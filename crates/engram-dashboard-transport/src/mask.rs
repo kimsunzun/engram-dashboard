@@ -1,30 +1,17 @@
-//! Masks text the peer gave before carrying it in an event · a display (TRD 3 §3-0 ⑤ · §5 19).
-//!
-//! ★The state machine and the dialing-place type use it together★ — it is called where [`crate::machine`] carries it in an event, and
-//! from `Display` by [`crate::DialFailure`]. If placed in either of those files, the seam type would end up calling the state machine, so it is kept separate.
+//! Masks peer-given text before carrying it in an event · a display (TRD 3 §3-0 ⑤ · §5 19). ★Used by both the state machine and the dialing-place type★ ([`crate::machine`] event carry; `Display` of [`crate::DialFailure`]) —
+//! placed in either file, the seam type would end up calling the state machine.
 
-/// Byte cap of the masked text — ★bytes, not characters★. If it overflows, it is cut at a character boundary and an ellipsis (`…`) is added to fit within this.
-/// It is set with more room than the WS close-text cap of 123 bytes — the local diagnostic text and the could-not-connect text take this path too.
+/// Byte cap of the masked text — ★bytes, not characters★; overflow is cut at a character boundary with an ellipsis (`…`) inside the cap. Larger than the WS close-text cap (123 bytes) because local diagnostic and could-not-connect text take this path too.
 pub(crate) const REASON_MAX_BYTES: usize = 256;
 
-/// Masks text the peer gave — erases characters that break lines, alter text invisibly, or carry hidden content, and bounds the length to the byte
-/// cap (256 bytes). ★The same after several passes★ — masking already masked text again changes nothing.
+/// Masks peer-given text — erases line-breaking, invisibly altering and hidden-content characters, and bounds the length (256 bytes). ★Idempotent★ — masking masked text changes nothing.
 ///
-/// What it erases = control characters (Cc) + U+2028/2029 + all Default_Ignorable_Code_Point + U+FFF9–FFFB. That is all.
-/// - Control characters — `char::is_control` (U+0000–001F · U+007F–009F. Includes line breaks · tabs · ESC).
-/// - Line · paragraph separators U+2028 · U+2029 — they break lines even though they are not control characters.
-/// - All Default_Ignorable_Code_Point (a Unicode property — 「characters that normally draw nothing」). It covers bidirectional formatting (flips the visible
-///   order so it reads as different text) · zero-width characters · Hangul filler characters · tag characters U+E0000–E007F (invisible on screen but
-///   an LLM reads them — a prompt-smuggling channel) · variation selectors (there are 256, so one carries a byte and hides arbitrary
-///   data behind a visible character — all that erasing loses is emoji · CJK variant glyph shapes, so they have no value in diagnostic text).
-///   The standard library has no property table, so `hides` writes the ranges by hand (including unassigned reserved ranges — the property definition is that way).
-/// - Annotation formatting U+FFF9–FFFB — not in the property above but they open an invisible stretch.
+/// Erased: control characters (`char::is_control`: U+0000–001F · 007F–009F, includes line breaks · tabs · ESC) · U+2028/2029 (break lines though not control) · all Default_Ignorable_Code_Point (「draws nothing」:
+/// bidirectional formatting that flips visible order · zero-width · Hangul filler · tag characters U+E0000–E007F, invisible but read by an LLM — a prompt-smuggling channel · variation selectors, 256 of them, each
+/// hiding a byte behind a visible character; losing emoji · CJK variant glyphs costs nothing in diagnostics; `hides` writes the ranges by hand since std has no property table, including unassigned reserved ranges)
+/// · annotation formatting U+FFF9–FFFB (opens an invisible stretch). ★Remaining★: other format characters (Cf, e.g. U+0600–0605) and runs of combining characters (overflow bounded by the length cap).
 ///
-/// ★What remains★ — format characters outside the above (Cf. e.g. the visible Arabic-number prefix U+0600–0605) and runs of combining characters. The
-/// damage of runs of combining characters (glyphs overflowing above and below the line) is bounded by the length cap (256 bytes).
-///
-/// ★It does not make text 「safe」★ — it handles only length and hidden characters. A plausible sentence the peer made up
-/// remains as is, so the rule of not using it for branching · popup text ([`crate::ConnectFailure::Rejected`]) is still the wall.
+/// ★It does not make text 「safe」★ — only length and hidden characters; a plausible sentence the peer made up stays, so not branching on it · not using it as popup text ([`crate::ConnectFailure::Rejected`]) remains the wall.
 pub fn mask_reason(text: &str) -> String {
     const ELLIPSIS: char = '…';
     let mut out: String = text.chars().filter(|c| !hides(*c)).collect();
@@ -101,7 +88,6 @@ mod tests {
 
     #[test]
     fn masking_drops_tag_characters_that_smuggle_text_to_an_llm() {
-        // 「ignore」 written with tag characters — only 「ok」 shows on screen.
         let smuggled: String = "ignore"
             .chars()
             .map(|c| char::from_u32(0xE0000 + c as u32).unwrap())

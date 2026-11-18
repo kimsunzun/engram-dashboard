@@ -1,9 +1,9 @@
 //! The scratch folder of one query — the querier writes a config file in it and uses it as the child's working folder. Deleted when done.
 //!
-//! ★It is an exclusive create★ — the name is random, and if the name already exists it does not use that folder and draws a new name. A file the child
-//!   trusts and reads is placed inside it, so reusing a folder planted in advance by someone else would let that file be swapped.
-//! ★A deletion failure is ignored (after a short retry if locked)★ — the leftover folder is swept away by the receiving side at startup with [`sweep_stale_scratch`].
-//!   (Windows cannot delete a file someone has open or a working folder — so we kill the child first and wait.)
+//! ★Exclusive create★ — the name is random, and an existing name is not reused (a new name is drawn): a file the child trusts and reads
+//!   sits inside, so a folder planted in advance by someone else would let that file be swapped.
+//! ★A deletion failure is ignored (after a short retry if locked)★ — the leftover is swept at startup by the receiving side with
+//!   [`sweep_stale_scratch`]. (Windows cannot delete an open file or a working folder — so the child is killed first and waited for.)
 
 use std::fs;
 use std::io;
@@ -15,22 +15,20 @@ use uuid::Uuid;
 
 use super::ProbeError;
 
-/// Folder name = this prefix + 32 lowercase hex digits of a uuid v4. The sweep deletes only names that fit this grammar — widening it to a prefix match
-/// would delete even things placed by hand.
+/// Folder name = this prefix + 32 lowercase hex digits of a uuid v4. The sweep deletes only names that fit this grammar — widening it to a
+/// prefix match would delete even things placed by hand.
 const SCRATCH_PREFIX: &str = "probe-";
 const SCRATCH_HEX_LEN: usize = 32;
 
 /// Upper bound on drawing anew when names collide. A random name collides only when someone planted it in advance, so a few tries are enough.
 const SCRATCH_CREATE_ATTEMPTS: usize = 8;
 
-/// The scratch folder of one query. Deletes it whole on drop (failure is ignored).
 #[derive(Debug)]
 pub struct ScratchDir {
     path: PathBuf,
 }
 
 impl ScratchDir {
-    /// Creates a new folder under `root` exclusively. Creates `root` if it does not exist.
     pub fn create(root: &Path) -> Result<Self, ProbeError> {
         Self::create_named(root, || {
             format!("{SCRATCH_PREFIX}{}", Uuid::new_v4().simple())
@@ -70,15 +68,14 @@ impl ScratchDir {
     }
 }
 
-/// The number and interval of retries the drop makes at deleting — first try + 19 times × 10 ms (about 200 ms).
+/// The number and interval of drop's deletion retries — first try + 19 times × 10 ms (about 200 ms).
 ///
-/// Right after the direct child ends, a grandchild may still hold the working folder — deleting immediately then fails, and a few ms
-/// later it works (measured 2026-09-27, 40/40 runs · success after about 5 ms — the grounds of the budget of about 200 ms. It was carried in the same commit c7dcba33 as the querier's Job tree
-/// exit wait (`wait_tree_gone`), and there is no record of whether the measurement was before or after that wait).
-// ADR-0291 R14: pilot 2026-10-10 (rustc 1.95 · NTFS) — a synthetic reproduction with a grandchild holding the working folder failed only with OS error 32
-//   (`ERROR_SHARING_VIOLATION` — `is_busy` bites on it) and 145 never appeared. The real query path releases the folder after the Job tree has
-//   fully ended, so it was deleted on the first try 6/6 times — so we do not widen the decision. The delete-pending state (145) of FAT/exFAT
-//   was not measured — a folder left that way is reaped by the sweep at startup.
+/// Right after the direct child ends, a grandchild may still hold the working folder — immediate deletion fails and a few ms later works
+/// (measured 2026-09-27, 40/40 runs, success after ~5 ms — the grounds of the ~200 ms budget).
+// ADR-0291 R14: pilot 2026-10-10 (rustc 1.95 · NTFS) — a synthetic grandchild-held reproduction failed only with OS error 32
+//   (`ERROR_SHARING_VIOLATION`, which `is_busy` catches); 145 never appeared. The real query path releases the folder after the Job tree
+//   ended and deleted on the first try 6/6, so the decision is not widened. FAT/exFAT's delete-pending (145) was not measured — a folder
+//   left that way is reaped by the startup sweep.
 const DELETE_RETRY: Retry = Retry {
     retries: 19,
     pause: Duration::from_millis(10),
@@ -106,10 +103,10 @@ fn is_scratch_name(name: &str) -> bool {
     })
 }
 
-/// Deletes the leftover scratch folders under `root` — called when no query is running at all (at startup).
+/// Deletes the leftover scratch folders under `root` — called when no query is running (at startup).
 ///
-/// What it deletes is only **folders** that fit the [`ScratchDir`] name grammar (files · links · other names are left). If `root` does not exist
-/// there is nothing to do. A failure leaves only a log — a cleanup failure does not block startup.
+/// Deletes only **folders** fitting the [`ScratchDir`] name grammar (files · links · other names are left). A missing `root` is a no-op. A
+/// failure leaves only a log — cleanup failure does not block startup.
 pub fn sweep_stale_scratch(root: &Path) {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
@@ -210,7 +207,6 @@ mod tests {
         drop(scratch);
     }
 
-    /// Windows cannot delete the folder if someone has a file inside open exclusively — drop swallows that failure.
     #[cfg(windows)]
     #[test]
     fn drop_ignores_a_delete_failure() {
@@ -237,7 +233,8 @@ mod tests {
         fs::remove_dir_all(&path).expect("cleanup");
     }
 
-    /// If the lock is released soon during drop, the retried delete succeeds — the case where a grandchild lets go of the working folder a little late.
+    /// If the lock is released soon during drop, the retried delete succeeds — the case where a grandchild lets go of the working folder a
+    ///   little late.
     #[cfg(windows)]
     #[test]
     fn drop_retries_a_delete_that_fails_only_briefly() {

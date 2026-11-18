@@ -1,21 +1,19 @@
 //! session_tracker — the **runner** for session id drift tracking (best-effort).
 //!
 //! ## What it owns
-//! The observation period · the per-agent observer registry · the change callback · the lifetime of the single polling thread. That is all.
+//! The observation period · the per-agent observer registry · the change callback · the single polling thread's lifetime. Nothing else.
 //!
-//! ★**Which program writes the session id where and in what shape is not known to this file**★ (ADR-0004): all that knowledge
-//! is behind [`SessionIdSource`] implementations, and implementations are built only inside `backend/<name>/`
-//! ([`crate::backend::session_id_source`]). This module only takes observers and knocks on them every period.
+//! ★**Which program writes the session id where and in what shape is not known here**★ (ADR-0004): it is behind [`SessionIdSource`]
+//! implementations, built only in `backend/<name>/` ([`crate::backend::session_id_source`]). This module takes observers and knocks on
+//!   them every period.
 //!
 //! ## Why track
-//! The sid we designated at spawn can change inside that program, and if we fail to catch up with the changed value, the next restore
-//! revives the old session. Even if observation is absent or fails, it degrades without damage — the path of resuming with the first designated sid
-//! stays alive as is. **Do not take it as the primary ground of correctness.**
+//! The sid designated at spawn can change inside that program; an uncaught change makes the next restore revive the old session. Absent or
+//! failed observation degrades without damage (resume with the first designated sid stays alive). **Not the primary ground of correctness.**
 //!
 //! ## Entry points
-//! `watch`/`unwatch` = registry operations (manager calls them in spawn · kill) · `start`/`stop` = thread lifetime
-//! (the daemon assembly, once at boot). With `enabled=false`, both `watch` and the thread are no-ops — a toggle to turn it off without a code deployment even if a claude update
-//! breaks the session file format.
+//! `watch`/`unwatch` = registry (manager calls them in spawn · kill) · `start`/`stop` = thread lifetime (daemon assembly, once at boot).
+//! `enabled=false` makes `watch` and the thread no-ops — a toggle without a deployment if a claude update breaks the session file format.
 //!
 //! tauri import 0.
 
@@ -34,37 +32,33 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 // ── Observation port (ADR-0004) ────────────────────────────────────────────────────────
 
-/// A port that repeatedly observes one incarnation's session id. It is the **only** backend touchpoint this runner knows.
+/// A port that repeatedly observes one incarnation's session id — the **only** backend touchpoint this runner knows.
 ///
-/// Implementations live inside `backend/<name>/` — where to read (file · socket · process) and its format are all the implementation's
-/// job, and this module holds only the period · registry · callback. The only place that builds implementations is
+/// Implementations live in `backend/<name>/` (where and how to read is theirs); this module holds the period · registry · callback. Builder:
 /// [`crate::backend::session_id_source`].
 ///
-/// **Call convention:** the runner thread calls [`SessionIdSource::poll`] exactly once per entry per period.
-/// This call happens **while holding** the registry lock, so implementations must keep blocking short (about one file read).
-/// The callback for the returned value is called after releasing the lock (ADR-0006 lock order).
+/// **Call convention:** once per entry per period on the runner thread, **under** the registry lock — implementations must block briefly
+/// (about one file read). The callback for the returned value runs after releasing the lock (ADR-0006).
 // ADR-0004
 pub trait SessionIdSource: Send {
-    /// One observation. Do not emit [`SessionIdPoll::Degraded`] right away just because one observation failed — the judgment of
-    /// when to give up is set by the implementation from the nature of its observation target.
+    /// One observation. Do not emit [`SessionIdPoll::Degraded`] right away on one failed observation — when to give up is the
+    ///   implementation's call from the nature of its target.
     fn poll(&mut self) -> SessionIdPoll;
 }
 
-/// The outcome of one [`SessionIdSource::poll`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum SessionIdPoll {
     /// Not read yet, or read and unchanged — ask again next period.
     Unchanged,
     /// A new sid was observed. The runner raises it via `on_change`.
     Changed(Uuid),
-    /// Cannot observe any more — the runner skips this entry **permanently** (degrade without damage: restore works
-    /// normally with the first designated sid). To revive it, `unwatch` and then `watch` again.
+    /// Cannot observe any more — the runner skips this entry **permanently** (degrade without damage: restore works with the first
+    ///   designated sid). To revive it, `unwatch` then `watch` again.
     Degraded,
 }
 
 // ── watch entry ───────────────────────────────────────────────────────────────
 
-/// The tracking state of one agent.
 struct WatchEntry {
     source: Box<dyn SessionIdSource>,
     /// After the observer reports giving up, it is not knocked on again.
@@ -100,7 +94,7 @@ pub struct SessionTracker {
 }
 
 impl SessionTracker {
-    /// Create the tracker (the thread is not started yet — it starts when `start()` is called).
+    /// The thread is not started here — it starts when `start()` is called.
     pub fn new(config: TrackerConfig, on_change: Arc<dyn Fn(AgentId, Uuid) + Send + Sync>) -> Self {
         Self {
             enabled: config.enabled,
@@ -127,7 +121,7 @@ impl SessionTracker {
         );
     }
 
-    /// Untrack (on kill/respawn — prevents zombie entries).
+    /// Call on kill/respawn — prevents zombie entries.
     pub fn unwatch(&self, agent_id: AgentId) {
         self.watched
             .lock()
@@ -184,7 +178,6 @@ impl SessionTracker {
         *handle_guard = Some(handle);
     }
 
-    /// Stop the polling thread + join (stop handle — H-1.6).
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.lock().expect("handle poisoned").take() {

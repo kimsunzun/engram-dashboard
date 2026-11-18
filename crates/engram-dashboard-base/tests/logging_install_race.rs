@@ -1,6 +1,7 @@
 //! Checks that a call that **lost** the subscriber install neither creates a file nor runs retention cleanup.
 //!
-//! If the losing call opened the file first, an empty file nobody writes would remain, and the retention cleanup run while making it **deletes one real
+//! If the losing call opened the file first, an empty file nobody writes would remain, and the retention cleanup run while making it
+//!   **deletes one real
 //! log** — that empty file permanently takes one slot of the cap.
 //!
 //! ★A separate process is needed★: the global subscriber is once per process, so to create a state where someone else installed first

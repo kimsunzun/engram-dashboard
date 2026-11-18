@@ -16,20 +16,20 @@ pub struct RosterEntry {
 
 /// The two answers when asked about one name.
 ///
-/// ★There is no answer 「the owner is away」★ — the disconnected owner's registration vanishes from the registry, so that name gets the same answer as a name
-/// **never seen before** (what ADR-0150 accepted — the reason for leaving no trace is in [`Roster`]).
-/// If that distinction is ever really needed, it is solved not by reviving the trace but by putting the connection list in the response.
+/// ★No "the owner is away" answer★ — a disconnected owner's registration vanishes, so its name answers like one **never seen** (accepted
+///   in ADR-0150; reason in [`Roster`]).
+/// If the distinction is ever needed, put the connection list in the response instead of reviving the trace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerLookup {
     Available(OwnerToken),
     Unknown,
 }
 
-/// An endpoint that asks only one thing, 「who is the owner of this name」 — all that [`crate::route`] needs from the registry.
+/// An endpoint that asks only "who is the owner of this name" — all [`crate::route`] needs from the registry.
 ///
-/// ★This is what keeps delivery from holding the registry **for the whole round trip**★: for the assembly code holding the shared registry to
-/// pass a reference to `route`, it would have to hold the lock until the reply arrives, and meanwhile registration, connection cleanup and every other delivery all stop
-/// (one slow peer halts the whole registry). If the implementation takes the lock **only within this call**, that halt disappears.
+/// ★Keeps delivery from holding the registry **for the whole round trip**★: passing the shared registry by reference to `route` would hold
+///   the lock until the reply arrives,
+/// halting registration, cleanup and every other delivery behind one slow peer. Implementations take the lock **only within this call**.
 pub trait OwnerLookupSource: Send + Sync {
     fn lookup(&self, name: &str) -> OwnerLookup;
 }
@@ -40,23 +40,20 @@ impl OwnerLookupSource for Roster {
     }
 }
 
-/// ★Does not consult the build list★ — only when the registry is filled by runtime registration alone is 「can it be called now」 a fact
-/// (TRD §3-7 prohibition clause).
+/// ★Does not consult the build list★ — only when the registry is filled by runtime registration alone is "can it be called now" a fact
+///   (TRD §3-7 prohibition clause).
 ///
-/// ★When an owner disconnects, its entries vanish — leaving neither a trace nor a marker★ ([`Roster::disconnect`])
-///
-/// Do not revert to a form that leaves a trace. The owner token is new per connection (`OwnerToken`), so if the same client
-/// reconnects it is a stranger to the registry, and so traces are not overwritten but **pile up**. With neither expiry nor a reclaim path,
-/// once [`Roster::MAX_NAMES`] is reached every registration carrying a name not already in the registry is rejected, and — those names go out as
-/// `UNKNOWN_COMMAND` (= 「do not retry, rediscover」, TRD §4-②) — nothing but a daemon restart clears it
-/// (ADR-0150 decision 3).
-/// ★But that alone does not bound the size★ — a name is a **string** the registration packet carried (not a build constant),
-/// so a single attached owner can send any number of names. That axis is closed by count and length caps
-/// ([`Roster::MAX_NAMES_PER_OWNER`] · [`Roster::MAX_NAMES`] · [`Roster::MAX_NAME_BYTES`] ·
-/// [`Roster::MAX_HELP_BYTES`] · [`Roster::MAX_AGENT_ARGS`]).
-/// ★One name has one owner★ — the later registrant wins. If two different owners claim the same name, the earlier
-/// owner loses that name, and when the later owner disconnects, the name does not return to the earlier owner but vanishes. Several
-/// owners for one name is a deferred agenda item (ADR-0150 alternative G).
+/// ★When an owner disconnects, its entries vanish — no trace, no marker★ ([`Roster::disconnect`]). Do not revert to leaving a trace: the
+///   owner token is new per connection (`OwnerToken`),
+/// so a reconnecting client is a stranger and traces **pile up** with no expiry or reclaim; at [`Roster::MAX_NAMES`] every new name is
+///   rejected as `UNKNOWN_COMMAND`
+/// ("do not retry", TRD §4-②) until a daemon restart (ADR-0150 decision 3).
+/// ★That alone does not bound the size★ — a name is a **string** from the packet, so one attached owner can send any number; count and
+///   length caps close that axis
+/// ([`Roster::MAX_NAMES_PER_OWNER`] · [`Roster::MAX_NAMES`] · [`Roster::MAX_NAME_BYTES`] · [`Roster::MAX_HELP_BYTES`] ·
+///   [`Roster::MAX_AGENT_ARGS`]).
+/// ★One name has one owner★ — the later registrant wins; the earlier owner loses the name for good, even after the later one disconnects.
+///   Several owners per name is deferred (ADR-0150 alternative G).
 // ADR-0156
 // ADR-0150
 #[derive(Debug, Default)]
@@ -74,61 +71,50 @@ struct Registration {
 }
 
 impl Roster {
-    /// The number of names one owner can hold in the registry **cumulatively** — measured as everything already in the registry under that owner
-    /// plus this packet, not the packet just sent ([`Roster::check_room_for`]).
+    /// The number of names one owner can hold **cumulatively** — everything already in the registry under that owner plus this packet
+    ///   ([`Roster::check_room_for`]).
     ///
-    /// ★A name is a **string** the registration packet carried, not a build constant★ — without a cap, a single malfunctioning
-    /// or malicious owner would grow the registry without bound while attached.
-    /// Basis for the value: the whole current vocabulary is a bit over 60 (screen 33 · agent 5 · daemon 3 · `src-tauri` 17) and the largest
-    /// owner has 33. 512 = eight times that — a spot that real use does not reach while still stopping runaway.
+    /// ★A name is a **string** from the packet★ — without a cap one faulty owner could grow the registry without bound while attached.
+    /// Value basis: the whole vocabulary is a bit over 60 (screen 33 · agent 5 · daemon 3 · `src-tauri` 17), the largest owner 33; 512 =
+    ///   eight times that.
     pub const MAX_NAMES_PER_OWNER: usize = 512;
 
-    /// The number of names in the whole registry — it stops here even with many owners (a per-owner cap alone would be bypassed by the number of owners).
+    /// The number of names in the whole registry — it stops here even with many owners (a per-owner cap alone would be bypassed by the
+    ///   number of owners).
     pub const MAX_NAMES: usize = 4096;
 
-    /// The maximum bytes of one name.
-    ///
-    /// Basis for the value: the longest name that exists now is `agentlist.createTerminal` (24 bytes). 128 = a bit over five
-    /// times that — not reached even if a family goes deeper, while closing the path of inflating the registry with a single name.
+    /// The maximum bytes of one name. Basis: the longest now is `agentlist.createTerminal` (24 bytes); 128 = a bit over five times that.
     pub const MAX_NAME_BYTES: usize = 128;
 
-    /// The maximum bytes of the `help` field.
-    ///
-    /// ★This string stays resident while its owner is attached★ — without a cap, one exaggerated `help` eats the registry's
-    /// whole memory.
-    /// Basis for the value: the largest entry now is `agent.spawn` at 591 bytes (measured in `agent/bindings/commands.schema.json`).
-    /// 4096 = seven times that, comfortably holding a declaration that unfolds nested structs a few more levels.
-    /// Adding this cap to the name and agent-reference field caps closes the registry's resident cap at [`Roster::MAX_NAMES`] ×
-    /// (128 + 4096 + 8 × 128) ≈ 20 MiB.
+    /// The maximum bytes of the `help` field. ★Resident while its owner is attached★ — an uncapped `help` eats the registry's memory.
+    /// Basis: the largest now is `agent.spawn` at 591 bytes (`agent/bindings/commands.schema.json`); 4096 = seven times that. With the
+    ///   name and agent-reference caps the resident cap is
+    /// [`Roster::MAX_NAMES`] × (128 + 4096 + 8 × 128) ≈ 20 MiB.
     pub const MAX_HELP_BYTES: usize = 4096;
 
-    /// The number of agent-reference fields one name can mark (ADR-0308). The length of a single field name is
-    /// bounded together by [`Roster::MAX_NAME_BYTES`].
+    /// The number of agent-reference fields one name can mark (ADR-0308); a single field name is bounded by [`Roster::MAX_NAME_BYTES`].
     ///
-    /// ★This field is also a string the registration packet carried, so it stays resident★ — without a cap, it would bypass the `help` cap to inflate the registry.
-    /// Basis for the value: a command has at most three fields pointing at an agent now (`slot.assignAgent` · `layout.setSlotContent` —
-    /// `assign`, the agent to put in; `agent_id`, its old name; `slot_of`, the slot pointer). 8 = a bit over twice that.
+    /// ★Also a resident packet string★ — without a cap it would bypass the `help` cap. Basis: at most three now (`slot.assignAgent` ·
+    ///   `layout.setSlotContent`: `assign`, `agent_id`, `slot_of`); 8 = a bit over twice that.
     pub const MAX_AGENT_ARGS: usize = 8;
 
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// All at once on attach — it is that owner's **entire set**. A reconnect resend takes the same path, so an old name this owner did not
-    /// carry this time comes down from the registry (per-owner last-wins, ADR-0081 「RegisterRole resend」).
-    /// So calling it with an empty list leaves that owner's place completely empty.
+    /// All at once on attach — that owner's **entire set**. A reconnect resend takes the same path, so an old name not carried this time
+    ///   comes down (per-owner last-wins, ADR-0081 "RegisterRole resend");
+    /// an empty list leaves that owner's place completely empty.
     ///
-    /// ★If the cap is exceeded, **not one name is entered** and `INVALID_ARGUMENT` is returned★ — if we cut off only the overflow
-    /// and entered the rest, the owner would take it as success and some names would silently be missing (those names go out as `UNKNOWN_COMMAND`,
-    /// though from the registering side's view there is no reason for that). The rejection is decided **before the registry is touched**, so a failed
-    /// registration does not change existing state.
-    /// ★Taking a name held by another is legitimate here★ — registration is an entire-set declaration tied to **the moment of attaching**
-    /// (TRD §3-7 clause 1), so a new connection inheriting an old connection's names is the handover itself. The diff while attached
-    /// ([`Roster::update`]) has no such anchor, so the same handover is not allowed.
-    /// ★A late registration from a disconnected owner is **not blocked here**★ — the registry has no trace of that owner (it is erased on disconnect),
-    /// so there is no basis to tell it apart from one sent by a live owner. That net is in **one place only**, the side that knows connection lifetime
-    /// (`CommandRoster::refuse_if_detached` in `engram-dashboard-daemon`) — putting a second net here
-    /// would mean holding per-owner state separately, and that list would grow without bound just like a trace.
+    /// ★If the cap is exceeded, **not one name is entered** and `INVALID_ARGUMENT` is returned★ — entering the rest would read as success
+    ///   while some names silently go out as `UNKNOWN_COMMAND`.
+    /// The rejection comes **before the registry is touched**, so a failed registration changes nothing.
+    /// ★Taking a name held by another is legitimate here★ — registration is tied to **the moment of attaching** (TRD §3-7 clause 1), so
+    ///   inheriting an old connection's names is the handover; [`Roster::update`] has no such anchor.
+    /// ★A late registration from a disconnected owner is **not blocked here**★ — the registry keeps no trace of that owner, so it cannot
+    ///   tell it from a live one. The net lives **in one place only**, the side that knows
+    /// connection lifetime (`CommandRoster::refuse_if_detached` in `engram-dashboard-daemon`); a second net here would need per-owner
+    ///   state that grows without bound like a trace.
     // ADR-0150
     pub fn register(
         &mut self,
@@ -151,39 +137,28 @@ impl Roster {
         Ok(())
     }
 
-    /// The **diff** while attached — a late-starting feature adds names and a switched-off feature takes names down (TRD §3-7 clause 3).
-    /// A full resend is [`Roster::register`] only.
+    /// The **diff** while attached — a late-starting feature adds names, a switched-off one takes names down (TRD §3-7 clause 3). A full
+    ///   resend is [`Roster::register`] only.
     ///
-    /// ★`removed` **erases** the name — it does not leave a trace★: if it left a trace, an owner that is still connected could
-    /// repeat `added`=new name · `removed`=old name and permanently fill its own share ([`Roster::MAX_NAMES_PER_OWNER`]),
-    /// and then the same accident of traces permanently filling the registry would recur without even disconnecting
-    /// (the other half of the axis ADR-0150 decision 3 closed for disconnects).
-    /// ★`removed` erases **only names it holds itself**★ — the same rule as [`Roster::disconnect`]. If a late diff from a past
-    /// owner erased the registration of the owner that just attached, a live command would disappear (reconnect overlap). Another
-    /// owner's name or a nonexistent name passes silently — a diff means 「change my share like this」, not
-    /// a claim about someone else's state.
-    /// ★`added` cannot take a name held by another — this is where it parts from [`Roster::register`]★.
-    /// Registration's last-wins is tied to **the moment of attaching** (TRD §3-7 clause 1), so it reads as a handover, but a diff is by definition
-    /// 「while attached」, so it has no such anchor. If an anchorless overwrite were allowed, a late diff from a dead connection would
-    /// **overwrite with its own token** the registration of the shell that just attached, so lookups would answer the dead owner as `Available`, and the live shell would have no
-    /// occasion to register again (registration happens only once on attaching), so that state would be frozen in place.
-    /// ★Why it is rejected rather than passed silently★ (another owner's name in `removed` passes silently): not
-    /// erasing another's name means 「my share」 as the diff stated it is already so, so nothing is lost, but if `added` were silently
-    /// ignored, the caller would **be told success** while believing that name comes to itself. The rejection is `CONFLICT`
-    /// — it answers not that the packet is wrong (`INVALID_ARGUMENT`) but that the **state** of the registry is not so.
-    /// ★A diff from a disconnected owner is **not blocked here**★ — the same reason as [`Roster::register`], and the net
-    /// stands in the same single place.
-    /// ★A packet carrying one name in both `added` and `removed` is **rejected whole with `INVALID_ARGUMENT`**★ —
-    /// we do not fix an application order. Whichever order is picked, the caller cannot know the result: adding then removing means that **even after receiving success**
-    /// the name is not in the registry and goes out as `UNKNOWN_COMMAND` (the cap rejection of [`Roster::register`] blocks
-    /// that very accident —
-    /// 「the owner takes it as success and some names silently end up missing」), and removing then adding means the instruction to take it down is silently
-    /// ignored. **A success report that diverges from actual state is worse than picking the wrong order** — the caller has no means to tell a silent
-    /// deletion from a successful registration. No clause fixes an order in ADR-0150 or in TRD §3-7 clause 3, so
-    /// we do not fill that gap arbitrarily here.
+    /// ★`removed` **erases** the name, leaving no trace★: a trace would let a connected owner repeat add/remove and permanently fill its
+    ///   own share ([`Roster::MAX_NAMES_PER_OWNER`]) — the other half of the axis ADR-0150 decision 3 closed for disconnects.
+    /// ★`removed` erases **only names it holds itself**★ (as [`Roster::disconnect`]): a late diff from a past owner must not erase the
+    ///   registration of the owner that just attached (reconnect overlap).
+    /// Another owner's or a nonexistent name passes silently — a diff means "change my share", not a claim about others.
+    /// ★`added` cannot take a name held by another — where it parts from [`Roster::register`]★: last-wins there is anchored to the moment
+    ///   of attaching; a diff is "while attached", so a late diff from a dead connection
+    /// would **overwrite the just-attached shell's registration with its dead token**, lookups would answer `Available` for the dead
+    ///   owner, and the live shell never re-registers (once per attach) — frozen.
+    /// ★Why rejected rather than ignored★: a silently ignored `added` would **tell the caller success** while it believes the name is its
+    ///   own. The rejection is `CONFLICT` — the registry's **state** is not so, not that the packet is wrong (`INVALID_ARGUMENT`).
+    /// ★A diff from a disconnected owner is **not blocked here**★ — same reason and same single net as [`Roster::register`].
+    /// ★A packet carrying one name in both `added` and `removed` is **rejected whole with `INVALID_ARGUMENT`**★ — no application order is
+    ///   fixed: add-then-remove leaves the name absent **after a success**
+    /// (the accident the cap rejection of [`Roster::register`] blocks), remove-then-add silently ignores the take-down. **A success report
+    ///   that diverges from actual state is worse than picking the wrong order**;
+    /// neither ADR-0150 nor TRD §3-7 clause 3 fixes an order, so none is invented here.
     ///
-    /// The cap is checked again counting only `added` — if exceeded, **not one name is touched** (the same contract as [`Roster::register`],
-    /// and the two rejections above are the same).
+    /// The cap is checked again counting only `added` — if exceeded, **not one name is touched** (same contract as [`Roster::register`]).
     // ADR-0150
     pub fn update(
         &mut self,
@@ -218,16 +193,14 @@ impl Roster {
         Ok(())
     }
 
-    /// Whether one name is carried in both lists — checked **before the registry is touched** (the same contract as [`Roster::check_room_for`]).
-    /// The reason for rejecting and 「we do not fix an application order」 are in the [`Roster::update`] comment.
+    /// Whether one name is carried in both lists — checked **before the registry is touched** (same contract as
+    ///   [`Roster::check_room_for`]); why it is rejected: [`Roster::update`].
     ///
-    /// ★It does not look at the registry — so it takes no `self`★: the subject of the decision is **one packet**, and that is also why its code is
-    /// `INVALID_ARGUMENT` (sending the same round trip again gives the same answer). Its sibling
-    /// [`Roster::check_added_are_not_taken`] by contrast speaks about the registry's **state**, so it is `CONFLICT` and the answer changes
-    /// if the state changes.
-    /// ★The iteration is over `added`★ — the name quoted in the message must be one that passed [`Roster::MAX_NAME_BYTES`], and
-    /// only `decls` has its length measured (`removed` is not measured). An overlapping name is by definition also in `added`, so the value
-    /// this iteration quotes is always within that cap.
+    /// ★Does not look at the registry — takes no `self`★: it judges **one packet**, hence `INVALID_ARGUMENT` (the same round trip gets the
+    ///   same answer); its sibling
+    /// [`Roster::check_added_are_not_taken`] speaks about registry **state**, hence `CONFLICT`.
+    /// ★Iterates over `added`★ — the quoted name must have passed [`Roster::MAX_NAME_BYTES`], and only `decls` has its length measured; an
+    ///   overlapping name is also in `added`.
     fn check_lists_are_disjoint(
         added: &[CommandDecl],
         removed: &[String],
@@ -244,7 +217,8 @@ impl Roster {
         Ok(())
     }
 
-    /// Whether `added` **overwrites another's registration** — the only entries that remain in the registry have an owner (ADR-0150), so it is decided by
+    /// Whether `added` **overwrites another's registration** — the only entries that remain in the registry have an owner (ADR-0150), so
+    ///   it is decided by
     /// one owner comparison.
     fn check_added_are_not_taken(
         &self,
@@ -268,21 +242,20 @@ impl Roster {
 
     /// Whether this registration is within the cap — checked **before the registry is touched**.
     ///
-    /// ★The per-owner cap measures that owner's **cumulative** total, not one packet★: if only the packet were measured, one owner sending
-    /// non-overlapping 512-name diffs one after another would fill the whole registry by itself. Then the real shell's registration would be blocked by the overall
-    /// cap and `tab.*` and `window.*` would all go out as `UNKNOWN_COMMAND`, a code that means 「retrying is pointless, rediscover the name」 (TRD §4-②), so the caller would give up on a command that really exists for good.
-    /// So it is blocked here so that the overall cap does not become a **shared resource with no per-owner share**. The names carried in this packet
-    /// are overwrites and do not take new slots, so they are not counted twice.
-    /// ★This cap is a different axis from the rejected TTL★ — what was rejected there was **time**, so the answer to the same question varied
-    /// with the clock (ADR-0156 alternative C · ADR-0150 alternative F). A count cap does not change the answer for a name in the registry.
-    /// ★The decision comes before the change, so this **over-measures** (left knowingly)★: names that will come down in this round trip are still
-    /// in the registry, so they are counted too — [`Roster::register`]'s own names about to be replaced and `removed`
-    /// of [`Roster::update`] are such cases. The cost is only that 「an owner whose share is full cannot replace its entire name set in one packet」, and sending
-    /// one empty full registration empties its own place completely and opens that path. It is not an axis along which the registry grows, so
-    /// we did not fix it precisely — measuring exactly would require the cap decision to model the result of the change, and then this function's contract 「decide before touching the registry」 would blur.
+    /// ★The per-owner cap measures that owner's **cumulative** total, not one packet★: otherwise one owner sending non-overlapping
+    ///   512-name diffs would fill the whole registry, the real shell's registration
+    /// would be blocked by the overall cap, and `tab.*` / `window.*` would go out as `UNKNOWN_COMMAND` (TRD §4-②, "retrying is pointless")
+    ///   so callers give up on commands that exist.
+    /// Names carried in this packet are overwrites and are not counted twice.
+    /// ★A different axis from the rejected TTL★ — that was **time**, so the answer varied with the clock (ADR-0156 alternative C ·
+    ///   ADR-0150 alternative F); a count cap does not change the answer for a name in the registry.
+    /// ★The decision comes before the change, so this **over-measures** (left knowingly)★: names about to come down in this round trip
+    ///   ([`Roster::register`]'s own replaced names, `removed` of [`Roster::update`]) are still counted.
+    /// The cost is only that an owner with a full share cannot replace its entire set in one packet; one empty full registration opens
+    ///   that path.
+    /// Measuring exactly would force the decision to model the change and blur "decide before touching".
     ///
-    /// Names and `help` are strings the registration packet carried, so length is measured too — one exaggerated `help` eats the registry memory
-    /// whole for as long as that owner is attached.
+    /// Names and `help` are strings from the packet, so length is measured too.
     fn check_room_for(
         &self,
         owner: &OwnerToken,
@@ -353,17 +326,16 @@ impl Roster {
         Ok(())
     }
 
-    /// The connection was cut — **erase the entries remaining under that owner along with their slot.** Since it leaves neither trace nor marker, those
-    /// names get the same answer as names that were never registered ([`OwnerLookup`]).
+    /// The connection was cut — **erase the entries remaining under that owner along with their slot.** No trace or marker is left, so
+    ///   those names answer like never-registered ones ([`OwnerLookup`]).
     ///
-    /// ★It takes down **only names the owner still owns**★ — so that in a reconnect overlap (the new connection registers, then the old connection's cleanup arrives)
-    /// it does not erase the registration of the owner that just attached.
-    /// ★This is the only place that handles disconnects★ — the only calling path is the daemon's `on_disconnect → detach`
-    /// (ADR-0150), and making a second would split causality.
-    /// ★Return = **all names this call erased** (ascending)★ — after erasing, the registry has no trace of the event
-    /// (the reason for leaving no trace is in this type's comment), so this return is the only value that can say what disappeared. Instrumentation is
-    /// done by **the side that knows connection lifetime** (`CommandRoster::detach` in `engram-dashboard-daemon`) — this crate bears
-    /// no logging dependency (the workspace and third-party dependency cap = the `lib.rs` header).
+    /// ★Takes down **only names the owner still owns**★ — in a reconnect overlap (new connection registers, then the old one's cleanup
+    ///   arrives) it must not erase the just-attached owner's registration.
+    /// ★The only place that handles disconnects★ — the only caller is the daemon's `on_disconnect → detach` (ADR-0150); a second would
+    ///   split causality.
+    /// ★Return = **all names this call erased** (ascending)★ — nothing else records the event, so this is the only value that can say what
+    ///   disappeared. Instrumentation belongs to the side that knows
+    /// connection lifetime (`CommandRoster::detach` in `engram-dashboard-daemon`); this crate takes no logging dependency (`lib.rs` header).
     // ADR-0150
     pub fn disconnect(&mut self, owner: &OwnerToken) -> Vec<String> {
         self.remove_owner(owner)
@@ -431,8 +403,8 @@ mod tests {
 
     /// ★Reconnect overlap — an old connection's cleanup must not take down a new registration★
     ///
-    /// The owner token is new per connection, so when the shell reconnects, the registration (new token) comes first and the old connection's cleanup
-    /// arrives late. If the cleanup took names down per name, the commands of the shell that just attached would silently vanish.
+    /// The owner token is new per connection, so the new registration comes first and the old cleanup arrives late; per-name takedown
+    ///   would silently vanish the just-attached shell's commands.
     #[test]
     fn a_superseded_owners_cleanup_does_not_take_down_the_current_registration() {
         let old = OwnerToken::new("shell-conn-1");
@@ -471,7 +443,8 @@ mod tests {
         assert_eq!(roster.lookup("tab.create"), OwnerLookup::Available(second));
     }
 
-    /// ★Nothing accumulates in the registry however often it reconnects★ — the owner token is new per connection, so in the form that left a trace, this repetition
+    /// ★Nothing accumulates in the registry however often it reconnects★ — the owner token is new per connection, so in the form that left
+    ///   a trace, this repetition
     /// permanently filled the registry up to the cap (ADR-0150 decision 3).
     #[test]
     fn reconnecting_many_times_leaves_nothing_behind() {
@@ -548,7 +521,8 @@ mod tests {
 
     /// ★The cap decision comes before the change, so it also counts the owner's own names this packet will push out★
     ///
-    /// It is an over-measure and left knowingly (basis = `check_room_for`). We pin down together that the cost is limited to 「an owner whose share is full cannot replace its entire name set in one packet」, and that **one empty full registration opens that path**.
+    /// An over-measure left knowingly (basis = `check_room_for`): the cost is limited to "a full-share owner cannot replace its entire set
+    ///   in one packet", and **one empty full registration opens that path**.
     #[test]
     fn a_full_owners_disjoint_snapshot_is_measured_before_the_old_names_come_down() {
         let owner = OwnerToken::new("shell-1");
@@ -599,8 +573,7 @@ mod tests {
         assert_eq!(roster.lookup("wave0.0"), OwnerLookup::Unknown);
     }
 
-    /// ★Names and `help` are strings the registration packet carried★ — if length were not measured, one exaggerated `help` would eat the registry
-    /// memory whole for as long as that owner is attached.
+    /// ★Names and `help` are strings from the packet★ — unmeasured length would let one exaggerated `help` eat the registry memory.
     #[test]
     fn an_oversized_name_or_help_is_refused_whole() {
         let owner = OwnerToken::new("shell-1");
@@ -795,11 +768,10 @@ mod tests {
 
     /// ★The registration side of the vanished line of defense — the registry does not block a disconnected owner's late **registration** either★
     ///
-    /// Registration is an 「entire-set declaration at the moment of attaching」, so inheriting even a live owner's names is legitimate (handover), but the registry has
-    /// no memory that the owner has already disconnected, so a dead connection's late registration cannot be told apart from a genuine handover.
-    /// So if this packet passes, that name becomes `Available` under a **nonexistent owner**, and that connection has no further
-    /// cleanup coming, so it stays frozen for the whole daemon lifetime (delivery goes out over a cut link). The blocking net is in the side that knows connection lifetime,
-    /// **one place only** — `CommandRoster::refuse_if_detached` in `engram-dashboard-daemon`.
+    /// Registration inherits even a live owner's names legitimately (handover), and the registry cannot tell a dead connection's late
+    ///   registration from one. If it passes, the name becomes `Available`
+    /// under a **nonexistent owner** and stays frozen for the daemon's lifetime (delivery over a cut link). The net is **in one place
+    ///   only** — `CommandRoster::refuse_if_detached` in `engram-dashboard-daemon`.
     #[test]
     fn the_roster_alone_cannot_refuse_a_late_registration_from_a_disconnected_owner() {
         let old = OwnerToken::new("shell-conn-1");
@@ -826,7 +798,8 @@ mod tests {
 
     // ── Diff registration (TRD §3-7 clause 3) ────────────────────────────────────────────────────────────
 
-    /// ★A diff erases only `removed`★ — if it left a trace, an owner that is still connected would repeat add/remove and permanently fill its own share
+    /// ★A diff erases only `removed`★ — if it left a trace, an owner that is still connected would repeat add/remove and permanently fill
+    ///   its own share
     /// (ADR-0150). Not touching names that are not carried is where it parts from `register`'s
     /// entire-set last-wins.
     #[test]
@@ -859,8 +832,7 @@ mod tests {
         );
     }
 
-    /// ★A diff's `removed` empties the place★ — if left as a trace, an attached owner could keep changing names and permanently fill its own share
-    /// cap, and the same unbounded growth would recur even without disconnecting (ADR-0150).
+    /// ★A diff's `removed` empties the place★ — a trace would let an attached owner fill its own share cap by changing names (ADR-0150).
     #[test]
     fn swapping_names_forever_does_not_eat_an_owners_cap() {
         let owner = OwnerToken::new("shell-1");
@@ -889,10 +861,8 @@ mod tests {
         );
     }
 
-    /// ★Reconnect overlap — the same net must stand for the diff too★
-    ///
-    /// If an old connection's late diff took names down per name, the commands of the new connection that just registered the same name would silently
-    /// vanish (the same accident `disconnect` prevents).
+    /// ★Reconnect overlap — the same net must stand for the diff too★ — an old connection's late diff must not take down names the new
+    ///   connection just registered (as `disconnect`).
     #[test]
     fn an_update_from_a_superseded_owner_does_not_take_down_the_current_registration() {
         let old = OwnerToken::new("shell-conn-1");
@@ -918,9 +888,8 @@ mod tests {
 
     /// ★Reconnect overlap — the same net must stand on the `added` side too★
     ///
-    /// The mirror of the test above. If an old connection's late diff **adds** the same name, the entry is overwritten with a dead token,
-    /// and lookup answers that dead owner as `Available`, so delivery goes out over a cut link. The live shell has no occasion to register again
-    /// (registration happens once on attaching), so that state does not resolve by itself.
+    /// Mirror of the test above: an old connection's late diff **adding** the same name would overwrite the entry with a dead token,
+    ///   lookups would answer the dead owner as `Available`, and the live shell never re-registers.
     #[test]
     fn an_update_from_a_superseded_owner_does_not_add_over_the_current_registration() {
         let old = OwnerToken::new("shell-conn-1");
@@ -945,12 +914,10 @@ mod tests {
         );
     }
 
-    /// ★If one name is carried in both `added` and `removed`, it is rejected **whole packet**★
-    ///
-    /// If an application order is picked, the caller cannot know the result whichever way: adding then removing means that **even after receiving success**
-    /// the name is not in the registry and goes out as `UNKNOWN_COMMAND` (exactly the accident `register` blocks at the cap —
-    /// 「the owner takes it as success and some names silently end up missing」), and removing then adding means the instruction to take it down is
-    /// silently ignored. No clause fixes an order in ADR-0150 or in TRD §3-7 clause 3, so rejection is the answer.
+    /// ★If one name is carried in both `added` and `removed`, it is rejected **whole packet**★ — either application order leaves the
+    ///   caller unable to know the result
+    /// (add-then-remove: absent **after a success**; remove-then-add: take-down silently ignored); no clause of ADR-0150 or TRD §3-7
+    ///   clause 3 fixes an order.
     #[test]
     fn an_update_carrying_one_name_in_both_lists_is_refused_whole() {
         let owner = OwnerToken::new("shell-1");
@@ -992,9 +959,8 @@ mod tests {
         assert_eq!(roster.len(), 1);
     }
 
-    /// Returns to the caller **what the disconnect erased** — since no trace remains in the registry (ADR-0150), this return is the only value from which that event
-    /// can be reconstructed later. Instrumentation is done by the daemon, which knows connection lifetime
-    /// (`CommandRoster::detach` — no logging dependency is brought into the tool crate).
+    /// Returns **what the disconnect erased** — no trace remains in the registry (ADR-0150), so this is the only value that reconstructs
+    ///   the event; instrumentation is the daemon's (`CommandRoster::detach`).
     #[test]
     fn a_disconnect_reports_the_names_it_removed() {
         let owner = OwnerToken::new("shell-1");
@@ -1066,9 +1032,8 @@ mod tests {
         assert_eq!(roster.lookup("one.more"), OwnerLookup::Unknown);
     }
 
-    /// ★On disconnect it vanishes without a trace★ — the owner token is new per connection, so if a trace were left, the same client's
-    /// reconnect would be **piling up**, not overwriting, and with neither expiry nor a reclaim path the registry would permanently fill up to the cap
-    /// (ADR-0150 decision 3).
+    /// ★On disconnect it vanishes without a trace★ — the owner token is new per connection, so a trace would **pile up** per reconnect up
+    ///   to the cap (ADR-0150 decision 3).
     #[test]
     fn a_disconnect_empties_that_owners_share_of_the_roster() {
         let owner = OwnerToken::new("shell-1");
@@ -1114,12 +1079,11 @@ mod tests {
 
     /// ★Pin down the vanished line of defense — the registry **cannot block** a disconnected owner's late packet★
     ///
-    /// Once the trace is gone, the registry has no place to remember that owner's death. So a late diff passes as is,
-    /// and that name becomes `Available` under a **nonexistent owner** and stays frozen for the whole daemon lifetime (that connection has no cleanup
-    /// coming). The blocking net is in the side that knows connection lifetime, **one place only** — `CommandRoster::refuse_if_detached` in `engram-dashboard-daemon`
-    /// (the list of live connections). Do not put a second net here:
-    /// if the registry held per-owner state separately, expiry-less data would gain one more unboundedly growing list (the same reason
-    /// the trace was discarded — ADR-0150).
+    /// With the trace gone the registry cannot remember the owner's death, so a late diff passes and the name becomes `Available` under a
+    ///   **nonexistent owner**, frozen for the daemon's lifetime.
+    /// The net is in the side that knows connection lifetime, **one place only** — `CommandRoster::refuse_if_detached` in
+    ///   `engram-dashboard-daemon`.
+    /// Do not put a second net here: it would add another unboundedly growing per-owner list (why the trace was discarded — ADR-0150).
     #[test]
     fn the_roster_alone_cannot_refuse_a_late_delta_from_a_disconnected_owner() {
         let owner = OwnerToken::new("shell-1");

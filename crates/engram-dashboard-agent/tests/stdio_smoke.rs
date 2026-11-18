@@ -1,10 +1,9 @@
-//! ② Isolated integration test — directly asserts the StdioTransport (pipe child) + OutputCore new path without a manager.
+//! ② Isolated integration test — asserts the StdioTransport (pipe child) + OutputCore new path directly, without a manager.
 //!
-//! The transport that json mode (ADR-0044) uses. Verified with a cmd.exe fake child, without a real claude (isolation — ADR-0012).
-//! It spawns a real process but is light and has no global contention.
+//! The transport json mode uses (ADR-0044). Verified with a cmd.exe fake child, no real claude (isolation — ADR-0012). A real process but
+//!   light, no global contention.
 //!
-//! ★Windows only★: the fixture is cmd.exe-based, so this file compiles and runs only on Windows
-//!   (the project assumes Windows/WebView2).
+//! ★Windows only★: the fixture is cmd.exe-based, so this file compiles and runs only on Windows (the project assumes Windows/WebView2).
 #![cfg(windows)]
 
 use std::path::PathBuf;
@@ -145,7 +144,6 @@ fn spec(program: &str, args: &[&str]) -> CommandSpec {
 #[test]
 fn stdio_stdout_pump_and_finalize_once() {
     let id = Uuid::new_v4();
-    // The structured argument is irrelevant to this pump test — open with the json path (true) (affects only caps).
     let (transport, _pid) =
         StdioTransport::open(&spec("cmd.exe", &["/c", "echo OUT-MARKER"]), true, None)
             .expect("open");
@@ -198,8 +196,7 @@ fn stdio_stdout_pump_and_finalize_once() {
 #[test]
 fn stdio_stderr_not_in_output_stream() {
     let id = Uuid::new_v4();
-    // A single-argument compound command: cmd strips the outer quotes and runs it as `echo OUT& echo ERR 1>&2`
-    // (redirecting echo's stdout to stderr). The markers are ASCII, so locale-independent.
+    // A single-argument compound command: cmd strips the outer quotes and runs `echo OUT& echo ERR 1>&2`. ASCII markers, locale-independent.
     let (transport, _pid) = StdioTransport::open(
         &spec("cmd.exe", &["/c", "echo OUT-MARKER& echo ERR-MARKER 1>&2"]),
         true,
@@ -223,7 +220,6 @@ fn stdio_stderr_not_in_output_stream() {
         wait_until(Duration::from_secs(5), || out.contains("OUT-MARKER")),
         "did not receive the stdout marker within 5s"
     );
-    // Wait for exit to secure a point at which stderr has also been fully drained.
     assert!(
         wait_until(Duration::from_secs(5), || matches!(
             core.status(),
@@ -232,7 +228,6 @@ fn stdio_stderr_not_in_output_stream() {
         "exit not reached"
     );
     core.join_pump(Duration::from_secs(5));
-    // Spare wait (time for the stderr drain thread to finish).
     std::thread::sleep(Duration::from_millis(200));
 
     assert!(
@@ -420,11 +415,11 @@ fn stdio_decoder_flush_skipped_on_shutdown_kill() {
     );
 }
 
-/// Proves the ClaudeStreamDecoder wiring through the real-process pump path — the trait delegation itself is
-///   covered separately by the `backend::output_decoder` unit tests, so it is not looked at again here.
+/// Proves the ClaudeStreamDecoder wiring through the real-process pump path (the trait delegation itself is covered by the
+///   `backend::output_decoder` unit tests).
 ///
-/// ※ NDJSON lines have many `"` so `cmd /c echo <json>` gets tangled with Rust arg quoting (`"` escape) and the bytes
-///   break → instead write the NDJSON to a temp file and stream it with `cmd /c type <path>` (the path has no special characters).
+/// ※ NDJSON lines have many `"`, so `cmd /c echo <json>` tangles with Rust arg quoting and breaks the bytes → write the NDJSON to a temp
+///   file and stream it with `cmd /c type <path>` (the path has no special characters).
 #[test]
 fn stdio_real_claude_decoder_emits_structured_event() {
     use engram_dashboard_agent::backend::claude::ClaudeStreamDecoder;
@@ -507,7 +502,8 @@ fn observation(pct: f64) -> UsageObservation {
     }
 }
 
-/// A decoder that accumulates a 10 % observation per `decode` and a 20 % observation at `flush` — measures whether the pump drains at both places.
+/// A decoder that accumulates a 10 % observation per `decode` and a 20 % observation at `flush` — measures whether the pump drains at both
+///   places.
 struct UsageEmittingDecoder {
     pending: Vec<UsageObservation>,
 }
@@ -574,7 +570,7 @@ fn stdio_pump_forwards_usage_after_decode_and_flush() {
 }
 
 /// One round with the real `ClaudeStreamDecoder` — a `rate_limit_event` line becomes an observation at the sink with no output event.
-/// (The reason for streaming NDJSON through a temp file = `stdio_real_claude_decoder_emits_structured_event`)
+/// (Why NDJSON goes through a temp file: `stdio_real_claude_decoder_emits_structured_event`.)
 #[test]
 fn stdio_real_claude_decoder_reports_rate_limit_usage() {
     use engram_dashboard_agent::backend::claude::ClaudeStreamDecoder;

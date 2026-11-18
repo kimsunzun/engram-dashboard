@@ -1,12 +1,9 @@
 //! Real socket ④ — does the receiving side's accept policy hold in a real upgrade (TRD 3 §5 1 · 2 · 12 · 14 · 15 · 16 · 18 · 3-0 U7).
 //!
-//! ★Only what cannot be measured in memory is placed here★ — the header decision table · the loopback decision · loss in the report queue are measured by the `ws.rs` unit tests without a
-//! socket. What is measured here is whether those decisions hold in a **real HTTP upgrade** (does the 403 reach the peer · does a refusal
-//! come out as a report), whether the deadline really closes the TCP, whether the size cap went into the real tungstenite settings (both directions), whether the permit count is right in the real accept
-//! order, and whether an accepted link put on the registry carries requests both ways.
-//!
-//! ★Part of the dialing side is not this crate's★ — our [`WsDialer`] adds no Origin, does not change Host, and blocks the outgoing
-//! size itself, so the places that build those headers and sizes call `tokio-tungstenite` directly or write to TCP by hand.
+//! ★Only what memory cannot measure lives here★ — the header decision table · loopback decision · report-queue loss are `ws.rs` unit tests. Here: do those decisions hold in a **real HTTP upgrade** (403 reaches the peer ·
+//! a refusal comes out as a report), does the deadline really close the TCP, does the size cap reach the real tungstenite settings (both directions), is the permit count right in real accept order, does an accepted link on
+//! the registry carry requests both ways. ★Part of the dialing side is not this crate's★ — our [`WsDialer`] adds no Origin, keeps Host, and blocks outgoing size itself, so those headers and sizes are built with
+//! `tokio-tungstenite` directly or by hand on TCP.
 #![cfg(all(feature = "ws", feature = "test-support"))]
 
 // This suite does not use the `TestWire` scaffolding (`registry` · `wait_*` · `listen` · `accept_link`) — the other three do.
@@ -43,7 +40,6 @@ fn bind(policy: AcceptPolicy) -> (WsListener, AcceptRefusals) {
     WsListener::bind(common::loopback(), policy, Arc::new(SystemClock)).expect("bind")
 }
 
-/// The next refusal report. Panics: when [`common::PATIENCE`] is exceeded · when the listener disappears.
 async fn next_refusal(refusals: &mut AcceptRefusals, what: &str) -> AcceptRefusal {
     tokio::time::timeout(common::PATIENCE, refusals.recv())
         .await
@@ -56,8 +52,7 @@ async fn next_refusal(refusals: &mut AcceptRefusals, what: &str) -> AcceptRefusa
         .unwrap_or_else(|| panic!("the inbox ended before the {what} report"))
 }
 
-/// Re-checks briefly until the condition holds — ★used only where waiting for a count that has no notification (permits · ready queue)★. Not used to measure
-/// time (`common` header). Panics: when [`common::PATIENCE`] is exceeded.
+/// Re-checks briefly until the condition holds — ★only where waiting for a count with no notification (permits · ready queue)★; not for measuring time (`common` header). Panics: [`common::PATIENCE`] exceeded.
 async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     let waited = tokio::time::timeout(common::PATIENCE, async {
         while !ready() {
@@ -72,7 +67,6 @@ async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     );
 }
 
-/// An upgrade with headers attached by hand — a header of the same name is replaced (Host too).
 async fn raw_upgrade(
     listener: &WsListener,
     headers: &[(header::HeaderName, &str)],
@@ -107,7 +101,6 @@ async fn accept(listener: &mut WsListener) -> Accepted {
         .expect("accept")
 }
 
-/// Whether the peer closed — 0 bytes (FIN) or an error (RST) means closed. Panics: not closed within [`common::PATIENCE`].
 async fn closed_by_peer(stream: &mut TcpStream, what: &str) {
     let mut buf = [0u8; 64];
     match tokio::time::timeout(common::PATIENCE, stream.read(&mut buf)).await {
@@ -214,7 +207,7 @@ async fn a_host_other_than_a_loopback_name_on_this_port_gets_403() {
 
 #[tokio::test]
 async fn an_upgrade_without_a_host_header_is_accepted() {
-    // D9 — if there is no Host it is accepted. tungstenite's dialing side builds no request without a Host, so it is written to TCP by hand.
+    // D9 — no Host is accepted. tungstenite's dialing side builds no request without a Host, so it is written to TCP by hand.
     let (mut listener, _refusals) = bind(common::accept_policy());
     let mut tcp = TcpStream::connect(listener.local_addr())
         .await
@@ -255,7 +248,6 @@ async fn a_silent_tcp_peer_is_closed_at_the_deadline_without_holding_up_other_ac
     });
     let addr = listener.dial_address();
 
-    // Opens only TCP and sends nothing.
     let opened = Instant::now();
     let mut silent = TcpStream::connect(listener.local_addr())
         .await
@@ -265,7 +257,7 @@ async fn a_silent_tcp_peer_is_closed_at_the_deadline_without_holding_up_other_ac
     })
     .await;
 
-    // ★The second accept stands even with a stalled peer★ — if the upgrade were waited on at the accept spot, this would block until the deadline.
+    // ★The second accept stands even with a stalled peer★ — waiting for the upgrade at the accept spot would block until the deadline.
     let dialer = common::dialer();
     let (accepted, dialed) = tokio::time::timeout(common::PATIENCE, async {
         tokio::join!(listener.accept(), dialer.dial(&addr))
@@ -309,7 +301,7 @@ async fn a_message_over_the_limit_breaks_the_link_into_the_listener() {
         max_message_bytes: LIMIT,
         ..common::accept_policy()
     });
-    // ★The dialing side is tungstenite defaults★ — our dialing side blocks a frame over the cap itself, so it never reaches the receiving side.
+    // ★The dialing side is tungstenite defaults★ — our dialer blocks a frame over the cap itself, so it never reaches the receiver.
     let mut client = raw_upgrade(&listener, &[]).await.expect("upgrade");
     let (mut server_tx, mut server_rx) = accepted_ends(accept(&mut listener).await);
 
@@ -350,7 +342,7 @@ async fn a_message_over_the_limit_breaks_the_link_into_the_dialer() {
         ws.send(Message::Binary(vec![2u8; LIMIT + 1].into()))
             .await
             .expect("the sending side is not blocked");
-        // Held until the dialing side cuts — if released first, we cannot tell whether the cut was due to size.
+        // Held until the dialing side cuts — released first, we could not tell whether the cut was due to size.
         while ws.next().await.is_some() {}
     });
 
@@ -391,7 +383,7 @@ async fn dial(dialer: &WsDialer, addr: &Address) -> Result<(), DialFailure> {
 async fn full_upgrade_slots_close_new_tcp_at_once_and_a_failed_peer_frees_its_slot() {
     let (mut listener, mut refusals) = bind(AcceptPolicy {
         max_pending_upgrades: 2,
-        // So that the silent peer is not caught by the deadline during the test — the permit must be released by the peer's cut, not by the deadline.
+        // The silent peer must not be caught by the deadline during the test — the permit must be released by the peer's cut, not the deadline.
         upgrade_timeout: Duration::from_secs(60),
         ..common::accept_policy()
     });
@@ -463,7 +455,7 @@ async fn the_ready_queue_is_bounded_by_the_slots_until_the_accepted_link_is_let_
         RefusalKind::SlotsFull
     );
 
-    // ★Even if taken away, the permit is held until it is put on the registry★ — it is released only once the receiving side's next stage takes hold of it (TRD 3 §5 14).
+    // ★Even taken away, the permit is held until the link is put on the registry★ — released only once the receiving side's next stage holds it (TRD 3 §5 14).
     let taken = accept(&mut listener).await;
     assert_eq!(listener.queued(), 1);
     assert!(
@@ -510,7 +502,7 @@ async fn unread_refusal_reports_are_dropped_and_counted_without_stalling_accepts
 
 // ── Putting an accepted link on the registry (§3-1 ① — end to end) ──
 
-/// A vocabulary both sides speak — `TestWire` is the dialing side's vocabulary, so the receiving side cannot read requests.
+/// A vocabulary both sides speak — `TestWire` is the dialing side's, so the receiving side could not read requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Msg {
     Ask { tag: u64, body: String },
@@ -667,7 +659,7 @@ async fn ask_across(
 
 #[tokio::test]
 async fn an_accepted_socket_attaches_to_a_registry_and_requests_flow_both_ways() {
-    // ★The listener and the receiving registry use the same clock★ — `upgraded_at` and the auth deadline must be on the same clock (`WsListener::bind`).
+    // ★The listener and the receiving registry use one clock★ — `upgraded_at` and the auth deadline must share it (`WsListener::bind`).
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let (mut listener, _refusals) =
         WsListener::bind(common::loopback(), common::accept_policy(), clock.clone()).expect("bind");

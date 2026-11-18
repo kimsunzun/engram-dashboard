@@ -1,153 +1,59 @@
 //! CodexAppServerTransport — the [`AgentTransport`] implementation for the `codex app-server --stdio` child process.
 //!
-//! ★What this file owns★: the child process + Job Object · the single stdin writer · the reader (pump) · the waiting table of
-//!   outgoing requests and the id counter · the thread id and readiness · the gated input queue · the trigger that hands held text at a tool end
-//!   of the running turn ([`State::steer_due`] — ADR-0235). The id · method · order of outgoing envelopes are
-//!   all held here — so the bytes [`AgentTransport::send_input`] receives are not a wire frame but
-//!   **the message body** ([`crate::backend::InputEncoder::TransportFramed`]).
+//! Owns the child + Job Object · the single stdin writer · the reader (pump) · the waiting table and id counter · thread id and readiness ·
+//! the gated input queue · the tool-end steer trigger ([`State::steer_due`] — ADR-0235). Id · method · order of outgoing envelopes are
+//! decided here, so [`AgentTransport::send_input`] receives the message body, not a wire frame
+//! ([`crate::backend::InputEncoder::TransportFramed`]).
 //!
-//! ★The three threads and the walls between them★:
-//!   - **Reader** (= pump, launched by [`AgentTransport::start`]) — owns the decoder exclusively as `&mut`. The memory of approval
-//!     items we refused ([`RefusedItems`]) is also held by the reader alone — there is no lock (ADR-0241).
-//!     ★It never takes the stdin lock and never waits on the waiting table★. When a line that needs an answer comes, it **puts it in the outbox and
-//!     returns immediately.** Violate this and reading stops, and when reading stops the peer's queue fills, and the peer does not close
-//!     its stdout write handle, so **EOF never comes** — the process is alive and there is not a single signal.
-//!   - **Writer** (itself) — the **only** thread that holds the stdin lock throughout a blocking write, and also the **only**
-//!     thread that drains the control queue. The handshake runs here too (meanwhile the queue holds user input). ★Even
-//!     during that wait it keeps draining the control queue★ — if it parked entirely, a refusal the reader put in could not go out, and if the peer was
-//!     waiting for that answer, both sides would wait for each other until the deadline.
-//!   - **stderr drain** — keeps the child from stopping because the pipe filled.
+//! ★Three threads★:
+//!   - **Reader** (pump, launched by [`AgentTransport::start`]) — owns the decoder as `&mut` and [`RefusedItems`], no lock (ADR-0241).
+//!     ★It never takes the stdin lock and never waits on the waiting table★: a line needing an answer goes to the outbox. Otherwise
+//!     reading stops, the peer's queue fills, the peer keeps its stdout open, and **EOF never comes** — alive, no signal.
+//!   - **Writer** — the only holder of the stdin lock across a blocking write and the only drainer of the control queue; the handshake
+//!     runs here. ★It keeps draining control lines while it waits★, else a queued refusal cannot go out and both sides wait for each other.
+//!   - **stderr drain** — keeps the child from blocking on a full pipe.
 //!
-//! ★Lock order = state → waiting table★ (ADR-0006). There is no reverse: [`Pending`] does not call outside while holding its own
-//!   lock. There is also no place that takes the stdin lock while holding the state lock.
+//! ★Lock order = state → waiting table★ (ADR-0006), never reverse; nothing takes the stdin lock while holding the state lock.
 //!
-//! ★Teardown is today's causality as is (ADR-0001 2 verbs)★ — no wait is added inside [`AgentTransport::shutdown`],
-//!   and ★**on that path** stdin is not closed before kill★ (source of truth for the reason = the same spot in `transport/stdio.rs`).
-//!   ★**This is not a whole-file rule but a rule of the teardown path — do not misread it either way**★:
-//!   ① on the branch where the handshake failed, [`writer_loop`] closes stdin **without kill** — ★not only on a record failure
-//!   but **also on a round-trip failure (including refusal)**★ (the comment at that spot is the source of truth for why it is safe there). Do not use
-//!   this sentence to revert its existence. ② Conversely, do not use that new spot as grounds to
-//!   flip the order of `shutdown()` either — the reasons the two spots are safe **differ**, and that side's order is
-//!   a real regression guarded by [`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`].
-//!   Nobody joins the writer thread, and ★it ends on its own on seeing the closed marker (`State::closed`) — there are **two** places that
-//!   set that marker★: `shutdown()` (we killed it) and the `Drop` of [`ReaderExit`] (the peer ended on its own
-//!   or the reader panicked — being `Drop`, unwinding passes it for sure). In the former case killing the child breaks the pipe,
-//!   and a blocked write is released with an error. ★The price = unsent input left in the queue quietly disappears★.
+//! ★Teardown (ADR-0001 2 verbs)★: no wait inside [`AgentTransport::shutdown`], and **on that path** stdin is not closed before kill
+//! (`transport/stdio.rs`; guarded by [`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`]). [`writer_loop`] does close stdin
+//! **without kill** after a failed handshake — the reasons differ; neither is grounds to change the other. Nobody joins the writer; it ends
+//! on `State::closed`, set by `shutdown()` and by the `Drop` of [`ReaderExit`]. ★Unsent queued input disappears silently★.
 //!
-//! ★Known limits — do not shrink this list; remove items together with fixing them★:
-//!   - **The turn itself has no deadline.** Only the `turn/start` **response** has a deadline, so if a turn
-//!     ends leaving only an `error` notification without `turn/completed`, the gate never opens. After that,
-//!     [`AgentTransport::send_input`] reports it as "the queue is full" — a report with the wrong reason.
-//!   - **Non-Windows has no means of reaping grandchildren.** Neither Job Object nor process groups are used.
-//!   - [`AgentTransport::interrupt`] does not look at the closed marker — there is a window where it returns `Ok` for one line
-//!     that will be dropped at the moment of closing.
-//!   - **History restore is best-effort as a whole** — whether refusal · deadline · line cap, the outcome is 「restore only
-//!     up to there」 and the connection stands as is ([`hydrate_history`]). So **how much was restored remains only in the log
-//!     and has no indication on screen** — a person reads the shortened screen as 「it was only this much」.
-//!   - ★**Restored history and live lines can mix — what prevents it is not structure but measurement**★:
-//!     the reader runs even during the handshake, so if the peer streams notifications in that window, those lines mix with the history.
-//!     ★★There are **two** mixing axes and only one is closed — writing only 「splitting is closed」 is false★★:
-//!     ① **the order inside the ring** is closed — [`OutputCore::emit_batch_without_turn_observation`] carries the whole history
-//!        in one lock section. So a subscriber that **attaches later** always receives the intact history by replay.
-//!     ② **the delivery order to an already attached subscriber is not closed** — that door sends after letting go of the ring lock,
-//!        so a live emit in between can cut in as [batch seq N] → [live seq N+k] → [batch seq N+1].
-//!        ★And the frontend handles that **by discarding, not reordering**★ — the subscription callback of `RichSlot`
-//!        drops `chunk.seq <= lastSeq`, so the history frames after the cut-in **disappear from the screen**.
-//!     That is, today both 「stands in front」 and 「splits during delivery」 are open, and what actually prevents them is
-//!     only the measurement below. There is one way to close both axes together — **the reader holding emits bounded**
-//!     until the gate opens. Deciding that queue's cap and the disposal on overflow (silent loss) comes first, so it is a separate matter.
-//!     ★Write precisely what the containment is — that is the point of this item★: ADR-0203 measured `item/*`
-//!     notifications after resume as **0** (0.154.0), and the place that opens a turn requires [`Link::Ready`], so there is
-//!     no turn of ours yet either. ★That is, it is **an observation of vendor behaviour**, not a structural guarantee★ — codex updates itself and this
-//!     protocol has no version field (another item of this header already says so), so that 0 can quietly
-//!     change. If it changes, the symptom is 「one strange line above the restored conversation」, and closing it requires the reader to **hold emits
-//!     bounded** until the gate — that queue's cap and the disposal on overflow (silent loss) must be decided first, so it is
-//!     a separate matter.
-//!     ★That separate matter was **closed as not to be built** (ADR-0205) — this limit stays open, and that ADR holds the reopening trigger too★.
-//!   - If the connection cannot stand, the input queued disappears. **How many disappeared remains both in the log and on screen** —
-//!     the `detail` of the failure outcome carries that count (that branch of [`writer_loop`]). ★What this spot once said, 「it remains only in the log
-//!     (all that shows on screen is "handshake failed")」, is a stale description★ — the count is carried,
-//!     and the headline is not one but two ([`HandshakeFailure::headline`] — it writes a protocol round-trip failure and a session id record
-//!     failure separately).
+//! ★Known limits — remove an item only together with its fix★:
+//!   - **The turn has no deadline** (only the `turn/start` response does): a turn ending with only an `error` notification never opens the
+//!     gate, and [`AgentTransport::send_input`] then reports "the queue is full" for the wrong reason.
+//!   - **Non-Windows cannot reap grandchildren** (no Job Object, no process groups); a peer that closes only stdout and lives leaves an
+//!     orphan there (Windows: `KILL_ON_JOB_CLOSE` on link drop).
+//!   - **Job Object enrolment is after spawn** — a grandchild born in between escapes (`pty.rs` · `stdio.rs` the same). Precedent fix:
+//!     `usage::process` + `spawn::prepare_tree_root`.
+//!   - [`AgentTransport::interrupt`] ignores the closed marker and can return `Ok` for one line dropped at closing.
+//!   - **History restore is best-effort** ([`hydrate_history`]): how much was restored is only in the log.
+//!   - ★**Restored history and live lines can mix**★ — prevented by measurement, not structure: ADR-0203 measured `item/*` after resume as
+//!     **0** (0.154.0), and a turn opens only after [`Link::Ready`]; codex self-updates and has no version field. Ring order is closed
+//!     ([`OutputCore::emit_batch_without_turn_observation`]); delivery order to an attached subscriber is open, and the frontend
+//!     **discards** `chunk.seq <= lastSeq` (`RichSlot`), so history after a cut-in vanishes. Closing it needs bounded emit-holding
+//!     (ADR-0205: not to be built; holds the reopening trigger).
+//!   - If the connection cannot stand, queued input disappears; the count is in the failure `detail` ([`HandshakeFailure::headline`]).
 //!   - The pump is launched with a panicking `thread::spawn` (the other two absorb failures into the log).
-//!   - **One blocking write can hang forever** — if the peer does not read our stdin, `write_all`
-//!     stops on pipe backpressure, and the only way out of it is `shutdown()`'s kill. Neither a deadline
-//!     nor a condition variable reaches inside that one write. ★This is a limit over this whole file,
-//!     not only the handshake★.
-//!   - **The codex writer ([`writer_loop`]) is not contained (ADR-0292)** — in the production process, a writer panic
-//!     anywhere has the hook end the process. Below is the shape that stands only in a test build without the hook: the containment is only the one place, the `catch_unwind` of
-//!     [`record_session_id`] wrapping the session id record call, and **the rest of the writer code has none.** If the writer panics outside
-//!     the containment, the state already standing at that moment remains: **before** the handshake the link is `Connecting`
-//!     and the closed marker does not stand either, so [`AgentTransport::send_input`] keeps returning `Ok`, fills the queue up to the cap,
-//!     and reports that stop as "the queue is full" (the same reason mismatch as the first item above). **After** the handshake the link
-//!     is already `Ready`, so the same symptom happens on the turn path. ★Either way the closed marker does not stand, so neither the pump
-//!     nor the reaper moves★.
-//!   - **The slots that hold an end that came before the response are [`EARLY_COMPLETION_SLOTS`]** (each slot carries the turn id
-//!     together with **the turn boundary that line made** — [`EarlyCompletion`]). If more ends than that stream in while waiting for one
-//!     response, the oldest are dropped first, and if a dropped one was our turn's, that
-//!     turn has nothing left to end it again. Only one turn is open, so one slot suffices in normal operation, but
-//!     if the peer streams ends of turns we never opened, it is eaten into that much. ★Those slots are emptied entirely at every place
-//!     where the turn returns to `Idle`★ — source of truth for the reason = that line of [`end_turn_if`].
-//!   - **Job Object enrolment is **after** spawn, so a grandchild created in between is outside the Job.** Once enrolled,
-//!     breakaway is blocked (neither `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is turned on) and the tree goes down as a whole,
-//!     but descendants born in that window are outside that guarantee. ★This window is not this link's alone★ — `pty.rs` · `stdio.rs` have
-//!     the same shape. Fixing it is a separate matter touching all three links together, and the precedent is the usage query runner — it launched suspended,
-//!     put it into the Job, then woke it, closing that window (`usage::process` + OS layer `spawn::prepare_tree_root` ·
-//!     `spawn::TreeRoot`).
-//!   - **If the handshake fails, [`writer_loop`] lets go of our stdin — regardless of the branch.**
-//!     ★This spot once said 「the child · reader · writer remain and stay resident until the manager reaps them」. That
-//!     was beyond stale, it was **false — nobody reaps that session**★: what opens the reaping is the one message the pump's
-//!     [`OutputCore::finish`] emits, and the reaper is its sole consumer (ADR-0019), so if the reader does not see EOF,
-//!     that message **is never created at all.** So that shape was not 「resident until reaped」 but
-//!     **a permanent wedge** — the screen says `Running` but all input is refused, and the child + Job Object + three threads are
-//!     held for the whole daemon lifetime. On a boot restore, as many stand at once as there are resumable codex profiles.
-//!     ★Still, this link does not call kill★ — it only lets go of the write end, and the end transition is still the pump's
-//!     alone (ADR-0005 as is; the 2 verbs of ADR-0001 belong to the `kill` handler). ★What actually cuts that wedge
-//!     is the manager's teardown★ (the 「recovery」 item below).
-//!   - ★**The case where the peer closes only stdout and keeps living has no owner yet**★ — the reader sees EOF and sets `closed`,
-//!     and the session is reaped, but the child is alive. On Windows, when the link is dropped the Job handle closes and
-//!     `KILL_ON_JOB_CLOSE` reaps the tree, but **non-Windows has no such backstop and an orphan remains**
-//!     (the parent version of 「non-Windows has no means of reaping grandchildren」, which this header already writes).
-//!     ★**Production reachability differs per branch — read it neither as 「all dead code」 nor as 「all running」**★:
-//!     a session id **record** failure comes only from a panic caught by [`record_session_id`], and that spot is outside the containment
-//!     marking, so in the production process the hook ends the process at that spot (ADR-0292) — so
-//!     the 「session id record failed」 headline of [`HandshakeFailure::headline`] and the 「this incarnation is not used」 `detail`
-//!     are observed only in a test build without the hook. **Closing stdin is different** — it is reached in production too by a round-trip failure (deadline · decode failure · and the peer's
-//!     **refusal**). ★**Do not point to them by ordinal**★ — the branch order changes.
-//!   - **The first link of recovery after a handshake failure is *the peer's* action, and if that does not come, the manager is what cuts it** —
-//!     what actually ends the session after letting go of stdin is 「the peer sees EOF and exits on its own」 (measured
-//!     41–51ms — ★that figure was measured on the **record failure branch**, and the refusal branch is unmeasured★), and only when that happens does
-//!     reader EOF → pump → reaper follow.
-//!     ★Even if that premise breaks, this link **kills nothing**★ — instead [`Link::Down`] is immediately
-//!     visible outside via [`AgentTransport::link_state`], and the activation decision confirms it as a failure and then runs the
-//!     existing teardown (ADR-0001 2 verbs). ★Do not bring that disposal back into this file — ADR-0199 explicitly forbids
-//!     the writer's `child.kill()` · `TerminateJobObject`★ (it came in once and was removed).
-//!     ★**The remaining hole**: in a spawn where that decision is **not hooked** (codex launched as Fresh), nobody looks at that `Down`
-//!     — that branch still has no owner.★ codex updates itself and this
-//!     protocol has no version field (another item of this header already says so), so that behaviour can quietly
-//!     change. **Do not shrink this item** — to fix it, first decide who carries the bounded wait and the disposal after it.
-//!   - **The session id record port is called synchronously on the writer thread** — if that callback blocks, that thread is stuck and
-//!     neither input nor control lines go out. ★**This is real, not potential**★: the assembly point (`manager.rs`) passes the port to every
-//!     spawn, and that implementation takes the profile registry lock and rewrites `agents.json` entirely.
-//!     That is, this link can stop at the end of the handshake for **as long as someone else's disk write**. Meanwhile, multiplied with the item above where control lines go out
-//!     only one per slice, it makes the [`OUTBOX_LIMIT`] refusal dropping **long**.
-//!   - **The real cap of an outgoing request is `budget + SWEEP_INTERVAL`, and that clock starts *after* the first write.**
-//!     The deadline is first read only after one slice of the first `recv_timeout`, and the request write before that is itself not bounded.
-//!   - **During the handshake, control lines go out only one per slice.** If server requests pile up faster than that,
-//!     they reach [`OUTBOX_LIMIT`] and refusals start being dropped — it is visible on screen and ends with the handshake deadline, but
-//!     the missed obligations in the meantime are real.
-//!   - The attribution of `turn/completed` leans on **the turn id string the peer gave**. If the peer sends back the id it is using now as is,
-//!     the wrong turn closes — it is not a value we issued, so there is nothing more this layer can count.
-//!   - **An unattributed `turn/completed` cannot emit a turn boundary** ([`Reader::note_turn`]). So in a combination where the peer sends only ends
-//!     without a turn id, that turn remains open both in this link and in the fact layer — if the response already
-//!     came, there is no deadline backstop either. ★Still, the point of this shape is that both axes get **the same** decision★: drawing only the screen
-//!     as 「ended」 while this layer, which holds the queue, does not take the next input would be a worse mismatch.
-//!     ★That 「same decision」 holds only if it **applies to progress too**★ — gating only the end and leaving progress open, one `item/*`
-//!     line that came while no turn is open would turn on only the fact layer, and its end would be blocked per the sentence above with nobody able to turn it off
-//!     (the link is `Idle` = queue open, but the fact layer is busy). [`Reader::claims_our_turn`] carries that split —
-//!     the body always goes to the screen, but whether to count it as grounds for 「mid-turn」 is split by the same axis.
-//!
-//! tauri import 0.
+//!   - **One blocking write can hang forever** (peer not reading stdin → pipe backpressure); only `shutdown()`'s kill gets out. The whole
+//!     file, not only the handshake.
+//!   - **[`writer_loop`] is not contained (ADR-0292)**: production ends the process on a writer panic; without the hook the only
+//!     containment is [`record_session_id`]'s `catch_unwind`, and a panic elsewhere leaves the link `Connecting`/`Ready` with `closed`
+//!     unset — `send_input` keeps returning `Ok` and reports "the queue is full".
+//!   - **[`EARLY_COMPLETION_SLOTS`]**: more ends than slots before one response drop the oldest; if it was our turn's, nothing ends that
+//!     turn. Emptied at every return to `Idle` ([`end_turn_if`]).
+//!   - **If the handshake fails [`writer_loop`] only lets go of stdin** — it kills nothing (ADR-0199 forbids the writer's `child.kill()` ·
+//!     `TerminateJobObject`). Recovery = the peer exits on EOF, else the manager's teardown via [`Link::Down`]
+//!     ([`AgentTransport::link_state`]); [unverified on the refusal branch]. Where that decision is **not hooked** (codex launched as
+//!     Fresh) nobody looks at `Down`: no owner. Fixing it first needs a decision on who carries the bounded wait.
+//!   - **The session id record port runs synchronously on the writer thread** — it takes the registry lock and rewrites `agents.json`
+//!     (`manager.rs`), so the handshake end can stall for someone else's disk write, lengthening [`OUTBOX_LIMIT`] refusal dropping.
+//!   - **An outgoing request's real cap is `budget + SWEEP_INTERVAL`**, started *after* the first write.
+//!   - **During the handshake control lines go out one per slice**; faster server requests reach [`OUTBOX_LIMIT`] and refusals drop.
+//!   - `turn/completed` attribution leans on **the turn id string the peer gave**; an unattributed one cannot emit a boundary
+//!     ([`Reader::note_turn`]) — the turn stays open here and in the fact layer with no deadline backstop once the response came. Both
+//!     axes must get **the same** decision, progress included ([`Reader::claims_our_turn`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -190,173 +96,113 @@ use crate::types::{
 
 /// The cap on how long one outgoing request waits for an answer.
 ///
-/// ★Applied to every request without exception★ (measured 0.154.0): the server **gives no answer at all to an envelope it could not decode,
-/// even if it carries an `id`** — an answer comes only for a parameter error after the envelope was read. So a waiting table without a deadline
-/// hangs forever not "someday" but **during normal operation**.
-/// ★Grounds for the value★: the observed round trips are `initialize` ≈130ms · `turn/interrupt` ≈18ms. 30 seconds is over 200× the slowest
-/// of them, so there is no room to cut a normal round trip, and it also generously covers `thread/start` being slow because it launches
-/// its own MCP children (measured — those children are our grandchildren, so the Job Object reaps them together). At the same time
-/// the error shows up before a person in front of the screen decides "it froze".
-/// ★Unrelated to the length of the turn★ — the **response** of `turn/start` comes when the turn opens, not when it ends.
+/// ★Applied to every request★ (measured 0.154.0): the server gives **no answer at all to an undecodable envelope, even with an `id`**, so
+/// the waiting table would hang forever. Observed `initialize` ≈130ms · `turn/interrupt` ≈18ms; 30 s covers a slow `thread/start` that
+/// launches MCP children. Unrelated to turn length — the `turn/start` response comes when the turn opens.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 
-/// The cap on **the whole thing until the connection stands** — two round trips + the record call + history paging. ★Applied not to one request but to one
-/// section★.
+/// The cap on **the whole thing until the connection stands** — two round trips + the record call + history paging; ★one section, not one
+/// request★.
 ///
-/// ★★History paging running **inside** this budget is the contract (ADR-0203)★★: giving it a separate budget would delay
-///   `Ready` by up to two budgets and break the backstop contract below, and then **a resume that succeeded but was busy fetching the screen
-///   would be decided as a failure.** That the clock is started in one place, [`writer_loop`], is the concrete form of it, and
-///   [`tests::the_handshake_and_the_history_share_one_budget`] measures it.
-///   ★The price = if the handshake was slow, the restored screen gets shorter★ — leaning that way is intended.
-///
-/// ★This value now **does not need to fit any window**★ — the activation decision does not watch a window but receives the connection outcome
-///   this link emits **on the spot** (user decision — [`AgentTransport::link_state`]). That is, the purpose of the cap narrowed from
-///   「emit the outcome before the decision」 to **「give up on a peer that does not answer, eventually」**.
-///   ★This spot once had 「smaller than the manager's decision window」 written as a contract — that window is gone, so it is stale★.
-/// ★Still, the value is not raised★: reverting to [`REQUEST_DEADLINE`] (30 seconds) makes two round trips up to 60 seconds, and
-///   there is nothing gained by waiting that long — the observed round trip is `initialize` ≈130ms and a refusal comes **immediately**
-///   (measured — a child-thread `thread/resume` returned `-32600` right away). 10 seconds is over 70× that normal round trip,
-///   covering even a slow startup (npm shim → node), and the outcome arrives before a person feels 「it froze」.
-/// ★Only one contract remains: it must be **smaller** than the manager's liveness backstop★
-///   ([`crate::manager::LINK_RESOLUTION_BACKSTOP`]). That one is not a decision but **giving up**, so if this value were larger,
-///   a refusal with a reason would be covered by a give-up without a reason. That relation is inside the same crate, so the test bench measures it directly.
-/// ★★**This cap applies only to 「waiting for a response」 — it does not apply to writes**★★: if the peer does not read our stdin,
-///   `write_all` of [`write_line`] hangs forever on pipe backpressure, and meanwhile this budget is never
-///   evaluated (the write of the `initialized` notification between handshake steps is the same spot). On that path the link
-///   stops at `Connecting` forever, and **what cuts it is not this link but the backstop above and the teardown after it.**
-///   That fact is the only reason the backstop still exists — to remove it, making writes bounded comes first.
-/// ★Turn requests do not use this value★ — they use [`REQUEST_DEADLINE`] as is.
+/// ★History paging runs **inside** this budget (ADR-0203)★: a separate one could delay `Ready` by two budgets past the backstop and decide a
+/// successful resume a failure (started once in [`writer_loop`]; [`tests::the_handshake_and_the_history_share_one_budget`]). A slow
+/// handshake shortens the restored screen — intended.
+/// It only has to **give up on a silent peer** (a refusal comes immediately); ★it must stay **smaller** than
+/// [`crate::manager::LINK_RESOLUTION_BACKSTOP`]★, which gives up without a reason.
+/// ★It bounds waiting for a response, not writes★: a blocked `write_all` ([`write_line`]) is never evaluated against it; the backstop and
+/// teardown cut that. Turn requests use [`REQUEST_DEADLINE`].
 const HANDSHAKE_BUDGET: Duration = Duration::from_secs(10);
 
-/// The period at which the writer **looks around**. Two places use this value — the deadline-expiry sweep, and sending control lines
-/// **one line at a time** while the handshake waits for an answer ([`request_blocking`]).
-///
-/// ★The two differ in nature★: the sweep is one map scan, while draining control lines is **a blocking write**. So this value
-/// means not 「one slice takes this long」 but 「**unless blocked**, decide again at this interval」.
-/// The fact that one blocking write can hang forever is carried not by this constant but by the 「known limits」 of the module header.
-/// ★Grounds for the value★: it is 1/60 of [`REQUEST_DEADLINE`], so the deadline error does not change a decision, and the delay until a server request
-/// refusal goes out during the handshake is also bound to that much.
+/// The period at which the writer **looks around**: the deadline sweep, and sending control lines **one at a time** while the handshake
+/// waits ([`request_blocking`]). A blocking write can still hang (module header). 1/60 of [`REQUEST_DEADLINE`].
 const SWEEP_INTERVAL: Duration = Duration::from_millis(500);
 
 /// The queue cap of control lines that go out without the gate (server request refusals · `turn/interrupt`).
 ///
-/// ★Grounds★: these lines go out right away regardless of the turn state, so they do not pile up as long as the peer reads stdin. If they pile up,
-/// the peer **stopped reading**, and then this cap turns a "stop without a signal" into an observable refusal. 64 is
-/// small enough to expose that stop within a short time, and large enough to absorb a moment when approval requests rush in.
+/// Grounds: they go out regardless of turn state, so they pile up only if the peer **stopped reading**; this cap turns that silent stop
+/// into an observable refusal. 64 exposes it quickly and still absorbs a rush of approval requests.
 const OUTBOX_LIMIT: usize = 64;
 
 /// The number of items requested per history page.
 ///
-/// ★★This value **does not bound the line size — do not read it that way**★★ (measured): what `limit` cuts is the count, and
-///   the bytes of one item are decided by the peer. In the measured sample one `limit:50` page was 1,823,509B, and
-///   even at `limit:1` the largest page was 437,196B (one `commandExecution.aggregatedOutput`).
-///   That is, no `limit` guarantees staying under [`MAX_LINE_BYTES`].
-/// ★So what this value weighs is **the trade-off between the probability of exceeding that cap and the number of round trips**★ — 25 is about half
-///   the largest observed page (1.8MB@50), so there is 4× left to the line cap, and it fills the 2MiB ring within a few round trips.
-/// ★If exceeded and the line is dropped, that request gets no answer until the deadline, and the restore ends **only up to there**★ —
-///   quiet and harmless (the disposal of that branch is carried by [`hydrate_history`]).
+/// ★Does **not** bound line size★ (measured): the peer decides bytes per item (one `limit:50` page 1,823,509B; `limit:1` up to 437,196B), so
+/// [`MAX_LINE_BYTES`] can be exceeded at any value; 25 trades that chance against round trips. An over-cap line gets no answer until the
+/// deadline and the restore ends there ([`hydrate_history`]).
 const HISTORY_PAGE_LIMIT: u32 = 25;
 
 /// The maximum number of round trips history paging runs — **a runaway backstop, not a policy**.
 ///
-/// ★There are three normal ends★: cursor exhausted · ring filled · handshake budget exhausted. This value fires only when the peer
-///   keeps giving a cursor that never ends, and even then the budget usually cuts first.
-/// ★Grounds for the value★: multiplied by [`HISTORY_PAGE_LIMIT`] it is 6400 items, over the ring's count ceiling (4096) —
-///   that is, this cap never prevents carrying what could be carried.
+/// Normal ends: cursor exhausted · ring filled · handshake budget exhausted. This fires only if the peer keeps giving a cursor that
+/// never ends, and even then the budget usually cuts first. Times [`HISTORY_PAGE_LIMIT`] it is 6400 items, over the ring's count
+/// ceiling (4096), so it never prevents carrying what could be carried.
 const MAX_HISTORY_PAGES: usize = 256;
 
 /// The cap on the input the link holds (`State::pending`). Over it, that call returns `Err` (ADR-0190 — it does not drop).
 ///
-/// ★Grounds★: one entry is one complete user turn. The windows in which the queue stands are only the handshake (≈130ms) and one ongoing turn,
-/// so 32 entries being full means a person pushed in 32 turns without seeing a single answer — at that point
-/// refusing is more honest than taking more.
-/// ★Everything is counted regardless of stage★ — an item handed over is also one entry visible in the list until receipt (echo).
+/// Grounds: one entry = one complete user turn; the queue stands only during the handshake (≈130ms) and one ongoing turn, so 32 full
+/// means a person pushed 32 turns without seeing an answer — refusing is more honest than taking more. Everything is counted
+/// regardless of stage (a handed-over item is still one list entry until its echo).
 // ADR-0231
 const INPUT_QUEUE_LIMIT: usize = 32;
 
-/// The bytes the reader reads at a time.
 const READ_BUF_BYTES: usize = 4096;
 
 /// The maximum bytes one line can use. A line over it is dropped **alone** and recovery starts from the next newline.
 ///
-/// ★This value is not derived from observation★ — the observed maximum (an error body in the 4KB range) only says **what the floor must not
-/// be**, and does not set the cap. What it measures is not the size of a normal line but
-/// **the memory a peer that sends no newline can take with this one buffer**, and on that axis 4MiB is the spot that is unnoticeable
-/// as an amount one session can hold by mistake and far too small for the peer to exhaust memory.
-/// ★Which way it is wrong if off★: too large and that one line is caught late, too small and normal lines are dropped and
-/// the screen goes empty — so it leans toward a thousand times the observed maximum.
+/// ★Not derived from observation★ — the observed maximum (a 4KB-range error body) only says what the floor must not be. This measures
+/// **the memory a peer that sends no newline can take with this one buffer**: 4MiB is unnoticeable as an amount one session can hold
+/// by mistake and far too small to exhaust memory. Too large → that line is caught late; too small → normal lines are dropped and the
+/// screen goes empty — so it leans to a thousand times the observed maximum.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 /// The cap (in characters) on peer strings carried into logs and the screen.
 ///
-/// ★Grounds★: the 4KB error body above, if not cut, covers a whole log line. With 512 characters, the method name and the first sentence of the reason
-/// remain.
+/// Grounds: the 4KB error body above would cover a whole log line uncut; 512 keeps the method name and the first sentence of the reason.
 const LOG_STRING_LIMIT: usize = 512;
 
 /// The number of slots holding the turn id of an end notification that came before the response.
 ///
-/// ★Grounds★: only one turn is open at a time, so **one slot is needed in normal operation**. The rest is room for when the peer
-/// streams ends of turns we never opened, and this value is the cap on that room. Over it, the oldest
-/// are dropped first — the later one came, the more likely it belongs to the turn being waited on now.
+/// Grounds: only one turn is open, so **one slot suffices in normal operation**; the rest is room for a peer streaming ends of turns we
+/// never opened. Over the cap the oldest are dropped — the later one came, the likelier it belongs to the turn awaited now.
 const EARLY_COMPLETION_SLOTS: usize = 8;
 
 /// The number of slots remembering the item ids of approval requests we refused ([`RefusedItems`]).
 ///
-/// ★Grounds★: the peer emits that item's end right at the spot it receives our refusal (measured fixture `refuse_u2a` — request ·
-/// refusal resolution · end come within a few ms). So **0–1 slots are occupied in normal operation**. What remains is only items whose end never
-/// comes (a peer that died midway · a turn interrupted while waiting for approval), and this value is the cap on that remainder. Over it, the oldest are
-/// dropped first — the late end of a pushed-out item loses the reason that it was our refusal, and a command shows as 「error」, a file change as `Declined` (reason unknown
-/// — 「denied · not executed」).
+/// The peer emits that item's end within a few ms of our refusal (fixture `refuse_u2a`), so 0–1 slots are normally occupied; the rest are
+/// items whose end never comes. Over the cap the oldest drop and that item's late end shows as "error"/`Declined` instead of refused.
 // ADR-0241
 const REFUSED_ITEM_SLOTS: usize = 16;
 
-/// The maximum bytes of a turn id to hold. ★It is **filtered, not truncated**★ — this value is not an observation key people read but
-/// a **token compared for equality** later, so storing it truncated could make two different long ids read as the same.
-/// The observed id is a UUIDv7 string (36 bytes), and 128 is room beyond that.
+/// The maximum bytes of a turn id to hold. ★**Filtered, not truncated**★ — it is a token compared for equality later, and truncating
+/// could make two different long ids read as the same. The observed id is a UUIDv7 string (36 bytes); 128 is room beyond that.
 const MAX_TURN_ID_BYTES: usize = 128;
 
 /// The lowest codex edition that uses the list · receipt notifications — `clientUserMessageId` of `turn/start` · `turn/steer` came in
-/// with this edition (tag comparison — the same as ADR-0198's floor). Below it, today's behaviour as is ([`Floor::Below`]).
+/// with it (tag comparison — same as ADR-0198's floor). Below it, today's behaviour ([`Floor::Below`]).
 // ADR-0231
 const CLIENT_MESSAGE_ID_FLOOR: (u64, u64, u64) = (0, 140, 0);
 
-// ★That there is no place that branches on error codes is intended — that is also why there is no retry backoff constant★.
-//   An error response wakes the waiter of that request whatever its code, so it does not go quietly silent. The three reasons for not adding
-//   「resend the same request on a particular code」 on top: ① it is unverified whether an overload code actually comes in this envelope
-//   (the `-32xxx` range appears 0 times in the schema, and overload · rate limit come as `codexErrorInfo` of the `error`
-//   **notification**) ② the three requests we emit are dangerous to retry — `initialize` can be sent only
-//   once (measured: the second is an error), retrying `thread/start` creates two threads, retrying `thread/resume`
-//   is also a request that opens the same thread twice, and retrying `turn/start`
-//   opens once more a turn the peer already received ③ so to pick a value, seeing that code on a real server comes
-//   first. ★What is needed to reopen it★ = an observation of which code comes for which request and when.
+// ★No branching on error codes, hence no retry backoff constant★: an error response wakes its waiter whatever its code. A retry is unsafe
+//   for all three requests (`initialize` works once; `thread/start` creates two threads; `thread/resume`/`turn/start` repeat), and
+//   [unverified — whether an overload code comes in this envelope; observe first].
 
-/// The notification that a turn ended — ★the state machine input of this link★. Queue release must know that the turn ended, so
-/// this layer, which classifies envelopes, reads it as its own job.
+/// The notification that a turn ended — ★the state machine input of this link★.
 ///
-/// ★The translator also reads the same line and carries it over as a turn boundary (`TurnEnd`) — the two readers do different work★: that one
-/// translates 「what outcome this line speaks of」 (codex vocabulary → neutral vocabulary), and this one decides 「whether that outcome **belongs to our
-/// turn**」. ★The translator has no material for that decision★ — our thread · turn id exist only in this
-/// layer. So translation is always done, but **this layer decides whether to raise that output to the screen** (the `boundary` argument of
-/// [`Reader::note_turn`]). Remove that gate, and someone else's turn end closes our turn, later output is split by a fake
-/// boundary, and the fact layer observes idleness and plugs mail in mid-turn.
-///
-/// ★`turn/started` is **deliberately** not read — do not revive it★: that notification **carries not a single identifier we
-/// issued**, so in principle it cannot be attributed to a turn. Trying to tell it apart instead by circumstances like 「is the current turn waiting
-/// for an answer」, a late notification of the previous turn writes its id into the new turn's slot and does not recover after that
-/// (an end notification with that id closes the live turn, the queue opens and turns overlap, and `interrupt` aims at a dead
-/// turn). The only thing that decides the turn id is **the `turn/start` response paired by our request id**.
-///
+/// The translator also carries this line as a `TurnEnd` boundary; **whether it belongs to our turn** is decided only here (the `boundary`
+/// argument of [`Reader::note_turn`]), else someone else's end closes our turn and the fact layer plugs mail mid-turn.
+/// ★`turn/started` is deliberately not read — do not revive it★: it carries no identifier we issued, and guessing by circumstance lets a
+/// late notification write its id into the new turn's slot. Only **the `turn/start` response paired by our request id** decides the turn id.
 const TURN_COMPLETED: &str = method::TURN_COMPLETED;
 
 // ── State machine ─────────────────────────────────────────────────────────────────
 
-/// The connection axis. ★Once cut, it does not come back in this incarnation (ADR-0192)★ — no reconnect and no re-`initialize`.
+/// The connection axis. ★Once cut, it does not come back in this incarnation (ADR-0192)★ — no reconnect, no re-`initialize`.
 #[derive(Debug)]
 enum Link {
     /// Before or during the handshake. Input is not refused but **queues**.
     Connecting,
-    /// The response to the second handshake request (`thread/start` or `thread/resume`) was received and the record call returned —
-    /// `turn/start` is allowed from here on.
+    /// The second handshake response (`thread/start` or `thread/resume`) was received and the record call returned — `turn/start` is
+    /// allowed from here on.
     Ready,
     /// Cut, or the handshake failed. The reason is quoted as is when refusing new input.
     Down(String),
@@ -364,108 +210,97 @@ enum Link {
 
 /// The turn axis.
 ///
-/// ★The only thing that fills `turn_id` is the `turn/start` **response**★ — only that response is paired by our request id and
-/// attributed without ambiguity (why notifications are not used = [`TURN_COMPLETED`] doc).
-/// `seq` = a marker raised every time we open a turn. ★Comparison is only match/mismatch★, and it does one thing — **it prevents something that arrived
-/// late from touching the next turn opened in between.** Without this marker, turns overlap on one thread,
-/// and the input queue exists to prevent that (ADR-0193).
+/// ★Only the `turn/start` **response** fills `turn_id`★ — it is the only one paired by our request id (why not notifications:
+/// [`TURN_COMPLETED`] doc). `seq` is a marker raised each time we open a turn; ★comparison is match/mismatch only★ and **prevents
+/// something late from touching the next turn opened in between**. Without it turns overlap on one thread, which the input queue
+/// exists to prevent (ADR-0193).
 #[derive(Debug)]
 enum TurnState {
     Idle,
     Active { seq: u64, turn_id: Option<String> },
 }
 
-/// The floor decision ([`CLIENT_MESSAGE_ID_FLOOR`]) — the handshake decides it once and does not revert it for that incarnation.
+/// The floor decision ([`CLIENT_MESSAGE_ID_FLOOR`]) — decided once by the handshake, never reverted for that incarnation.
 ///
 /// ★User items that came in during `Pending` are held without announcing★ — the side the decision lands on decides them all at once
-///   ([`settle_floor`]). Putting them in the list in advance creates list items that meet a below-floor decision (TRD §5-5).
+/// ([`settle_floor`]); announcing earlier would create list items that meet a below-floor decision (TRD §5-5).
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Floor {
     Pending,
     /// The list · synthetic bubble · `clientUserMessageId` · echo comparison stand.
     Above,
-    /// Today's path — items are held without identifiers (no list · synthetic bubble · comparison) and leave at the moment the turn opens.
+    /// Today's path — items are held without identifiers and leave at the moment the turn opens.
     Below,
 }
 
 /// Things living under one lock. ★The "can it send" check and the "transition to in-progress" must be **the same critical section**★
-/// (ADR-0193): [`AgentTransport::send_input`] is `&self`, so concurrent calls are structurally possible, and if the two
-/// were split, both callers would see idle and each open a turn. That pairing exists in one place only, [`take_turn_locked`].
+/// (ADR-0193): [`AgentTransport::send_input`] is `&self`, so concurrent calls are possible and a split would let two callers both see
+/// idle and each open a turn. That pairing exists only in [`take_turn_locked`].
 struct State {
     link: Link,
     turn: TurnState,
     thread_id: Option<String>,
-    /// Control lines that do not go through the turn gate. The writer picks them **before** input — if a refusal response waited behind a queued user turn,
-    /// the peer would never get the answer to that request.
+    /// Control lines that do not go through the turn gate. The writer picks them **before** input — a refusal waiting behind a queued
+    /// user turn would never reach the peer.
     outbox: VecDeque<String>,
-    /// The input the link holds — in arrival order. A turn opens with the oldest `Held`. Items without an identifier leave at the opening
-    /// spot, and items carrying an identifier remain as `InFlight` until receipt (echo) or the turn-end disposal ([`take_turn_locked`] ·
-    /// [`State::close_turn_items`]).
+    /// The input the link holds, in arrival order. A turn opens with the oldest `Held`. Items without an identifier leave at the opening;
+    /// items carrying one stay `InFlight` until echo or the turn-end disposal ([`take_turn_locked`] · [`State::close_turn_items`]).
     // ADR-0231
     pending: VecDeque<PendingItem>,
     // ADR-0231
     floor: Floor,
-    /// The marker of the next turn to open. Only increases monotonically and is never rewound.
+    /// The marker of the next turn to open. Only increases, never rewound.
     next_turn_seq: u64,
-    /// ★An end notification that came before the response★ — at that point it cannot be attributed, so it is held, and compared and ended when the
-    /// `turn/start` response that follows tells **our turn's id authoritatively**.
-    ///
-    /// ★What is held is not 「there was an end」 but **that id**★ — that distinction is why this slot is not a misattribution.
-    ///   The ending decision is still only the id match, and no turn ends merely by being here.
+    /// ★An end notification that came before the response★ — it cannot be attributed yet, so it is held and compared when the
+    /// `turn/start` response gives **our turn's id authoritatively**. What is held is that **id**, not "there was an end", which is why
+    /// this is not a misattribution; no turn ends merely by being here.
     early_completions: VecDeque<EarlyCompletion>,
     /// This link has nothing more to send — the writer sees this and ends its loop.
     ///
-    /// ★There are two places that set it★: [`AgentTransport::shutdown`] (we killed it) and the `Drop` of [`ReaderExit`]
-    /// (the peer ended on its own or **the reader panicked** — being `Drop`, unwinding passes it for sure). ★The second
-    /// out, the writer thread remains forever for every agent that ended naturally★ — that thread holds the `Arc`s of core · stdin · the waiting table,
-    /// so one session's worth of memory remains with it, and `shutdown()` is not called on the reaper path, so
-    /// nobody wakes it.
+    /// ★Set in two places★: [`AgentTransport::shutdown`] (we killed it) and the `Drop` of [`ReaderExit`] (peer ended or the reader
+    /// panicked — `Drop` survives unwinding). ★The second matters: without it the writer thread stays forever for every naturally
+    /// ended agent★, holding the `Arcs` of core · stdin · waiting table (one session's memory), and `shutdown()` is not called on the
+    /// reaper path, so nobody wakes it.
     closed: bool,
-    /// The tool-end trigger — a tool item of our current turn ended ([`Reader::note_tool_item`]) · or user text held for the turn whose turn id
-    ///   just came remains ([`Reader::resolve`]). While it stands, the writer hands the held user texts over as steers one at a time in typing order, and lowers it
-    ///   when there is nothing left to hand over ([`take_steer_locked`]) — one tool end hands over all held text (ADR-0235 — 「when one tool
-    ///   ends, slip it in」). It is also lowered when the turn closes ([`State::close_turn_items`]). ★The side that sets it does `notify_all` in the same lock
-    ///   section★.
+    /// The tool-end trigger — a tool item of our current turn ended ([`Reader::note_tool_item`]) · or user text held for the turn whose
+    /// turn id just came remains ([`Reader::resolve`]). While it stands the writer hands held user texts over as steers one at a time in
+    /// typing order and lowers it when none is left ([`take_steer_locked`]) — one tool end hands over all held text (ADR-0235). Also
+    /// lowered when the turn closes ([`State::close_turn_items`]). ★The setter does `notify_all` in the same lock section★.
     // ADR-0231
     steer_due: bool,
-    /// Halt after error — our turn ended abnormally (`failed` · the `turn/start` exit — [`TurnClose`]).
-    ///   ★While it stands, Idle opens no turn at all★ ([`State::idle_opening`]) — neither held user text nor mail goes out on its own
-    ///   (TRD §5-5 「halt after error」 · user decision N11).
-    /// Where it is set = [`State::close_turn_items`] (regardless of turn kind — user · Direct · mail). Where it is lifted = the moment user text comes in
-    ///   ([`State::push_pending`]) · link closed ([`ReaderExit`]). Idle after lifting is the usual order, so the held text goes out before the new text
-    ///   (what remains goes first — PRD AC24). ★An interruption (`interrupted`) does not set it★ — text held after an interruption goes out at the next Idle.
-    ///   The list emptying by ✕ · time do not lift it. ★It does not stand on a below-floor incarnation★ — like this whole feature, that is today's path.
-    /// ★It blocks only the turns the link opens on its own★ — the door through which mail enters the link is the kernel's `last_end_failed`, and the codex classifier
-    ///   folds the `TurnEnd{Failed}` of the same trigger (`classify_turn`). ★It is a field outside [`TurnState`]★ — expressing the halt as `Active`
-    ///   would make the attribution gate count a late echo as our turn and turn the turn table on again (TRD §5-5 「echo the vendor sent」 condition ①).
-    // ADR-0231: the halt itself and where it is set.
-    // ADR-0235: where it is lifted = the moment user text comes in (decision 4).
+    /// Halt after error — our turn ended abnormally ([`TurnClose`]). ★While it stands Idle opens no turn★ ([`State::idle_opening`]); neither
+    ///   held user text nor mail goes out on its own (TRD §5-5 「halt after error」 · user decision N11).
+    /// Set in [`State::close_turn_items`]; lifted when user text comes in ([`State::push_pending`]) or the link closes ([`ReaderExit`]) —
+    ///   not by the list emptying through ✕ or time. An interruption does not set it; it does not stand on a below-floor incarnation. It
+    ///   blocks only turns the link opens itself (mail enters through the kernel's `last_end_failed`). ★A field outside [`TurnState`]★ — as
+    ///   `Active` it would make the attribution gate count a late echo as our turn (TRD §5-5 「echo the vendor sent」 condition ①).
+    // ADR-0231
+    // ADR-0235: lifted when user text comes in.
     halted: bool,
-    /// The 「steer refused」 mark — the marker (`seq` of [`TurnState::Active`]) of a turn whose steer got an error response or could not be written. During that turn
-    ///   no held item is handed over ([`take_steer_locked`]). The vendor closed that turn's window (for a write failure, the same
-    ///   write would fail again), so no loop of sending again in the same turn is made. The next turn has a different marker and is released on its own.
+    /// The 「steer refused」 mark — the marker (`seq` of [`TurnState::Active`]) of a turn whose steer got an error response or could not
+    ///   be written. No held item is handed over in that turn ([`take_steer_locked`]): the vendor closed its window (for a write
+    ///   failure the same write would fail again). The next turn has a different marker.
     // ADR-0231
     steer_refused: Option<u64>,
 }
 
-/// What one disposal will emit — gathered under the state lock, and the caller does [`Disposal::emit`] after letting go of the lock (ADR-0006 · logs are also
-/// written outside the lock — reason = [`TurnNoteLog`]).
+/// What one disposal will emit — gathered under the state lock; the caller runs [`Disposal::emit`] after releasing it (ADR-0006; logs
+/// too — reason [`TurnNoteLog`]).
 // ADR-0231
 #[derive(Debug, Default)]
 struct Disposal {
     events: Vec<QueuedInputEvent>,
-    /// The trace lines of items returned to the held place (`held_again` — [`STEER_TRACE`]).
+    /// Trace lines of items returned to the held place (`held_again` — [`STEER_TRACE`]).
     traces: Vec<SteerTrace>,
-    /// The halt transition this disposal produced.
     transitions: Vec<Transition>,
-    /// The ids of list items returned to the held place — their handed-over mark is read again ([`publish_hand_over`]).
+    /// Ids of list items returned to the held place — their handed-over mark is re-emitted ([`publish_hand_over`]).
     handed_back: Vec<String>,
 }
 
 impl Disposal {
-    /// Order: transition → trace lines → list events → handed-over marks. ★Call it before the turn boundary★ — the consumer the boundary wakes sees a tidied list
-    /// ([`end_turn_if`]).
+    /// Order: transition → trace lines → list events → handed-over marks. ★Call it before the turn boundary★ — the consumer the boundary
+    /// wakes must see a tidied list ([`end_turn_if`]).
     fn emit(self, core: &OutputCore, state: &SharedState) {
         write_transitions(core.id(), self.transitions);
         for t in &self.traces {
@@ -480,16 +315,11 @@ impl Disposal {
     }
 }
 
-/// Emits the handed-over mark (`HandedOver`) — ★the value is not decided by the caller but read from the item's current stage★ (`InFlight` = handed over ·
-/// `Held` = held). Only list items that finished announcing emit it — Direct · mail · items without an identifier · items already gone · items with a death mark
-/// emit nothing (so the mark never precedes that `Queued` in the ring).
+/// Emits the handed-over mark (`HandedOver`) — ★the value is read from the item's current stage★ (`InFlight` = handed over · `Held` =
+/// held). Only list items that finished announcing emit it (so it never precedes `Queued`).
 ///
-/// ★After emitting, it reads again and emits again if it changed★ — the handing-over side (the writer — after finishing the write) and the returning side (reader · turn end) emit
-///   on different threads after letting go of the state lock, so emitting a fixed value would leave the stale value of the later emitter as the last mark in the ring (handed-over text as
-///   「waiting」 · held text as 「sent」 without ✕). The side that changed the stage always calls this, and this stops only when the value read again equals the last emitted
-///   value, so the last mark in the ring = the last stage. The same value going out twice is harmless (the reducer just
-///   swaps the mark).
-/// The state lock is held only while reading (ADR-0006 — emit is outside the lock).
+/// ★It re-reads after emitting and re-emits if changed★: the handing-over side (writer) and the returning side (reader · turn end) emit on
+/// different threads after releasing the state lock, so a fixed value could leave a stale last mark in the ring. A duplicate is harmless.
 // ADR-0231
 // ADR-0235
 fn publish_hand_over(core: &OutputCore, state: &SharedState, id: &str) {
@@ -518,9 +348,9 @@ fn publish_hand_over(core: &OutputCore, state: &SharedState, id: &str) {
     }
 }
 
-/// One transition of the halt after error — gathered under the state lock and written with [`write_transitions`] after letting go of the lock (reason =
-/// [`TurnNoteLog`]). ★User text is not carried★ — only the marker (turn) is carried.
-/// Levels: set and lift are info (operational events where the turns the link opens on its own halt and resume) · discard is debug (cleanup on link close).
+/// One transition of the halt after error — gathered under the state lock, written by [`write_transitions`] after releasing it
+/// ([`TurnNoteLog`]). ★User text is not carried★, only the turn marker.
+/// Levels: set and lift are info; discard is debug (cleanup on link close).
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Transition {
@@ -528,7 +358,7 @@ enum Transition {
     Halted { turn: u64, close: TurnClose },
     /// User text came in and the halt was lifted ([`State::push_pending`] — the writer = [`AgentTransport::send_turn`]).
     HaltLifted,
-    /// The link closed and discarded the halt that was standing ([`ReaderExit`]).
+    /// The link closed and discarded the standing halt ([`ReaderExit`]).
     Discarded,
 }
 
@@ -553,7 +383,7 @@ impl Transition {
     }
 }
 
-/// Writes the gathered transitions — ★call it after letting go of the state lock★ (reason = [`TurnNoteLog`]).
+/// Writes the gathered transitions — ★call it after releasing the state lock★ ([`TurnNoteLog`]).
 fn write_transitions(agent: AgentId, transitions: Vec<Transition>) {
     for t in transitions {
         t.write(agent);
@@ -562,17 +392,17 @@ fn write_transitions(agent: AgentId, transitions: Vec<Transition>) {
 
 /// One `turn/completed` that came before the response — holds the id together with **the turn boundary that line made**.
 ///
-/// ★Why the boundary is held too★: raising that boundary to the screen at this point would make an end not yet attributed close a live
-///   turn ([`Boundary`]). But dropping it would leave nothing to raise after the comparison holds, and **that conversation's waiting
-///   indicator would spin forever** — even though the outcome was known. So it is only deferred.
+/// ★Why the boundary is held too★: raising it to the screen now would let an unattributed end close a live turn ([`Boundary`]), but
+/// dropping it would leave nothing to raise once the comparison holds and **that conversation's waiting indicator would spin
+/// forever**. So it is only deferred.
 struct EarlyCompletion {
-    /// The comparison token. ★Holding it unmasked is intended★ — transforming it would break the comparison. Instead it is filtered by length
-    /// ([`MAX_TURN_ID_BYTES`]), and passes [`sanitize`] when going out to the log · screen.
+    /// The comparison token. ★Held unmasked on purpose★ — transforming it would break the comparison; it is filtered by length
+    /// ([`MAX_TURN_ID_BYTES`]) and passes [`sanitize`] when going to the log · screen.
     turn_id: String,
-    /// The turn boundary the translator emitted from that line. `None` = the translator could not emit a boundary (a malformed line · no translator).
+    /// The boundary the translator emitted from that line. `None` = it could not emit one (malformed line · no translator).
     boundary: Option<OutputEvent>,
-    /// That line's status — at the spot where the comparison holds, the items of that turn are disposed (TRD §5-5 「an early end is a turn end too」).
-    ///   It is not read back from the boundary because disposal must stand even for a line with no translator or where no boundary could be emitted.
+    /// That line's status — where the comparison holds, that turn's items are disposed (TRD §5-5 「an early end is a turn end too」). Not
+    /// read back from the boundary because disposal must stand even when no boundary could be emitted.
     // ADR-0231
     close: TurnClose,
 }
@@ -582,27 +412,25 @@ struct EarlyCompletion {
 // ADR-0234
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnClose {
-    /// `completed` of `turn/completed`.
     Completed,
-    /// A status of `turn/completed` with unknown meaning · no status (including `inProgress` — a value not carried into an outcome). The disposal is
-    ///   the same as `Completed` but ★does not set the halt after error★ — the kernel classifier folds the same line into 「other
-    ///   end」 (`TurnOutcome::Unknown` → `TurnEndKind::Other`) and does not set `last_end_failed` as an error end.
+    /// A `turn/completed` status of unknown meaning · no status (incl. `inProgress`). Disposal same as `Completed` but ★it does not set
+    ///   the halt★ — the kernel classifier folds the same line into `TurnOutcome::Unknown` → `TurnEndKind::Other` and does not set
+    ///   `last_end_failed`.
     Unknown,
-    /// `failed` of `turn/completed`. This and `Rejected` · `Unanswered` are failure ends — they return the user text that turn carried without an echo
-    ///   to the held place (the same as other ends) and set the halt after error ([`State::close_turn_items`] · [`State::halted`]).
+    /// `failed` of `turn/completed`. With `Rejected` · `Unanswered` it is a failure end: it returns the user text that turn carried without
+    /// an echo to the held place and sets the halt ([`State::close_turn_items`] · [`State::halted`]).
     Failed,
-    /// `interrupted` of `turn/completed` — the vendor drops what was handed over with neither echo nor history (M6). Not a failure end — it does not set the halt
-    ///   and does not erase the carried text: held text and text returned to the held place go out at the next Idle (user decision 2026-09-26).
+    /// `interrupted` of `turn/completed` — the vendor drops what was handed over with neither echo nor history (M6). Not a failure end:
+    /// it neither sets the halt nor erases text; held and returned text go out at the next Idle (user decision 2026-09-26).
     Interrupted,
-    /// `turn/start` did not reach the vendor or the vendor refused it — write failure · error response.
+    /// `turn/start` did not reach the vendor or was refused — write failure · error response.
     Rejected,
-    /// It is unknown whether the vendor received `turn/start` — response deadline · response decode failure · a turn id over the cap. A failure end, so the disposal is
-    ///   the same as `Failed` (if it was received, an echo that came before already closed it as received).
+    /// Unknown whether the vendor received `turn/start` — response deadline · decode failure · turn id over the cap. A failure end, disposal
+    ///   same as `Failed` (if it was received, an earlier echo already closed it as received).
     Unanswered,
 }
 
 impl TurnClose {
-    /// `turn.status` of the `turn/completed` params.
     fn of_completion(params: Option<&Value>) -> Self {
         match params
             .and_then(|p| p.get("turn"))
@@ -619,27 +447,15 @@ impl TurnClose {
 
 // ── Mid-turn handover trace (ADR-0235) ─────────────────────────────
 
-/// The target of the mid-turn handover trace lines — turn on with `RUST_LOG=engram::codex_steer=debug`. When off, not even the material is gathered
-/// ([`SteerTrace::enabled`] — at the default level warn, not a single line goes out). One line per event.
-///
-/// ★Field names are a contract★ — QA reads the log by these names. Every line carries `agent` · `phase` · `item_id`, and `turn_id` only
-///   when that turn is known. `phase` is the kind of the line ([`SteerPhase`]):
-///   - `tool_start` — `item/started` of a tool item of our current turn (`item_id` = that tool's id).
-///   - `tool_end` — `item/completed` of the same tool item. `held` = the number of user items held at that moment.
-///   - `steer` — the writer finished writing `turn/steer` for one held item (`item_id` = that item · `request` = request id).
-///   - `write_failed` — that `turn/steer` could not be written (fields same as `steer`) — it did not reach the vendor.
-///   - `refused` — that steer got an error response (`turn_id` only while that turn is still running).
-///   - `echo` — an item of the held list became received by a `userMessage` echo (`turn_id` = the turn the item went into).
-///   - `held_again` — a handed-over item returned to the held place because that turn ended without an echo (`turn_id` = the turn it was handed to · `close` = the shape of that end
-///     — the [`TurnClose`] name).
-/// What QA tells apart with these lines = whether text handed over after one tool ended went in before the next tool (does `tool_end` → `steer` → `echo` come before the next
-///   `tool_start`). ★Line order is not guaranteed across threads★ — the reader (`tool_*` · `refused` · `echo`) and
-///   the writer (`steer` · `write_failed`) write separately, so order is read from the lines' timestamps. Lines are written after letting go of the state lock (reason =
-///   [`TurnNoteLog`]).
+/// Target of the mid-turn handover trace lines — `RUST_LOG=engram::codex_steer=debug`; when off nothing is gathered
+/// ([`SteerTrace::enabled`]). ★Field names are a contract★ — QA reads the log by them: every line has `agent` · `phase` · `item_id`
+/// (`turn_id` when known); `phase` ([`SteerPhase`]) ∈ `tool_start` · `tool_end` (+`held`) · `steer` (+`request`) · `write_failed` ·
+/// `refused` · `echo` · `held_again` (+`close` = [`TurnClose`] name). ★Order is not guaranteed across threads★ (reader vs writer lines) —
+/// read timestamps. Written after releasing the state lock ([`TurnNoteLog`]).
 // ADR-0231
 const STEER_TRACE: &str = "engram::codex_steer";
 
-/// The kinds of [`STEER_TRACE`] lines — the value of the `phase` field ([`SteerPhase::name`] · a QA contract, so it is not changed) and a one-line message.
+/// The kinds of [`STEER_TRACE`] lines — the `phase` field value ([`SteerPhase::name`], a QA contract: do not change) and a message.
 // ADR-0235
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SteerPhase {
@@ -682,14 +498,14 @@ impl SteerPhase {
     }
 }
 
-/// One [`STEER_TRACE`] line — the material is gathered inside the state lock and written outside the lock.
+/// One [`STEER_TRACE`] line — material gathered inside the state lock, written outside it.
 // ADR-0231
 #[derive(Debug)]
 struct SteerTrace {
     phase: SteerPhase,
     turn_id: Option<String>,
     item_id: String,
-    /// `tool_end` only — the number of user items held at that moment.
+    /// `tool_end` only — user items held at that moment.
     held: Option<usize>,
     /// `steer` only — the request id of that `turn/steer`.
     request: Option<i64>,
@@ -714,8 +530,7 @@ impl SteerTrace {
         }
     }
 
-    /// The turn id and the tool item id are strings the vendor gave, so they go out through [`sanitize`] — our item id goes through the same door too (the source
-    /// is not told apart per field).
+    /// The turn id and tool item id are vendor strings, so they go through [`sanitize`]; our item id goes through the same door.
     fn write(&self, agent: AgentId) {
         let turn_id = self
             .turn_id
@@ -740,20 +555,17 @@ impl SteerTrace {
 // ADR-0231
 #[derive(Debug)]
 struct Steer {
-    /// Our request id — the waiting table key.
     request: i64,
-    /// The id of the handed-over item — pairs the response with that item ([`Waiter::Steer`]).
+    /// The id of the handed-over item — pairs the response with it ([`Waiter::Steer`]).
     item: String,
-    /// The marker of the turn that item went into = the `InFlight` generation of that item.
+    /// The marker of the turn the item went into = its `InFlight` generation.
     gen: u64,
     line: String,
-    /// The id of the turn it was handed to — material of the trace line ([`STEER_TRACE`]).
     turn_id: String,
 }
 
 impl Steer {
-    /// The trace line of this steer — `steer` (after the writer finished writing · [`writer_loop`]) · `write_failed` ([`steer_write_failed`]).
-    /// `None` if the line is off.
+    /// The trace line of this steer — `steer` (after the write · [`writer_loop`]) · `write_failed` ([`steer_write_failed`]). `None` if off.
     fn trace(&self, phase: SteerPhase) -> Option<SteerTrace> {
         SteerTrace::enabled().then(|| SteerTrace {
             request: Some(self.request),
@@ -780,15 +592,13 @@ impl State {
         }
     }
 
-    /// The held item place of the turn Idle opens next — TRD §5-5 「the order of opening turns = user first」 (PRD §3-9 · user decision N6).
-    /// ★Decided by state alone★. Whether a turn can open (`Ready` · `Idle`) is looked at by the caller ([`take_turn_locked`]).
-    ///   1. The oldest user `Held` (including Direct · text returned to the held place at turn end). Even before announcing, it is the head — the opening
-    ///      side waits for the announcement (it does not skip — typing order).
-    ///   2. Otherwise the oldest mail (including items without an identifier).
-    /// ★During a halt after error ([`State::halted`]) nothing is opened★ — once the next user text lifts the halt, it is as usual from 1 (the held
-    ///   text goes before that new text — what remains goes first).
-    /// ★If the floor decision is not `Above`, it is today's order as is★ (oldest `Held` · regardless of source) — a below-floor incarnation is today's behaviour together with
-    ///   this whole feature, and the halt does not stand either.
+    /// The held item the next Idle turn opens — TRD §5-5 「the order of opening turns = user first」 (PRD §3-9 · user decision N6).
+    /// ★Decided by state alone★; whether a turn can open (`Ready` · `Idle`) is the caller's check ([`take_turn_locked`]).
+    ///   1. The oldest user `Held` (incl. Direct · text returned at turn end). Even before announcing it is the head — the opening side
+    ///      waits for the announcement (typing order).
+    ///   2. Otherwise the oldest mail (incl. items without an identifier).
+    /// ★During a halt ([`State::halted`]) nothing is opened★ — once the next user text lifts it, order is as above.
+    /// ★If the floor decision is not `Above`★ it is today's order (oldest `Held` · any source) and the halt does not stand either.
     // ADR-0231
     fn idle_opening(&self) -> Option<usize> {
         let held = |p: &PendingItem| matches!(p.stage, Stage::Held);
@@ -804,15 +614,15 @@ impl State {
             .or_else(|| self.pending.iter().position(held))
     }
 
-    /// Puts one item at the end as `Held` and **decides what to announce**. If it is a user item, it lifts the halt after error ([`State::halted`]
-    /// — the returned value = it was lifted this time. The caller writes that transition log outside the lock).
+    /// Puts one item at the end as `Held` and **decides what to announce**. A user item lifts the halt ([`State::halted`]); the returned
+    /// value = it was lifted this time (the caller writes that transition log outside the lock).
     ///
-    /// ★Classification is done with the state **before** putting, in the same critical section as putting★: if `Ready ∧ Idle ∧ pending empty`,
-    ///   Direct (synthetic bubble · outside the list); other user items are Queued (list). ★Direct is also put into pending★ —
-    ///   if not, the second input of the same idle moment also sees 「empty」 and becomes Direct, creating a branch where an item not even in the list is held
-    ///   and blocks new text and mail (TRD §5-5 「Direct items are kept in pending too」).
-    /// An item with something to announce is held with `announced=false`, and the announcement is done by [`announce`] outside the lock.
-    /// Mail · items without an identifier have nothing to emit. After a below-floor decision, the identifier is dropped (today's path).
+    /// ★Classification uses the state **before** putting, in the same critical section★: `Ready ∧ Idle ∧ pending empty` → Direct
+    ///   (synthetic bubble · outside the list); other user items are Queued (list). ★Direct is also put into pending★ — otherwise the
+    ///   second input of the same idle moment also sees "empty" and becomes Direct, leaving a held item outside the list that blocks new
+    ///   text and mail (TRD §5-5 「Direct items are kept in pending too」).
+    /// Items with something to announce are held `announced=false`; [`announce`] emits outside the lock. Mail · items without an
+    /// identifier emit nothing. After a below-floor decision the identifier is dropped.
     // ADR-0231
     fn push_pending(&mut self, id: Option<String>, body: Vec<u8>, origin: InputOrigin) -> bool {
         let id = if self.floor == Floor::Below { None } else { id };
@@ -837,15 +647,14 @@ impl State {
             cancel_asked: false,
             death: None,
         });
-        // ADR-0235: the halt after error is lifted by the next user text — even if that text leaves afterwards by ✕, it does not stand again.
+        // ADR-0235: the next user text lifts the halt — even if that text later leaves by ✕, it does not stand again.
         origin == InputOrigin::User && std::mem::take(&mut self.halted)
     }
 
-    /// The vendor received that text (`clientId` echo) — removed from pending regardless of stage. ★Receipt wins★:
-    ///   an echo, whatever stage it comes in, is the fact that the text went into the history (TRD §5-5 「consumption echo」), so a held item (including text
-    ///   returned to the held place at turn end) does not go out again, and for a handed-over item the late response of that request
-    ///   becomes a no-op in the [`State::turn_start_carrier`] comparison (generation masking). The returned value = the removed item (`None` = an id the link
-    ///   does not know — mail · already resolved · the second echo of the same text).
+    /// The vendor received that text (`clientId` echo) — removed from pending regardless of stage. ★Receipt wins★: an echo at any stage
+    ///   means the text is in the history (TRD §5-5 「consumption echo」), so a held item does not go out again, and for a handed-over item
+    ///   the late response becomes a no-op in the [`State::turn_start_carrier`] comparison. Returns the removed item (`None` = id unknown
+    ///   to the link — mail · already resolved · second echo).
     // ADR-0231
     fn take_delivered(&mut self, id: &str) -> Option<PendingItem> {
         let pos = self
@@ -855,12 +664,11 @@ impl State {
         self.pending.remove(pos)
     }
 
-    /// Among the items the `turn/start` of marker `gen` carried, the one still waiting for a response — the `InFlight` of that turn whose turn id is
-    /// unknown.
+    /// Among the items the `turn/start` of marker `gen` carried, the one still waiting for a response — the `InFlight` of that turn with
+    /// unknown turn id.
     ///
-    /// ★There is only one★: one `turn/start` carries only one item (TRD §5-5), and a steer goes out **only after** the turn id is known
-    ///   and writes that id on its own item. If the stage already moved on (left by echo · disposed), `None` — the late
-    ///   response is a no-op (generation masking).
+    /// ★There is only one★: a `turn/start` carries one item (TRD §5-5) and a steer goes out only after the turn id is known. If the
+    /// stage moved on (echo · disposed), `None` — the late response is a no-op (generation masking).
     // ADR-0231
     fn turn_start_carrier(&mut self, gen: u64) -> Option<&mut PendingItem> {
         self.pending.iter_mut().find(|p| {
@@ -871,12 +679,11 @@ impl State {
         })
     }
 
-    /// Disposes one list item (or a refused Direct) for this cause — returns the `Dropped` to emit, and the caller emits it
-    /// outside the lock.
+    /// Disposes one list item (or a refused Direct) for this cause — returns the `Dropped` to emit outside the lock.
     ///
-    /// ★Before announce, only the death mark is attached and `None` is returned★ — that item's `Queued` may not be in the ring yet, so emitting
-    ///   `Dropped` here could precede `Queued` in the ring. [`announce`] follows **right after** `Queued` and
-    ///   removes the item (TRD §5-5 「when a disposal meets an item before announce」).
+    /// ★Before announce only the death mark is attached and `None` is returned★ — `Queued` may not be in the ring yet, so emitting
+    ///   `Dropped` could precede it. [`announce`] follows **right after** `Queued` and removes the item (TRD §5-5 「when a disposal meets
+    ///   an item before announce」).
     // ADR-0231
     fn drop_listed(&mut self, pos: usize, cause: DropCause) -> Option<QueuedInputEvent> {
         let item = self.pending.get_mut(pos)?;
@@ -888,36 +695,25 @@ impl State {
         item.id.map(|id| QueuedInputEvent::Dropped { id, cause })
     }
 
-    /// The turn of marker `gen` ended with `close` — disposes that turn's items and returns what to emit (the caller does
+    /// The turn of marker `gen` ended with `close` — disposes that turn's items and returns what to emit (the caller runs
     /// [`Disposal::emit`] outside the lock).
     ///
-    /// ★Call it in **the same critical section** that returns the turn to `Idle`★ — if they come apart, new text arriving in that gap sees an `InFlight`
-    ///   without an outcome and is classified as waiting, and if even one path by which a turn ends misses this, that item remains in pending
-    ///   forever and all new text goes to waiting (TRD §5-5 「five exits」 invariant).
+    /// ★Call it in **the same critical section** that returns the turn to `Idle`★ — else new text in the gap sees an outcome-less `InFlight`;
+    /// a missed ending path leaves it in pending forever (TRD §5-5 「five exits」).
     ///
     /// | Item | Any end (`Completed` · `Unknown` · `Interrupted` · `Failed` · `Rejected` · `Unanswered`) |
     /// |---|---|
-    /// | User item handed over in that turn (list · Direct) — no echo | Returned to the held place (no outcome event — the list row · drawn bubble stay as is · the list row only re-emits the handed-over mark) |
-    /// | User item handed over in that turn — ✕ reached it after the handover | `Dropped{Withdrawn}` |
+    /// | User item handed over in that turn — no echo | Returned to the held place (no outcome event; only the handed-over mark re-emits) |
+    /// | … ✕ reached it after the handover | `Dropped{Withdrawn}` |
     /// | Mail handed over in that turn | Removed without an event |
     /// | Held item | As is |
     ///
-    /// ★Only receipt (echo) removes handed-over text from the list as received★ — text of a turn that ended without an echo is held again and rides the next turn (Idle order —
-    ///   [`State::idle_opening`]). It does not change place, so typing order stays as is. If a late echo comes, it becomes received while held
-    ///   ([`State::take_delivered`] — it does not go out again).
-    /// ★A failure end does not erase either★ (user decision 2026-09-26 · ADR-0235 — replaces 「erase on failure」) — the returned text and the held text are made
-    ///   to wait until the next user text by the halt below ([`State::halted`]). The only thing that splits a failure end from the other ends is that halt.
-    /// An item ✕ reached is not held because the user already removed it — returning it would send it in the next turn.
-    /// Mail is not held again (today's disposal as is) — it is outside the list, so the kernel carries the outcome of that text.
-    /// ★It does not wait for steer responses★ — the echo of an accepted steer comes before `turn/completed` (TRD §3-2 · M10), so at this end
-    ///   text without an echo was not accepted. The late response of that request is made a no-op by the generation comparison ([`State::hold_refused_steer`]).
-    /// ★The halt after error is also set here★ ([`State::halted`]) — every path by which a turn ends (`turn/completed` · early-end release ·
-    ///   the five `turn/start` exits) passes this function, so there is no other place to hook the trigger. `Failed` · `Rejected` · `Unanswered`
-    ///   set it (floor-meeting incarnations only), and `Completed` · `Interrupted` · `Unknown` do not touch it (the lifting side = [`State::push_pending`]).
-    /// The halt transition goes into [`Disposal::transitions`], and the trace lines of the return (`held_again`) into [`Disposal::traces`]
-    ///   (written outside the lock).
-    /// ★Write each branch of `close` separately — do not group them with `_`★: when a new end appears, compilation must stop here so that the disposal of that end
-    ///   gets decided.
+    /// Only an echo removes handed-over text as received; a late echo makes it received while held ([`State::take_delivered`]). ★A failure
+    /// end does not erase either★ (user decision 2026-09-26 · ADR-0235): returned and held text wait behind the halt ([`State::halted`]).
+    /// ★No waiting for steer responses★ — an accepted steer's echo precedes `turn/completed` (TRD §3-2 · M10); the late response is a no-op
+    /// by generation ([`State::hold_refused_steer`]).
+    /// ★The halt is set here★: `Failed` · `Rejected` · `Unanswered` (floor-meeting incarnations only); the others do not.
+    /// ★Write each `close` branch separately, no `_`★ — a new end must stop compilation here.
     // ADR-0231
     // ADR-0235
     fn close_turn_items(&mut self, gen: u64, close: TurnClose) -> Disposal {
@@ -927,9 +723,8 @@ impl State {
             Drop(DropCause),
             Remove,
         }
-        // ADR-0235: the tool-end trigger belongs to that turn, so it is lowered with the turn — if left, when the writer opened the next turn before seeing it,
-        //   text typed after that turn id came would go out as a steer without a tool end. For text held in the next turn, the place where the turn id comes sets it again
-        //   ([`Reader::resolve`]).
+        // ADR-0235: the tool-end trigger belongs to that turn, so it is lowered with it — otherwise text typed after the next turn id came
+        //   would go out as a steer without a tool end. For text held in the next turn, [`Reader::resolve`] sets it again.
         self.steer_due = false;
         let tracing_on = SteerTrace::enabled();
         let mut out = Disposal::default();
@@ -945,8 +740,8 @@ impl State {
             } else if item.cancel_asked {
                 Fate::Drop(DropCause::Withdrawn)
             } else {
-                // ★Returned to the held place regardless of the shape of the end★ (user decision 2026-09-26 · ADR-0235 — even on error it is not erased but halted):
-                //   a failure end sets the halt below, so the returned text waits until the next user text.
+                // ★Returned to the held place whatever the end shape★ (user decision 2026-09-26 · ADR-0235): a failure end sets the halt below, so
+                //   the returned text waits for the next user text.
                 Fate::Held
             };
             match fate {
@@ -980,9 +775,8 @@ impl State {
                 }
             }
         }
-        // ★Halt after error (TRD §5-5)★ — Idle does not open a turn until the next user text. An interruption does not set it (held text goes out at the next Idle
-        //   — user decision 2026-09-26). An end of unknown meaning does not set it either — the kernel classifier folds the same end into 「the rest」
-        //   ([`TurnClose::Unknown`]).
+        // ★Halt after error (TRD §5-5)★ — Idle opens no turn until the next user text. An interruption does not set it, nor does an end of
+        //   unknown meaning ([`TurnClose::Unknown`] — the kernel classifier folds it into "the rest").
         match close {
             TurnClose::Failed | TurnClose::Rejected | TurnClose::Unanswered => {
                 if self.floor == Floor::Above {
@@ -996,17 +790,13 @@ impl State {
         out
     }
 
-    /// A steer got an error response or could not be written — the vendor does not have that text (`-32600` 「no turn running」 · review/compaction turn ·
-    /// id mismatch · write failure are all the same — [`Reader::resolve`] · [`steer_write_failed`]). The returned value = what the caller emits outside the lock
-    /// (`None` = no-op).
+    /// A steer got an error response or could not be written — the vendor does not have that text. Returns what the caller emits outside the
+    /// lock (`None` = no-op).
     ///
-    /// ★It moves only when (id, generation) and **the current stage** match★ (generation masking — TRD §5-5): an item already removed by echo or disposed by the turn end (returned
-    ///   to the held place or erased) cannot be moved twice by a late refusal — the 「steer refused」 mark is not attached to that turn either (a refusal of accepted text is no
-    ///   grounds that the turn's window closed — the generation masking test measures this).
-    /// If they match, the item is returned to `Held` (same place — typing order) and the 「steer refused」 mark is attached to that turn — no loop of sending again in the same turn
-    ///   is made, and the next Idle opens it. There is no outcome event (`Queued` is once per id) — only the handed-over mark is re-emitted
-    ///   ([`Disposal::handed_back`]).
-    ///   ★An item ✕ reached is withdrawn instead of returned★ (`Dropped{Withdrawn}` — the user already removed it, and the vendor never saw that text).
+    /// ★It moves only when (id, generation) **and the current stage** match★ (generation masking — TRD §5-5): an item already removed by echo or
+    /// disposed by the turn end is not moved twice, and no 「steer refused」 mark is attached. On a match the item returns to `Held` (typing
+    /// order), the turn gets the mark (no resend loop), and only the handed-over mark re-emits ([`Disposal::handed_back`]). ★A ✕-reached item
+    /// is withdrawn instead★ (`Dropped{Withdrawn}`).
     // ADR-0231
     fn hold_refused_steer(&mut self, id: &str, gen: u64) -> Option<Disposal> {
         let pos = self.pending.iter().position(|p| {
@@ -1014,7 +804,7 @@ impl State {
                 && matches!(p.stage, Stage::InFlight { gen: g, turn_id: Some(_) } if g == gen)
         })?;
         let mut out = Disposal::default();
-        // The mark is independent of ✕ — the fact that the vendor refused to put it into this turn is the same.
+        // The mark is independent of ✕ — the vendor refused to put it into this turn either way.
         self.steer_refused = Some(gen);
         if self.pending[pos].cancel_asked {
             out.events
@@ -1030,67 +820,63 @@ impl State {
     }
 }
 
-/// One input the link holds. ★The link does not read the registry and decides by these fields★ (ADR-0193).
+/// One input the link holds. ★The link does not read the registry; it decides by these fields★ (ADR-0193).
 // ADR-0231
 struct PendingItem {
-    /// The identifier the list events and the echo comparison use (the `msg_uuid` of the session write). `None` = an item that came in through
-    /// [`AgentTransport::send_input`] — without an identifier it can neither be withdrawn nor compared by echo, and it does not go into the list.
+    /// The identifier for list events and the echo comparison (the `msg_uuid` of the session write). `None` = an item from
+    /// [`AgentTransport::send_input`] — it can be neither withdrawn nor compared by echo and does not go into the list.
     id: Option<String>,
-    /// The body after the encoder — the envelope is built by this link.
     body: Vec<u8>,
     origin: InputOrigin,
     stage: Stage,
-    /// Is it a list item (an item that emitted or will emit `Queued`)? Direct · mail · items without an identifier are `false`.
+    /// A list item (emitted or will emit `Queued`)? Direct · mail · items without an identifier are `false`.
     listed: bool,
-    /// The announcement (Direct synthetic echo · `Queued`) finished, or there is nothing to emit. ★The writer does not hand over an item for which this is `false`★
-    /// — if the handover outran the announcement, the receipt (`Delivered`) would be dropped with an id the registry does not know.
-    /// ★`listed=false ∧ announced=false` is 「not decided yet」 before the decision, and Direct after the decision (`Above`)★ —
-    /// pre-decision items are all decided again by [`settle_floor`] under the same lock, and Direct stands only after the decision.
+    /// The announcement (Direct synthetic echo · `Queued`) finished or there is nothing to emit. ★The writer does not hand over an item
+    /// with this `false`★ — a handover outrunning the announcement would drop the receipt (`Delivered`) for an id the registry does not
+    /// know. ★`listed=false ∧ announced=false` = "not decided yet" before the decision, Direct after it (`Above`)★ — pre-decision items
+    /// are all decided again by [`settle_floor`] under the same lock.
     announced: bool,
-    /// ✕ came after the handover ([`withdraw_item`] sets it) — the vendor decides the outcome, and if it turns out the vendor did not take it
-    /// (steer error response · turn end without an echo), the link withdraws it (`Dropped{Withdrawn}`) instead of returning it to the held place. If set, an overlapping second ✕ is `TooLate` without an event.
+    /// ✕ came after the handover ([`withdraw_item`] sets it) — the vendor decides the outcome; if it did not take the item (steer error
+    /// response · turn end without echo) the link withdraws it (`Dropped{Withdrawn}`) instead of returning it. An overlapping second ✕ is
+    /// `TooLate` without an event.
     cancel_asked: bool,
-    /// The cause of a disposal that arrived before announce — the announcing side follows `Queued` **right after** with a `Dropped` of this cause
-    /// (so that `Dropped` never stands before that `Queued` in the ring).
+    /// Cause of a disposal that arrived before announce — the announcing side follows `Queued` **right after** with a `Dropped` of this
+    /// cause (so `Dropped` never precedes `Queued` in the ring).
     death: Option<DropCause>,
 }
 
 /// The stage of a [`PendingItem`].
 // ADR-0231
 enum Stage {
-    /// Not handed over yet.
     Held,
-    /// `turn/start` or a steer was written, and it waits for the echo.
+    /// `turn/start` or a steer was written; waits for the echo.
     ///
-    /// `gen` = the generation of that request = ★the marker of the turn that request went into (`seq` of [`TurnState::Active`])★ — it rises every time the link
-    ///   opens a turn, and a turn id comes only from that turn's `turn/start` response, so it equals 「the number that rises with every new active turn
-    ///   id」. There is no separate counter because the two always rise together, so there is no place for them to diverge. A late
-    ///   response · echo moves the item only when (id, gen) and **the current stage** match (so an item moved to another stage is not moved
-    ///   twice). `turn_id` = the turn that request aimed at (`None` = `turn/start` carried it and its response has not given the turn id
-    ///   yet — a steer goes out only after the turn id is known).
-    InFlight { gen: u64, turn_id: Option<String> },
+    /// `gen` = ★the marker of the turn that request went into (`seq` of [`TurnState::Active`])★ — it rises with every turn the link
+    ///   opens, and a turn id comes only from that turn's `turn/start` response, so it equals "the number that rises with each new active
+    ///   turn id"; no separate counter exists, so the two cannot diverge. A late response · echo moves the item only when (id, gen) and
+    ///   **the current stage** match. `turn_id` = the turn that request aimed at (`None` = `turn/start` carried it and its response has
+    ///   not given the id yet — a steer goes out only after the turn id is known).
+    InFlight {
+        gen: u64,
+        turn_id: Option<String>,
+    },
 }
 
 /// State + the condition variable waiting on it. The writer sleeps here.
 ///
-/// ★The condition variable's `notify` reduces **latency**, it does not carry correctness★ — the writer wakes by a `wait_timeout` of [`SWEEP_INTERVAL`]
-/// and looks at the same condition again, so even if every `notify_all` were removed the behaviour would be the same and only the queue
-/// would open that much later. What carries correctness is that timeout. ★So do not read it as "without a notification it stops"★
-/// — reading it that way leads to quoting a guarantee that does not exist.
+/// ★`notify` reduces **latency**, it does not carry correctness★: the writer wakes by `wait_timeout` of [`SWEEP_INTERVAL`] and
+/// re-checks the same condition, so without any `notify_all` the behaviour is the same, only the queue opens later. Do not read it as
+/// "without a notification it stops" — that quotes a guarantee that does not exist.
 type SharedState = Arc<(Mutex<State>, Condvar)>;
 
-// ── List announcement · floor decision ─────────────────────────────────────────────────────
+// ── List announcement · floor decision ─────────────────────────────────────────────
 
-/// The queue of the announcing sides and whether this incarnation's receipt notifications are available — one per link (shared with the writer by `Arc`).
+/// The queue of announcing sides and whether receipt notifications are available — one per link (shared with the writer by `Arc`).
 ///
-/// `order` — ★announcing must be outside the state lock (ADR-0006), and there are two announcing sides★ (the input thread that put the item ·
-///   the writer that made the decision). Without this queue, in the gap where both let go of the lock, they would outrun each other's announcements and the list would
-///   disagree with typing order. The side holding the queue emits not only its own item but **all pre-announce items** in arrival order.
-///   ★Lock order = `order` → state★. ★It emits while holding `order` — an intended exception to ADR-0006 「send without holding a lock」,
-///   backed by the contract that `OutputSink::send` does not block★. The reader and `withdraw` do not take this queue — both dispose only items
-///   that finished announcing, and only attach a death mark to pre-announce items ([`State::drop_listed`]).
-/// `ack` — filled by the floor decision (`Above` = `Available` · `Below` = `Unavailable`). The assembly point carries **the same**
-///   `Arc` on the session ([`CodexAppServerTransport::delivery_ack`]).
+/// `order` — ★announcing must be outside the state lock (ADR-0006) and there are two announcing sides★ (input thread · writer); the holder
+///   emits **all pre-announce items** in arrival order so the list keeps typing order. ★Lock order = `order` → state; emitting under
+///   `order` is an intended ADR-0006 exception (`OutputSink::send` does not block)★. The reader and `withdraw` do not take it.
+/// `ack` — filled by the floor decision; the session carries **the same** `Arc` ([`CodexAppServerTransport::delivery_ack`]).
 // ADR-0231
 // ADR-0234
 struct Announcer {
@@ -1098,15 +884,12 @@ struct Announcer {
     ack: Arc<DeliveryAck>,
 }
 
-/// Emits pre-announce items in arrival order — list items = `Queued`, Direct = synthetic bubble. Before the decision (`Above`)
-/// nothing is emitted (the side the decision lands on calls it in [`settle_floor`]).
+/// Emits pre-announce items in arrival order — list items = `Queued`, Direct = synthetic bubble; nothing before the decision (`Above`).
 ///
-/// ★Two steps★: gather what to emit under the lock → let go of the lock and emit → take it again for `announced=true` + waking the writer.
-///   An item that got a death mark in between is removed here, and `Dropped` follows **right after** `Queued`.
-/// ★The synthetic bubble is emitted with `emit_without_turn_observation` — do not change it to the ordinary door★: the classifier would write it
-///   as progress and turn 「mid-turn」 on, and if that text's `turn/start` were refused, a turn that never opened would remain 「in progress」 and
-///   mail would be blocked until the 30-minute fail-open (ADR-0127). codex's idle decision is carried by the link state (ADR-0193).
-/// ★uuid = item id★ — the vendor echo carries the same value as `clientId`, and the accumulator folds them into one copy.
+/// Gather under the lock → release and emit → retake for `announced=true` + waking the writer; an item death-marked in between is removed
+/// here with `Dropped` **right after** `Queued`.
+/// ★The bubble uses `emit_without_turn_observation`, not the ordinary door★: the classifier would count it as progress and a refused
+/// `turn/start` would leave a never-opened turn "in progress", blocking mail until the 30-minute fail-open (ADR-0127).
 // ADR-0231
 // ADR-0234
 fn announce(core: &OutputCore, state: &SharedState, announcer: &Announcer) {
@@ -1162,13 +945,11 @@ fn announce(core: &OutputCore, state: &SharedState, announcer: &Announcer) {
     }
 }
 
-/// Writes the floor decision and decides the path of items held before the decision — the writer calls it **once** after the handshake stands.
-///
-/// `Above` → pre-decision user items become list items and are announced right away as `Queued`. `Below` → every item
-///   drops its identifier and goes on today's path (held until the turn end without list · synthetic bubble — user decision N1 (a)).
-///   ★So an item already in the list never meets a below-floor decision★.
-/// ★Call it **after** the session id record returned — do not bring it forward★: deciding before that would let the record failure branch
-///   ([`writer_loop`]) erase items already in the list without an event.
+/// Writes the floor decision and decides the path of items held before it — the writer calls it **once** after the handshake stands.
+/// `Above`: pre-decision user items become list items (`Queued`). `Below`: every item drops its identifier and takes today's path (user
+/// decision N1 (a)).
+/// ★Call it **after** the session id record returned★ — earlier, the record failure branch ([`writer_loop`]) would erase list items
+/// without an event.
 // ADR-0231
 fn settle_floor(core: &OutputCore, state: &SharedState, announcer: &Announcer, floor: Floor) {
     debug_assert_ne!(floor, Floor::Pending, "the decision is one of the two");
@@ -1197,14 +978,11 @@ fn settle_floor(core: &OutputCore, state: &SharedState, announcer: &Announcer, f
     announce(core, state, announcer);
 }
 
-/// The floor decision (M8) — `thread.cliVersion` → if absent or unreadable, the first edition of the `initialize` response `userAgent` → if both
-/// fail, below the floor.
+/// The floor decision (M8) — `thread.cliVersion`, else the first edition in the `initialize` `userAgent`, else below the floor.
 ///
-/// ★`userAgent` reads only the edition right after the first `/` — do not change it to 「the last semver」★: the head is our
-///   `clientInfo.name`, and the trailing parenthesis holds **our** edition (measured 0.156.1: `engram-dashboard/0.156.1
-///   (Windows …) unknown (engram-dashboard; 0.1.0)`).
-/// ★If unknown, it falls below the floor★ — carrying `clientUserMessageId` on an unknown edition quietly breaks the echo comparison.
-///   A prerelease of the floor edition (`0.140.0-alpha`) is also below the floor (semver order).
+/// ★`userAgent` reads only the edition right after the first `/`★ — the trailing parenthesis holds **our** edition (0.156.1:
+/// `engram-dashboard/0.156.1 (Windows …) unknown (engram-dashboard; 0.1.0)`). ★Unknown → below the floor★ (an unknown edition quietly
+/// breaks the echo comparison); a floor prerelease (`0.140.0-alpha`) is below too.
 // ADR-0231
 fn floor_verdict(cli_version: Option<&str>, user_agent: &str) -> Floor {
     let from_agent = || {
@@ -1224,7 +1002,6 @@ fn floor_verdict(cli_version: Option<&str>, user_agent: &str) -> Floor {
     }
 }
 
-/// Does the string start with `MAJOR.MINOR.PATCH`, and does a prerelease mark (`-`) follow it?
 fn leading_semver(s: &str) -> Option<((u64, u64, u64), bool)> {
     let mut parts = [0u64; 3];
     let mut rest = s;
@@ -1246,17 +1023,16 @@ fn leading_semver(s: &str) -> Option<((u64, u64, u64), bool)> {
 
 // ── Waiting table ────────────────────────────────────────────────────────────────────
 
-/// Who receives the answer to one outgoing request, and how.
 enum Waiter {
     /// The sending thread waits on a channel (handshake only — that thread is not the reader).
     Handshake(mpsc::Sender<Result<Value, String>>),
-    /// No thread is waiting, and **the response gives a turn id** — the reader applies it where it receives it.
+    /// No thread waits and **the response gives a turn id** — the reader applies it where it receives it.
     ///
-    /// ★`seq` is the marker of the turn this request opened★ — without it, a late answer would write its id into the slot of **another turn opened in between**,
-    /// and the `interrupt` after that would aim at the wrong turn.
+    /// ★`seq` is the marker of the turn this request opened★ — otherwise a late answer would write its id into the slot of **another
+    /// turn opened in between** and the later `interrupt` would aim at the wrong turn.
     TurnStart { seq: u64 },
     /// `turn/steer` of item `id` handed to the running turn — only a refusal reaches that item ([`State::hold_refused_steer`]).
-    /// `gen` = the `InFlight` generation of that item (= the marker of the turn it was handed to) — so a late answer cannot move an item that moved to another stage.
+    /// `gen` = that item's `InFlight` generation (= the turn marker) — a late answer cannot move an item that moved to another stage.
     // ADR-0231
     Steer { id: String, gen: u64 },
     /// Only failures are looked at, in the log.
@@ -1269,15 +1045,14 @@ struct PendingEntry {
     method: &'static str,
 }
 
-/// The waiting table of requests we issued. ★An id the server issued never enters here★ (TRD §4-4) — the two id spaces
-/// inevitably overlap (a server id must be returned as is), and what tells them apart is not the id value but **the envelope shape**.
-/// Lookups happen only on `result`/`error` envelopes.
+/// The waiting table of requests we issued. ★An id the server issued never enters here★ (TRD §4-4): the two id spaces overlap (a server
+/// id must be returned as is), so **the envelope shape** tells them apart, not the id value. Lookups happen only on `result`/`error`
+/// envelopes.
 #[derive(Default)]
 struct Pending {
     entries: Mutex<HashMap<i64, PendingEntry>>,
-    /// No more answers can come — no new waiting entries are taken. ★Without this, one waiting entry registered **after** the link closed
-    /// holds its thread until its deadline runs out★ (the handshake issues two requests back to back, so a window of closing
-    /// in between really exists).
+    /// No more answers can come — no new entries are taken. ★Without this, an entry registered **after** the link closed would hold its
+    /// thread until its deadline★ (the handshake issues two requests back to back, so that window exists).
     closed: AtomicBool,
 }
 
@@ -1287,8 +1062,8 @@ impl Pending {
         self.register_at(id, waiter, method, Instant::now() + REQUEST_DEADLINE)
     }
 
-    /// The branch that takes the deadline as an argument — ★a seam for the test bench to measure expiry without actually sleeping for [`REQUEST_DEADLINE`]★
-    /// (ADR-0012). The production caller is only [`Pending::register`] above.
+    /// The deadline-as-argument branch — ★a seam so tests measure expiry without sleeping for [`REQUEST_DEADLINE`]★ (ADR-0012). The
+    /// production caller is only [`Pending::register`].
     fn register_at(
         &self,
         id: i64,
@@ -1297,7 +1072,7 @@ impl Pending {
         deadline: Instant,
     ) -> bool {
         let mut g = sync::lock(&self.entries);
-        // ★Read while holding the lock★ — reading outside would let a waiting entry into a table closed in between.
+        // ★Read while holding the lock★ — reading outside would let an entry into a table closed in between.
         if self.closed.load(Ordering::Acquire) {
             return false;
         }
@@ -1319,8 +1094,7 @@ impl Pending {
         g.drain().map(|(_, e)| e).collect()
     }
 
-    /// ★A string id cannot be ours★ — our counter emits only i64. So it becomes `None` here and
-    /// the caller drops it as an "unknown id".
+    /// ★A string id cannot be ours★ (our counter emits only i64): it becomes `None` and the caller drops it as an "unknown id".
     fn take(&self, id: &RequestId) -> Option<PendingEntry> {
         let key = match id {
             RequestId::Num(n) => *n,
@@ -1354,13 +1128,12 @@ impl Pending {
 // ── Link ──────────────────────────────────────────────────────────────────────
 
 pub(crate) struct CodexAppServerTransport {
-    /// Shared by the pump (try_wait) and shutdown (kill+wait). std Child caches the status after wait, so a double wait
-    /// is harmless.
+    /// Shared by the pump (try_wait) and shutdown (kill+wait). std `Child` caches the status after wait, so a double wait is harmless.
     child: Arc<Mutex<Child>>,
-    /// ★Only the writer thread takes it★ — if the reader took this lock, the deadlock of the module header would stand.
-    /// Only the last step of [`AgentTransport::shutdown`] touches it, with `try_lock` (no blocking).
+    /// ★Only the writer thread takes it★ — if the reader took this lock, the module header's deadlock would stand. Only the last step of
+    /// [`AgentTransport::shutdown`] touches it, with `try_lock` (no blocking).
     stdin: Arc<Mutex<Option<ChildStdin>>>,
-    /// Taken in `start()` and moved to the reader. If None, it already started.
+    /// Taken in `start()` and moved to the reader. `None` = already started.
     stdout: Mutex<Option<ChildStdout>>,
     stderr: Mutex<Option<ChildStderr>>,
     decoder: Mutex<Option<Box<dyn OutputDecoder>>>,
@@ -1371,40 +1144,38 @@ pub(crate) struct CodexAppServerTransport {
     pending: Arc<Pending>,
     // ADR-0231
     announcer: Arc<Announcer>,
-    /// Filled by `start()` — used by the input thread's announcement ([`announce`]). ★While empty there is nothing to announce★:
-    ///   announcement stands only after the floor decision, and the decision is made by the writer `start()` launched.
+    /// Filled by `start()` — used by the input thread's announcement ([`announce`]). ★While empty there is nothing to announce★: it
+    ///   stands only after the floor decision, made by the writer `start()` launched.
     // ADR-0231
     core: OnceLock<Arc<OutputCore>>,
-    /// Our request id counter. ★Server ids do not enter here★ — the two spaces are separate.
+    /// Our request id counter. ★Server ids do not enter★ — the two spaces are separate.
     next_id: Arc<AtomicI64>,
     sid_sink: Option<SessionIdSink>,
-    /// The port to call at the moment the peer first echoes a user message ([`Reader::witness_first_turn`]). `None` = nowhere to tell.
+    /// The port called when the peer first echoes a user message ([`Reader::witness_first_turn`]). `None` = nowhere to tell.
     // ADR-0226
     // ADR-0231
     first_turn_sink: Option<FirstTurnSink>,
-    /// The port that delivers the connection outcome **once** (`None` = the assembly point did not give one = this axis does not exist).
+    /// The port that delivers the connection outcome **once** (`None` = the assembly point gave none = this axis does not exist).
     /// ★Taken in `start()` and moved to the writer — delivery happens only on that thread, exactly once★.
     link_sink: Mutex<Option<LinkSink>>,
-    /// The writer thread handle. ★Nobody joins it — waiting inside `shutdown()` is a contract violation★.
-    ///
-    /// There is one reason to hold this handle: **it must be visible from outside whether that thread actually ends.** If it does not end,
-    /// one session's worth of memory remains with it, and that fact shows up nowhere without a means of observing it.
+    /// The writer thread handle. ★Nobody joins it — waiting inside `shutdown()` is a contract violation★. It is held so that **whether
+    /// the thread actually ends is observable** from outside; if it does not end, one session's memory remains and nothing else shows it.
     writer_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// Whether the output this link carries is a structured stream. ★An injected value (ADR-0044/0030/0191)★ — the link does not know what it
-    /// carries, and the side that knows is the backend that picked this mode.
+    /// Whether the output this link carries is a structured stream. ★An injected value (ADR-0044/0030/0191)★ — the link does not know
+    /// what it carries; the backend that picked this mode does.
     structured: bool,
-    /// The owner of the group of processes this link launched — only one, and no weak handle is handed out either. ★Kept as the last field★ — fields
-    /// are dropped in declaration order, so this place decides when the group closes as the link is dropped. Whether it can be moved earlier was not
-    /// measured, and no test guards this placement.
+    /// The owner of the group of processes this link launched — only one, no weak handle handed out. ★Kept as the last field★: fields
+    /// drop in declaration order, so this place decides when the group closes as the link is dropped. Whether it can move earlier was not
+    /// measured and no test guards this placement.
     group: GroupOwner,
 }
 
 impl CodexAppServerTransport {
     /// **The pump is not launched yet** (in `start`). Returns `child_pid` together.
     ///
-    /// `open_params` = the value that goes out as is as the second handshake request ([`ThreadOpen`]). ★Neither the policies nor whether to
-    ///   resume are hard-coded by the link★ — which folder to trust as the workspace and with which sandbox · approval
-    ///   policy to run, and whether to resume a stored thread, are backend knowledge, so they are injected.
+    /// `open_params` = the value that goes out as the second handshake request ([`ThreadOpen`]). ★The link hard-codes neither the
+    ///   policies nor whether to resume★ — which folder to trust, which sandbox · approval policy, and whether to resume a stored thread
+    ///   are backend knowledge, so they are injected.
     /// `sid_sink` = where to record the thread id codex issued. `None` = nowhere to record.
     pub(crate) fn open(
         spec: &CommandSpec,
@@ -1451,14 +1222,14 @@ impl CodexAppServerTransport {
     }
 
     /// Whether this incarnation's receipt notifications are available — **the very** `Arc` the floor decision fills. The assembly point
-    /// carries it in `SpawnParts::delivery_ack` (a separately made one would have the session and the link see different values).
+    /// carries it in `SpawnParts::delivery_ack` (a separately made one would give session and link different values).
     // ADR-0231
     pub(crate) fn delivery_ack(&self) -> Arc<DeliveryAck> {
         self.announcer.ack.clone()
     }
 
-    /// Plugs in the first-turn port — ★call it before `start()`★ (the reader takes it then). This link's session does not count submissions
-    /// (`MidTurnPolicy::TransportOwned`), so if it is missed this incarnation's thread id is not persisted.
+    /// Plugs in the first-turn port — ★call it before `start()`★ (the reader takes it then). This link's session does not count
+    /// submissions (`MidTurnPolicy::TransportOwned`), so if missed this incarnation's thread id is not persisted.
     // ADR-0226
     // ADR-0231
     pub(super) fn with_first_turn(mut self, sink: Option<FirstTurnSink>) -> Self {
@@ -1477,8 +1248,7 @@ fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason
 
 /// Cuts keeping character boundaries. If cut, leaves that fact.
 ///
-/// ★Do not call this directly instead of [`sanitize`]★ — the peer string would skip masking and go out to the log · screen.
-/// If there are two doors, one of them is bound to be forgotten.
+/// ★Do not call this instead of [`sanitize`]★ — the peer string would skip masking and go to the log · screen. Two doors → one gets forgotten.
 fn clip(s: &str, limit: usize) -> String {
     if s.chars().count() <= limit {
         return s.to_string();
@@ -1487,9 +1257,9 @@ fn clip(s: &str, limit: usize) -> String {
     format!("{head}…(truncated)")
 }
 
-/// The door external process strings pass through before being carried to the log · screen — ★masking comes before truncation★:
-/// the patterns of `mask_secrets` require a certain length after the prefix, so cutting first would cut a credential spanning the boundary
-/// below that quantifier and let it escape masking.
+/// The door external process strings pass through before reaching the log · screen — ★masking comes before truncation★: the
+/// `mask_secrets` patterns need a certain length after the prefix, so cutting first could cut a credential across the boundary below
+/// that quantifier and let it escape masking.
 fn sanitize(s: &str, limit: usize) -> String {
     clip(&mask_secrets(s), limit)
 }
@@ -1506,11 +1276,11 @@ fn write_line(stdin: &Mutex<Option<ChildStdin>>, line: &str) -> Result<(), PtyEr
     w.flush().map_err(|e| PtyError::WriteFailed(e.to_string()))
 }
 
-/// Sends **only one line** queued in the control queue. The returned value = was there anything to send.
+/// Sends **only one line** queued in the control queue. Returns whether there was anything to send.
 ///
-/// ★One line at a time is the contract★ — [`request_blocking`], which calls this function, must measure the deadline again
-/// in between. Letting it drain everything would make that one call indefinitely long, and the deadline **would not be evaluated**.
-/// ★It does not write while holding the lock★ — it takes the line out, lets go, then writes (ADR-0006).
+/// ★One line at a time is the contract★: [`request_blocking`] calls this and must re-measure the deadline in between; draining
+/// everything would make one call unbounded and the deadline **would not be evaluated**.
+/// ★It does not write while holding the lock★ — takes the line, releases, then writes (ADR-0006).
 fn drain_one_control_line(stdin: &Mutex<Option<ChildStdin>>, state: &SharedState) -> bool {
     let line = {
         let (lock, _) = &**state;
@@ -1528,21 +1298,13 @@ fn drain_one_control_line(stdin: &Mutex<Option<ChildStdin>>, state: &SharedState
     }
 }
 
-/// Issues one request and **waits** for the answer. ★Must not be called on the reader thread★ — reading stops while waiting.
+/// Issues one request and **waits** for the answer. ★Never on the reader thread★ — reading stops while waiting.
 ///
-/// ★It sends control lines even while waiting★: the one calling this function is the writer, and the writer is the **only** thread that drains that queue.
-///   If it parked entirely, a server request refusal the reader put in could not go out until this wait ends,
-///   and if the peer was waiting for that answer, both sides would wait for each other until the deadline (after that the connection does not
-///   come back in this incarnation — ADR-0192). ★Whether 0.154.0 actually puts `thread/start` after an approval request is
-///   unconfirmed★ — what is blocked is that structural window.
-/// ★Order is the contract — **measure the deadline first, then write one line**★: the write is blocking, so writing first would leave the deadline
-///   unevaluated while that one write hangs. Flip that order and this function stops being bounded,
-///   and the handshake neither fails nor shows on screen while input keeps being accepted.
-/// ★The limit that still remains★: one blocking write can still hang forever, and the only way out of it is
-///   `shutdown()`'s kill (module header 「known limits」).
-/// `budget` = this request's deadline. Production callers all pass [`REQUEST_DEADLINE`] — taking it as an argument is
-///   ★a seam for the test bench to measure boundedness without actually sleeping for that cap★ (the same reason as
-///   [`Pending::register_at`], ADR-0012).
+/// ★It sends control lines while waiting★ — the writer is the only drainer; parking would deadlock with a peer awaiting our refusal until
+/// the deadline (ADR-0192). [unverified — whether 0.154.0 puts `thread/start` after an approval request].
+/// ★Order is the contract — **measure the deadline first, then write one line**★: the write blocks, so writing first leaves the deadline
+/// unevaluated while one write hangs. One blocking write can still hang forever (module header).
+/// `budget` = this request's deadline (production: [`REQUEST_DEADLINE`]); an argument as a seam for tests ([`Pending::register_at`], ADR-0012).
 fn request_blocking<P: Serialize, R: DeserializeOwned>(
     stdin: &Mutex<Option<ChildStdin>>,
     state: &SharedState,
@@ -1601,16 +1363,13 @@ fn request_blocking<P: Serialize, R: DeserializeOwned>(
     }
 }
 
-/// The handshake. Order is the contract — `initialize` → (`initialized`) → **the second request `open` picked**
-/// (`thread/start` or `thread/resume`).
+/// The handshake. Order is the contract — `initialize` → (`initialized`) → **the second request `open` picked** (`thread/start` or
+/// `thread/resume`).
 ///
-/// ★`initialize` can be sent only once (measured 0.154.0)★ — the second comes back as an error. So this function
-/// runs exactly once per incarnation and is not called again even on failure (ADR-0192).
-/// ★If the second request is refused, it is `Err` as is — it does not fall back to a new thread (ADR-0082)★. There is one more codex-side
-/// reason: `-32600` of this protocol does not have one meaning — an unknown method, a second `initialize`,
-/// and a config error all come with that code (measured 0.154.0 — the source of truth for the first two is this folder's `protocol`, and the third is
-/// the real response [`tests::a_peer_error_message_is_masked_before_it_leaves_this_module`] holds). So splitting off 「unknown thread」 by error code
-/// and falling back to a new thread would overwrite a still sound handle on an unrelated failure.
+/// ★`initialize` works only once (measured 0.154.0)★, so this runs once per incarnation, never again even on failure (ADR-0192).
+/// ★A refused second request is `Err` as is — no fallback to a new thread (ADR-0082)★: `-32600` is not specific to "unknown thread"
+/// (unknown method · second `initialize` · config error all use it — [`tests::a_peer_error_message_is_masked_before_it_leaves_this_module`]),
+/// so falling back would overwrite a sound handle on an unrelated failure.
 fn handshake(
     stdin: &Mutex<Option<ChildStdin>>,
     state: &SharedState,
@@ -1619,14 +1378,12 @@ fn handshake(
     open: &ThreadOpen,
     deadline: Instant,
 ) -> Result<Opened, String> {
-    // ★The deadline is applied not per request but to **the whole section**★ — per request, the sum of round trips becomes a multiple of the cap, and
-    //   the moment that sum exceeds the manager's backstop, this link's failure cannot take part in the decision
-    //   (the doc of [`HANDSHAKE_BUDGET`] is the source of truth for that causality).
-    // ★So the deadline is **received from outside**★ — the history paging that runs right after this section ([`hydrate_history`]) shares
-    //   the same deadline. Taking `Instant::now()` again here would give each of the two 10 seconds, so the
-    //   sum would exceed the backstop, and **a resume that succeeded while fetching history would be decided as a failure.**
-    // ★If the remaining share is 0, `request_blocking` returns right away with a deadline expiry★ — that is the only deciding place, so
-    //   it is not split here in advance to reach the same conclusion in two places.
+    // ★The deadline covers **the whole section**, not each request★ — per request the round trips sum to a multiple of the cap and
+    //   can exceed the manager's backstop, so this link's failure could not take part in the decision ([`HANDSHAKE_BUDGET`]).
+    // ★So the deadline is **received from outside**★: the history paging right after ([`hydrate_history`]) shares it. A fresh
+    //   `Instant::now()` here would give each 10 s and a resume that succeeded while fetching history would be decided a failure.
+    // ★With 0 remaining, `request_blocking` returns at once with a deadline expiry★ — the only deciding place, so it is not
+    //   pre-split here.
     let remaining = || deadline.saturating_duration_since(Instant::now());
 
     let init: InitializeResponse = request_blocking(
@@ -1643,22 +1400,21 @@ fn handshake(
         },
         remaining(),
     )?;
-    // ★This line is the only record that tells upstream drift apart after the fact★ — this protocol has no version field
-    //   (`protocolVersion` appears 0 times in the whole schema), and the CLI updates itself.
+    // ★The only record that tells upstream drift apart after the fact★ — the protocol has no version field (`protocolVersion` appears 0
+    //   times in the schema) and the CLI self-updates.
     tracing::info!(
         user_agent = %sanitize(&init.user_agent, LOG_STRING_LIMIT),
         platform = %sanitize(&init.platform_os, LOG_STRING_LIMIT),
         "codex app-server connected"
     );
 
-    // Sending it is not an obligation (measured 0.154.0 — `thread/start` succeeds even without it). It is harmless, so it is kept
-    //   to match the handshake shape.
+    // Not an obligation (measured 0.154.0 — `thread/start` succeeds without it); harmless, kept to match the handshake shape.
     write_line(stdin, &protocol::notification_line(method::INITIALIZED))
         .map_err(|e| format!("initialized write failed: {e}"))?;
 
-    // ★Both branches return the same `thread`, so this function has one return★ — on resume too, **the id the peer
-    //   gave is raised as is**. It is not rewritten on the assumption that it equals what we sent: if it differs, that different
-    //   value is the thread this incarnation actually talks in, and the record verb must receive it so that the next resume opens the right place.
+    // ★Both branches return the same `thread`, so one return★ — on resume too **the id the peer gave is raised as is**: if it differs
+    //   from what we sent, that value is the thread this incarnation actually talks in, and the record verb must receive it so the next
+    //   resume opens the right place.
     let (thread, items_backwards_cursor): (Thread, Option<String>) = match open {
         ThreadOpen::Start(params) => {
             let started: ThreadStartResponse = request_blocking(
@@ -1670,7 +1426,7 @@ fn handshake(
                 params,
                 remaining(),
             )?;
-            // ★A new conversation has no history to go back to — the response does not even have that field★ (schema 0.154.0).
+            // ★A new conversation has no history — the response does not even have that field★ (schema 0.154.0).
             (started.thread, None)
         }
         ThreadOpen::Resume(params) => {
@@ -1701,11 +1457,10 @@ fn handshake(
     })
 }
 
-/// What the handshake set up — the thread this incarnation talks in, and the door into that thread's past screen.
+/// What the handshake set up — the thread this incarnation talks in, and the door into its past screen.
 ///
-/// ★The two fields are of **different grades**★: without `thread_id` this incarnation can do nothing (handshake failure).
-///   Without `items_backwards_cursor` nothing breaks — it means there is nothing to restore or it is a new conversation, and
-///   that absence is today's behaviour of starting with an empty screen as is (ADR-0203: history failure is quiet and harmless).
+/// ★The two fields are of **different grades**★: without `thread_id` nothing works (handshake failure); without
+///   `items_backwards_cursor` nothing breaks — nothing to restore or a new conversation, starting with an empty screen (ADR-0203).
 struct Opened {
     thread_id: String,
     items_backwards_cursor: Option<String>,
@@ -1714,29 +1469,16 @@ struct Opened {
     floor: Floor,
 }
 
-/// Fetches the resumed thread's past screen **from the end** and carries it over into neutral events (ADR-0203).
+/// Fetches the resumed thread's past screen **from the end** and carries it into neutral events (ADR-0203).
 ///
-/// ★★Failure does not create failure★★: this function **emits `Err` on no branch.** Without a cursor,
-///   if the peer refuses, if a line exceeds the cap and no answer comes, if the budget runs out — the outcome is always 「the events
-///   up to there」. History that could not be fetched is **an empty screen**, not a failed activation (the same grade as the claude-side `.jsonl` read
-///   returning an empty `Vec` when the file is absent — ADR-0079).
-/// ★★So this call **shares** [`HANDSHAKE_BUDGET`] with the handshake — it does not start a new clock★★:
-///   starting a separate one would delay `Ready` by up to two budgets, exceed the manager's
-///   [`crate::manager::LINK_RESOLUTION_BACKSTOP`], and **a successful resume would be decided as 「the link could not reach an outcome」.**
-///   That regression is of a different grade from the screen getting a little shorter.
-/// ★Where it stops = four★: ① cursor exhausted (normal) ② the ring is filled ③ budget exhausted ④ [`MAX_HISTORY_PAGES`].
-///   Why ② is this function's ceiling is carried by [`REPLAY_MAX_BYTES`] — fetching more than the ring will keep is pure
-///   cost, and that decision axis must be the [`estimate_cost_bytes`] the ring actually uses (estimating on another axis
-///   either fetches less and loses screen, or fetches more and only wastes round trips).
-/// ★Direction★: it walks **from the newest** with `sortDirection: desc` + the backward cursor resume gave (schema 0.154.0
-///   writes that combination directly in that field's description). The `data` inside a page is also newest first, so while gathering it is reversed, and
-///   at the end it is flipped once back to time order (measured 2026-09-16: the first page's `data[0]` is the last assistant
-///   response, and the end of the last page is the first `userMessage`).
-/// ★A translator is made **for this call only**★ — what the pump holds is a `Box<dyn OutputDecoder>`, so it cannot reach doors outside
-///   the trait. What splits are two things, the diagnostic count map and the 「first come」 memory of echoed user items, but
-///   in history one item comes **exactly once**, so that memory has nothing to do, and the counts are diagnostic only.
-///   ★The price = drift seen in history and drift seen live pile up in different maps★ (both go out
-///   to the log — the observation key contains the method name, so which side is told apart).
+/// ★Failure does not create failure★: **it emits `Err` on no branch** — no cursor, refusal, over-cap line, budget out all end as "the events
+/// up to there"; unfetched history is **an empty screen**, not a failed activation (ADR-0079).
+/// ★It **shares** [`HANDSHAKE_BUDGET`] — no new clock★ (a second one could exceed [`crate::manager::LINK_RESOLUTION_BACKSTOP`]).
+/// Stops: ① cursor exhausted ② ring filled ([`REPLAY_MAX_BYTES`] via the ring's [`estimate_cost_bytes`]) ③ budget ④ [`MAX_HISTORY_PAGES`].
+/// Direction: `sortDirection: desc` + the resume's backward cursor; pages and items are newest first, reversed while gathering and flipped
+/// once at the end.
+/// ★A translator is made **for this call only**★ — the pump's `Box<dyn OutputDecoder>` is out of reach; history yields each item once, so
+/// only the diagnostic count maps split.
 // ADR-0203
 fn hydrate_history(
     stdin: &Mutex<Option<ChildStdin>>,
@@ -1747,7 +1489,7 @@ fn hydrate_history(
     deadline: Instant,
 ) -> Vec<OutputEvent> {
     let Some(cursor) = opened.items_backwards_cursor.clone() else {
-        // A new conversation, or the peer gave no entry point — today's behaviour (empty screen) as is.
+        // A new conversation, or the peer gave no entry point — empty screen.
         return Vec::new();
     };
     collect_history(&opened.thread_id, cursor, deadline, |params, budget| {
@@ -1763,11 +1505,10 @@ fn hydrate_history(
     })
 }
 
-/// The **round-trip-free core** of the function above — how pages are walked, where it stops, and in what order it hands them out.
+/// The **round-trip-free core** of the function above — how pages are walked, where it stops, in what order it hands them out.
 ///
-/// ★There is one reason `fetch` is injected: this rule must be measurable alone, without a child process★
-/// (ADR-0012). In production what goes in that place is [`request_blocking`] alone, and the test bench builds the pages
-/// by hand. ★An `Err` from `fetch` is **non-fatal**★ — what was gathered up to that point is emitted as is.
+/// ★`fetch` is injected so this rule can be measured alone, without a child process★ (ADR-0012); production passes
+/// [`request_blocking`]. ★An `Err` from `fetch` is **non-fatal**★ — what was gathered is emitted as is.
 fn collect_history(
     thread_id: &str,
     entry_cursor: String,
@@ -1776,21 +1517,13 @@ fn collect_history(
 ) -> Vec<OutputEvent> {
     let mut cursor = entry_cursor;
     let mut decoder = CodexAppServerDecoder::new();
-    // Piled up newest → oldest. One slot = the events one item emitted + the **group number** that item belongs to.
-    // ★An item that carried nothing over takes no slot★ — only then do turn boundaries stand **between turns with content**,
-    //   and a history that was all dropped does not become a list of only boundaries.
-    // ★★The key being a **number** instead of the original id is a memory cap — but filtering alone was not enough★★:
-    //   `turnId` has no wire cap, so if items with long ids come on every page, the piled-up original strings alone
-    //   reach hundreds of MiB (the line cap applies only to **one** page, not to this accumulation). Yet folding all ids
-    //   over the cap into one `None` slot would **render two different conversations as one turn** — what is lost would rise in grade from
-    //   「the comparison gets loose」 to 「the screen lies」.
-    //   So the axis is split in two: **distinction** is carried by the number, and **display** by the filtered id.
-    //   - Distinction: compared only with **one** original id, the previous item's (`last_raw` — when a new value comes in, the previous one is dropped,
-    //     so it is always O(1)). So even ids over the cap become different groups if they differ.
-    //   - Display: each group holds only one id, **filtered, not truncated**, by [`MAX_TURN_ID_BYTES`] (`groups`).
-    //     If two truncated ids became equal, different turns would fold into one, so they are not truncated (the same decision as
-    //     `MAX_ID_BYTES` of `decoder`). The number of groups is at most the number of items, so this side is bounded too.
-    //   ★The remaining price = **no id is carried** on the boundary of a turn over the cap★ (the boundary itself stands).
+    // Piled newest → oldest. One slot = the events one item emitted + the **group number** it belongs to. ★An item that carried nothing
+    //   takes no slot★ — boundaries stand only **between turns with content**.
+    // ★★The key is a **number**, not the original id — a memory cap★★: `turnId` has no wire cap (the line cap bounds one page, not this
+    //   accumulation), so long ids would pile up hundreds of MiB; folding all over-cap ids into one `None` slot would **render two
+    //   conversations as one turn**. So: **distinction** = comparison with the previous item's original id only (`last_raw`, O(1)); **display**
+    //   = one id per group, **filtered, not truncated** ([`MAX_TURN_ID_BYTES`], `groups`; truncation could make different turns equal —
+    //   as `MAX_ID_BYTES` of `decoder`). ★Price: **no id is carried** on the boundary of an over-cap turn★.
     let mut newest_first: Vec<(u32, Vec<OutputEvent>)> = Vec::new();
     let mut groups: Vec<Option<String>> = Vec::new();
     let mut last_raw: Option<String> = None;
@@ -1817,12 +1550,10 @@ fn collect_history(
         let page = match fetch(&params, budget) {
             Ok(page) => page,
             Err(reason) => {
-                // ★It is `info`, not `warn`★ — this is not a defect but the fact 「restored only up to here」,
-                //   and the connection stands normally after this. The reason is still left (the first signal of upstream drift is here).
-                // ★★It is kept **knowing that this branch swallows 「the connection died」**★★ — when the reader sees EOF,
-                //   the waiting entry wakes with an error and comes here, and the two cannot be told apart by string. So that
-                //   decision is carried not here but by the place that opens the gate ([`open_gate`]) — there the state is looked at directly,
-                //   so no string guessing is needed.
+                // ★`info`, not `warn`★ — "restored only up to here" is a fact, not a defect, and the connection stands. The reason is still logged
+                //   (first signal of upstream drift).
+                // ★Kept **knowing this branch swallows "the connection died"**★: reader EOF wakes the waiting entry with an error and
+                //   lands here, indistinguishable by string. That decision is made by [`open_gate`], which looks at the state directly.
                 tracing::info!(
                     page = pages,
                     "codex history restore stops here — only the screen gets shorter, the connection stays as is: {}",
@@ -1840,18 +1571,17 @@ fn collect_history(
             let new_run = last_raw.as_deref() != Some(entry.turn_id.as_str());
             let shown =
                 (entry.turn_id.len() <= MAX_TURN_ID_BYTES).then_some(entry.turn_id.as_str());
-            // ★★The ceiling decision is made **before putting**, and **counting the boundaries to be synthesized too**★★:
-            //   ① measuring after putting always exceeds by that one entry. ② without counting the boundaries, in a history with many turns the actual event
-            //   count would be up to twice what is counted here (the extreme where every item splits a turn), and the ring would drop half
-            //   right on landing — tying the ceiling to the ring constant was meant precisely to remove that mismatch.
-            // ★There is **one boundary per new run**★ — turned back to time order, there is one closing boundary per run,
-            //   so counting one each time the run changes while walking in reverse gives exactly the total.
+            // ★Decide the ceiling **before putting**, **counting the boundaries to be synthesized too**★: ① measuring after putting always
+            //   exceeds by one entry ② without boundaries, a history with many turns would hold up to twice the counted events (every item
+            //   splitting a turn) and the ring would drop half on landing — the mismatch tying the ceiling to the ring constant removes.
+            // ★One boundary per new run★ — in time order there is one closing boundary per run, so counting each run change while walking
+            //   in reverse gives the total.
             let boundary = new_run.then(|| history_turn_boundary(shown));
             let add_events = translated.len() + usize::from(boundary.is_some());
             let add_cost = translated.iter().map(estimate_cost_bytes).sum::<usize>()
                 + boundary.as_ref().map(estimate_cost_bytes).unwrap_or(0);
-            // ★The first item is always taken★ — even if one alone exceeds the ceiling, that one is better than an empty screen,
-            //   and the ring keeps the newest one by the same rule (the `len() > 1` guard of `Ring::push`).
+            // ★The first item is always taken★ — even one over the ceiling beats an empty screen, and the ring keeps the newest by the same
+            //   rule (the `len() > 1` guard of `Ring::push`).
             if !newest_first.is_empty()
                 && (cost + add_cost > REPLAY_MAX_BYTES || count + add_events > REPLAY_MAX_EVENTS)
             {
@@ -1862,7 +1592,7 @@ fn collect_history(
             cost += add_cost;
             if new_run {
                 groups.push(shown.map(String::from));
-                // ★Only **the previous one** original is held★ — this assignment drops the previous value, so it does not accumulate.
+                // ★Only **the previous** original is held★ — this assignment drops the old value, so nothing accumulates.
                 last_raw = Some(entry.turn_id);
             }
             newest_first.push((groups.len() as u32 - 1, translated));
@@ -1871,16 +1601,12 @@ fn collect_history(
             break;
         }
         match next {
-            // ★★If the same cursor is given again, it stops★★ — otherwise it would fetch the same page again up to the page cap,
-            //   carrying **several copies of the same conversation**, and those duplicates would push the real history out of the ring. The cap bounds the loop
-            //   but cannot prevent this contamination.
-            //   ★★What is blocked is **only one fixed point** — write precisely which cycles leak★★: only cycles of length 1
-            //   (A→A) are caught, and **all of length 2 or more leak** (A→B→A, A→B→C→A, …). In that case what stops it is
-            //   the page cap · ring ceiling · budget, and until then **several copies of the same conversation** go into the ring — duplicates
-            //   are visible on screen and activation is delayed by the budget. Do not read it as 「there is a cap, so it is harmless」.
-            //   ★The reason it is not fixed is not the value but **the axis of cost**★ — catching longer cycles requires remembering the cursors seen,
-            //   and a cursor is a string whose length the peer decides, so that memory becomes the same accumulated cost as `turnId`
-            //   above. There are no grounds for how many to remember, so no constant is invented.
+            // ★The same cursor again stops the walk★ — otherwise the same page is refetched up to the page cap, carrying **several copies of the
+            //   same conversation** that push the real history out of the ring; the cap bounds the loop but not this contamination.
+            //   ★Only **cycles of length 1** (A→A) are caught; **all of length ≥ 2 leak** (A→B→A, …)★ — those are stopped by the page cap ·
+            //   ring ceiling · budget, meanwhile duplicates are visible and activation is delayed by the budget. Not "capped, so harmless".
+            //   ★Not fixed because of **cost**, not value★: catching longer cycles means remembering seen cursors, strings whose length the
+            //   peer decides — the same accumulated cost as `turnId` above — and there are no grounds for how many to remember.
             Some(next) if next == cursor => {
                 tracing::warn!(
                     page = pages,
@@ -1893,7 +1619,7 @@ fn collect_history(
         }
     }
 
-    // ★It is flipped once here back to time order★ — in the ring, insertion order is screen order.
+    // ★Flipped once here back to time order★ — in the ring, insertion order is screen order.
     newest_first.reverse();
     let items = newest_first.len();
     let mut events: Vec<OutputEvent> = Vec::with_capacity(count);
@@ -1907,8 +1633,7 @@ fn collect_history(
         }
         events.extend(translated);
     }
-    // ★The last turn must be closed too★ — if not, the waiting indicator of the restored slot spins forever
-    //   ([`history_turn_boundary`] is the source of truth for that causality).
+    // ★The last turn must be closed too★ — else the restored slot's waiting indicator spins forever ([`history_turn_boundary`]).
     if let Some(last) = open_group {
         events.push(history_turn_boundary(groups[last as usize].as_deref()));
     }
@@ -1931,15 +1656,10 @@ fn collect_history(
 
 /// Opens the gate — ★**only while this incarnation's connection is still ours**★.
 ///
-/// ★★Without it, a dead link stands as `Ready` — that is why this function exists★★: if the peer closes stdout while
-///   fetching history after the handshake succeeded, the `Drop` of [`ReaderExit`] sets `closed`/[`Link::Down`]
-///   and wakes the waiting entries with an error. The history side is made to treat that error as **partial success** (that is
-///   right — one page not coming and the connection being cut are different events), so left as is, the next line would overwrite the state
-///   that just went down with `Ready` and **deliver something already dead as a successful activation.**
-/// ★So the axis that splits is not 「what failed」 but **「is the connection standing now」**★ — the state is looked at directly, so
-///   there is no need to interpret error strings. If only a page did not come, this check passes.
-/// ★The wording of `Err` is the reason the state held, as is★ — that reason is a JSON-RPC error on stdout or the stream ending, so
-///   it is in neither the console tail nor the stderr tail (the doc of `LinkResolution::Failed` is the source of truth for that causality).
+/// Else a dead link stands as `Ready`: if the peer closes stdout during history, [`ReaderExit`] sets `closed`/[`Link::Down`] and wakes
+/// waiters with an error that history treats as **partial success**; the next line would overwrite `Down` with `Ready` and **deliver
+/// something dead as a successful activation.** The split axis is "is the connection standing now" (state read directly), not "what failed".
+/// The `Err` wording is the state's reason as is (a JSON-RPC error on stdout or stream end — in neither console nor stderr tail).
 // ADR-0203
 // ADR-0201
 fn open_gate(state: &SharedState, thread_id: String) -> Result<(), String> {
@@ -1960,8 +1680,9 @@ fn open_gate(state: &SharedState, thread_id: String) -> Result<(), String> {
 enum Job {
     /// A control line that does not go through the gate.
     Line(String),
-    /// A user turn taken out of the queue — the waiting entry is registered before writing. `seq` = the marker of the turn this Job opened. `item` = the id of the list item
-    /// it carried (the handed-over mark is emitted after writing — [`publish_hand_over`]) · `None` for Direct · mail · items without an identifier.
+    /// A user turn taken out of the queue — the waiting entry is registered before writing. `seq` = the marker of the turn this Job
+    /// opens. `item` = the id of the list item it carried (handed-over mark emitted after writing — [`publish_hand_over`]); `None` for
+    /// Direct · mail · items without an identifier.
     Turn {
         id: i64,
         seq: u64,
@@ -1970,18 +1691,18 @@ enum Job {
     },
     /// This wake-up is only the deadline sweep.
     Sweep,
-    /// Hands one held item released by the tool-end trigger to the running turn — the waiting entry is registered before writing ([`issue_steer`]).
+    /// Hands one held item released by the tool-end trigger to the running turn — waiting entry registered before writing ([`issue_steer`]).
     // ADR-0231
     Steer(Steer),
 }
 
 /// ★The only place where "can it send" and "transition to in-progress" are joined under one lock★ (ADR-0193).
 ///
-/// What it opens with is decided by the Idle order ([`State::idle_opening`] — user `Held` → mail · nothing during a halt after error).
-/// If the head is pre-announce, it waits (does not skip — typing order). An item carrying an identifier (floor met) carries `clientUserMessageId` and remains `InFlight`
-/// waiting for the echo. ★An item without an identifier leaves at the moment of opening, as today — there is no key to compare, so if left, the turn-end disposal could never
-/// close it and it would block mail★. One `turn/start` is one item (PRD §3-8). ★It does not open while Active★ — an in-progress `turn/start` is
-/// handled by the vendor as a steer (TRD §3-2). The `Idle` check on the first line prevents it.
+/// What it opens with = the Idle order ([`State::idle_opening`]). A pre-announce head waits (typing order). An item with an identifier
+/// (floor met) carries `clientUserMessageId` and stays `InFlight` for the echo. ★An item without one leaves at opening — it has no
+/// comparison key, so the turn-end disposal could never close it and it would block mail★. One `turn/start` = one item (PRD §3-8).
+/// ★It does not open while Active★ — a `turn/start` during a turn is handled by the vendor as a steer (TRD §3-2); the first-line
+/// `Idle` check prevents it.
 // ADR-0231
 fn take_turn_locked(s: &mut State, next_id: &AtomicI64) -> Option<Job> {
     if !matches!(s.link, Link::Ready) || !matches!(s.turn, TurnState::Idle) {
@@ -2026,27 +1747,23 @@ fn take_turn_locked(s: &mut State, next_id: &AtomicI64) -> Option<Job> {
             })
         }
         Err(e) => {
-            // Our types cannot fail to serialize, but by contract it is open. Dropping the body here would be a silent
-            //   loss, so it stays in the queue and is retried at the next wake-up.
+            // Our types cannot fail to serialize, but by contract it is open; dropping the body would be a silent loss, so it stays queued and
+            //   is retried at the next wake-up.
             tracing::warn!("turn/start serialization failed — this body stays in the queue: {e}");
             None
         }
     }
 }
 
-/// If the tool-end trigger ([`State::steer_due`]) stands, picks one held item to hand to the running turn, moves it to `InFlight`, and builds its
-/// `turn/steer` — that is all of mid-turn handover (ADR-0235). ★It does not open a turn★ — the opening place is still
-/// [`take_turn_locked`] alone (ADR-0193).
+/// If the tool-end trigger ([`State::steer_due`]) stands, picks one held item for the running turn, moves it to `InFlight` and builds its
+/// `turn/steer` (ADR-0235). ★It does not open a turn★ — only [`take_turn_locked`] does (ADR-0193).
 ///
-/// Candidate = the oldest `Held` **user** item. ★Mail is skipped★ — it is outside the list, so it is not under the no-overtaking rule, and it is held until the turn
-///   end and goes out at Idle (held mail does not block the steer of user items). One request is one item (PRD §3-8)
-///   — while the trigger stands, the writer calls it again in turn and hands over all held text in typing order (each item with its own `clientUserMessageId`).
-/// ★If there is nothing to hand over, the trigger is lowered★ — no held user text · no running turn whose turn id is known (`expectedTurnId` is the vendor's
-///   precondition) · that turn's 「steer refused」 mark ([`State::steer_refused`]) · the candidate is not a list item (Direct
-///   goes out only by `turn/start`) · below the floor (no identifier — today's path). Text typed after that waits for the next tool end or the turn end (Idle
-///   order).
-/// ★If the candidate is pre-announce, it waits with the trigger left standing★ — it does not skip (typing order), and the announcement wakes the writer ([`announce`]).
-/// ★It splits from ✕ under the same lock★ — a ✕ that came after it moved to `InFlight` here is on the handed-over side (`TooLate`).
+/// Candidate = the oldest `Held` **user** item; mail is skipped (outside the list, waits for Idle). One request = one item (PRD §3-8);
+/// the writer calls again until all held text is handed over, each with its own `clientUserMessageId`.
+/// ★Nothing to hand over → the trigger is lowered★: no held user text · no running turn with a known id (`expectedTurnId`) · the turn's
+/// 「steer refused」 mark ([`State::steer_refused`]) · candidate not a list item (Direct goes only by `turn/start`) · below the floor.
+/// ★A pre-announce candidate waits with the trigger standing★ ([`announce`] wakes the writer). ★Split from ✕ under the same lock★ — a ✕
+/// after the move to `InFlight` is `TooLate`.
 // ADR-0231
 // ADR-0235
 fn take_steer_locked(s: &mut State, next_id: &AtomicI64) -> Option<Steer> {
@@ -2108,8 +1825,8 @@ fn take_steer_locked(s: &mut State, next_id: &AtomicI64) -> Option<Steer> {
             })
         }
         Err(e) => {
-            // The type cannot fail to serialize but by contract it is open — the item stays held and goes out at the turn end. The trigger is lowered
-            //   so the same failure is not repeated on every wake-up.
+            // Cannot fail to serialize but by contract it is open — the item stays held and goes out at the turn end; the trigger is lowered so
+            //   the failure is not repeated on every wake-up.
             tracing::warn!("turn/steer serialization failed — this item stays held: {e}");
             s.steer_due = false;
             None
@@ -2130,7 +1847,7 @@ fn next_job(state: &SharedState, next_id: &AtomicI64) -> Option<Job> {
         if let Some(job) = take_turn_locked(&mut s, next_id) {
             return Some(job);
         }
-        // While the tool-end trigger stands, held user text one at a time — when there is nothing left to hand over, that function lowers the trigger.
+        // While the tool-end trigger stands, held user text one at a time; the function lowers the trigger when nothing is left.
         // ADR-0231
         if let Some(steer) = take_steer_locked(&mut s, next_id) {
             return Some(Job::Steer(steer));
@@ -2143,26 +1860,14 @@ fn next_job(state: &SharedState, next_id: &AtomicI64) -> Option<Job> {
     }
 }
 
-/// Ends the turn only when `seq` is **exactly the turn in progress now**, disposes that turn's items with `close`, releases the queue, and
-/// **emits the boundary** of that turn. The list events of the disposal are emitted **before** the boundary — the consumer the boundary wakes
-/// sees a tidied list.
+/// Ends the turn only when `seq` is **exactly the turn in progress now**, disposes its items with `close`, releases the queue and **emits
+/// the boundary** (disposal events first). ★Without the marker check a late signal would close the next turn★. Returns whether it ended.
 ///
-/// ★Ending without looking at the marker would let a late signal close the next turn★ — then two turns would be open at once, which is exactly the state
-/// the input queue is meant to prevent. The returned value = whether it actually ended it.
-///
-/// ★The point is that emitting the boundary is not a choice but part of this function★ (ADR-0127): for turns ending on this path,
-///   `turn/completed` **does not come** (write failure · response decode failure · error response · deadline expiry · turn id over the cap).
-///   Item disposal is part of this function for the same reason — without it that `InFlight` remains forever. But the only input that
-///   returns the fact layer to 「not mid-turn」 is the turn boundary signal, so returning only the state without a boundary would leave that
-///   incarnation **observed as mid-turn although idle**, and mail is blocked until the 30-minute fail-open valve sweeps it.
-///   ★So it is not replaced by one [`OutputEvent::Error`] line★ — that vocabulary means 「not an end」, so the classifier does not
-///   count it as a turn signal (that was exactly the mechanism of the defect above).
-/// ★The reason is carried **inside** the boundary, with no separate error line in front★ — splitting would divide 「the turn ended」 and 「how
-///   it ended」 into two events and give consumers one more ordering contract (the translator's `turn/completed` spot already made
-///   the same decision).
-/// ★The outcome of this path is always `Failed`★ — all five callers mean 「we give up on this turn」, and none of them
-///   is an outcome the peer told us. An outcome the peer told us passes the translator and is attributed by [`Reader::note_turn`].
-///   `close` is `Rejected` (write failure · error response) or `Unanswered` (the rest).
+/// ★Emitting the boundary is part of this function★ (ADR-0127): on these paths `turn/completed` **does not come** (write failure · decode
+/// failure · error response · deadline · turn id over the cap), and only a boundary returns the fact layer to "not mid-turn" — else the
+/// incarnation is **observed mid-turn although idle**, blocking mail until the 30-minute fail-open. An [`OutputEvent::Error`] line cannot
+/// replace it (not a turn signal); the reason rides **inside** the boundary (no extra ordering contract).
+/// The outcome is always `Failed`: `close` = `Rejected` (write failure · error response) or `Unanswered` (the rest).
 fn end_turn_if(
     state: &SharedState,
     core: &OutputCore,
@@ -2177,11 +1882,9 @@ fn end_turn_if(
             TurnState::Active { seq: cur, turn_id } if *cur == seq => {
                 let turn_id = turn_id.clone();
                 s.turn = TurnState::Idle;
-                // ★The held end is dropped together with this turn★: that slot only waits for the id of **the turn that was open**,
-                //   so if the turn ends by another path, it will never be compared. If left, the moment the next
-                //   turn reuses that id, [`Reader::resolve`] would close the freshly opened turn on the spot
-                //   and raise a stale boundary. A turn always opens only from `Idle` ([`take_turn_locked`]),
-                //   so emptying it at every idle spot keeps any slot from carrying over to the next turn.
+                // ★The held end is dropped with this turn★: that slot waits only for the id of **the turn that was open**; left behind, the moment
+                //   the next turn reuses that id [`Reader::resolve`] would close the fresh turn and raise a stale boundary. A turn opens only
+                //   from `Idle` ([`take_turn_locked`]), so emptying at every idle spot keeps any slot from carrying over.
                 s.early_completions.clear();
                 // ADR-0231
                 let drops = s.close_turn_items(seq, close);
@@ -2192,7 +1895,7 @@ fn end_turn_if(
         }
     };
     match ended {
-        // ★Emit after letting go of the lock★ (ADR-0006) — subscribers run arbitrary code inside this call.
+        // ★Emit after releasing the lock★ (ADR-0006) — subscribers run arbitrary code inside this call.
         Some((turn_id, drops)) => {
             drops.emit(core, state);
             core.emit(OutputEvent::TurnEnd {
@@ -2207,11 +1910,10 @@ fn end_turn_if(
     }
 }
 
-/// The `turn/start` of the turn the writer opened could not be written — withdraws the waiting entry and closes that turn as refused (`Rejected`) (it did not reach
-/// the vendor — that text returns to the held place and waits behind the halt · [`State::close_turn_items`]).
+/// The `turn/start` of the turn the writer opened could not be written — withdraws the waiting entry and closes that turn as `Rejected`
+/// (the text did not reach the vendor — it returns to the held place behind the halt · [`State::close_turn_items`]).
 ///
-/// ★This failure has no way back to the caller★ — that call already received `Ok` and left. All that remains is closing this turn as a
-///   failure (no new correction channel is made).
+/// ★This failure has no way back to the caller★ — the call already returned `Ok`; all that remains is closing the turn as a failure.
 // ADR-0231
 fn turn_write_failed(
     state: &SharedState,
@@ -2234,18 +1936,18 @@ fn turn_write_failed(
 /// The outcome of [`issue_steer`].
 // ADR-0231
 enum Issued {
-    /// Fully written — the handed-over mark of that item was emitted.
+    /// Fully written — the handed-over mark was emitted.
     Written,
-    /// Could not write — that item was returned to the held place ([`steer_write_failed`]).
+    /// Could not write — the item was returned to the held place ([`steer_write_failed`]).
     Failed,
-    /// The waiting table closed — it means the link closed, so the writer ends.
+    /// The waiting table closed = the link closed, so the writer ends.
     Closed,
 }
 
-/// Emits one steer the writer picked. ★The waiting entry is registered **before** the write★ — registered after, a fast response would arrive first and be dropped as 「unknown
-/// id」, and that item would remain waiting for a response. `write` = the action of writing one line to the peer's stdin (production =
-/// [`write_line`] — the test bench swaps the write).
-/// ★Known remainder★: on `Closed`, the item just moved remains `InFlight` — the link has already closed, and the core's end synthesis closes it.
+/// Emits one steer the writer picked. ★The waiting entry is registered **before** the write★ — after it, a fast response would arrive
+/// first and be dropped as an "unknown id", leaving the item waiting. `write` = writing one line to the peer's stdin (production =
+/// [`write_line`]; tests swap it).
+/// ★Known remainder★: on `Closed` the item just moved stays `InFlight` — the link already closed and the core's end synthesis closes it.
 // ADR-0231
 fn issue_steer(
     state: &SharedState,
@@ -2263,7 +1965,7 @@ fn issue_steer(
     }
     match write(&steer.line) {
         Ok(()) => {
-            // The handed-over mark — emitted **after** writing (the value is read from the current stage — [`publish_hand_over`]).
+            // The handed-over mark — emitted **after** writing (value read from the current stage — [`publish_hand_over`]).
             publish_hand_over(core, state, &steer.item);
             Issued::Written
         }
@@ -2274,11 +1976,12 @@ fn issue_steer(
     }
 }
 
-/// A steer the writer picked could not be written — withdraws the waiting entry and returns that item to the held place (it did not reach the vendor · user decision
-/// 2026-09-26 B — not erased). The disposal is the same as a steer refusal ([`State::hold_refused_steer`]): the 「steer refused」 mark is attached to that turn
-/// so no loop is made where the next tool end of the same turn immediately writes the same text again, and the next Idle opens it · if ✕ reached it, it is withdrawn.
-/// ★The turn is left as is★ — the steer did not open a turn, and that turn keeps running at the vendor (it is not a trigger of the halt after error either — TRD §5-5
-/// five exits). Generation masking is the same as refusal — an item already disposed because the turn ended before the write is not touched and no mark is attached.
+/// A steer the writer picked could not be written — withdraws the waiting entry and returns the item to the held place (it did not
+/// reach the vendor · user decision 2026-09-26 B — not erased). Disposal = a steer refusal ([`State::hold_refused_steer`]): the
+/// 「steer refused」 mark stops the next tool end of the same turn from rewriting the same text; the next Idle opens it; a ✕-reached item
+/// is withdrawn.
+/// ★The turn is left as is★ — the steer did not open a turn, it keeps running at the vendor, and it is no halt trigger (TRD §5-5 five
+/// exits). Generation masking as in refusal — an item already disposed by the turn end is untouched and gets no mark.
 // ADR-0231
 fn steer_write_failed(
     state: &SharedState,
@@ -2298,7 +2001,7 @@ fn steer_write_failed(
     tracing::warn!(
         "codex app-server turn/steer send failed — that text returns to the held place: {e}"
     );
-    // ADR-0235: the same event is also left as a trace line so it is visible to QA reading only the trace.
+    // ADR-0235: also left as a trace line so it is visible to QA reading only the trace.
     if let Some(t) = steer.trace(SteerPhase::WriteFailed) {
         t.write(core.id());
     }
@@ -2316,8 +2019,7 @@ fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
             REQUEST_DEADLINE.as_secs()
         );
         match entry.waiter {
-            // ★This channel is already woken by `recv_timeout` too★ — if both stand, the one that comes first wins, and if the channel
-            //   is closed, send fails quietly.
+            // ★This channel is also woken by `recv_timeout`★ — if both stand the first wins; a closed channel makes send fail quietly.
             Waiter::Handshake(tx) => {
                 let _ = tx.send(Err(reason));
             }
@@ -2333,9 +2035,9 @@ fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
                     tracing::debug!("the turn opened by a turn/start past its deadline has already ended — leaving it as is");
                 }
             }
-            // ★Same as a success response — the item is not moved★ (reason = the steer response spot of [`Reader::resolve`]): that item waits for the echo,
-            //   and if the turn ends without an echo, the turn end disposes it ([`State::close_turn_items`]). Even if the expired steer is processed late at the vendor, there is no double
-            //   delivery — it is tied to that turn by `expectedTurnId` and is refused after the turn ends.
+            // ★Same as a success response — the item is not moved★ (reason = the steer response spot of [`Reader::resolve`]): it waits for the
+            //   echo, and a turn ending without one disposes it ([`State::close_turn_items`]). An expired steer processed late at the vendor
+            //   cannot double-deliver — `expectedTurnId` ties it to that turn and it is refused after the turn ends.
             // ADR-0231
             Waiter::Steer { .. } => tracing::warn!("{reason}"),
             Waiter::Fire => tracing::warn!("{reason}"),
@@ -2345,47 +2047,17 @@ fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
 
 /// Hands the received thread id to the assembly point's record verb. `Err` = this incarnation's connection must not be set up.
 ///
-/// ★It is not persisted here★ — this port of the production assembly point is the receipt of the session id latch, and this link's persistence happens when the peer
-/// first echoes a user message ([`Reader::witness_first_turn`] · ADR-0226 amendment).
-///
-/// ★The honest condition of the gate is not 「it is on disk」 but 「the record call returned」★ — that port swallows failures into the log
-/// inside itself and does not block the caller, so claiming persistence on top of it would quote a guarantee that does not exist.
-/// If the port is `None`, there is nowhere it is recorded either.
-/// ★Called before [`Link::Ready`] — do not flip it★: the line where `turn/start` is allowed is `Ready`, so if the order
-/// flipped, a turn would go out with that session before it is recorded, and the port would lose the contract 「called before sending」. Because that contract
-/// stands, there is no second verb asking back whether it was recorded.
-///
-/// ★The closed fence **only narrows the window and cannot close it — do not read it as 「it blocks late writes」**★. It blocks one thing:
-/// **an end already observed before this thread got here** (the child answered and died right away and the reader saw EOF ·
-/// [`AgentTransport::shutdown`] ran first).
-///
-/// ★**Do not estimate the remaining window as 「a few instructions」 — the dominant term of its size is lock contention**★. The window runs from the moment
-/// the state lock above is released to **the moment the profile map actually changes**, and in between this thread waits for the profile registry lock.
-/// Another thread can hold that lock **until the whole rewrite of `agents.json` finishes** (ADR-0071
-/// puts the save inside the lock). So `shutdown()`, the return of `join_pump`, and the reaper's reaping can
-/// all fit inside this window, and a write arriving after them **writes the sid into the profile of an already reaped session and pushes the old sid
-/// into history.** The incarnation marker guard does not cover this window either — none of the end paths touches `epoch`, so
-/// the markers of a reaped session and a live session are **the same**.
-///
-/// Closing that window would need the 「is it alive」 decision to go into **one critical section** with the record, but that critical section is on the profile
-/// registry side, and this link's state lock cannot be carried that far (it would be a disk write while holding a lock — the lock order of the module
-/// header).
-///
-/// ★Do not inflate the value `catch_unwind` actually buys — it is not 「safe even if the record blows up」★.
-/// The call graph under this port has **no panic source our code creates** (decoding returns `Result`,
-/// base `now_epoch_ms` is `unwrap_or(0)`, `normalize_hierarchy` does no indexing, and a save failure returns as `Err`
-/// and the registry ends it with a log). What can be reached is the **poison guard** (`expect`) of the registry map lock —
-/// the store state field recovers from poison and does not panic — and for that to stand, **another panic must first have
-/// poisoned that lock**. So this containment buys exactly one thing:
-/// ★in a state where the registry is already broken by someone else's panic, the codex writer **does not die on top of it**★.
-/// ★**Moreover, this branch is not reached in the production process**★ — the writer is outside the containment marking, so a panic in here
-/// has the hook end the process on the spot (ADR-0292). That is, the outcome running as `Err` is observed only in a test build without the hook.
-/// There are two reasons it is still kept — in that build it actually stands, and if this place becomes contained, the defence lives on its own.
-///
-/// What this blocks in a build without the hook: if unwind went up from here, neither [`Link::Ready`] nor [`Link::Down`] would stand,
-/// the link would stop at `Connecting`, and in that state [`AgentTransport::send_input`] would see neither the closed marker nor `Down`
-/// and **return `Ok` while the queue fills up to the cap** — the agent looks Running but goes mute, and
-/// there is no recovery but kill (the spot where ADR-0190's 「do not let it pass silently」 collapses into 「it stops silently」).
+/// Not persisted here — persistence happens at the peer's first user message echo ([`Reader::witness_first_turn`] · ADR-0226). ★The gate's
+/// condition is "the record call returned", not "on disk"★ (the port swallows failures into the log). `None` port = nowhere to record.
+/// ★Called before [`Link::Ready`]★ — a turn must not go out before the session is recorded.
+/// ★The closed fence only narrows the window★: it blocks an end **already observed**. The rest is dominated by registry lock contention
+/// (held **through the whole `agents.json` rewrite** — ADR-0071), so `shutdown()` · `join_pump` · the reaper can fit inside and a late write
+/// records the sid into an already reaped session's profile and pushes the old sid into history; the incarnation marker does not help (no end
+/// path touches `epoch`). Closing it needs one critical section on the registry side.
+/// `catch_unwind` only keeps the codex writer from dying on top of an already broken (poisoned) registry — the graph below has no panic
+/// source of our code. ★Not reached in production★ (the writer is outside the containment marking: the hook ends the process — ADR-0292);
+/// the `Err` outcome is seen only in a hook-less build, where an unwind would leave the link `Connecting` with `send_input` returning `Ok`
+/// while the queue fills (ADR-0190).
 fn record_session_id(
     state: &SharedState,
     shutdown: &AtomicBool,
@@ -2399,16 +2071,16 @@ fn record_session_id(
         return Ok(());
     };
 
-    // ★Both markers are looked at together★ — [`AgentTransport::shutdown`] sets this atomic **first** and then takes the state
-    //   lock to set `closed`. The gap in between is not empty (at that moment the lock may be held by `send_input` · [`next_job`] ·
-    //   the reader's refusal path). Looking at only one would leak that whole span, while OR-ing both closes it for free.
+    // ★Look at both markers together★ — [`AgentTransport::shutdown`] sets this atomic **first**, then takes the state lock to set
+    //   `closed`; the gap is not empty (the lock may be held by `send_input` · [`next_job`] · the reader's refusal path). One marker leaks
+    //   the span; OR-ing both closes it.
     let already_ended = shutdown.load(Ordering::Acquire) || {
         let (lock, _) = &**state;
         let s = sync::lock(lock);
         s.closed
     };
     if already_ended {
-        // ★It is a normal end, so no failure outcome is emitted★ — returning `Err` would stand one more error boundary on a session that already ended.
+        // ★A normal end, so no failure outcome★ — `Err` would stand one more error boundary on a session that already ended.
         tracing::debug!("not recording the codex thread id — this incarnation has already ended");
         return Ok(());
     }
@@ -2421,23 +2093,21 @@ fn record_session_id(
     })
 }
 
-/// One reason the connection could not stand. ★The two fields answer **different questions**★ — `reason` is what went wrong,
-/// `while_recording` is **at which stage it went wrong**. The latter only decides what to tell a person (headline ·
-/// `detail`).
+/// One reason the connection could not stand. ★The two fields answer **different questions**★ — `reason` = what went wrong,
+/// `while_recording` = **at which stage**; the latter only decides what to tell a person (headline · `detail`).
 ///
-/// ★**The stdin disposal no longer splits by this field**★ — if it failed, it is closed regardless of the branch
-/// (that spot in [`writer_loop`] is the source of truth for the reason). This field once meant 「is the peer alive」 and doubled as that decision,
-/// and that dual role let the combination **round-trip failure but the peer is alive** (codex's `thread/resume` refusal) leak
-/// entirely. Do not bring that meaning back here.
+/// ★**The stdin disposal no longer splits by this field**★ — on failure it is closed on every branch ([`writer_loop`] has the reason).
+/// The field once meant "is the peer alive" and doubled as that decision, which let **round-trip failure but peer alive** (codex's
+/// `thread/resume` refusal) leak entirely. Do not bring that meaning back.
 struct HandshakeFailure {
     reason: String,
-    /// Did the two round trips succeed and it fell over at the record stage? Only splits the sentence given to a person (the doc above).
+    /// Did the two round trips succeed and it fell over at the record stage? Only splits the sentence given to a person.
     while_recording: bool,
 }
 
 impl HandshakeFailure {
-    /// The headline for the screen · log. ★The two branches are not reported with the same sentence★ — writing a record failure as 「handshake failed」
-    /// makes one suspect the protocol round trip, sending the classification cost to the wrong place (the round trip succeeded).
+    /// The headline for screen · log. ★The two branches get different sentences★ — writing a record failure as "handshake failed" would
+    /// make one suspect the protocol round trip (it succeeded).
     fn headline(&self) -> &'static str {
         if self.while_recording {
             "codex app-server session id record failed (the protocol round trip succeeded)"
@@ -2447,27 +2117,14 @@ impl HandshakeFailure {
     }
 }
 
-/// Delivers the connection outcome — ★**at most once**★ (zero-or-once). If the user turned it off, it is not delivered.
+/// Delivers the connection outcome — ★**at most once**★; not delivered if the user turned it off.
 ///
-/// ★A handshake released by kill is not 「the peer answered」★: [`AgentTransport::shutdown`] closes the waiting table and
-///   wakes the handshake with `Err`, and delivering that as is would **record the user's cancellation as a resume failure** and
-///   run cleanup once more on top of that (defect ③). On that branch the only fact the supervisor sees is the end state,
-///   and there the discipline 「what the user turned off is not a failure」 already exists.
-/// ★Looking at the `shutdown` atomic is enough★ — that marker stands **first** on the kill path (the first line of that function)
-///   and never goes back. That is, what is read here is a latch, not a flipping cell.
-/// ★★What keeps 「at most once」 is **the shape of the call sites**, not this function★★ — written precisely:
-///   this function only borrows `&Option<LinkSink>` and does not consume it, and delivers every time it is called. The grounds for being bound
-///   to once are two — ① the production call sites are only **the two branches of one `match`** in [`writer_loop`], so
-///   only one runs on an execution path ② only the writer thread holds the port, and the `take` of [`AgentTransport::start`]
-///   prevents two of those threads from coming up.
-///   ★This spot once said 「the port is consumed with `take()`」, but **there is no such line**★ — the only
-///   `take` is in `start`, and what it prevents is not a second **call** but a second **thread**.
-///   Adding call sites breaks this invariant at that site, so when adding them, look here too.
-/// ★★What is suppressed is **only the message — it cannot stop the channel from disappearing**★★: this port is held by the writer thread
-///   alone, so if delivery is skipped and [`writer_loop`] returns, the sending end drops and the receiving side
-///   wakes with `Disconnected`. Reading that signal as 「the link could not reach an outcome」 would **make the suppression meaningless**
-///   (the user's cancellation would turn back into a resume failure) — so the receiving side looks at the end-intent latch **first**
-///   ([`crate::manager::AgentManager::link_activation_verdict`]). This suppression alone is only half.
+/// A handshake released by kill is not "the peer answered": delivering it would **record the user's cancellation as a resume failure** and
+/// clean up twice (defect ③). The `shutdown` atomic is a latch set **first** on the kill path.
+/// ★"At most once" holds by **the call-site shape**, not this function★ (it delivers every call): the production sites are the two branches
+/// of one `match` in [`writer_loop`], and only the writer holds the port (`take` in [`AgentTransport::start`] prevents a second thread).
+/// ★Only the message is suppressed — the channel still disappears★: the receiver wakes with `Disconnected`, so it checks the end-intent latch
+/// first ([`crate::manager::AgentManager::link_activation_verdict`]).
 fn deliver_link(shutdown: &AtomicBool, sink: &Option<LinkSink>, resolution: LinkResolution) {
     if shutdown.load(Ordering::Acquire) {
         tracing::debug!(
@@ -2493,17 +2150,11 @@ fn writer_loop(
     link_sink: Option<LinkSink>,
     announcer: Arc<Announcer>,
 ) {
-    // ★The two failures are carried **separately**★ — the 「handshake」 this link speaks of is not only the two round trips but **up to the record call
-    //   returning** (the gate condition of [`record_session_id`] above), so both block `Ready` and ride the cleanup below
-    //   together. Still, there is **one fact that must not be lumped together**: on the branch that fell over at the record, the round trip already succeeded,
-    //   so **it is certain the peer is alive and reading our stdin**. On the branch where the round trip itself failed there is no such
-    //   certainty — ★no certainty is not 「dead」★: a refusal (`thread/resume` returned with an error) is an answer
-    //   the peer gave while alive and well.
-    //   ★So what this difference splits is **only what to tell a person**★ — the stdin disposal below is the same
-    //   regardless of the branch. Do not tie the two together again (source of truth for the reason = the closing spot below).
-    // ★★The budget clock is started **here, once** — the handshake and the history restore share it★★.
-    //   Started separately, the time until the connection stands would be up to two budgets, exceeding the manager's backstop, and a resume that
-    //   succeeded while fetching history would be decided as a failure (the doc of [`hydrate_history`] is the source of truth for that causality).
+    // ★The two failures are carried **separately**★: the "handshake" runs **up to the record call returning** ([`record_session_id`]), so
+    //   both block `Ready` and ride the cleanup below. Difference: after a record failure the round trip succeeded, so **the peer is
+    //   alive and reading stdin**; after a round-trip failure no certainty — ★no certainty is not "dead"★ (a `thread/resume` refusal
+    //   comes from a live peer). ★This splits **only what to tell a person**★; the stdin disposal below is the same on every branch.
+    // ★★The budget clock starts **here, once** — handshake and history share it★★ ([`hydrate_history`]).
     let link_deadline = Instant::now() + HANDSHAKE_BUDGET;
     let outcome = match handshake(
         &stdin,
@@ -2530,27 +2181,19 @@ fn writer_loop(
 
     match outcome {
         Ok(opened) => {
-            // ★The floor decision is written **after** the record returns and **before** the history★ (reason = [`settle_floor`]) — the window in which the list of pre-decision
-            //   items comes up late is bound to the handshake round trip (TRD §5-5). It is before the gate, so those items
-            //   cannot go out yet.
+            // ★Write the floor decision **after** the record returns and **before** the history★ ([`settle_floor`]) — the window in which
+            //   pre-decision list items appear late is bound to the handshake round trip (TRD §5-5). It is before the gate, so they cannot
+            //   go out yet.
             // ADR-0231
             settle_floor(&core, &state, &announcer, opened.floor);
-            // ★★The past screen is raised **before opening the gate** — do not flip the order★★ (ADR-0203):
-            //   if the gate opened first, user turns queued from that moment could go out, and that turn's response would go into the ring **before**
-            //   the history not yet carried. Then the restored conversation would attach after the new answer.
-            //   ★This order carries in place what the seed-before-publish of ADR-0079 used to keep★ — there the history was
-            //   on disk and could be read before launching the child, but here the history is received **by asking a peer that exists only after the handshake
-            //   stands**, so it cannot be pulled ahead of the session going into the registry.
-            //   Instead ⓐ it is before the gate, so there is no turn of ours yet, and ⓑ the door below **does fanout too**.
-            // ★That it is `emit_without_turn_observation` is the concrete form of ⓑ★ — `seed` only puts into the ring and
-            //   does no fanout, so used here, where the session is already in the registry, a subscriber that attached in between would **never see** the past
-            //   screen (it already replayed an empty ring and has no way to receive it again). This door both puts into the ring and
-            //   sends to attached subscribers, so both kinds see the same thing.
-            // ★While doing so it does not touch observation · state · finalize★ — the very discipline `seed` kept
-            //   (ADR-0005 · ADR-0113 · ADR-0127). Feeding past records as progress signals would mean that turn's end
-            //   never comes and mail is blocked until the 30-minute fail-open.
-            // ★Raised **as one chunk**★ — called item by item, the reader's live lines would take seqs in each gap and
-            //   new lines would be stuck in the middle of the restored conversation ([`OutputCore::emit_batch_without_turn_observation`]).
+            // ★Raise the past screen **before opening the gate** — do not flip the order★ (ADR-0203): gate first, and queued user turns could go
+            //   out and their response enter the ring **before** the unraised history, attaching the restored conversation after the new
+            //   answer. (This replaces ADR-0079's seed-before-publish: here history comes **from a peer that exists only after the
+            //   handshake**, so instead ⓐ it is before the gate — no turn of ours yet — and ⓑ the door below **fans out too**.)
+            // ★`emit_without_turn_observation` is ⓑ★: `seed` only fills the ring without fanout, so a subscriber attached in between
+            //   would **never see** the past screen. ★It touches no observation · state · finalize★ (ADR-0005 · ADR-0113 · ADR-0127) —
+            //   past records as progress would leave that turn's end never coming. ★Raised **as one chunk**★ — item by item, live lines
+            //   would take seqs in the gaps ([`OutputCore::emit_batch_without_turn_observation`]).
             core.emit_batch_without_turn_observation(hydrate_history(
                 &stdin,
                 &state,
@@ -2559,16 +2202,14 @@ fn writer_loop(
                 &opened,
                 link_deadline,
             ));
-            // ★★The gate opens **only while the connection still stands**★★ — if the stream ended while fetching history,
-            //   setting `Ready` here is 「delivering something dead as a successful activation」 ([`open_gate`]).
+            // ★The gate opens **only while the connection still stands**★ — if the stream ended while fetching history, setting `Ready` would
+            //   deliver something dead as a successful activation ([`open_gate`]).
             match open_gate(&state, opened.thread_id) {
-                // ★Delivered **right after** opening the gate — not called while holding the lock★ (ADR-0006: no external calls while holding the state
-                //   lock. This port calls assembly point code, and that side touches channels).
+                // ★Delivered **right after** opening the gate, not under the lock★ (ADR-0006) — this port calls assembly point code that touches channels.
                 Ok(()) => deliver_link(&shutdown, &link_sink, LinkResolution::Ready),
                 Err(reason) => {
-                    // ★No error · boundary is added to the screen here★ — the stream having ended means the pump will soon
-                    //   emit the end transition (ADR-0005 sole actor), and that path already closes the screen.
-                    //   If it is a user kill, `deliver_link` suppresses this delivery (that function's latch).
+                    // ★No error · boundary is added to the screen here★ — the stream ending means the pump will soon emit the end transition
+                    //   (ADR-0005 sole actor), which already closes the screen; a user kill makes `deliver_link` suppress this.
                     tracing::warn!(
                         "codex app-server: the connection ended while fetching history — not opening the gate: {}",
                         sanitize(&reason, LOG_STRING_LIMIT)
@@ -2594,8 +2235,8 @@ fn writer_loop(
             if dropped > 0 {
                 tracing::warn!("{dropped} pending input(s) were lost because the handshake failed");
             }
-            // ★The reason is **carried** in the delivery★ — this wording is a JSON-RPC error on stdout, so it is in neither the console tail nor the stderr
-            //   diagnostic tail. If not carried here, the classification has no way to reach it at all.
+            // ★The reason is **carried** in the delivery★ — this wording is a JSON-RPC error on stdout, in neither the console nor the stderr
+            //   diagnostic tail; without carrying it the classification cannot reach it.
             deliver_link(
                 &shutdown,
                 &link_sink,
@@ -2603,23 +2244,14 @@ fn writer_loop(
                     reason: reason.clone(),
                 },
             );
-            // ★This boundary does not correspond to a link-side turn★: the only place that opens a turn ([`take_turn_locked`])
-            //   requires [`Link::Ready`], and that state stands only if the handshake succeeds. So the queued
-            //   `dropped` inputs, seen from the link side, are **not turns yet but queued bodies**, and the fact layer has never
-            //   observed this incarnation as 「mid-turn」 either (the first progress signal comes from the item the peer echoes,
-            //   and no synthetic input echo is declared — ADR-0193).
-            // ★Still, **whether or not input was dropped**, one failure outcome is emitted★ — because this is the only thing that closes
-            //   the screen. The frontend does not read `Error` as a turn end (because retried stream errors come in that vocabulary
-            //   — the doc of [`OutputEvent::Error`]), so a slot holding only an error has **its waiting indicator spin
-            //   forever**. The link is already [`Link::Down`], so nothing will arrive after that either.
-            // ★There is no open turn and so no id to carry, so `turn_id` is not invented★.
-            // ★However many were dropped, there is one boundary★ — `dropped` is the number of dropped bodies, not the number of turns.
-            // ★The reason sentences of the two branches differ on purpose★ — the dropping side says that bodies a person sent were destroyed,
-            //   and the non-dropping side says only that the connection could not stand. Writing input loss on the latter would report something
-            //   that did not happen.
-            // ★That the reason is carried both in the error line and inside the boundary is intended★ — a consumer reading only the boundary must also know what
-            //   happened (the same reason as [`end_turn_if`]), and so no new ordering contract
-            //   arises between the two.
+            // ★This boundary has no link-side turn★: [`take_turn_locked`] requires [`Link::Ready`], so `dropped` inputs are **queued bodies, not
+            //   turns**, and the fact layer never saw this incarnation "mid-turn" (ADR-0193).
+            // ★Still, **whether or not input was dropped**, one failure outcome is emitted★ — the only thing closing the screen: the frontend
+            //   does not read `Error` as a turn end ([`OutputEvent::Error`]), so a slot holding only an error would spin **forever**. No
+            //   open turn, so no `turn_id`; one boundary however many bodies were dropped.
+            // ★Reason sentences differ on purpose★ — the dropping side says bodies a person sent were destroyed, the other only that the
+            //   connection could not stand (claiming loss there would report something that did not happen). ★The reason rides both the error
+            //   line and the boundary★ so a boundary-only consumer knows too (as [`end_turn_if`]).
             for entry in pending.close() {
                 if let Waiter::Handshake(tx) = entry.waiter {
                     let _ = tx.send(Err(reason.clone()));
@@ -2637,7 +2269,7 @@ fn writer_loop(
                     sanitize(reason, LOG_STRING_LIMIT)
                 )
             } else if *while_recording {
-                // ★Here 「the connection could not stand」 is false★ — the round trip stood, and we decided not to use it.
+                // ★Here "the connection could not stand" is false★ — the round trip stood and we decided not to use it.
                 format!(
                     "{} — this incarnation is not used: {}",
                     failure.headline(),
@@ -2657,47 +2289,18 @@ fn writer_loop(
                 },
             });
 
-            // ★Our stdin is closed **on both branches**★ — getting here means 「this incarnation is not
-            //   used」 is settled, and that conclusion is the same regardless of the peer's liveness. Without closing, the loop below
-            //   would spin forever chewing only `Job::Sweep`, holding the child · reader · writer, and the reader would never see EOF, so
-            //   [`OutputCore::finish`] would never run and **neither the end transition nor reaping would happen**
-            //   (the screen says Running but all input is refused — until a person kills it).
-            // ★This spot once said 「close only on the branch that fell over at the record — only that branch has certainty of the peer's survival」.
-            //   The premise was true and **the conclusion was wrong**★: certainty of survival is not a *premise* of closing.
-            //   If the peer is already dead, `take()` only drops one handle, so it is a no-op (writes after it
-            //   fail anyway), and if it is alive it receives EOF — **both sides are safe.** Conversely, the side that does not close
-            //   has no safe outcome: the combination of a failed round trip with the peer alive and well really exists, and that is
-            //   ★codex **refusing** `thread/resume` with a JSON-RPC error★ (the refusal comes on stdout and
-            //   the child does not die). That combination is exactly the wedge above — ★unlike the record failure branch, it **is reached
-            //   in production**★ (that one is a panic outside the marking, so in the production process the hook ends it first — ADR-0292) — and on a boot restore
-            //   as many stand at once as there are resumable codex profiles.
-            // ★Still, **the reason sentences are kept split**★ — what changed is the stdin disposal, not the diagnosis
-            //   ([`HandshakeFailure::headline`] and the `detail` above). On the round-trip branch the connection could not stand, and on the record branch
-            //   it stood but we decided not to use it.
-            // ★This link does not end its own lifetime★ — it still does not call kill (the 2 verbs of ADR-0001
-            //   belong to the kill handler). What is done here is only **letting go of our write end**, and after that
-            //   the existing causality drives it: peer exit → reader EOF → the `Drop` of [`ReaderExit`] sets
-            //   `closed`+`Link::Down` → the pump emits the end transition (ADR-0005 alone) → the reaper reaps.
-            //   ★The measured 41–51ms is the figure of **the record failure branch** (closed while there was no turn) — how fast the peer
-            //   ends on the refusal branch has never been measured★. Only the causality is the same; do not copy the figure over.
-            // ★Why taking the stdin lock here is safe (unlike the order risk of `shutdown`)★: that risk is the shape where
-            //   **another thread** waits for the lock of a writer hanging in `write_all`. What takes it here is
-            //   the writer itself, and this point is before entering the loop, so it is not inside `write_all`.
-            //   ★That decision does not tell branches apart — removing the `if` this time does not touch these grounds★:
-            //   the axis of the grounds is 「which thread takes it」, not 「which failure it was」, and the acquisition **place** is still
-            //   one (the single line below). So the count also stays two.
-            // ★**Write the range of that safety precisely — not 「the whole file」 but 「the production call graph」**★:
-            //   the places that take this lock blocking are only **two** in the production section ([`write_line`] and this line right below),
-            //   and only the writer calls [`write_line`] (`shutdown` is `try_lock`, so it does not count).
-            //   ★But **the test section takes the same lock blocking outside that graph**★ —
-            //   [`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`] pushes 8MiB with [`write_line`]
-            //   on a separate thread and holds the lock until kill comes. Running such a filling thread and this
-            //   branch **on the same test bench** would block here forever, and then stdin would not close and the causality this round
-            //   set up would disappear entirely. No item combines them that way today — that item does not call [`AgentTransport::start`],
-            //   so the writer thread itself does not come up (that fact is what makes this exception harmless,
-            //   and the moment `start` is added, the harmlessness breaks).
-            //   The count in the production section is guarded by [`tests::the_production_blocking_stdin_locks_are_counted`] —
-            //   if a third appears the decision above must be made again, so it is kept from quietly growing.
+            // ★Our stdin is closed **on both branches**★ — without it the loop below spins on `Job::Sweep`, the reader never sees EOF,
+            //   [`OutputCore::finish`] never runs and **neither the end transition nor reaping happens** (screen Running, all input refused).
+            //   A live peer after a failed round trip exists — ★codex **refusing** `thread/resume`★, **reached in production** (the record
+            //   failure branch is ended by the hook — ADR-0292) — and a boot restore stands up one per resumable codex profile. A dead peer: a
+            //   no-op; a live one: EOF; so survival certainty is not a premise of closing.
+            // ★No kill here★ (ADR-0001's 2 verbs belong to the kill handler): letting go of the write end drives peer exit → reader EOF →
+            //   `Drop` of [`ReaderExit`] (`closed`+`Link::Down`) → pump end transition (ADR-0005) → reaper. [unverified on the refusal branch].
+            // ★Taking the stdin lock here is safe★: the writer itself takes it, before the loop, not inside `write_all` (`shutdown`'s risk is
+            //   **another thread** waiting on a hung writer). Range = **the production call graph**: only [`write_line`] and this line take it
+            //   blocking, and only the writer calls [`write_line`]; the count is guarded by
+            //   [`tests::the_production_blocking_stdin_locks_are_counted`]. ★The test section holds it blocking outside that graph★
+            //   ([`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`]; harmless as it never calls [`AgentTransport::start`]).
             let had_stdin = sync::lock(&stdin).take().is_some();
             tracing::warn!(
                 had_stdin,
@@ -2705,41 +2308,18 @@ fn writer_loop(
                 "the connection could not stand, closing the codex-side stdin — the session is reaped once the peer sees EOF and ends"
             );
 
-            // ★It ends here — this link **kills nothing**★.
-            //   Letting go of stdin makes the peer see EOF and end on its own (measured 41–51ms, with no turn), and that EOF
-            //   ends the reader, leading to [`OutputCore::finish`] → reaper. ★That first link is **not ours**,
-            //   and if the peer remains with stdout open, the whole chain does not run★ — whether the peer ends with EOF even after a refusal
-            //   is **unverified** (only the record failure branch was measured).
-            // ★That disposal is **the manager's job** — do not kill here★: the [`Link::Down`] above is
-            //   immediately visible outside via [`AgentTransport::link_state`], and the activation decision confirms it as a failure
-            //   and then runs the existing teardown (the 2 verbs of ADR-0001) — that kill also releases a hanging reader.
-            //   ★The writer once called `child.kill()` · `TerminateJobObject` directly at this spot, but that
-            //   crossed the line ADR-0199 drew (the writer calling those verbs is a violation the moment it happens), so it was removed.
-            //   Do not revive it — to revive it, that ADR must be changed first.★
-            // ★**A hole that once remained — closed now**★: previously no decision was hooked at all for codex launched as Fresh
-            //   (the supervisor dropped the delivery box), so **nobody looked at** the `Down` of a `thread/start` refusal.
-            //   Now the two activation entrances (the Fresh branch of `AgentManager::activate_profile` ·
-            //   the non-resume branch of `AgentManager::restore_one`) run the same decision, so both modes
-            //   have an owner (`AgentManager::spawn_fresh_settled`).
-            // ★One branch without an owner remains, but **it does not reach here today**★: ad-hoc creation that calls `AgentManager::spawn_agent`
-            //   directly (the daemon's by-cwd branch) drops the delivery box as is. That the output format that entrance gives codex
-            //   is **terminal**, so this link itself does not come up, is all that makes that branch harmless
-            //   — the day that default changes to app-server, this hole opens as is.
+            // ★This link kills nothing★ — disposal is **the manager's job**: [`Link::Down`] is visible via [`AgentTransport::link_state`] and the
+            //   activation decision runs the existing teardown (ADR-0001 2 verbs), whose kill also releases a hanging reader. Do not bring the
+            //   writer's `child.kill()` / `TerminateJobObject` back here — ADR-0199 forbids it.
+            // Both activation entrances (`AgentManager::activate_profile` Fresh · `restore_one` non-resume) run that decision
+            //   (`spawn_fresh_settled`). ★One ownerless branch, not reached today★: ad-hoc `AgentManager::spawn_agent` (by-cwd) drops the
+            //   delivery box; harmless only because it gives codex the **terminal** output format — if that default becomes app-server it opens.
         }
     }
 
-    // ★The loop runs even if the handshake failed★ — because there must be one way out: when the reader sees EOF and
-    //   sets `closed`, [`next_job`] returns `None` and it exits on its own. Returning here would make
-    //   two cleanup points.
-    // ★But **「it runs to answer the peer's requests」 is no longer true**★ — stdin was already let go right above,
-    //   so every [`write_line`] after it fails. The peer sees EOF instead of waiting for an answer. The old sentence
-    //   (「the peer may be alive, and then a place to answer server requests is needed」) dates from when closing existed on only one
-    //   branch.
-    // ★**Do not write 「the peer never stalls」 unconditionally — that much has never been measured**★: what was measured is one thing,
-    //   「closing stdin while there is no turn makes it exit within 41–51ms」. Under the condition this header writes separately
-    //   — the peer's requests pile up during the handshake and refusals drop at [`OUTBOX_LIMIT`] — after closing,
-    //   every [`write_line`] fails, so the peer meets EOF **with unanswered requests remaining**. Whether the peer simply ends
-    //   even in that state is **unverified**. If it does not end, it is exactly the 「the first link is the peer's action」 item above.
+    // ★The loop runs even if the handshake failed★ — reader EOF sets `closed`, [`next_job`] returns `None`, one exit. Stdin is already let go,
+    //   so every [`write_line`] fails; ★"the peer never stalls" is unmeasured★ — with unanswered requests ([`OUTBOX_LIMIT`] drops)
+    //   [unverified] whether it ends (else the module header's recovery item).
     loop {
         if shutdown.load(Ordering::Acquire) {
             break;
@@ -2763,16 +2343,15 @@ fn writer_loop(
                 line,
                 item,
             } => {
-                // ★The waiting entry is registered **before** writing★ — registered after, a fast response would arrive first and be dropped as an "unknown id".
-                // ★Known remainder★: leaving here leaves the turn just opened as Active. The waiting table having closed means
-                //   the link has already closed, so there is no consumer to read that state, but 「the turn is tidied
-                //   on every way out」 does not hold.
+                // ★The waiting entry is registered **before** writing★ — after it, a fast response would arrive first and be dropped as an "unknown id".
+                // ★Known remainder★: leaving here leaves the turn just opened as Active. The waiting table having closed means the link
+                //   already closed, so nothing reads that state, but "the turn is tidied on every way out" does not hold.
                 if !pending.register(id, Waiter::TurnStart { seq }, method::TURN_START) {
                     break;
                 }
                 match write_line(&stdin, &line) {
                     Err(e) => turn_write_failed(&state, &pending, &core, id, seq, &e),
-                    // ADR-0231: the handed-over mark of the list item it carried — emitted **after** writing (the value is read from the current stage).
+                    // ADR-0231: the handed-over mark of the carried list item — emitted **after** writing.
                     Ok(()) => {
                         if let Some(item) = &item {
                             publish_hand_over(&core, &state, item);
@@ -2805,21 +2384,18 @@ fn writer_loop(
 
 /// The cap on looking again **until the exit code is caught** after the reader sees EOF.
 ///
-/// ★One `try_wait` right after EOF cannot get the code★ — stdout closing and the process being reaped are
-/// not the same moment, so that one call usually falls to `Ok(None)` and the code is quietly **lost**. That loss hurts
-/// twice: the exit code does not show on screen, and `Exited { code: None }` cannot be told apart from 「the child is still alive」,
-/// so the test bench loses its means of telling the two apart.
-/// ★Grounds for the value★: between stdout close and process reaping is on the order of milliseconds. 2 seconds is a generous margin,
-/// and beyond it, it is 「a peer that has not ended」 — that disposal is carried not by this link but by the manager's teardown.
+/// ★One `try_wait` right after EOF cannot get the code★ — stdout closing and reaping are not the same moment, so it usually falls to
+/// `Ok(None)` and the code is **lost**, and `Exited { code: None }` becomes indistinguishable from "still alive".
+/// Grounds: stdout close to reaping is milliseconds; 2 s is a generous margin, and beyond it the peer "has not ended" — carried by the
+/// manager's teardown, not this link.
 const CHILD_REAP_GRACE: Duration = Duration::from_secs(2);
 
-/// Cuts arbitrary chunks into lines. ★It does not read as UTF-8 before a complete line is settled★ — the pump throws chunks that do not know
-/// character boundaries, so a multibyte character can be cut at a boundary, and a newline (0x0A) cannot appear as a UTF-8 continuation byte,
-/// so a byte-level search is safe.
+/// Cuts arbitrary chunks into lines. ★It does not read as UTF-8 before a complete line is settled★ — the pump passes chunks with no
+/// character boundaries, and a newline (0x0A) cannot appear as a UTF-8 continuation byte, so a byte-level search is safe.
 struct LineSplitter {
     buf: Vec<u8>,
-    /// Is it in the middle of dropping the whole tail of an over-cap line up to the next newline? ★If only the buffer were emptied, the remaining bytes of that line
-    /// up to the next newline would be parsed as a "new line" and make a fake envelope★.
+    /// In the middle of dropping the tail of an over-cap line up to the next newline? ★Emptying only the buffer would parse the rest of
+    /// that line as a "new line" and make a fake envelope★.
     discarding: bool,
 }
 
@@ -2868,7 +2444,6 @@ impl LineSplitter {
             }
         }
         if !rest.is_empty() {
-            // ★Measure before appending★ — measuring after appending is already past it at that moment.
             if self.buf.len() + rest.len() > MAX_LINE_BYTES {
                 tracing::warn!(
                     bytes = self.buf.len() + rest.len(),
@@ -2883,42 +2458,29 @@ impl LineSplitter {
     }
 }
 
-/// Closes the link **however the reader ends** — whether a normal EOF or a panic that came up inside `handle_line`.
-///
-/// ★Why it must be `Drop`★: `contain` wraps the reader loop **from outside**, so cleanup written at the tail of the loop
-///   is simply passed over by unwind. That path is not hypothetical — if a subscriber panics inside `core.emit` or
-///   the mutex of `OutputCore` is poisoned (that side is `.expect`), it goes right there. Then the closed marker does not
-///   stand and the writer thread spins forever holding core · stdin · the waiting table.
-/// ★What is done here is only 「close」★ — decoder flush and producing the end reason are the normal path's job, so they stay
-///   inside the loop (nothing is lost if unwind skips them).
+/// Closes the link **however the reader ends** — normal EOF or a panic inside `handle_line`. ★It must be `Drop`★: `contain` wraps the loop
+/// from outside, so cleanup at the loop tail is skipped by unwind (a subscriber panic in `core.emit`, a poisoned `OutputCore` mutex), the
+/// closed marker never stands and the writer spins forever. It only closes — decoder flush and the end reason stay in the loop.
 struct ReaderExit {
     state: SharedState,
     pending: Arc<Pending>,
-    /// The agent that the transition log of a discarded halt carries ([`Transition::Discarded`]).
+    /// The agent the transition log of a discarded halt carries ([`Transition::Discarded`]).
     agent: AgentId,
 }
 
 impl Drop for ReaderExit {
-    /// ★★Order is the contract — **write the state first, then wake**★★.
-    ///
-    /// ★It was once the other way, and that was a defect★: waking the waiting entries first brings the writer back **through a window the death itself
-    ///   opened** — the woken writer reads the still `Connecting` state, passes the gate ([`open_gate`]),
-    ///   and **delivers `Ready` to an already ended link.** That window was not by chance; it opened on every stream end.
-    /// ★The current order closes it **structurally**★: state write (mutex release) → `send` (channel) →
-    ///   the writer's `recv` → the writer's state read (mutex acquire) chain by happens-before, so a writer woken by this end
-    ///   **always** sees [`Link::Down`]. The grounds are the memory model, not timing slack.
-    /// ★Still, do not remove the waking★ — leaving them is a permanent hang, and that hang has no signal. What changed is
-    ///   **only the order**.
-    /// ★Locks are not held overlapping★ (ADR-0006 state→waiting table): the waiting table is closed **after** letting go of the state lock.
+    /// ★Order is the contract — **write the state first, then wake**★. Waking first lets the writer return through a window the death itself
+    /// opened, read `Connecting`, pass [`open_gate`] and **deliver `Ready` to an ended link**. The current order closes it **structurally**
+    /// (state write → `send` → writer `recv` → state read chain by happens-before). Do not remove the waking (permanent hang). The waiting
+    /// table closes **after** releasing the state lock (ADR-0006).
     // ADR-0203
     // ADR-0201
     fn drop(&mut self) {
         let discarded = {
             let (lock, cv) = &*self.state;
             let mut s = sync::lock(lock);
-            // The turn that was in progress does not know its outcome — ★one log line is all★. Leaving this fact as state would need a third
-            //   caller to erase it (ADR-0127 decision 5), and the next incarnation does not take over this incarnation's link
-            //   (ADR-0192), so there is no consumer to read it either.
+            // The turn in progress does not know its outcome — ★one log line is all★. As state it would need a third caller to erase it
+            //   (ADR-0127 decision 5), and the next incarnation does not take over this link (ADR-0192), so nothing would read it.
             if matches!(s.turn, TurnState::Active { .. }) {
                 tracing::warn!(
                     "codex app-server: the stream ended without knowing the turn outcome"
@@ -2926,27 +2488,27 @@ impl Drop for ReaderExit {
             }
             s.link = Link::Down("the stream ended".to_string());
             s.turn = TurnState::Idle;
-            // The held ends are dropped too (source of truth for the reason = [`end_turn_if`]).
+            // The held ends are dropped too ([`end_turn_if`]).
             s.early_completions.clear();
-            // The halt after error is discarded too — after closing there is no turn to open, and the waiting items are closed by the core's end synthesis.
+            // The halt is discarded too — after closing no turn opens, and waiting items are closed by the core's end synthesis.
             // ADR-0231
             let halted = std::mem::take(&mut s.halted);
             s.closed = true;
             cv.notify_all();
             halted.then_some(Transition::Discarded)
         };
-        // Written outside the lock (reason = [`TurnNoteLog`]).
+        // Written outside the lock ([`TurnNoteLog`]).
         if let Some(t) = discarded {
             t.write(self.agent);
         }
-        // ★Wake all pending RPCs with an error★ — leaving them is a permanent hang, and that hang has no signal.
+        // ★Wake all pending RPCs with an error★ — leaving them is a permanent hang with no signal.
         for entry in self.pending.close() {
             match entry.waiter {
                 Waiter::Handshake(tx) => {
                     let _ = tx.send(Err(format!("{}: the stream ended", entry.method)));
                 }
-                // ★The steer item is not touched★ — the stream end is the end of this incarnation, and the remaining items are closed by the core's end
-                //   synthesis as `Dropped{AgentEnded}` (the owner of end disposal is one — TRD §5-5 「deadline and close」).
+                // ★The steer item is not touched★ — the stream end ends this incarnation and the core's end synthesis closes remaining items as
+                //   `Dropped{AgentEnded}` (one owner of end disposal — TRD §5-5 「deadline and close」).
                 Waiter::TurnStart { .. } | Waiter::Steer { .. } | Waiter::Fire => {
                     tracing::debug!(
                         "{}: the stream ended before receiving the answer",
@@ -2958,12 +2520,11 @@ impl Drop for ReaderExit {
     }
 }
 
-/// The one line [`Reader::note_turn`] leaves **after letting go of the lock**.
+/// The one line [`Reader::note_turn`] leaves **after releasing the lock**.
 ///
-/// ★It is not written while holding the state lock★: tracing's file sink writes synchronously per event, so writing it inside that lock
-///   would line up [`AgentTransport::send_input`] and the writer behind that disk write. And
-///   [`Self::Unattributable`] is an **everyday** path — when the real `turn/completed` of an abandoned turn comes late,
-///   it comes here. One chatty peer creates that many disk writes while holding the lock.
+/// ★Not written under the state lock★: tracing's file sink writes synchronously per event, which would line up
+///   [`AgentTransport::send_input`] and the writer behind a disk write. [`Self::Unattributable`] is an **everyday** path (the real
+///   `turn/completed` of an abandoned turn arriving late), so one chatty peer would make that many disk writes under the lock.
 // ADR-0006
 enum TurnNoteLog<'a> {
     ForeignThread(&'a str),
@@ -2988,7 +2549,7 @@ impl TurnNoteLog<'_> {
                 "codex app-server: an end that came before the response — waiting for the comparison"
             ),
             TurnNoteLog::Unattributable(turn) => tracing::warn!(
-                // Left as an empty string, 「there was no id」 and 「the id was an empty string」 would look the same in the log.
+                // Left empty, "no id" and "the id was an empty string" would look the same in the log.
                 turn = %turn
                     .map(|t| sanitize(t, LOG_STRING_LIMIT))
                     .unwrap_or_else(|| "(no field)".to_string()),
@@ -2998,17 +2559,14 @@ impl TurnNoteLog<'_> {
     }
 }
 
-/// The item ids of approval requests we refused — remembered to attribute that item's live end to our refusal
-/// ([`ToolOutcome::Refused`]).
+/// The item ids of approval requests we refused — remembered to attribute that item's live end to our refusal ([`ToolOutcome::Refused`]).
 ///
-/// ★The vendor end alone cannot tell our refusal apart★ (measured fixture `refuse_u2a`): a refused command closes as `failed`, and a refused file change
-///   as `declined`, with the same shape as a real failure · the vendor's own denial. So this layer, which refused, holds the id and rewrites it at the end.
-///   The translator does not know this memory — it stays a pure translator that receives only notification lines.
-/// ★Reader-only and lock-free★ — the writing side ([`Reader::refuse`]) and the reading side (the end notification of the same [`Reader::handle_line`]) are both
-///   the reader thread, and the peer emits the end after receiving our answer, so the memory always stands before the end. Putting it in the state lock ([`State`]) would only lengthen the lock
-///   section.
-/// ★The place that empties it is that item's end line alone — it is not emptied at the turn end★: the end comes even after the turn end (measured fixture `steer_m6`
-///   last line). Emptying at the turn end would make that late end show as 「error」.
+/// ★The vendor end alone cannot tell our refusal apart★ (measured fixture `refuse_u2a`): a refused command closes as `failed`, a refused
+///   file change as `declined`, shaped like a real failure · the vendor's own denial. So this layer holds the id and rewrites it at the end;
+///   the translator stays pure.
+/// ★Reader-only and lock-free★: writer ([`Reader::refuse`]) and consumer (the end in [`Reader::handle_line`]) are both the reader thread,
+///   and the peer emits the end after receiving our answer. ★Emptied only by that item's end line, not at the turn end★: the end can come
+///   after the turn end (fixture `steer_m6` last line); emptying earlier would show it as "error".
 // ADR-0241
 #[derive(Debug, Default)]
 struct RefusedItems {
@@ -3016,9 +2574,8 @@ struct RefusedItems {
 }
 
 impl RefusedItems {
-    /// Writes one refused item. If full, the oldest is dropped (reason = [`REFUSED_ITEM_SLOTS`]).
-    /// ★An already remembered id is not put in again★ — the peer alternates request → end per approval and does not put two refusals on one item, but
-    ///   even if that order changes, the slots do not leak.
+    /// Writes one refused item. If full, the oldest is dropped ([`REFUSED_ITEM_SLOTS`]). ★An already remembered id is not put in again★ —
+    /// the peer alternates request → end per approval, but even if that changes, slots do not leak.
     fn remember(&mut self, item_id: &str) {
         if self.ids.iter().any(|r| r == item_id) {
             return;
@@ -3035,10 +2592,10 @@ impl RefusedItems {
         self.ids.push_back(item_id.to_string());
     }
 
-    /// Attributes the translation result of one notification line to our refusal. If that line is `item/completed` of a remembered item, the memory is **taken out**
-    /// (regardless of the end status — the end line is the emptying place), and the `Failed` · `Declined` results the translator emitted with that id are changed to `Refused`.
-    /// If the translator emitted no result (`completed` etc.), only the memory is erased.
-    /// ★It does not split by the vendor end status★ — whether the vendor closes our refusal as `failed` or as `declined`, the reason is our refusal.
+    /// Attributes the translation result of one notification line to our refusal. On `item/completed` of a remembered item the memory is
+    /// **taken out** (whatever the end status) and the translator's `Failed` · `Declined` results with that id become `Refused`; with
+    /// no result emitted (`completed` etc.) only the memory is erased. ★It does not split by vendor end status★ — `failed` or `declined`,
+    /// the reason is our refusal.
     fn attribute(&mut self, method_name: &str, params: Option<&Value>, events: &mut [OutputEvent]) {
         if method_name != method::ITEM_COMPLETED || self.ids.is_empty() {
             return;
@@ -3064,19 +2621,16 @@ impl RefusedItems {
     }
 }
 
-/// The id if a refused server request points to a tool item to attribute to our refusal — otherwise `None` (only refusing, as today).
+/// The id if a refused server request points to a tool item to attribute to our refusal — otherwise `None` (just refusing).
 ///
-/// ★Only two requests point to one — command approval and file change approval★. In both, `itemId` is the id of a tool item started earlier, and the peer
-///   closes that item right away on our refusal (measured fixture `refuse_u2a`). Other requests (`item/tool/call` ·
-///   `item/permissions/requestApproval` etc. — we do not know whether that item is a tool row we draw · approval under the old name has the field
-///   `callId`) do not point.
-/// ★Even a command approval does not point if `approvalId` or `networkApprovalContext` is carried (only absent or `null`)★ — the former is
-///   a sub-command approval, so its refusal is not an execution refusal of the parent item (the parent's end is the result of the whole script), and the latter is a network
-///   approval, so the peer does not emit that item's end (reading of upstream source `rust-v0.156.1` — likely · the measured command approvals
-///   had only the shape without both).
-/// ★The id is filtered by the same cap as the translator ([`MAX_ID_BYTES`])★ — for an id over it the translator emits no result, so the memory finds no pair and
-///   only takes a slot. This filtering is also the cap on the bytes held: without it, one slot holds an id up to the line cap ([`MAX_LINE_BYTES`]),
-///   and such slots pile up to [`REFUSED_ITEM_SLOTS`].
+/// ★Only command approval and file change approval point★: `itemId` is a tool item started earlier and the peer closes it right after our
+///   refusal (fixture `refuse_u2a`). Others (`item/tool/call` · `item/permissions/requestApproval`; unknown whether that item is a tool
+///   row we draw · old-name approval has `callId`) do not.
+/// ★A command approval with `approvalId` or `networkApprovalContext` does not point (only absent or `null`)★: the former is a
+///   sub-command approval (the parent's end is the whole script's result), the latter a network approval whose item end is not emitted
+///   (upstream `rust-v0.156.1` — likely; measured approvals had neither).
+/// ★The id is filtered by the translator's cap ([`MAX_ID_BYTES`])★ — over it the translator emits no result, so the memory would only take
+///   a slot; it also caps held bytes (else up to [`MAX_LINE_BYTES`] per slot × [`REFUSED_ITEM_SLOTS`]).
 // ADR-0241
 fn refused_item_id<'a>(method_name: &str, params: Option<&'a Value>) -> Option<&'a str> {
     let params = params?;
@@ -3109,11 +2663,10 @@ struct Reader {
 }
 
 impl Reader {
-    /// Refuses a server request. ★If not answered, that agent stops forever★ — so even an unknown request is
-    /// always answered. ★It does not disguise success★: returning a success response to an approval request is an automatic approval.
-    /// ★If a refused approval request points to a tool item, its id is remembered ([`RefusedItems`] · decision = [`refused_item_id`])★ — to attribute that
-    ///   item's end to our refusal. It is written only when the refusal line actually went into the control queue: if it could not be put in because closed or overflowing,
-    ///   the peer gets no answer and the end does not come.
+    /// Refuses a server request. ★Unanswered, that agent stops forever★, so even an unknown request is always answered. ★It does not
+    /// disguise success★: a success response to an approval request is an automatic approval.
+    /// ★A refused approval request pointing to a tool item has its id remembered ([`RefusedItems`] · [`refused_item_id`])★ — only when the
+    /// refusal line actually entered the control queue (if closed or overflowing the peer gets no answer and no end).
     // ADR-0241
     fn refuse(&mut self, id: &RequestId, method_name: &str, params: Option<&Value>) {
         let shown = sanitize(method_name, LOG_STRING_LIMIT);
@@ -3137,9 +2690,8 @@ impl Reader {
             }
         };
         if dropped {
-            // ★There is no caller to return an error to here — it is a line the reader itself made★. So if left only in the log, this
-            //   event **is visible nowhere**: the peer waits for the answer forever and there is no signal on screen. The sibling
-            //   event (turn/start deadline) shows on screen, so this place is raised to the same grade.
+            // ★No caller to return an error to — the reader made this line itself★. Logged only, the event **is visible nowhere**: the peer waits
+            //   forever with no signal on screen. The sibling event (turn/start deadline) shows on screen, so this is raised to that grade.
             tracing::warn!(
                 cap = OUTBOX_LIMIT,
                 "codex app-server: the control queue is full, cannot send the request refusal"
@@ -3152,32 +2704,17 @@ impl Reader {
         }
     }
 
-    /// Feeds one turn-ended notification into this state machine, and ★decides **whether to raise the turn boundary the translator emitted from that line
-    /// to the screen**★. The returned value = the boundary to raise now (`None` if none). If attributed to the end of our turn, that turn's
-    /// item disposal events are emitted here (before the boundary — [`State::close_turn_items`]).
+    /// Feeds one turn-ended notification into this state machine and ★decides **whether to raise the translator's boundary from that line**★.
+    /// Returns the boundary to raise now (`None` if none); if attributed to our turn's end, its item disposal events are emitted here (before
+    /// the boundary — [`State::close_turn_items`]).
     ///
-    /// ★Only this layer knows attribution★ — the translator sees the same line but does not know our thread · turn id. So
-    ///   translation is always done, but whether its output **is our turn's boundary** is decided here. Without this gate, one line of someone else's
-    ///   turn end would close our live turn on screen (later output split by a fake boundary), and the fact layer too
-    ///   would flip to idle and mail would be plugged in mid-turn.
-    /// ★A blocked line does not quietly disappear★ — it remains as a warn. Without a log, there is no knowing whether to look for the cause of 「the boundary did not show」
-    ///   in this layer or the translator.
-    ///
-    /// ★The ending condition is only when both match★: equal to our thread id (if known), and **equal to the turn id we know.**
-    ///   Ending by looking only at the thread would let another turn of the same thread (a late signal of an already ended previous turn) close the turn running now,
-    ///   and the queue would open on the spot and turns would overlap.
-    /// ★If the turn id is not known yet, nothing is ended★. That ignoring does not create a stall **at that point**:
-    ///   an empty id means that turn's `turn/start` has not received an answer yet (whether the answer is success, error
-    ///   or a decode failure, those three branches all end the turn or fill the id), and that request has [`REQUEST_DEADLINE`]
-    ///   on it, so expiry ends that turn via [`end_turn_if`].
-    /// ★That argument does not cover the case where the end comes **before** the response — so it is closed separately★: if that notification were
-    ///   only dropped here, the response that follows would fill the id and take away the waiting entry too, leaving that turn with nothing
-    ///   to end it. So that notification's id **and boundary** are held in [`State::early_completions`],
-    ///   and compared at the spot where the response decides our turn's id, and raised then ([`Reader::resolve`]).
-    /// ★The key is that what is held is not 「there was an end」 but **that id**★ — the former is a groundless memory that could end anything,
-    ///   which is misattribution itself, but the latter only **defers** the id comparison this function already does.
-    ///   The ending decision is only the id match on every path. ★Do not widen that property★ — the moment a branch that ends a turn
-    ///   without an id comparison is added, the misattribution this file removed comes right back.
+    /// ★Only this layer knows attribution★ (our thread · turn id): without the gate someone else's end closes our live turn and plugs mail
+    /// mid-turn. A blocked line is logged as warn.
+    /// ★Ends only when both match★: our thread id (if known) and **the turn id we know**.
+    /// ★Unknown turn id → nothing ends★, no stall: that turn's `turn/start` has no answer yet and has [`REQUEST_DEADLINE`] ([`end_turn_if`]).
+    /// ★An end **before** the response★: its id **and boundary** are held in [`State::early_completions`] and compared where the response
+    /// decides our turn's id ([`Reader::resolve`]) — else nothing would end the turn once the waiting entry is removed. ★What is held is that
+    /// **id**, never "there was an end"★; the ending decision is only the id match on every path — do not widen it.
     // ADR-0127
     fn note_turn(
         &self,
@@ -3186,8 +2723,8 @@ impl Reader {
         boundary: Option<OutputEvent>,
     ) -> Option<OutputEvent> {
         if method_name != TURN_COMPLETED {
-            // ★The translator does not emit turn boundaries outside this name★ — still, what was received is returned as is:
-            //   on the day that premise breaks, the boundary showing on screen is better than it quietly disappearing.
+            // ★The translator emits no turn boundary outside this name★ — still what was received is returned as is: if the premise breaks, a
+            //   visible boundary beats a silent one.
             return boundary;
         }
         let incoming_thread = params
@@ -3203,8 +2740,8 @@ impl Reader {
         let (result, log) = {
             let (lock, cv) = &*self.state;
             let mut s = sync::lock(lock);
-            // ★An unknown threadId is not an error★ — it was measured that a notification arrives before the response that would tell
-            //   that thread's id. While our id is not known yet, it is not filtered on that axis.
+            // ★An unknown threadId is not an error★ — measured: a notification arrives before the response that tells that thread's id. While
+            //   our id is unknown it is not filtered on that axis.
             let foreign_thread = match (s.thread_id.as_deref(), incoming_thread) {
                 (Some(mine), Some(theirs)) if mine != theirs => Some(theirs),
                 _ => None,
@@ -3228,10 +2765,9 @@ impl Reader {
                         cv.notify_all();
                         (boundary, None)
                     }
-                    // ★An end that came while the current turn's id is not known yet★: at this point it cannot be attributed, so it **does not end
-                    //   and does not raise the boundary either**. Instead that id and boundary are held, and compared when the following `turn/start` response
-                    //   tells our turn's id authoritatively ([`Reader::resolve`]). Without that comparison this
-                    //   turn would remain with nothing to end it — the response takes away the waiting entry and the deadline backstop disappears too.
+                    // ★An end while the current turn's id is unknown★: it cannot be attributed, so it **neither ends nor raises the boundary**; its id
+                    //   and boundary are held and compared when the following `turn/start` response gives our turn's id ([`Reader::resolve`]).
+                    //   Without that the turn would have nothing to end it — the response removes the waiting entry and the deadline backstop.
                     (TurnState::Active { turn_id: None, .. }, Some(theirs)) => {
                         if theirs.len() > MAX_TURN_ID_BYTES {
                             (None, Some(TurnNoteLog::OversizedTurnId(theirs.len())))
@@ -3249,7 +2785,7 @@ impl Reader {
                             (None, Some(TurnNoteLog::Held(theirs)))
                         }
                     }
-                    // There is no open turn, or it differs from the id we know, or the notification has no turn id at all.
+                    // No open turn, or it differs from the id we know, or the notification has no turn id.
                     _ => (None, Some(TurnNoteLog::Unattributable(incoming_turn))),
                 }
             }
@@ -3257,28 +2793,19 @@ impl Reader {
         if let Some(entry) = log {
             entry.write();
         }
-        // ★Emitted before the boundary, outside the lock★ (reason = [`end_turn_if`] · ADR-0006) — the boundary is emitted by the caller.
+        // ★Emitted before the boundary, outside the lock★ ([`end_turn_if`] · ADR-0006) — the caller emits the boundary.
         drops.emit(&self.core, &self.state);
         result
     }
 
-    /// Can this notification **be counted as belonging to the turn we have open now** — not whether to raise it to the screen but ★whether to write
-    /// a progress signal into the fact layer★ (ADR-0113).
+    /// Can this notification **be counted as belonging to our open turn** — ★whether to write a progress signal into the fact layer★, not
+    /// whether to raise it to the screen (ADR-0113).
     ///
-    /// ★Why the two decisions are split★: blocking a boundary loses 「one boundary」, but blocking a body makes **the words the agent emitted
-    ///   disappear from the screen**. So the body is always raised, and only whether that line becomes grounds for 「this incarnation is mid-turn」
-    ///   is split here. Without this split, one `item/*` line of a turn we never opened would turn the fact layer
-    ///   on, and that turn's end would be blocked by [`Reader::note_turn`] so **nobody could turn it off** — until the 30-minute fail-open
-    ///   valve sweeps it, no mail goes to that agent (the same shape as the mechanism ADR-0127 closed).
-    /// ★The decision is 「does it not contradict」 — not 「does it match」★: `item/*` arrives **before the `turn/start` response**
-    ///   is normal (that window is why [`State::early_completions`] exists), so demanding an id match at that point
-    ///   would push our turn's streaming output entirely out of the fact layer. So if there is an open turn
-    ///   and it **does not contradict** that turn's id, it counts as ours.
-    /// ★If there is no open turn, it is never ours★ — at that moment this link is 「not mid-turn」, and the point of this shape is that both axes
-    ///   get the same decision (module header).
-    /// ★There is no lock between this decision and the emit (known remainder)★ — if the writer opens or closes a turn in that gap, one line
-    ///   counts toward the other side. Dragging the lock up to the emit would violate ADR-0006, and that one-line error is covered by the next line and
-    ///   the turn boundary.
+    /// Split from the boundary decision because blocking a body would lose the agent's words; unsplit, one `item/*` line of a turn we never
+    /// opened would turn the fact layer on with its end blocked by [`Reader::note_turn`] — **nobody could turn it off** until the 30-minute
+    /// fail-open (ADR-0127's mechanism). ★"Does not contradict", not "matches"★: `item/*` before the `turn/start` response is normal
+    /// ([`State::early_completions`]); with an open turn and no contradiction it counts, with no open turn it never does.
+    /// ★No lock between this decision and the emit (known remainder)★ — one line may count toward the other side (ADR-0006 forbids holding it).
     // ADR-0113
     fn claims_our_turn(&self, params: Option<&Value>) -> bool {
         let (lock, _) = &*self.state;
@@ -3313,7 +2840,7 @@ impl Reader {
         let entry = match self.pending.take(id) {
             Some(e) => e,
             None => {
-                // An id we never issued — a value of the server id space, or a place already withdrawn by the deadline.
+                // An id we never issued — a server id-space value, or one already withdrawn by the deadline.
                 tracing::debug!(
                     ?id,
                     "codex app-server: response with an unknown id — dropping it"
@@ -3327,11 +2854,10 @@ impl Reader {
             }
             Waiter::TurnStart { seq } => match outcome {
                 Ok(v) => match serde_json::from_value::<TurnStartResponse>(v) {
-                    // ★The id the response decides is length-capped too★ — this value goes out as is into the params of `turn/interrupt` and
-                    //   the field of [`OutputEvent::TurnEnd`], so without a cap the peer could with one response make a boundary exceeding the replay
-                    //   ring's single-event cap, and that ring would empty everything else for that one entry.
-                    //   ★It is a comparison token, so it is filtered, not truncated★ (same decision = [`MAX_TURN_ID_BYTES`]) — then this
-                    //   turn has no material for attribution, so it is closed here with **the same grade** as the error branch below.
+                    // ★The id the response decides is length-capped too★ — it goes as is into `turn/interrupt` params and [`OutputEvent::TurnEnd`], so
+                    //   uncapped, one response could make a boundary over the replay ring's single-event cap and empty the ring.
+                    //   ★A comparison token, so filtered, not truncated★ ([`MAX_TURN_ID_BYTES`]) — the turn then has no attribution material
+                    //   and is closed here **at the same grade** as the error branch below.
                     Ok(r) if r.turn.id.len() > MAX_TURN_ID_BYTES => {
                         tracing::warn!(
                             bytes = r.turn.id.len(),
@@ -3351,25 +2877,21 @@ impl Reader {
                         let released = {
                             let (lock, cv) = &*self.state;
                             let mut s = sync::lock(lock);
-                            // ★If the marker does not match, the turn this answer opened has already ended★ — writing that id into the current turn's slot
-                            //   would make the interrupt after it aim at the wrong turn.
+                            // ★A mismatched marker means the turn this answer opened already ended★ — writing its id into the current turn's slot would make
+                            //   a later interrupt aim at the wrong turn.
                             match &mut s.turn {
                                 TurnState::Active { seq: cur, turn_id } if *cur == seq => {
                                     let newly = turn_id.is_none();
                                     if newly {
                                         *turn_id = Some(r.turn.id);
                                     }
-                                    // ★This response is the place that authoritatively decides our turn's id★ — if an end
-                                    //   with that id already passed, it is ended here, and **the boundary held then
-                                    //   is raised now**. Without this comparison that turn would remain open forever
-                                    //   (the waiting entry was just taken away), and the `send_input` after it would report that stall as "the queue
-                                    //   is full" — a report with the wrong reason.
-                                    // ★The ending decision is still only the id match★ — no turn ends merely by being in
-                                    //   the held list.
+                                    // ★This response decides our turn's id authoritatively★ — if an end with that id already passed, it ends here and **the held
+                                    //   boundary is raised now**. Without it the turn would stay open forever (waiting entry just removed) and `send_input`
+                                    //   would report that stall as "the queue is full" — wrong reason.
+                                    // ★The ending decision is still only the id match★ — no turn ends merely by being in the held list.
                                     let ours = turn_id.clone();
-                                    // ★Writes the turn id onto the item this request carried — only when (marker, stage) match★ (generation
-                                    //   masking: a no-op if already removed by echo). A success response is acceptance, not receipt, so
-                                    //   the item keeps waiting for the echo (TRD §5-5).
+                                    // ★Writes the turn id onto the item this request carried — only when (marker, stage) match★ (generation masking: a no-op if
+                                    //   already removed by echo). A success response is acceptance, not receipt — the item keeps waiting for the echo (TRD §5-5).
                                     // ADR-0231
                                     if let Some(item) = s.turn_start_carrier(seq) {
                                         item.stage = Stage::InFlight {
@@ -3387,19 +2909,16 @@ impl Reader {
                                     match hit.and_then(|pos| s.early_completions.remove(pos)) {
                                         Some(held) => {
                                             s.turn = TurnState::Idle;
-                                            // The rest held in the same window are dropped together with this turn
-                                            //   (source of truth for the reason = [`end_turn_if`]).
+                                            // The rest held in the same window are dropped with this turn ([`end_turn_if`]).
                                             s.early_completions.clear();
-                                            // ★An early end is a turn end too★ — if not disposed here, that turn's
-                                            //   `InFlight` remains without an outcome (TRD §5-5 turn-end disposal ②).
+                                            // ★An early end is a turn end too★ — undisposed, that turn's `InFlight` stays without an outcome (TRD §5-5 turn-end disposal ②).
                                             // ADR-0231
                                             let drops = s.close_turn_items(seq, held.close);
                                             cv.notify_all();
                                             (drops, held.boundary)
                                         }
-                                        // ★The turn id just came★ — if there is user text held while opening this turn (text left at the turn end ·
-                                        //   text typed before the response), it is put into this turn right away without waiting for a tool end
-                                        //   — the text left at the turn end gathers into one turn (ADR-0235).
+                                        // ★The turn id just came★ — user text held while this turn opened (left at a turn end · typed before the response) goes into this turn
+                                        //   at once without waiting for a tool end, so text left at the turn end gathers into one turn (ADR-0235).
                                         // ADR-0231
                                         None => {
                                             if newly
@@ -3423,18 +2942,17 @@ impl Reader {
                                 }
                             }
                         };
-                        // ★Raised after letting go of the lock★ (ADR-0006) — subscribers run arbitrary code inside emit.
-                        //   The disposal events come before the boundary (reason = [`end_turn_if`]).
+                        // ★Raised after releasing the lock★ (ADR-0006) — subscribers run arbitrary code inside emit. Disposal events come before the
+                        //   boundary ([`end_turn_if`]).
                         let (drops, boundary) = released;
                         drops.emit(&self.core, &self.state);
                         if let Some(ev) = boundary {
                             self.core.emit(ev);
                         }
                     }
-                    // ★It must be **the same grade** as an error response★: the waiting entry was already taken away above, so if
-                    //   the turn is not ended here, that turn remains without `turn_id` and with no waiting entry to expire — `note_turn`
-                    //   can never attribute and the gate does not open (after that `send_input` reports that stall as
-                    //   "the queue is full"). An undecodable success is no less fatal than an explicit error.
+                    // ★Must be **the same grade** as an error response★: the waiting entry is already removed, so a turn left open has no `turn_id` and
+                    //   no entry to expire — `note_turn` can never attribute, the gate does not open and `send_input` reports "the queue is
+                    //   full". An undecodable success is as fatal as an explicit error.
                     Err(e) => {
                         let masked = sanitize(&e.to_string(), LOG_STRING_LIMIT);
                         tracing::warn!("turn/start response decode failed: {masked}");
@@ -3447,8 +2965,8 @@ impl Reader {
                         );
                     }
                 },
-                // An error response of `turn/start` is a refusal (`Rejected`) — the turn-end disposal returns the user text it carried to the held place and
-                //   the halt stands ([`State::close_turn_items`]).
+                // An error response of `turn/start` is a refusal (`Rejected`) — the disposal returns the carried user text to the held place and the
+                //   halt stands ([`State::close_turn_items`]).
                 // ADR-0231
                 Err(msg) => {
                     let masked = sanitize(&msg, LOG_STRING_LIMIT);
@@ -3462,12 +2980,11 @@ impl Reader {
                     );
                 }
             },
-            // ★The response reaches only that item — it does not end the turn★: a steer did not open the turn, and even if an error response comes,
-            //   that turn keeps running at the vendor (`turn/completed` ends it). The error sometimes comes before `turn/completed`
-            //   (M10 — 0.1 ms ahead) — no order is assumed.
-            // ★A success response (and the deadline) does not move the item — receipt is only the echo★: the echo of an accepted steer comes on the same stdout
-            //   before `turn/completed` (TRD §3-2 · M10), so text without an echo until the turn end was not accepted and may be sent again,
-            //   and a late response is made a no-op by the generation comparison ([`State::hold_refused_steer`]).
+            // ★The response reaches only that item — it does not end the turn★: a steer did not open the turn and even on an error response it keeps
+            //   running at the vendor (`turn/completed` ends it; the error sometimes comes first — M10, 0.1 ms ahead — no order is assumed).
+            // ★A success response (and the deadline) does not move the item — receipt is only the echo★: an accepted steer's echo precedes
+            //   `turn/completed` (TRD §3-2 · M10), so text without an echo by the turn end was not accepted and may be sent again; a late
+            //   response is a no-op by generation ([`State::hold_refused_steer`]).
             // ADR-0231
             Waiter::Steer { id: item, gen } => {
                 let Err(msg) = &outcome else {
@@ -3488,7 +3005,7 @@ impl Reader {
                     cv.notify_all();
                     (held, trace)
                 };
-                // Written and emitted outside the lock (reason = [`TurnNoteLog`] · ADR-0006).
+                // Written and emitted outside the lock ([`TurnNoteLog`] · ADR-0006).
                 tracing::warn!("turn/steer refused: {}", sanitize(msg, LOG_STRING_LIMIT));
                 if let Some(t) = trace {
                     t.write(self.core.id());
@@ -3512,18 +3029,13 @@ impl Reader {
         }
     }
 
-    /// For every receipt (`Delivered`) the translator emitted, removes that id from pending — regardless of stage
-    /// ([`State::take_delivered`]). The returned value = whether a turn boundary must be newly set after the receipt (below).
+    /// For every receipt (`Delivered`) the translator emitted, removes that id from pending regardless of stage ([`State::take_delivered`]).
+    /// Returns whether a turn boundary must be newly set after the receipt.
     ///
-    /// ★Removed **before** emitting to the screen★: that text is already in the vendor history and must not go out again, and another thread's
-    ///   disposal (deadline · write failure) must not meet that item afterwards and move it twice.
-    /// ★A receipt that came outside our turn (late receipt)★ — text returned to the held place at the turn end · a `Held` returned by refusal — is also closed
-    ///   as received (the next user turn sees that text in history — TRD §5-5 「when a receipt comes after the turn end」). It is removed while held, so it does not go out
-    ///   again. If the old request's echo comes after it was already handed over again, that is the receipt, and the new request's echo passes as an unknown id
-    ///   (the registry folds the second receipt of the same id). Once removed, the writer is woken.
-    /// ★A receipt that came with no open turn sets a new boundary (`true`)★ — that bubble is the conversation's last bubble, so the frontend turns on the waiting
-    ///   indicator, and only a turn boundary turns it off, and there may be no turn following it. Unknown ids (revival after ✕ · Direct · mail) are the same — an unsuppressed vendor echo sets up a bubble.
-    ///   If there is an open turn, that turn's end is the boundary.
+    /// ★Removed **before** emitting to the screen★ — the text is in the vendor history and must not go out again. ★A late receipt★ (text
+    /// returned to the held place) also closes as received (TRD §5-5 「when a receipt comes after the turn end」); removal wakes the writer.
+    /// ★A receipt with no open turn sets a new boundary (`true`)★ — only a boundary turns off the frontend waiting indicator (unknown ids
+    /// likewise); with an open turn, that turn's end is the boundary.
     // ADR-0231
     fn note_delivered(&self, events: &[OutputEvent]) -> bool {
         let ids: Vec<&str> = events
@@ -3564,16 +3076,12 @@ impl Reader {
         idle
     }
 
-    /// The tool-end trigger (ADR-0235 — t3code shape): when a tool item ([`is_tool_item`]) of our current turn ends
-    /// (`item/completed`), sets [`State::steer_due`] and wakes the writer — that tool end hands over all held user text.
-    /// The returned value = the trace lines of the tool item (`tool_start` · `tool_end` of [`STEER_TRACE`] — to be written outside the lock).
+    /// The tool-end trigger (ADR-0235 — t3code shape): a tool item ([`is_tool_item`]) of our current turn ending (`item/completed`) sets
+    /// [`State::steer_due`] and wakes the writer — that tool end hands over all held user text. Returns the tool item's trace lines.
     ///
-    /// ★Only lines of **the current turn id** of our thread (if known) count★ — a late completion of an old turn id (a tool of an interrupted turn — M6) is not a
-    ///   trigger. Lines before the turn id came (`Active{turn_id: None}`) do not count either: before that there is no means to hand over (`expectedTurnId`),
-    ///   and the spot where the response gives the turn id hands over the held text separately ([`Reader::resolve`]).
-    /// ★Parallel tools trigger at every end too★ — running tools are not counted. One finished tool is itself a place to slip in.
-    /// ★Called **before** translation★ — the time the trigger reaches the writer is the reaction latency, and doing translation · emit after it
-    ///   has no ordering that gets caught.
+    /// ★Only lines of **the current turn id** count★ — a late completion of an old turn id (M6) and lines before the turn id came
+    /// (`Active{turn_id: None}`; [`Reader::resolve`] hands over there) are no trigger. Parallel tools trigger at every end. ★Called **before**
+    /// translation★ — the trigger's arrival is the reaction latency.
     // ADR-0231
     // ADR-0235
     fn note_tool_item(&self, method_name: &str, params: Option<&Value>) -> Option<SteerTrace> {
@@ -3609,7 +3117,7 @@ impl Reader {
             } if current == incoming_turn => {}
             _ => return None,
         }
-        // The start · end trace lines of tool items — tools whose id cannot be compared (absent · overflowing) are not written (the trigger still stands).
+        // Start · end trace lines of tool items — tools whose id cannot be compared (absent · overflowing) are not written (the trigger still stands).
         let trace = match item_id {
             Some(id) if id.len() <= MAX_TURN_ID_BYTES && SteerTrace::enabled() => {
                 let phase = if started {
@@ -3637,15 +3145,10 @@ impl Reader {
         trace
     }
 
-    /// When the peer echoes a user message item **for the first time**, calls the first-turn port — the place where a turn appeared in this incarnation's conversation.
-    ///
-    /// ★Any `userMessage` of live `item/started` · `item/completed` counts★ — whether or not `clientId` is there (below the
-    ///   floor · mail turns too), and regardless of our turn decision ([`Reader::claims_our_turn`]) (a late echo after the turn end also has the same fact
-    ///   that the text went into the vendor history). Only lines that **declare** another thread are excluded. History restore does not pass this
-    ///   door (it is received as a response and the writer carries it — [`hydrate_history`]).
-    /// ★Called without holding any lock★ — beyond the port is the latch commit (profile disk write). The state lock taken for the thread comparison
-    ///   is let go before that. Called **after** emitting to the screen: so the disk write does not hold up the bubble.
-    // ADR-0226 · ADR-0231 · ADR-0233: user decision — the id is persisted when it became real (the peer's first user message echo).
+    /// On the peer's **first** echo of a user message item, calls the first-turn port. ★Any live `userMessage` counts★ — with or without
+    /// `clientId`, regardless of [`Reader::claims_our_turn`]; only lines **declaring** another thread are excluded; history restore does not
+    /// pass here ([`hydrate_history`]). ★Called without any lock, after emitting to the screen★ (the latch commit is a disk write).
+    // ADR-0226 · ADR-0231 · ADR-0233: persisted when the id became real (the peer's first user message echo).
     fn witness_first_turn(&mut self, method_name: &str, params: Option<&Value>) {
         if self.first_turn.is_none()
             || (method_name != method::ITEM_STARTED && method_name != method::ITEM_COMPLETED)
@@ -3701,54 +3204,50 @@ impl Reader {
             }
             Ok(Inbound::Notification { method, params }) => {
                 // ADR-0231
-                // Trace lines are written right after letting go of the lock — so they come before the steer line (writer) that trigger released.
+                // Trace lines are written right after releasing the lock — so they come before the steer line (writer) the trigger released.
                 if let Some(t) = self.note_tool_item(&method, params.as_ref()) {
                     t.write(self.core.id());
                 }
-                // ★The translator gets **the original line bytes** as is★ — making a second entrance would move that side's line
-                //   reassembly · cap · masking discipline out of the delivery path (source of truth for the reason = the `decoder.rs` header).
-                //   The translator splits lines by newline, so the terminator is given too.
+                // ★The translator gets **the original line bytes** as is★ — a second entrance would move that side's line reassembly · cap · masking
+                //   discipline out of the delivery path (`decoder.rs` header). It splits lines by newline, so the terminator is given too.
                 let mut events = match self.decoder.as_mut() {
                     Some(dec) => {
                         let mut events = dec.decode(line);
                         events.extend(dec.decode(b"\n"));
-                        // Usage observation is not an event — it is handed straight to the status sink regardless of the attribution gate.
+                        // Usage observation is not an event — handed straight to the status sink regardless of the attribution gate.
                         self.core.report_usage(dec.take_usage());
                         events
                     }
                     None => Vec::new(),
                 };
-                // ADR-0241: the translator does not know our refusals — the end of a refused item is rewritten by this layer before emit (without a lock).
+                // ADR-0241: the translator does not know our refusals — the end of a refused item is rewritten here before emit (no lock).
                 self.refused
                     .attribute(&method, params.as_ref(), &mut events);
-                // ★Only the turn boundary is pulled out and passes the **attribution gate** — the rest flows as is★: the translator does not know our
-                //   thread · turn id and cannot answer 「is this outcome our turn's」, and only this layer
-                //   knows that (source of truth for the reason = [`TURN_COMPLETED`] doc).
+                // ★Only the turn boundary is pulled out and passes the **attribution gate** — the rest flows as is★: the translator cannot answer
+                //   "is this outcome our turn's" ([`TURN_COMPLETED`]).
                 let boundary = events
                     .iter()
                     .position(|e| matches!(e, OutputEvent::TurnEnd { .. }))
                     .map(|i| events.remove(i));
                 let boundary_owed = self.note_delivered(&events);
-                // ★The body always goes to the screen, but whether to count that line as grounds for 「this incarnation is mid-turn」 is split★
-                //   (source of truth for the reason = [`Reader::claims_our_turn`]). If these two doors did not split, an unattributed line would
-                //   turn only the fact layer on, and its end would be blocked by the gate below with nobody able to turn it off.
-                // On a line that yields only one boundary (most `turn/completed`) this decision is not needed — the lock is saved.
+                // ★The body always goes to the screen, but whether the line counts as grounds for "mid-turn" is split★ ([`Reader::claims_our_turn`]);
+                //   unsplit, an unattributed line would turn only the fact layer on and its end would be blocked by the gate below.
+                // A line yielding only one boundary (most `turn/completed`) does not need this decision — the lock is saved.
                 let ours = !events.is_empty() && self.claims_our_turn(params.as_ref());
                 for ev in events {
-                    // ★End vocabulary is not sent through that door★ — that door also skips the doorbell (`StatusSink::turn_ended`),
-                    //   so consumers waiting for the end would not wake. By the translator contract one line emits
-                    //   only one boundary, which was already pulled out above, but on the day that contract breaks, guarding here
-                    //   is cheaper than quietly losing it.
+                    // ★End vocabulary is not sent through that door★ — it also skips the doorbell (`StatusSink::turn_ended`), so consumers waiting for the
+                    //   end would not wake. By the translator contract one line emits one boundary, already pulled out above; guarding here is
+                    //   cheaper than silently losing it if that breaks.
                     if ours || matches!(ev, OutputEvent::TurnEnd { .. }) {
                         self.core.emit(ev);
                     } else {
                         self.core.emit_without_turn_observation(ev);
                     }
                 }
-                // ★The boundary after a receipt outside the open turn (reason = [`Reader::note_delivered`]) — emitted through the observation-free door★: the turn table is already
-                //   idle (that receipt also went out without observation), so there is no consumer to wake, and emitting through the ordinary door would make the classifier fold it into a clean end and
-                //   erase the preceding error end (`last_end_failed`) — mail that should stay halted would flow.
-                //   If a new turn opened in between and the receipt was counted as that turn's progress (`ours`), that turn's end is the boundary.
+                // ★The boundary after a receipt outside the open turn ([`Reader::note_delivered`]) goes through the observation-free door★: the turn
+                //   table is already idle (the receipt also went without observation), so no consumer needs waking, and the ordinary door would
+                //   let the classifier fold it into a clean end and erase the preceding error end (`last_end_failed`) — mail that should stay
+                //   halted would flow. If a new turn opened in between and the receipt counted as its progress (`ours`), that turn's end is the boundary.
                 // ADR-0231
                 if boundary_owed && !ours {
                     self.core
@@ -3760,13 +3259,13 @@ impl Reader {
                 if let Some(ev) = self.note_turn(&method, params.as_ref(), boundary) {
                     self.core.emit(ev);
                 }
-                // ADR-0226: after emitting and tracing, outside the lock (reason = that function's doc).
+                // ADR-0226: after emitting and tracing, outside the lock.
                 self.witness_first_turn(&method, params.as_ref());
             }
             Ok(Inbound::Response { id, result }) => self.resolve(&id, Ok(result)),
             Ok(Inbound::Error { id, error }) => {
-                // ★Masking is done **here**, not at the boundary★ — this string goes both to the log and to the screen,
-                //   and also goes back to the caller. Filtering again at every outgoing door means one of them is bound to be forgotten.
+                // ★Mask **here**, not at the boundary★ — this string goes to the log, the screen and back to the caller; filtering at every outgoing door
+                //   means one gets forgotten.
                 let msg = format!(
                     "[{}] {}",
                     error.code,
@@ -3791,7 +3290,7 @@ fn reader_loop(
     mut reader: Reader,
     child: Arc<Mutex<Child>>,
 ) -> TerminalReason {
-    // ★The point is that this guard stands at the very top of the function★ — wherever unwind comes up from below, `Drop` runs.
+    // ★This guard stands at the very top★ — wherever unwind comes from below, `Drop` runs.
     let _exit = ReaderExit {
         state: reader.state.clone(),
         pending: reader.pending.clone(),
@@ -3817,7 +3316,7 @@ fn reader_loop(
         }
     }
 
-    // ★Closing is carried by `ReaderExit` above — not written again here★ (unwind must pass the same place too).
+    // ★Closing is carried by `ReaderExit` above — not repeated here★ (unwind must pass the same place).
     // ★No flush on the kill path★ — that tail is a fragment cut because we killed the process.
     if !shutdown.load(Ordering::Acquire) {
         if let Some(dec) = reader.decoder.as_mut() {
@@ -3828,15 +3327,11 @@ fn reader_loop(
         }
     }
 
-    // ★One `try_wait` right after EOF cannot get the exit code★ — stdout closing and the process being
-    //   reaped are not the same moment, so that one call usually falls to `Ok(None)` and the code is quietly
-    //   **lost**. That loss hurts twice: the exit code does not show on screen, and `Exited { code: None }`
-    //   cannot be told apart from 「the child is still alive」, so **the test bench loses its means of telling the two apart**.
-    // ★So it looks again, bounded★ — the lock is let go on every attempt (sleeping while holding it would block `shutdown`'s kill that long).
-    // ★The kill path does not run a single round of this loop★ — `shutdown()` already did `wait()`, so the first attempt
-    //   gives the value right away.
-    // ★Still, `None` can remain, and that is the honest outcome★ — that is the case where the peer closed only stdout and did not end,
-    //   and that disposal is carried separately by [`wait_for_close_or_tear_down`].
+    // ★One `try_wait` right after EOF cannot get the exit code★ — stdout closing and reaping are not the same moment, so it usually falls
+    //   to `Ok(None)` and the code is **lost**, and `Exited { code: None }` becomes indistinguishable from "still alive" for tests.
+    // ★So it retries, bounded★ — the lock is released each attempt (sleeping under it would block `shutdown`'s kill that long).
+    // ★The kill path runs no round of this loop★ — `shutdown()` already did `wait()`, so the first attempt gives the value.
+    // ★`None` can still remain, honestly★: the peer closed only stdout and did not end — carried by [`wait_for_close_or_tear_down`].
     let code = {
         let deadline = Instant::now() + CHILD_REAP_GRACE;
         loop {
@@ -3863,8 +3358,8 @@ fn reader_loop(
     }
 }
 
-/// The common receipt of `send_input` · `send_turn`. The `Err` conditions have [`AgentTransport::send_input`] doc as the source of truth. `Ok(true)` = this
-/// item lifted the halt after error ([`State::push_pending`] — the caller writes that log outside the lock).
+/// The common receipt of `send_input` · `send_turn`; `Err` conditions: [`AgentTransport::send_input`]. `Ok(true)` = this item lifted the
+/// halt after error ([`State::push_pending`] — the caller writes that log outside the lock).
 // ADR-0231
 fn accept_input(
     state: &SharedState,
@@ -3895,8 +3390,8 @@ fn accept_input(
     Ok(lifted)
 }
 
-/// The body of [`AgentTransport::withdraw`] — that doc is the source of truth for the contract. `core` = where to emit (`None` before `start()`
-/// — then there cannot be a list item that finished announcing).
+/// The body of [`AgentTransport::withdraw`] (contract there). `core` = where to emit (`None` before `start()` — then no list item has
+/// finished announcing).
 // ADR-0231
 fn withdraw_item(state: &SharedState, core: Option<&OutputCore>, id: &str) -> Withdraw {
     let (answer, ops) = {
@@ -3915,10 +3410,10 @@ fn withdraw_item(state: &SharedState, core: Option<&OutputCore>, id: &str) -> Wi
                 cv.notify_all();
                 (Withdraw::Withdrawn, dropped.into_iter().collect())
             }
-            // ★Already handed over — cannot be withdrawn · the row stays in the list★ (the frontend draws it like a handed-over row without ✕): the vendor decides the outcome
-            //   (echo = received · steer refusal or turn end without an echo = withdrawn), and here the cancellation receipt and 「could not remove it from the vendor
-            //   queue」 follow immediately (codex has no verb to withdraw handed-over text).
-            //   ★An overlapping second ✕ (window + LLM — it does not go through the input lock) is `TooLate` without an event★ — the registry's
+            // ★Already handed over — cannot be withdrawn · the row stays in the list★ (the frontend draws it as a handed-over row without ✕): the
+            //   vendor decides the outcome (echo = received · steer refusal or turn end without echo = withdrawn), and the cancellation
+            //   receipt and "could not remove it from the vendor queue" follow immediately (codex has no verb to withdraw handed-over text).
+            //   ★An overlapping second ✕ (window + LLM — not through the input lock) is `TooLate` without an event★ — the registry's
             //   `Cancelling`+`CancelRequested` no-op row is the second defence.
             // ADR-0231
             Stage::InFlight { .. } if item.cancel_asked => (Withdraw::TooLate, Vec::new()),
@@ -3935,7 +3430,7 @@ fn withdraw_item(state: &SharedState, core: Option<&OutputCore>, id: &str) -> Wi
             }
         }
     };
-    // ★Emitted after letting go of the lock★ (ADR-0006).
+    // ★Emitted after releasing the lock★ (ADR-0006).
     if let Some(core) = core {
         for op in ops {
             core.emit(OutputEvent::QueuedInput(op));
@@ -3955,20 +3450,19 @@ impl AgentTransport for CodexAppServerTransport {
             Some(s) => s,
             None => return,
         };
-        // ★Filled before the writer★ — the input thread announces after the writer's floor decision, so it must stand before that.
+        // ★Filled before the writer★ — the input thread announces after the writer's floor decision, so it must stand first.
         let _ = self.core.set(core.clone());
 
         // ── stderr drain ──
-        // The peer's diagnostic text comes on this stream (measured 0.154.0 — errors went here, not to stdout), so it is the only evidence of an activation
-        //   failure.
+        // The peer's diagnostic text comes on this stream (measured 0.154.0 — errors went here, not stdout), the only evidence of an
+        //   activation failure.
         if let Some(stderr) = sync::lock(&self.stderr).take() {
             drain_stderr(stderr, &core, "engram-codex-stderr", "codex");
         }
 
         // ── Writer ──
-        // ★Nobody joins it★ — `core` holds only one pump handle (widening that place is a core
-        //   change), and waiting inside `shutdown()` is a contract violation. When kill breaks the pipe, this thread's
-        //   blocked write is released, and it sees the closed marker and ends on its own.
+        // ★Nobody joins it★ — `core` holds one pump handle (widening it is a core change) and waiting inside `shutdown()` is a contract
+        //   violation. Kill breaks the pipe, releasing the blocked write; the thread sees the closed marker and ends on its own.
         if let Some(params) = sync::lock(&self.open_params).take() {
             let stdin = self.stdin.clone();
             let state = self.state.clone();
@@ -4000,7 +3494,7 @@ impl AgentTransport for CodexAppServerTransport {
                     *sync::lock(&self.writer_handle) = Some(handle);
                 }
                 Err(e) => {
-                    // Without a writer, neither the handshake nor input ever goes out — it is not left silent.
+                    // Without a writer neither handshake nor input goes out — not left silent.
                     tracing::warn!(agent = %agent_id, "codex writer thread failed to start: {e}");
                     let (lock, cv) = &*self.state;
                     let mut s = sync::lock(lock);
@@ -4024,7 +3518,7 @@ impl AgentTransport for CodexAppServerTransport {
         let child = self.child.clone();
         let shutdown = self.shutdown.clone();
         let handle = std::thread::spawn(move || {
-            // ADR-0292: finish is outside the marking — do not move it into the closure (reason = the same spot in `transport/pty.rs`).
+            // ADR-0292: finish is outside the marking — do not move it into the closure (same spot in `transport/pty.rs`).
             let normal_reason = contain(std::panic::AssertUnwindSafe(|| {
                 reader_loop(stdout, shutdown, reader, child)
             }));
@@ -4037,27 +3531,22 @@ impl AgentTransport for CodexAppServerTransport {
 
     /// The bytes are **a complete user turn body** — the envelope is built by this link.
     ///
-    /// ★The receipt has one meaning★: `Ok` = received all of it with the order settled, `Err` = not received. ★It does not report a reduction
-    ///   with a short `Ok`★.
-    /// ★`Err` is only what is decided **before** saying "we will take it"★ — ① the queue cap is exceeded ② this incarnation's
-    ///   connection has already ended. Input queued in the handshake window already received `Ok`, so ② is not widened past
-    ///   that point.
-    /// ★Known limit★: a write that failed after accepting has no way back to this caller. What remains then is one thing on the output
-    ///   stream, **the turn boundary of a failure outcome** ([`end_turn_if`], and the branch where the handshake failed and
-    ///   the queue is dropped entirely is emitted directly by [`writer_loop`]), and the `Ok` already given is not corrected.
+    /// ★`Ok` = all received with order settled, `Err` = not received; no short `Ok`★. `Err` is decided only **before** "we will take it":
+    /// ① queue cap exceeded ② connection already ended. ★Known limit★: a write that fails after accepting has no way back here; the
+    /// failure shows as a **failure turn boundary** on the output ([`end_turn_if`]; [`writer_loop`] for the dropped-queue branch).
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
         let InputEvent::Raw(bytes) = input;
-        // It is from mail, so it does not lift the halt.
+        // From mail, so it does not lift the halt.
         accept_input(&self.state, None, bytes, InputOrigin::Mail).map(|_| ())
     }
 
-    /// The same receipt as [`AgentTransport::send_input`] — carries the identifier and source on the item, and after the floor decision
-    /// finishes the announcement (synthetic bubble · `Queued`) before returning ([`announce`]).
+    /// The same receipt as [`AgentTransport::send_input`] — carries identifier and source on the item, and after the floor decision finishes
+    /// the announcement (synthetic bubble · `Queued`) before returning ([`announce`]).
     // ADR-0231
     fn send_turn(&self, turn: TurnInput) -> Result<(), PtyError> {
         let lifted = accept_input(&self.state, Some(turn.id), turn.body, turn.origin)?;
         if let Some(core) = self.core.get() {
-            // ADR-0231: written outside the lock (reason = [`TurnNoteLog`]).
+            // ADR-0231: written outside the lock ([`TurnNoteLog`]).
             if lifted {
                 Transition::HaltLifted.write(core.id());
             }
@@ -4066,15 +3555,12 @@ impl AgentTransport for CodexAppServerTransport {
         Ok(())
     }
 
-    /// ✕ — a held list item (including text returned to the held place at the turn end) is withdrawn (`Dropped{Withdrawn}` · no vendor call), and a handed-over list
-    /// item is `TooLate` (`CancelRequested` followed immediately by `CancelAnswered{removed:false}` — without an event if ✕ already reached it. If that
-    /// text's turn ends without an echo, it is withdrawn then as `Dropped{Withdrawn}`), and outside the list (Direct · mail · no identifier ·
+    /// ✕ — a held list item is withdrawn (`Dropped{Withdrawn}` · no vendor call); a handed-over list item is `TooLate` (`CancelRequested` then
+    /// `CancelAnswered{removed:false}`; withdrawn later if its turn ends without an echo); outside the list (Direct · mail · no identifier ·
     /// below the floor) and unknown ids are `NotHeld`.
     ///
-    /// ★The order stands under the same state lock as the handover★ — a ✕ that came after the writer moved `Held` to `InFlight` is on the handed-over
-    ///   side. ★A pre-announce item gets only a death mark and `Withdrawn` is answered★ — `Dropped` is followed by the announcing side
-    ///   right after `Queued` ([`State::drop_listed`]). If a death mark is already there, the first ✕ removed it, so it is
-    ///   `NotHeld`.
+    /// ★Ordered under the same state lock as the handover★. ★A pre-announce item gets only a death mark and `Withdrawn` is answered★
+    /// ([`State::drop_listed`]); a death mark already there = the first ✕ removed it: `NotHeld`.
     // ADR-0231
     fn withdraw(&self, id: &str) -> Withdraw {
         withdraw_item(&self.state, self.core.get().map(|c| &**c), id)
@@ -4088,8 +3574,7 @@ impl AgentTransport for CodexAppServerTransport {
 
     /// Interrupts one turn in progress with `turn/interrupt` (≠kill — the process stays alive).
     ///
-    /// ★If the turn id is not known yet, it is `Err`★ — the peer requires that field, and an envelope sent without it gets not even
-    ///   an answer (measured 0.154.0: an undecodable envelope gets no answer).
+    /// ★Unknown turn id → `Err`★: the peer requires that field and an envelope without it gets no answer at all (measured 0.154.0).
     fn interrupt(&self) -> Result<(), PtyError> {
         let (lock, cv) = &*self.state;
         let mut s = sync::lock(lock);
@@ -4132,21 +3617,17 @@ impl AgentTransport for CodexAppServerTransport {
         Ok(())
     }
 
-    /// The app-server version of the ADR-0001 2 verbs. ★Nothing is waited for inside★ (waiting is `core.join_pump`'s job).
+    /// The app-server version of the ADR-0001 2 verbs. ★Nothing is waited for inside★ (`core.join_pump` waits).
     ///
-    /// ★Order invariant — stdin close must never come before kill★: the writer holds the stdin lock throughout a blocking
-    ///   `write_all`. If the peer does not read stdin (pipe backpressure), that write blocks forever and
-    ///   does not let go of the lock, so trying to take `stdin.lock()` before kill would never even reach kill, the pump
-    ///   could not wake, and `join_pump` would hang forever. Killing the child first breaks the pipe, so that write is released with an error
-    ///   and the lock is released.
-    /// ※It was measured that closing stdin alone makes the peer exit on its own (41–51ms with no turn),
-    ///   but that observation does not change the order invariant above — without getting the lock, it cannot even reach the closing place.
+    /// ★Order invariant — stdin close must never come before kill★: the writer holds the stdin lock across a blocking `write_all`, so with a
+    /// peer not reading stdin, taking `stdin.lock()` first never reaches kill and `join_pump` hangs. Killing first breaks the pipe and
+    /// releases the lock. (Closing stdin alone also makes the peer exit — 41–51ms — but that does not change the order.)
     // ADR-0001
     fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
 
-        // ★Only the state lock is taken here★ — the thread holding a blocking write does not hold this lock
-        //   (it lets go before writing), so this step cannot hang. The queue not yet sent disappears here.
+        // ★Only the state lock is taken here★ — the thread in a blocking write does not hold it (released before writing), so this cannot
+        //   hang. The queue not yet sent disappears here.
         {
             let (lock, cv) = &*self.state;
             let mut s = sync::lock(lock);
@@ -4160,17 +3641,15 @@ impl AgentTransport for CodexAppServerTransport {
             let _ = child.wait();
         }
 
-        // Grandchildren (codex under the cmd shim, and the MCP children codex launched at thread/start) end together too. On an OS with no group
-        //   it is a no-op.
+        // Grandchildren (codex under the cmd shim, MCP children launched at thread/start) end together too; a no-op on an OS with no group.
         let _ = self.group.terminate(1);
 
-        // If try_lock cannot be obtained (the moment write_all has not been released yet), skip — the OS reclaims an uncleaned ChildStdin on
-        //   drop. ★No blocking lock★.
+        // If try_lock fails (write_all not yet released), skip — the OS reclaims an uncleaned `ChildStdin` on drop. ★No blocking lock★.
         if let Ok(mut guard) = self.stdin.try_lock() {
             let _ = guard.take();
         }
 
-        // Pending requests are woken here too — so they do not remain even when the reader ends without seeing EOF.
+        // Pending requests are woken here too — so none remain even when the reader ends without seeing EOF.
         for entry in self.pending.close() {
             if let Waiter::Handshake(tx) = entry.waiter {
                 let _ = tx.send(Err(format!("{}: the link closed", entry.method)));
@@ -4181,8 +3660,8 @@ impl AgentTransport for CodexAppServerTransport {
     fn capabilities(&self) -> TransportCaps {
         TransportCaps {
             input: InputCaps {
-                // ★`raw` is false because this channel does not carry keystrokes★ — the received bytes are
-                //   complete message bodies, and streaming them in one character at a time would open a turn per character.
+                // ★`raw` is false because this channel does not carry keystrokes★ — received bytes are complete message bodies; streaming them one
+                //   character at a time would open a turn per character.
                 raw: false,
                 message: true,
                 attachment: false,
@@ -4223,8 +3702,7 @@ mod tests {
         fn agent_list_updated(&self, _agents: Vec<crate::types::AgentInfo>) {}
     }
 
-    /// Collects emitted events as is — `snapshot()` returns only `TerminalBytes`, so structured events
-    /// can be seen only by subscribing.
+    /// Collects emitted events as is — `snapshot()` returns only `TerminalBytes`, so structured events are visible only by subscribing.
     struct EventSink {
         id: SinkId,
         seen: Arc<Mutex<Vec<OutputEvent>>>,
@@ -4241,8 +3719,8 @@ mod tests {
         }
     }
 
-    /// A subscriber that panics inside `core.emit` — one of the two unwind paths the review named (the other is
-    /// `OutputCore` mutex poison). `emit` does not catch a sink panic and sends it up as is.
+    /// A subscriber that panics inside `core.emit` — one of the two unwind paths (the other is `OutputCore` mutex poison). `emit` does not
+    /// catch a sink panic.
     struct PanickingSink(SinkId);
     impl OutputSink for PanickingSink {
         fn send(&self, _frame: OutputFrame<'_>) -> Result<(), SinkError> {
@@ -4253,11 +3731,8 @@ mod tests {
         }
     }
 
-    /// On receiving one notification line, emits an event — that emit passes through the subscriber above and unwinds the reader
-    /// **inside the read loop**.
-    ///
-    /// ★It must be `decode`, not flush★: the old shape that wrote the close at the loop tail closed **before** flush,
-    ///   so a panic blowing up in flush did not leak in that shape either. The leaking spot is the read loop.
+    /// On one notification line, emits an event — passing through the subscriber above, so the panic unwinds the reader **inside the
+    /// read loop**. ★It must be `decode`, not flush★: the leaking spot is the read loop (the old tail-of-loop close ran **before** flush).
     struct EmittingDecoder;
     impl OutputDecoder for EmittingDecoder {
         fn decode(&mut self, _chunk: &[u8]) -> Vec<OutputEvent> {
@@ -4268,8 +3743,8 @@ mod tests {
         }
     }
 
-    /// A probe that streams one notification line to stdout. ★Not built with `echo`★ — on that path the quotes change while passing the shell
-    /// and the envelope is not classified as a notification.
+    /// A probe that streams one notification line to stdout. ★Not built with `echo`★ — the shell changes the quotes and the envelope is
+    /// not classified as a notification.
     #[cfg(windows)]
     struct NotificationFile(std::path::PathBuf);
 
@@ -4349,14 +3824,13 @@ mod tests {
     }
 
     impl State {
-        /// Exactly the shape `send_input` puts in (no identifier · mail).
         fn push_legacy(&mut self, body: &[u8]) {
             self.push_pending(None, body.to_vec(), InputOrigin::Mail);
         }
     }
 
-    /// Opens one turn with marker `seq`. ★The point is that the test bench picks the marker directly★ — which turn a late signal
-    /// belongs to is told apart only by that marker.
+    /// Opens one turn with marker `seq`. ★The test bench picks the marker directly★ — which turn a late signal belongs to is told only by
+    /// that marker.
     fn activate(state: &SharedState, seq: u64, turn_id: Option<&str>) {
         with_state(state, |s| {
             s.turn = TurnState::Active {
@@ -4388,7 +3862,6 @@ mod tests {
         });
     }
 
-    /// A fake translator that sees exactly what the link put into the translator.
     struct RecordingDecoder {
         chunks: Arc<Mutex<Vec<u8>>>,
     }
@@ -4436,17 +3909,16 @@ mod tests {
         }
     }
 
-    /// The test bench with the real translator plugged in. ★Measuring the attribution gate must use this one★ — [`RecordingDecoder`]
-    /// emits no events at all, so measuring with it, 「blocked the boundary」 would pass **not because it blocked but because there was none
-    /// to begin with**.
+    /// The bench with the real translator. ★Attribution-gate tests must use this one★ — [`RecordingDecoder`] emits no events, so "blocked
+    /// the boundary" would pass because there was none to begin with.
     fn harness_with_real_decoder() -> Harness {
         let mut h = harness();
         h.reader.decoder = Some(Box::new(super::super::decoder::CodexAppServerDecoder::new()));
         h
     }
 
-    /// The test bench with the real translator **and** the real fact layer plugged in together — measures in one place whether 「the screen boundary」 and
-    /// 「is this incarnation mid-turn」 get the same decision. The incarnation marker is fixed at 1 (there is only one incarnation on this test bench).
+    /// The bench with the real translator **and** the real fact layer — measures in one place that "the screen boundary" and "is this
+    /// incarnation mid-turn" get the same decision. The incarnation marker is fixed at 1.
     fn harness_with_facts() -> (Harness, Arc<TurnObservations>, AgentId) {
         let id = AgentId::new_v4();
         let turns = Arc::new(TurnObservations::new());
@@ -4510,7 +3982,6 @@ mod tests {
             .collect()
     }
 
-    /// A one-line `turn/completed` — a shape the real translator can read.
     fn completed_line(thread_id: &str, turn_id: &str, status: &str) -> String {
         serde_json::json!({
             "method": "turn/completed",
@@ -4520,7 +3991,7 @@ mod tests {
         .to_string()
     }
 
-    /// One notification line **in the middle** of a turn — the kind that becomes a progress signal, not a boundary.
+    /// One notification line **in the middle** of a turn — a progress signal, not a boundary.
     fn progress_line(thread_id: &str, turn_id: &str) -> String {
         serde_json::json!({
             "method": "item/agentMessage/delta",
@@ -4531,7 +4002,6 @@ mod tests {
 
     // ── Carrying usage observations (`take_usage` → `StatusSink::usage_observed`) ──
 
-    /// A status sink that collects only `usage_observed`.
     struct UsageStatus(Arc<Mutex<Vec<crate::usage::UsageObservation>>>);
     impl StatusSink for UsageStatus {
         fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
@@ -4578,8 +4048,8 @@ mod tests {
         .to_string()
     }
 
-    /// ★The observation passes the read loop and reaches the status sink★ — if the translator only gathered it and nobody emptied it, it would disappear without an
-    /// error. Nothing goes to the screen (subscribers).
+    /// ★The observation passes the read loop and reaches the status sink★ — if the translator only gathered it and nobody emptied it, it
+    /// would vanish without an error. Nothing goes to the screen.
     #[test]
     fn a_rate_limits_update_reaches_the_status_sink_not_the_screen() {
         let (mut reader, seen, observed) = usage_reader(Box::new(CodexAppServerDecoder::new()));
@@ -4593,7 +4063,7 @@ mod tests {
         );
     }
 
-    /// A translator blocked by the wrapper (non-default profile) hands nothing to the sink — the decision itself is measured by this folder's `usage` tests.
+    /// A translator blocked by the wrapper (non-default profile) hands nothing to the sink — that decision is measured by this folder's `usage` tests.
     #[test]
     fn a_gated_decoder_reports_no_usage() {
         let gated = crate::usage::UsageGate::blocking(Box::new(CodexAppServerDecoder::new()));
@@ -4603,10 +4073,8 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty());
     }
 
-    /// The test bench with the table + codex classifier + real translator plugged in — ★only for items that actually measure the fact layer★.
-    ///
-    /// The default [`harness`] is `TurnWiring::detached()`, so the table is silent — measuring with it, 「did not turn mid-turn on」 would pass
-    /// **not because it did not turn it on but because the table is off**.
+    /// The bench with table + codex classifier + real translator — ★only for items that measure the fact layer★. The default [`harness`] is
+    /// `TurnWiring::detached()` with a silent table, so "did not turn mid-turn on" would pass because the table is off.
     struct FactHarness {
         reader: Reader,
         state: SharedState,
@@ -4648,9 +4116,8 @@ mod tests {
         }
     }
 
-    /// ★A line that came while no turn is open goes to the screen but does not turn 「mid-turn」 on★ — if it did, that turn's end would be
-    /// blocked by the attribution gate and nobody could turn it off, and until the 30-minute fail-open valve sweeps it, no mail would go to that agent
-    /// (the link is Idle = queue open but only the fact layer is busy — the two axes split).
+    /// ★A line while no turn is open goes to the screen but does not turn "mid-turn" on★ — otherwise that turn's end would be blocked by
+    /// the attribution gate and nobody could turn it off (no mail for 30 minutes; link Idle but only the fact layer busy).
     #[test]
     fn a_line_that_arrives_with_no_open_turn_is_shown_but_never_marks_the_agent_busy() {
         let mut h = fact_harness();
@@ -4662,7 +4129,7 @@ mod tests {
             !h.table.is_in_turn(h.id, 1),
             "an unattributed line turned the fact layer on"
         );
-        // ★It did not pass by dropping it★ — that line goes to the screen as is. Only the fact layer was split off.
+        // ★Not passed by dropping it★ — the line goes to the screen as is; only the fact layer was split off.
         assert!(
             h.seen
                 .lock()
@@ -4682,7 +4149,6 @@ mod tests {
         );
     }
 
-    /// Its pair — the same line that came while our turn is open turns it on, and that turn's end turns it off.
     #[test]
     fn a_line_inside_our_open_turn_marks_the_agent_busy_and_its_completion_clears_it() {
         let mut h = fact_harness();
@@ -4697,8 +4163,8 @@ mod tests {
         assert!(!h.table.is_in_turn(h.id, 1));
     }
 
-    /// ★Item notifications that come before the response are normal★ — blocking that window by id match would push our turn's streaming
-    /// entirely out of the fact layer. So the decision is not 「does it match」 but 「does it not contradict」.
+    /// ★Item notifications before the response are normal★ — blocking by id match would push our turn's streaming out of the fact layer;
+    /// the decision is "does not contradict", not "matches".
     #[test]
     fn a_line_that_arrives_before_the_turn_id_is_known_still_counts_as_ours() {
         let mut h = fact_harness();
@@ -4710,8 +4176,8 @@ mod tests {
         assert!(h.table.is_in_turn(h.id, 1));
     }
 
-    /// ★A held end is dropped together with that turn★ — if left, the moment the peer reuses the id,
-    /// [`Reader::resolve`] closes **the freshly opened turn** on the spot and raises a stale boundary to the screen.
+    /// ★A held end is dropped with that turn★ — otherwise when the peer reuses the id [`Reader::resolve`] closes **the freshly opened
+    /// turn** and raises a stale boundary.
     #[test]
     fn a_held_completion_does_not_survive_the_turn_that_was_open_when_it_arrived() {
         let mut h = harness_with_real_decoder();
@@ -4726,7 +4192,7 @@ mod tests {
             "did not hold the end that came before the response"
         );
 
-        // That turn ends by another path (deadline expiry · write failure · error response — all come via end_turn_if).
+        // That turn ends by another path (deadline · write failure · error response — all via end_turn_if).
         let core = h.reader.core.clone();
         assert!(end_turn_if(
             &h.state,
@@ -4741,7 +4207,7 @@ mod tests {
             "the held end lived longer than the turn"
         );
 
-        // Even if the next turn receives the same id, it lives on open.
+        // Even if the next turn receives the same id, it stays open.
         activate(&h.state, 1, None);
         assert!(h
             .pending
@@ -4761,9 +4227,8 @@ mod tests {
         );
     }
 
-    /// ★The turn id the response decides is capped too★ — without it that value goes out as is into the boundary field, alone exceeding the replay
-    /// ring's single-event cap, and that ring evicts everything else. It is a comparison token, so it is filtered, not truncated,
-    /// so that turn has no material for attribution — so it is closed with the same grade as an error response.
+    /// ★The turn id the response decides is capped too★ — uncapped it goes into the boundary field and alone exceeds the replay ring's
+    /// single-event cap. Filtered, not truncated, so the turn has no attribution material and closes at the same grade as an error response.
     #[test]
     fn an_oversized_turn_id_in_the_response_closes_the_turn_instead_of_becoming_a_boundary_field() {
         let h = harness();
@@ -4789,7 +4254,6 @@ mod tests {
         );
     }
 
-    /// Someone else's turn · someone else's thread are not counted even while our turn is open — the same axis as the boundary gate.
     #[test]
     fn a_line_from_another_turn_or_thread_does_not_count_even_while_ours_is_open() {
         let mut h = fact_harness();
@@ -4852,8 +4316,8 @@ mod tests {
         );
     }
 
-    /// ★The core of TRD §4-4★ — server ids and our ids inevitably overlap (because server ids are returned as is).
-    /// What tells them apart is not the value but **the envelope shape**.
+    /// ★The core of TRD §4-4★ — server ids and our ids overlap (server ids are returned as is); **the envelope shape** tells them apart,
+    /// not the value.
     #[test]
     fn a_server_request_whose_id_collides_with_ours_never_touches_the_pending_map() {
         let mut h = harness();
@@ -4939,8 +4403,8 @@ mod tests {
         assert!(msg.contains("Already initialized"), "{msg}");
     }
 
-    /// ★The error body the peer gave goes to three places at once — log · screen · caller — so masking is done not in front of those three but **where it is
-    /// made**★. With three doors, one of them is bound to be forgotten.
+    /// ★The peer's error body goes to three places — log · screen · caller — so masking is done **where it is made**★, not at the three
+    /// doors (one would be forgotten).
     #[test]
     fn a_peer_error_message_is_masked_before_it_leaves_this_module() {
         let mut h = harness();
@@ -4966,17 +4430,13 @@ mod tests {
         assert!(msg.contains("***"), "{msg}");
     }
 
-    /// ★[`clip`] must be called only inside [`sanitize`]★ — called elsewhere, that string skips masking
-    /// and goes out to the log · screen. With two doors one is forgotten, and the forgotten one leaks **quietly**.
-    ///
-    /// This item measures that property **in the source** — keeping one credential item per leaking path
-    /// is not maintainable, and a path without one becomes the leaking path.
+    /// ★[`clip`] must be called only inside [`sanitize`]★ — elsewhere the string skips masking and leaks **quietly**. This item measures
+    /// that property **in the source**; one credential item per leaking path is not maintainable.
     #[test]
     fn clip_is_only_reachable_through_the_masking_door() {
         let src = include_str!("transport.rs");
-        // ★It is not split by `#[cfg(test)]`★ — that attribute is inside the production section too (test-bench-only accessors),
-        //   and cut there this item would scan only the front part and **not see the back part**.
-        // ★A marker containing a newline is not used either★ — this repository checks out with CRLF, so `\n` would not match.
+        // ★Not split by `#[cfg(test)]`★ — that attribute is also inside the production section (test-bench accessors); cutting there would scan only the front part.
+        // ★No marker containing a newline★ — the repository checks out with CRLF, so `\n` would not match.
         let production = src.split("mod tests {").next().expect("production section");
         let offenders: Vec<&str> = production
             .lines()
@@ -5018,7 +4478,7 @@ mod tests {
         );
     }
 
-    /// If the stream were cut by an unreadable line the agent would die — it drops it and keeps going.
+    /// If the stream were cut by an unreadable line the agent would die — it drops the line and keeps going.
     #[test]
     fn unreadable_lines_are_dropped_and_the_next_line_still_routes() {
         let mut h = harness();
@@ -5058,9 +4518,9 @@ mod tests {
 
     // ── Turn state machine ──────────────────────────────────────────────────────
 
-    /// ★`turn/started` takes no part in identity — do not revive it★. That notification has no identifier we issued,
-    /// so in principle it cannot tell which turn it belongs to. Telling it apart instead by 「is the current turn waiting for an answer」, a late notification of the previous turn
-    /// passes that condition **while the new turn waits for its own request** and writes its id into the new turn's slot.
+    /// ★`turn/started` takes no part in identity — do not revive it★. It has no identifier we issued; telling it apart by "is the current
+    /// turn waiting for an answer" lets a late notification of the previous turn pass **while the new turn waits for its own request** and
+    /// write its id into the new turn's slot.
     #[test]
     fn a_turn_started_notification_never_sets_the_turn_id() {
         let mut h = harness();
@@ -5093,20 +4553,17 @@ mod tests {
         assert_eq!(turn_id_of(&h.state).as_deref(), Some("U-2"));
     }
 
-    /// ★A late response of the previous turn must not write its id into the current turn's slot★ — if written, the `interrupt` after it
-    /// aims at the wrong turn. What tells them apart is the marker, and without the marker both look like "the turn id is empty".
+    /// ★A late response of the previous turn must not write its id into the current turn's slot★ — a later `interrupt` would aim at the
+    /// wrong turn. Only the marker tells them apart; without it both look like "the turn id is empty".
     #[test]
     fn a_late_response_from_a_finished_turn_never_lands_on_the_next_turn() {
         let mut h = harness();
         make_ready(&h.state, "T");
-        // Turn 0 opened and its response has not come yet.
         activate(&h.state, 0, None);
         let _ = h
             .pending
             .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START);
-        // That turn ended and turn 1 opened.
         activate(&h.state, 1, None);
-        // Now the answer for turn 0 arrives.
         h.reader
             .handle_line(br#"{"id":5,"result":{"turn":{"id":"U-OLD"}}}"#);
         assert_eq!(
@@ -5121,7 +4578,7 @@ mod tests {
         );
     }
 
-    /// ★An unknown threadId is not an error★ — but a threadId that is **known and different** is not our turn.
+    /// ★An unknown threadId is not an error★ — but a **known, different** threadId is not our turn.
     #[test]
     fn a_turn_notification_for_another_thread_does_not_end_our_turn() {
         let mut h = harness();
@@ -5136,8 +4593,8 @@ mod tests {
         );
     }
 
-    /// ★A signal that **another turn** of the same thread ended must not close our turn either★ — if it did, the next turn would open and
-    /// two turns would run at once on one thread. Preventing exactly that is why the input queue exists.
+    /// ★An end of **another turn** of the same thread must not close ours★ — else the next turn opens and two run at once on one thread,
+    /// which the input queue exists to prevent.
     #[test]
     fn a_turn_completed_for_a_different_turn_on_our_thread_does_not_end_ours() {
         let mut h = harness();
@@ -5157,8 +4614,7 @@ mod tests {
         );
     }
 
-    /// ★An end that came while the turn id is unknown ends nothing★ — closing a live turn with an unattributable signal
-    /// opens the queue and turns overlap.
+    /// ★An end while the turn id is unknown ends nothing★ — closing a live turn on an unattributable signal opens the queue and overlaps turns.
     #[test]
     fn a_turn_completed_we_cannot_attribute_ends_nothing() {
         let mut h = harness();
@@ -5179,11 +4635,9 @@ mod tests {
         );
     }
 
-    /// ★An item that measures exactly the order that used to get stuck★: the end comes first (unattributable → ignored), and **without a sweep in between**
-    /// the response comes and decides our turn's id. That response takes away the waiting entry, so if it is not ended here that turn has nothing
-    /// to end it forever — no deadline, and no second end comes.
-    ///
-    /// ★Inserting a sweep would stop measuring this order★ — the deadline would end it instead, and the response-side comparison would never be called.
+    /// ★Measures exactly the order that used to get stuck★: the end first (unattributable → ignored), and **no sweep in between**, then
+    /// the response decides our turn's id. That response removes the waiting entry, so if the turn is not ended here nothing ever ends it.
+    /// ★A sweep would stop measuring this order★ — the deadline would end it and the response-side comparison would never run.
     #[test]
     fn an_early_completion_is_reconciled_when_the_response_names_it() {
         let mut h = harness();
@@ -5194,7 +4648,6 @@ mod tests {
             .pending
             .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START);
 
-        // ① The end comes first — at this point our turn's id is unknown, so it cannot be attributed.
         h.reader.handle_line(
             br#"{"method":"turn/completed","params":{"threadId":"T","turn":{"id":"U-EARLY"}}}"#,
         );
@@ -5204,7 +4657,6 @@ mod tests {
             "an unattributable end closed the turn on the spot"
         );
 
-        // ② Then the response comes — here our turn's id is decided as `U-EARLY`. No sweep is inserted.
         h.reader
             .handle_line(br#"{"id":5,"result":{"turn":{"id":"U-EARLY"}}}"#);
 
@@ -5250,19 +4702,17 @@ mod tests {
 
     // ── Turn boundary attribution gate ─────────────────────────────────────────────────
     //
-    // What the items above measure is that **this link's state machine** is not fooled by someone else's end, and what the items below
-    // measure is that **the screen and the fact layer** get the same decision. If the two split, the link keeps the queue closed while
-    // the screen draws the turn as ended, and the fact layer observes idleness and plugs mail in mid-turn.
+    // The items above measure that **this link's state machine** is not fooled by someone else's end; the items below measure that
+    // **the screen and the fact layer** get the same decision.
 
-    /// ★Exactly the input the review named★: our turn is `U-MINE` but an end of `U-OTHER` of the same thread comes.
-    /// The link ignores it, but the translator does not know attribution and emits a boundary — if that boundary flowed as is, the classifier and
-    /// the frontend both do not look at the id, so **the live `U-MINE` would be stamped as ended.**
+    /// ★Exactly the named input★: our turn is `U-MINE` but an end of `U-OTHER` of the same thread comes. The link ignores it, but the
+    /// translator does not know attribution and emits a boundary — flowing as is, classifier and frontend (neither reads the id) would
+    /// **stamp the live `U-MINE` as ended.**
     #[test]
     fn a_foreign_turn_completed_never_ends_the_live_turn() {
         let (mut h, turns, id) = harness_with_facts();
         make_ready(&h.state, "MINE");
         activate(&h.state, 0, Some("U-MINE"));
-        // The echoed user message = the first observation that this turn is running.
         h.reader.core.emit(OutputEvent::Structured {
             kind: "user".into(),
             json: "{}".into(),
@@ -5287,7 +4737,6 @@ mod tests {
         );
     }
 
-    /// The end of another thread is the same — blocked, but left in the log (reason = [`Reader::note_turn`] doc).
     #[test]
     fn a_turn_completed_from_another_thread_makes_no_boundary() {
         let mut h = harness_with_real_decoder();
@@ -5298,8 +4747,8 @@ mod tests {
         assert!(boundaries(&h.seen).is_empty(), "{:?}", boundaries(&h.seen));
     }
 
-    /// ★If attributed, the boundary flows **as is** — including the outcome★. If the gate only 「blocks」 and cannot let anything through,
-    /// the waiting indicator spins forever.
+    /// ★If attributed, the boundary flows **as is** — including the outcome★; a gate that only blocks would leave the waiting indicator
+    /// spinning forever.
     #[test]
     fn an_attributed_turn_completed_makes_exactly_one_boundary_with_its_outcome() {
         let mut h = harness_with_real_decoder();
@@ -5318,9 +4767,9 @@ mod tests {
         );
     }
 
-    /// ★The boundary of an end that came before the response is **neither dropped nor let through but deferred**★ — letting it through on the spot would let an end not yet
-    /// attributed close a live turn, and dropping it would leave nothing to raise after the comparison holds, so the waiting indicator
-    /// spins forever. Even though the outcome was known.
+    /// ★The boundary of an end before the response is **deferred**, neither dropped nor let through★ — letting it through would let an
+    /// unattributed end close a live turn; dropping it would leave nothing to raise after the comparison holds, and the waiting indicator
+    /// would spin forever.
     #[test]
     fn an_early_completion_boundary_is_held_until_the_response_names_it() {
         let mut h = harness_with_real_decoder();
@@ -5346,7 +4795,6 @@ mod tests {
         );
     }
 
-    /// The comparison is still only **the id match** — no boundary comes up merely by being held.
     #[test]
     fn an_early_completion_for_another_turn_never_releases_its_boundary() {
         let mut h = harness_with_real_decoder();
@@ -5365,9 +4813,9 @@ mod tests {
 
     // ── A turn that dies without an outcome (ADR-0127) ─────────────────────────────────────────
 
-    /// ★The only function that folds a turn **always** emits a boundary★ — that is the only means by which this link's four give-up paths (write failure · response
-    /// decode failure · error response · deadline expiry) return the fact layer. And if the marker does not match it
-    /// ends nothing and **emits no boundary either** — a late signal must not invent the next turn's boundary.
+    /// ★The only function that folds a turn **always** emits a boundary★ — the only way this link's four give-up paths (write failure ·
+    /// response decode failure · error response · deadline) return the fact layer. On a marker mismatch it ends nothing and **emits no
+    /// boundary either** — a late signal must not invent the next turn's boundary.
     #[test]
     fn ending_a_turn_always_makes_a_failure_boundary_and_a_stale_marker_makes_none() {
         let (core, seen) = core_with_sink();
@@ -5408,10 +4856,9 @@ mod tests {
         );
     }
 
-    /// ★This is the very outcome ADR-0127 is meant to prevent★: if the link gave up mid-turn and the fact layer did not return,
-    /// that incarnation would remain observed as 「mid-turn」 although idle, and until the 30-minute fail-open valve sweeps it
-    /// mail is blocked. ★One [`OutputEvent::Error`] line cannot do this★ — the classifier does not count that vocabulary as a turn signal
-    /// (that was the mechanism of this defect).
+    /// ★The very outcome ADR-0127 prevents★: a link that gave up mid-turn without returning the fact layer leaves the incarnation observed
+    /// "mid-turn" although idle, mail blocked until the 30-minute fail-open. ★One [`OutputEvent::Error`] line cannot do this★ — the
+    /// classifier does not count that vocabulary as a turn signal.
     #[test]
     fn a_turn_abandoned_without_a_completion_clears_the_fact_layer() {
         let (h, turns, id) = harness_with_facts();
@@ -5436,7 +4883,6 @@ mod tests {
         );
     }
 
-    /// The path where an error response comes to `turn/start` — one of the four give-ups. The reason goes out carried inside the boundary.
     #[test]
     fn an_error_response_to_turn_start_ends_the_turn_with_its_reason_inside_the_boundary() {
         let mut h = harness();
@@ -5464,8 +4910,8 @@ mod tests {
         );
     }
 
-    /// ★Even if the real end comes late to a turn closed by giving up, there is **one** boundary★ — if two went out, the screen would close the same turn twice,
-    /// and an unpaired end would pile up once more in the fact layer.
+    /// ★Even if the real end comes late to a turn closed by giving up, there is **one** boundary★ — two would close the same turn twice on
+    /// screen and pile up an unpaired end in the fact layer.
     #[test]
     fn an_abandoned_turn_and_its_late_completion_make_exactly_one_boundary() {
         let mut h = harness_with_real_decoder();
@@ -5490,8 +4936,7 @@ mod tests {
         );
     }
 
-    /// Runs the writer once without stdin to make the handshake fail. `queued` = bodies that had already received `Ok` in that window and
-    /// were queued.
+    /// Runs the writer once without stdin to make the handshake fail. `queued` = bodies that had already received `Ok` in that window.
     fn run_failed_handshake(queued: &[&str]) -> (SharedState, Arc<Mutex<Vec<OutputEvent>>>) {
         let (core, seen) = core_with_sink();
         let state = shared();
@@ -5502,12 +4947,10 @@ mod tests {
         });
 
         writer_loop(
-            // There is no stdin, so the handshake fails at the first write.
             Arc::new(Mutex::new(None)),
             state.clone(),
             Arc::new(Pending::default()),
             Arc::new(AtomicI64::new(0)),
-            // After the handshake the loop ends at the first check — what these items measure is the section before it.
             Arc::new(AtomicBool::new(true)),
             core,
             ThreadOpen::Start(ThreadStartParams {
@@ -5524,8 +4967,8 @@ mod tests {
         (state, seen)
     }
 
-    /// Pulls the errors · boundaries raised to the screen **in arrival order** — because what must be measured on this branch is not only the count but
-    /// 「does the reason come up before the boundary」.
+    /// Pulls the errors · boundaries raised to the screen **in arrival order** — this branch must measure "does the reason come before the
+    /// boundary", not just the count.
     fn error_and_boundary_order(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<&'static str> {
         seen.lock()
             .unwrap()
@@ -5538,10 +4981,9 @@ mod tests {
             .collect()
     }
 
-    /// ★Even with no dropped input, **one** failure outcome goes out★ — the place that opens a turn requires [`Link::Ready`],
-    /// so this incarnation never had a turn, but the frontend does not read `Error` as a turn end, so a slot holding only an error
-    /// has **its waiting indicator spin forever** (the link is `Down`, so nothing will arrive after it either).
-    /// ★That reason does not claim input loss★ — because nothing was dropped.
+    /// ★Even with no dropped input, **one** failure outcome goes out★ — a turn opens only from [`Link::Ready`], so this incarnation never
+    /// had one, but the frontend does not read `Error` as a turn end, so a slot with only an error spins its waiting indicator **forever**
+    /// (the link is `Down`). ★That reason does not claim input loss★ — nothing was dropped.
     #[test]
     fn a_failed_handshake_with_nothing_queued_still_ends_the_turn_exactly_once() {
         let (state, seen) = run_failed_handshake(&[]);
@@ -5567,10 +5009,9 @@ mod tests {
         assert!(with_state(&state, |s| matches!(s.link, Link::Down(_))));
     }
 
-    /// ★If queued bodies were destroyed, **one** failure outcome goes out★ — because the sending side had turns,
-    /// and `dropped` is the number of dropped bodies, not the number of turns. ★Without this boundary★ the frontend does not read `Error`
-    /// as a turn end (retried stream errors come in that vocabulary), so a slot that received only an error has **its waiting indicator
-    /// spin forever**.
+    /// ★With queued bodies destroyed, **one** failure outcome goes out★ — `dropped` counts bodies, not turns. ★Without this boundary★ the
+    /// frontend does not read `Error` as a turn end (retried stream errors use that vocabulary), so a slot that received only an error spins
+    /// **forever**.
     #[test]
     fn a_failed_handshake_that_destroyed_queued_input_ends_the_turn_exactly_once() {
         let (state, seen) = run_failed_handshake(&["queued one", "queued two"]);
@@ -5594,10 +5035,8 @@ mod tests {
         assert!(with_state(&state, |s| matches!(s.link, Link::Down(_))));
     }
 
-    /// ★If the places that return a turn to idle grow, this goes red★ — each place must answer 「who emits the boundary」,
-    /// and a place that does not answer is exactly where the fact layer freezes (ADR-0127). Today's four = [`end_turn_if`] (emits the boundary
-    /// itself) · [`Reader::note_turn`] (lets the translator boundary through) · [`Reader::resolve`] (raises the held
-    /// boundary) · [`ReaderExit::drop`] (the stream ended — `OutputCore::finish` soon takes the table away).
+    /// ★If the places that return a turn to idle grow, this goes red★ — each must answer "who emits the boundary" (ADR-0127). Today:
+    /// [`end_turn_if`] · [`Reader::note_turn`] · [`Reader::resolve`] · [`ReaderExit::drop`].
     #[test]
     fn every_place_that_idles_a_turn_is_accounted_for() {
         let src = include_str!("transport.rs");
@@ -5611,8 +5050,8 @@ mod tests {
             sites, 4,
             "the places that return a turn to idle are not four — a new place must emit its own turn boundary too"
         );
-        // ★Every such place must also drop the held ends★ — if not dropped, that slot survives until the next turn,
-        //   and the moment the peer reuses the id, the freshly opened turn is closed by a stale boundary (that line of [`end_turn_if`]).
+        // ★Every such place must also drop the held ends★ — else that slot survives to the next turn and when the peer reuses the id the fresh
+        //   turn is closed by a stale boundary ([`end_turn_if`]).
         let drops = production
             .lines()
             .map(|l| l.trim())
@@ -5622,9 +5061,9 @@ mod tests {
             drops, sites,
             "the number of idle places differs from the number of places dropping held ends"
         );
-        // ★Every such place must also dispose that turn's items (ADR-0231)★ — at a missed place, the `InFlight` of the ended turn
-        //   remains without an outcome and turns all new text into waiting. The only exception is the stream closing (list items are
-        //   closed by `OutputCore::finish` as `Dropped{AgentEnded}`, and the link is no longer used).
+        // ★Every such place must also dispose that turn's items (ADR-0231)★ — a missed place leaves the ended turn's `InFlight` without an
+        //   outcome and turns all new text into waiting. Only exception: the stream closing (`OutputCore::finish` closes list items as
+        //   `Dropped{AgentEnded}`; the link is no longer used).
         let disposals = production
             .lines()
             .map(|l| l.trim())
@@ -5638,10 +5077,9 @@ mod tests {
         );
     }
 
-    /// ★Even if an unattributed end is dropped, that turn's **deadline must remain**★ — taking away the waiting entry while ignoring it
-    /// would leave that turn with nothing to end it. This item measures that one thing, and **not** 「a turn that could not be attributed
-    /// always has a deadline」 (that generalization is false — there are cases where the end comes before the response,
-    /// and that slot is carried by the module header's 「known limits」).
+    /// ★Even if an unattributed end is dropped, that turn's **deadline must remain**★ — removing the waiting entry while ignoring it would
+    /// leave nothing to end the turn. This measures only that, **not** "an unattributable turn always has a deadline" (false — an end before
+    /// the response is carried by the module header's known limits).
     #[test]
     fn an_ignored_completion_leaves_the_turn_s_deadline_intact() {
         let mut h = harness();
@@ -5682,9 +5120,8 @@ mod tests {
         );
     }
 
-    /// ★An undecodable success response is **the same grade** as an explicit error★ — the waiting entry was already taken away, so if the turn
-    /// is not ended here, that turn remains open forever with neither `turn_id` nor a deadline (after that `send_input` reports that stall as
-    /// "the queue is full").
+    /// ★An undecodable success response is **the same grade** as an explicit error★ — the waiting entry is already gone, so a turn left open
+    /// would stay open forever with neither `turn_id` nor a deadline (`send_input` then reports "the queue is full").
     #[test]
     fn a_success_response_we_cannot_read_ends_the_turn_like_an_error_would() {
         let mut h = harness();
@@ -5695,7 +5132,7 @@ mod tests {
             .pending
             .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START);
 
-        // A success response without the `turn` field — the envelope is sound and only the payload does not read as our type.
+        // A success response without the `turn` field — the envelope is sound, the payload does not read as our type.
         h.reader
             .handle_line(br#"{"id":5,"result":{"not-a-turn":true}}"#);
 
@@ -5855,7 +5292,7 @@ mod tests {
         assert!(with_state(&h.state, |s| s.pending.is_empty()));
     }
 
-    /// A handed-over item is also one entry — it is visible in the list until receipt (echo).
+    /// A handed-over item is also one entry — visible in the list until receipt (echo).
     #[test]
     fn the_bound_counts_every_pending_item_whatever_its_stage() {
         let state = shared();
@@ -5902,11 +5339,9 @@ mod tests {
         );
     }
 
-    /// ★This item **cannot measure** atomicity — the signature already carries that property★: [`take_turn_locked`]
-    /// takes `&mut State`, so exclusive access is a compiler guarantee, and the lock is in this file's harness (`with_state`).
-    /// So there is practically no mutation that can turn this item red.
-    /// It is still kept because it looks at **whether the accounting is right** (even with eight rushing in, only one is consumed from the queue),
-    /// and that one thing is all this item measures.
+    /// ★This item **cannot measure** atomicity — the signature already carries it★: [`take_turn_locked`] takes `&mut State` (exclusivity is
+    /// a compiler guarantee; the lock is the harness's `with_state`), so practically no mutation turns this red. It is kept for **whether the
+    /// accounting is right** (with eight rushing in, only one is consumed) — all it measures.
     #[test]
     fn two_concurrent_takers_open_exactly_one_turn() {
         let h = harness();
@@ -5945,10 +5380,9 @@ mod tests {
         );
     }
 
-    /// What this item measures is **one thing, the `Ready` transition** — not 「that value is on disk」 (this link does not carry
-    /// that guarantee: the record port swallows failures inside itself).
-    /// ★The point is measuring with only the thread id filled and `Ready` not set★ — filling both together lets the absence of the id
-    /// block it instead, so **it stays green even if the gate is removed** (measured by mutation).
+    /// Measures **only the `Ready` transition** — not "that value is on disk" (the record port swallows failures inside itself).
+    /// ★The point is filling only the thread id and not `Ready`★ — filling both lets the id's absence block it instead, so **it stays green
+    /// even if the gate is removed** (measured by mutation).
     #[test]
     fn nothing_is_sent_before_the_link_is_ready_even_when_the_thread_id_is_known() {
         let h = harness();
@@ -5969,11 +5403,8 @@ mod tests {
 
     // ── The two exceptional branches of the record call ──────────────────────────────────────────────
 
-    /// ★An already ended incarnation is not recorded★ — if written, a dead session's profile holds someone else's conversation as its own,
-    /// and the old sid is pushed into history. ★But what this measures is only an end **already observed**★ — a session that ends between that decision and the actual
-    /// record is outside the range this item measures, and passes today (`record_session_id` doc).
-    /// ★The point is measuring **both** markers★ — `shutdown()` sets the atomic first and then takes the state lock to
-    /// set `closed`. The span in between is not empty, so a fence looking at only one side leaks that much.
+    /// ★An already ended incarnation is not recorded★ — else a dead session's profile gets someone else's conversation and the old sid enters
+    /// history. Measures only an end **already observed**; ★both markers★ are needed (`shutdown()` sets the atomic first, then `closed`).
     #[test]
     fn a_session_that_already_ended_is_not_recorded() {
         for (closed, shutting_down) in [(true, false), (false, true), (true, true)] {
@@ -6000,7 +5431,7 @@ mod tests {
         }
     }
 
-    /// The pair direction — if neither stands, it records. Without it, the item above would be green even as 「always skip」.
+    /// The pair direction — if neither stands, it records. Without it the item above would be green even for "always skip".
     #[test]
     fn a_live_session_is_recorded() {
         let state = shared();
@@ -6016,18 +5447,15 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
-    /// ★Even if the record panics, it does not take the writer with it★ — if unwind went up, neither `Ready` nor `Down` would stand, so
-    /// the link would stop at `Connecting`, and in that state [`AgentTransport::send_input`] would see neither closed nor `Down`,
-    /// return `Ok` and only fill the queue (the 「silent stop」 ADR-0190 forbids). Only by turning into `Err` does the writer go
-    /// to the failure branch and take the link down. It is the branch of a build without the hook — in the production process the hook ends it (ADR-0292).
+    /// ★Even if the record panics, it does not take the writer with it★ — an unwind would leave the link `Connecting` with `send_input`
+    /// returning `Ok` (ADR-0190); `Err` sends the writer to the failure branch. Hook-less build only; production ends the process (ADR-0292).
     #[test]
     fn a_panicking_sink_becomes_a_failure_instead_of_unwinding() {
         let state = shared();
         let sink: SessionIdSink = Arc::new(|_| panic!("the record port blew up"));
 
-        // ★The hook is not swapped bare-handed★ — the hook is process-global, so other items running concurrently in the same binary
-        //   would lose their own panic output (undiagnosable), or an overlapping span would leave the quiet hook forever. A helper that prevents
-        //   those two accidents already exists.
+        // ★The hook is not swapped bare-handed★ — it is process-global, so concurrent items would lose their own panic output or an overlapping
+        //   span would leave the quiet hook forever; a helper that prevents both already exists.
         let out = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
             record_session_id(&state, &AtomicBool::new(false), Some(&sink), "T")
         });
@@ -6056,7 +5484,7 @@ mod tests {
         );
     }
 
-    /// The writer picks control lines **before** user turns — if a refusal waited behind the queue, the peer would stop forever.
+    /// The writer picks control lines **before** user turns — a refusal waiting behind the queue would stop the peer forever.
     #[test]
     fn the_writer_takes_control_lines_before_queued_input() {
         let h = harness();
@@ -6357,12 +5785,10 @@ mod tests {
         );
     }
 
-    /// ★A waiting entry registered after the link closed holds its thread until its deadline runs out★ — the handshake issues two
-    /// requests back to back, so a window of closing in between really exists. If the waiting table itself closes, that wait ends immediately.
-    ///
-    /// ★The **time** assertion below cannot measure the waiting table closing★ — `shutdown()` already took stdin, so
-    /// the write fails right away, and this function returns quickly even if the closed marker is removed. What actually measures that marker is
-    /// only the two assertions above (is a new waiting entry refused · is `interrupt` refused).
+    /// ★A waiting entry registered after the link closed holds its thread until its deadline★ — the handshake issues two requests back to
+    /// back, so a closing window really exists. If the table itself closes, that wait ends immediately.
+    /// ★The **time** assertion below cannot measure the table closing★ — `shutdown()` already took stdin, so the write fails at once even
+    /// without the closed marker. Only the two assertions above (new entry refused · `interrupt` refused) measure the marker.
     #[cfg(windows)]
     #[test]
     fn after_shutdown_a_request_fails_at_once_instead_of_waiting_out_the_deadline() {
@@ -6398,12 +5824,9 @@ mod tests {
         );
     }
 
-    /// ★Even if the peer ends on its own, the writer thread must end★ — if not, that thread remains holding the `Arc`s of core · stdin · the waiting table,
-    /// and one session's worth of memory remains with it. `shutdown()` is not called on this path
-    /// (the reaper only removes the session from the registry).
-    ///
-    /// ★This item is **the only place that actually runs** both loops★ — the other link items call `handle_line` ·
-    /// `next_job` · `sweep_deadlines` directly.
+    /// ★Even if the peer ends on its own, the writer thread must end★ — else it stays holding the `Arc`s of core · stdin · the waiting
+    /// table (one session's memory); `shutdown()` is not called on this path (the reaper only removes the session from the registry).
+    /// ★The only item that actually runs **both** loops★ — the other link items call `handle_line` · `next_job` · `sweep_deadlines` directly.
     #[cfg(windows)]
     #[test]
     fn the_writer_thread_ends_when_the_peer_exits_on_its_own() {
@@ -6411,7 +5834,6 @@ mod tests {
         let (core, _seen) = core_with_sink();
         t.start(core.clone());
 
-        // The reader (pump) ends with EOF.
         core.join_pump(Duration::from_secs(10));
 
         await_writer_end(
@@ -6424,12 +5846,9 @@ mod tests {
         );
     }
 
-    /// ★The same marker must survive a reader **panic** too★ — `contain` wraps the reader loop from outside,
-    /// so cleanup written at the loop tail is simply passed over by unwind. If the marker does not stand on that path, the writer spins forever holding core ·
-    /// stdin · the waiting table, and that is the other half the normal EOF item cannot see.
-    ///
-    /// The unwind is produced by **making a subscriber panic inside `core.emit`** — exactly the path the review named, and
-    /// the only way this file reaches that point without the real codex.
+    /// ★The same marker must survive a reader **panic** too★ — `contain` wraps the loop from outside, so tail cleanup is skipped by unwind;
+    /// without the marker the writer spins forever holding core · stdin · the waiting table (the half the EOF item cannot see). The unwind is
+    /// produced by **a subscriber panicking inside `core.emit`** — the only way this file reaches it without the real codex.
     #[cfg(windows)]
     #[test]
     fn the_closing_mark_survives_a_reader_panic() {
@@ -6475,9 +5894,8 @@ mod tests {
         drop(probe);
     }
 
-    /// ★The control queue must go out even while the handshake waits for an answer★ — the writer is the only thread that drains that queue,
-    /// so if it parked entirely, a server request refusal the reader put in could not go out until the deadline runs out, and if the peer was waiting for that
-    /// answer, both sides would wait for each other.
+    /// ★The control queue must go out even while the handshake waits for an answer★ — the writer is the only drainer, so parking entirely
+    /// would hold a refusal the reader queued until the deadline, and a peer waiting for it would deadlock with us.
     #[cfg(windows)]
     #[test]
     fn the_handshake_keeps_draining_the_control_queue_while_it_waits() {
@@ -6527,19 +5945,13 @@ mod tests {
         t.shutdown();
     }
 
-    /// ★The order of the sliced wait is the contract — measure the deadline **first**, then write one line★.
-    ///
-    /// What is measured is exactly that one order: in a slice whose deadline already passed, **it returns without attempting a write.**
-    /// Flip the order and that one write cannot get the stdin lock and hangs, and the deadline is never evaluated.
-    ///
-    /// ★Make clear **what this item cannot measure**★: if the write blocks in a slice whose deadline has not passed yet, this
-    /// wait is still infinite. This order cannot fix that, and the only way out is `shutdown()`'s kill
-    /// (module header 「known limits」). Do not quote this item as that guarantee.
+    /// ★The order of the sliced wait is the contract — measure the deadline **first**, then write one line★: in a slice whose deadline passed
+    /// it returns without attempting a write (flipped, that write hangs on the stdin lock). ★Cannot measure★ a write that blocks in a live
+    /// slice (only `shutdown()`'s kill gets out) — do not quote this as that guarantee.
     #[cfg(windows)]
     #[test]
     fn an_expired_slice_returns_without_attempting_another_write() {
-        // The first request write must succeed (a small line), so only the deadline is made short. By the time one slice (500ms) runs,
-        //   it has already passed.
+        // The first request write must succeed (small line), so only the deadline is short; by the time one slice (500ms) runs it has passed.
         const BUDGET: Duration = Duration::from_millis(50);
         let (t, _) = open_probe(&["/c", "ping", "-n", "30", "127.0.0.1"]);
 
@@ -6565,8 +5977,7 @@ mod tests {
             )
         });
 
-        // Hold stdin **after** the first request write ends — the peer does not read stdin, so this write hangs forever
-        //   holding the lock.
+        // Hold stdin **after** the first request write ends — the peer does not read stdin, so this write hangs forever holding the lock.
         std::thread::sleep(Duration::from_millis(100));
         let filler = t.stdin.clone();
         let filling = std::thread::spawn(move || {
@@ -6591,8 +6002,8 @@ mod tests {
         let _ = filling.join();
     }
 
-    /// ★Failing to send a refusal because the control queue is full must show on screen★ — left only in the log, the peer waits for the answer
-    /// forever and this side has no signal. The sibling event (`turn/start` deadline) already shows on screen.
+    /// ★Failing to send a refusal because the control queue is full must show on screen★ — logged only, the peer waits forever with no
+    /// signal on this side. The sibling event (`turn/start` deadline) already shows on screen.
     #[test]
     fn a_full_control_queue_drops_a_protocol_obligation_visibly() {
         let mut h = harness();
@@ -6617,19 +6028,10 @@ mod tests {
         );
     }
 
-    /// ★The record call must come **before** the gate opens★ — this is the reason the one-verb port exists
-    /// ([`crate::backend::SessionIdSink`]: this order is why there is no second verb asking back 「was it written」).
-    /// Flipped, a turn would go out with that session before it is recorded, and the port would become **a notification that guarantees nothing**.
-    ///
-    /// ★Why it is measured in the source★ — the port is `Fn(&str)`, so it cannot see the link state at the time it is called, and making it see that
-    /// would break the very one-verb contract this item protects. The other half of the gate (「a turn goes out only when
-    /// `Ready`」) is measured by actually running [`tests::nothing_is_sent_before_the_link_is_ready_even_when_the_thread_id_is_known`]
-    /// — together the two cover the order 「record → gate → send」.
-    /// Precedent · same reason = `the_guard_is_armed_and_the_child_adopted_first_after_spawn` of the `crate::transport::spawn` tests.
-    /// ★What this item pins goes only as far as 「**handed** to the port before the gate」 (ADR-0226)★ — behind the port is the first-submission
-    ///   latch, so persistence is tied to submission. 「Persist before the first turn」 is carried together by the latch unit test (queueing behind an in-progress commit) ·
-    ///   the session's submission counting order test · the assembly point's wiring structure test (`manager`'s
-    ///   `the_first_submission_latch_is_wired_through_the_spawn_path`).
+    /// ★The record call must come **before** the gate opens★ — why the one-verb port exists ([`crate::backend::SessionIdSink`]). Measured in
+    /// the source: the port is `Fn(&str)` and cannot see link state. The other half is
+    /// [`tests::nothing_is_sent_before_the_link_is_ready_even_when_the_thread_id_is_known`]. ★Pins only "**handed** to the port before the
+    /// gate" (ADR-0226)★ — persistence-before-first-turn is covered by the latch tests and `manager`'s wiring test.
     #[test]
     fn the_session_id_is_recorded_before_the_gate_opens() {
         let body = writer_loop_code();
@@ -6637,9 +6039,8 @@ mod tests {
         let recorded = body.find("record_session_id(").expect(
             "there is no `record_session_id(` call in writer_loop — this item's premise is stale",
         );
-        // ★The anchor moved from `Link::Ready` to `open_gate(`★ — as the line that sets the gate moved into that function,
-        //   the `Link::Ready` left in this body became **only comments**. Left as is, this item would measure a comment
-        //   position and pass quietly (it actually passed that way).
+        // ★The anchor moved from `Link::Ready` to `open_gate(`★ — the line that sets the gate moved into that function, so the `Link::Ready`
+        //   left in this body became **only comments**; left as is the item would measure a comment position and pass quietly.
         let gate_open = body
             .find("open_gate(")
             .expect("there is no `open_gate(` call in writer_loop — this item's premise is stale");
@@ -6651,12 +6052,10 @@ mod tests {
         );
     }
 
-    /// Only the code of the `writer_loop` body **with comments stripped** — the shared lens of the items that measure order · door choice in the source.
+    /// Only the code of the `writer_loop` body **with comments stripped** — the shared lens of the items measuring order · door choice in the source.
     ///
-    /// ★★Stripping comments is why this helper exists★★: this file's comments quote the names they guard
-    ///   as is (that is this repository's comment convention), so scanning raw, **one comment line poses as a real call.**
-    ///   It actually passed that way once — even after the line setting the gate moved into `open_gate`,
-    ///   two items looking for `Link::Ready` were green measuring the **comments** left in the body.
+    /// ★Stripping comments is why this exists★: this file's comments quote the names they guard, so a raw scan lets **one comment line
+    ///   pose as a real call** — it once did, two items looking for `Link::Ready` were green measuring the **comments** left in the body.
     fn writer_loop_code() -> String {
         let src = include_str!("transport.rs");
         let production = src.split("mod tests {").next().expect("production section");
@@ -6697,7 +6096,6 @@ mod tests {
         Instant::now() + Duration::from_secs(60)
     }
 
-    /// Pulls only text — the lens used by the items measuring order.
     fn texts(events: &[OutputEvent]) -> Vec<String> {
         events
             .iter()
@@ -6708,11 +6106,10 @@ mod tests {
             .collect()
     }
 
-    /// ★Pages come newest first, and what goes on the screen must be **in time order**★ — that flip is the only order contract
-    /// of this path (measured 2026-09-16, real 0.154.0: the first page's `data[0]` of `sortDirection: desc`
-    /// is the last assistant response, and the end of the last page is the first `userMessage`).
-    /// ★The same item also measures the request shape★ — if direction · cursor continuation is wrong, the screen stands upside down or the same
-    /// page is fetched again forever.
+    /// ★Pages come newest first and the screen needs **time order**★ — that flip is this path's only order contract (measured 2026-09-16,
+    /// real 0.154.0: the first page's `data[0]` of `sortDirection: desc` is the last assistant response, the last page ends with the first
+    /// `userMessage`). ★Also measures the request shape★ — a wrong direction · cursor continuation stands the screen upside down or refetches
+    /// the same page forever.
     #[test]
     fn history_pages_backwards_and_lands_in_time_order() {
         let mut asked: Vec<(String, Option<String>)> = Vec::new();
@@ -6746,8 +6143,8 @@ mod tests {
         assert_eq!(texts(&events), vec!["first", "second", "third"]);
     }
 
-    /// ★Exactly one close per turn★ — without closing, the waiting indicator of the restored slot spins forever, and closing twice
-    /// piles up empty separators. Closing the last turn too is half of this item.
+    /// ★Exactly one close per turn★ — without closing, the restored slot's waiting indicator spins forever; closing twice piles up empty
+    /// separators. Closing the last turn too is half of this item.
     #[test]
     fn every_history_turn_is_closed_exactly_once() {
         let events = collect_history("th", "c".to_string(), far_deadline(), |_, _| {
@@ -6783,8 +6180,8 @@ mod tests {
         );
     }
 
-    /// ★If there is nothing at all to carry over, **nothing is emitted**★ — making a list of only boundaries would create separators in an empty
-    /// slot. Variants live drops (reasoning etc.) get the same decision in history too.
+    /// ★If there is nothing to carry over, **nothing is emitted**★ — a list of only boundaries would create separators in an empty slot.
+    /// Variants live drops (reasoning etc.) get the same decision in history.
     #[test]
     fn a_history_of_nothing_translatable_produces_no_events() {
         let events = collect_history("th", "c".to_string(), far_deadline(), |_, _| {
@@ -6805,8 +6202,8 @@ mod tests {
         );
     }
 
-    /// ★★Even if one page fails, it is **not an activation failure**★★ — the screen received up to that point is carried
-    /// as is and closed normally (ADR-0203: history failure is quiet and harmless).
+    /// ★★Even if one page fails, it is **not an activation failure**★★ — the screen received so far is carried and closed normally
+    /// (ADR-0203).
     #[test]
     fn a_failed_page_keeps_everything_that_came_before_it() {
         let mut calls = 0;
@@ -6829,11 +6226,10 @@ mod tests {
         );
     }
 
-    /// ★★The ceiling is the ring★★ (ADR-0203) — receiving beyond 2MiB is pure cost, since the ring drops from the front.
-    /// That decision must be made on the axis the ring actually counts ([`estimate_cost_bytes`]).
+    /// ★★The ceiling is the ring★★ (ADR-0203) — receiving beyond 2MiB is pure cost (the ring drops from the front), and the decision must
+    /// use the axis the ring counts ([`estimate_cost_bytes`]).
     #[test]
     fn history_stops_once_the_replay_ring_is_full() {
-        // One assistant body filled up to the cap (64Ki characters) — 32 of them is 2MiB.
         let big = "x".repeat(64 * 1024);
         let mut calls = 0;
         let events = collect_history("th", "c".to_string(), far_deadline(), |_, _| {
@@ -6842,20 +6238,18 @@ mod tests {
                 (0..HISTORY_PAGE_LIMIT)
                     .map(|i| entry("t1", agent_message(&format!("m{calls}-{i}"), &big)))
                     .collect(),
-                // The cursor does not end — the only thing that stops it must be the ceiling.
+                // The cursor does not end — only the ceiling must stop it.
                 Some("more"),
             ))
         });
 
         let weight: usize = events.iter().map(estimate_cost_bytes).sum();
-        // ★★It stops **before** exceeding — do not revert to 「stop after exceeding」★★: measuring after putting always exceeds by one
-        //   entry, and that one is dropped by the ring right on landing. Tying the ceiling to the ring constant was meant to remove that
-        //   mismatch.
+        // ★Stops **before** exceeding — do not revert to "stop after exceeding"★: measuring after putting always exceeds by one entry, which
+        //   the ring drops on landing (the mismatch tying the ceiling to the ring constant removes).
         assert!(
             weight <= REPLAY_MAX_BYTES,
             "received past the ceiling: {weight}B > {REPLAY_MAX_BYTES}B"
         );
-        // While doing so it fills it **almost** — it must be within a margin of one entry (64KiB).
         assert!(
             weight + 64 * 1024 >= REPLAY_MAX_BYTES,
             "stopped far short of filling the ring: {weight}B"
@@ -6866,9 +6260,9 @@ mod tests {
         );
     }
 
-    /// ★★The ceiling accounting must count **the synthesized boundaries too**★★ — without counting them, in a history where every item splits a turn the actual
-    /// event count becomes twice what was counted, and the ring (4096 entries) drops half right on landing. That half is **the
-    /// oldest side**, so the head of the restored conversation is cut off entirely.
+    /// ★★The ceiling accounting must count **the synthesized boundaries too**★★ — uncounted, a history where every item splits a turn has
+    /// twice the counted events and the ring (4096 entries) drops half on landing — the **oldest** half, cutting off the head of the
+    /// restored conversation.
     #[test]
     fn the_ceiling_counts_the_boundaries_it_synthesizes() {
         let mut n = 0usize;
@@ -6876,7 +6270,6 @@ mod tests {
             let data = (0..HISTORY_PAGE_LIMIT)
                 .map(|_| {
                     n += 1;
-                    // Every item has a different turn = the worst case where every item gets one more boundary.
                     entry(&format!("t{n}"), agent_message(&format!("m{n}"), "x"))
                 })
                 .collect();
@@ -6888,7 +6281,6 @@ mod tests {
             "received past the ring count ceiling: {} > {REPLAY_MAX_EVENTS}",
             events.len()
         );
-        // Back when boundaries were not counted, the item count here would have gone up to the ceiling — it should be around half.
         let texts = events
             .iter()
             .filter(|e| matches!(e, OutputEvent::TextDelta { .. }))
@@ -6908,13 +6300,11 @@ mod tests {
         );
     }
 
-    /// ★★`turnId` has no wire cap — it is filtered before holding★★: the line cap applies only to **one** page,
-    /// not to the accumulation piled up here, so if items with long ids come on every page, the original strings alone reach hundreds of MiB
-    /// (25 × 160KiB does not exceed 4MiB on one page, but gathered up to the count ceiling it is ~650MiB).
-    /// ★★While doing so, **different turns must stay two as they are**★★ — folding all ids over the cap into one slot (`None`)
-    /// catches the memory, but **two different conversations render as one turn.** So distinction is carried by the original comparison with the previous
-    /// item (O(1)), and the filtered id is carried on the boundary only as **display**. What this item measures is those
-    /// two axes — two boundaries, but no id carried.
+    /// ★★`turnId` has no wire cap — it is filtered before holding★★: the line cap bounds **one** page, not the accumulation, so items with
+    /// long ids on every page reach hundreds of MiB (25 × 160KiB fits 4MiB on one page, but up to the count ceiling it is ~650MiB).
+    /// ★★**Different turns must stay two**★★ — folding all over-cap ids into one `None` slot catches the memory but **renders two
+    /// conversations as one turn**. So distinction comes from the original comparison with the previous item (O(1)) and the filtered id is
+    /// only **display**; this measures both axes — two boundaries, no id carried.
     #[test]
     fn an_oversized_turn_id_is_filtered_before_it_is_retained() {
         let huge_a = "a".repeat(MAX_TURN_ID_BYTES + 1);
@@ -6946,7 +6336,6 @@ mod tests {
             vec!["earlier", "later"],
             "all the content remains"
         );
-        // When the same id continues, then it is one group — pins that the split above is not 「always split」.
         let same = collect_history("th", "c".to_string(), far_deadline(), |_, _| {
             Ok(page(
                 vec![
@@ -6965,8 +6354,8 @@ mod tests {
         );
     }
 
-    /// ★★The same page is not fetched again from a peer that returns the same cursor★★ — if it were, the same conversation would be carried several
-    /// times and those duplicates would push the real history out of the ring. The page cap bounds the loop but cannot prevent this contamination.
+    /// ★The same page is not refetched from a peer that returns the same cursor★ — else the conversation is carried several times and the
+    /// duplicates push the real history out of the ring; the page cap bounds the loop but not this contamination.
     #[test]
     fn a_repeating_cursor_stops_instead_of_duplicating_history() {
         let mut calls = 0usize;
@@ -6974,7 +6363,6 @@ mod tests {
             calls += 1;
             Ok(page(
                 vec![entry("t1", agent_message("m1", "once"))],
-                // The cursor the first answer gave keeps being returned after that.
                 Some("same"),
             ))
         });
@@ -6989,8 +6377,8 @@ mod tests {
         );
     }
 
-    /// ★It does not hang forever on a cursor that never ends★ — the budget usually cuts first, but for a peer that answers
-    /// immediately only this backstop remains.
+    /// ★It does not hang forever on a cursor that never ends★ — the budget usually cuts first, but for a peer answering immediately only
+    /// this backstop remains.
     #[test]
     fn an_unending_cursor_stops_at_the_page_cap() {
         let mut calls = 0usize;
@@ -7001,8 +6389,7 @@ mod tests {
                     "t1",
                     serde_json::json!({"type": "reasoning", "id": "r"}),
                 )],
-                // ★A **different** cursor every time★ — giving the same value, the repeat guard would cut first, and this item would measure that guard
-                //   instead of the cap it means to measure.
+                // ★A **different** cursor every time★ — the same value would make the repeat guard cut first and the item would measure that guard.
                 Some(&format!("c{calls}")),
             ))
         });
@@ -7010,9 +6397,9 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    /// ★★If the connection ended while fetching history, the gate is not opened★★ — the history side treats that error as 「a page did not
-    /// come」 (which is right), so if the gate did not look at the state, **an already dead link would stand as `Ready` and
-    /// be delivered as a successful activation.** After that the manager carries a corpse as a live agent.
+    /// ★★If the connection ended while fetching history, the gate is not opened★★ — history treats that error as "a page did not come"
+    /// (right), so a gate that did not look at the state would let **an already dead link stand as `Ready` and be delivered as a successful
+    /// activation**; the manager would carry a corpse as a live agent.
     #[test]
     fn a_gate_does_not_open_over_a_link_that_died_while_hydrating() {
         let state = shared();
@@ -7034,16 +6421,10 @@ mod tests {
         });
     }
 
-    /// ★★The stream end **writes the state first and then wakes**★★ — the other way, the writer would come back through a window the death itself opened,
-    /// read the still `Connecting` state, pass the gate, and **deliver `Ready` to an already ended link.**
-    /// That window was not by chance; it opened on every stream end.
-    ///
-    /// ★★Why measure by **source order** — it was measured by running, and cannot be measured★★: a version that wakes first was built with an observer
-    /// thread attached and run 200 times, and **it was never caught.** The woken side has to wait for the scheduler, while
-    /// the waking side takes the lock within the next few lines, so it is a race but practically the waking side always wins. That is, that
-    /// harness was **green even with the wrong order**, so it was not a regression net. As long as the subject is 「the order of two statements」,
-    /// measuring that directly is honest (sibling = [`tests::the_history_is_emitted_before_the_gate_opens`]).
-    /// ★So the share measured by running is carried by **the sibling item below**★ — not order but 「did both happen」.
+    /// ★★The stream end **writes the state first, then wakes**★★ — the reverse lets the writer return through the death's own window and
+    /// **deliver `Ready` to an ended link**. ★Why by **source order**★: a wake-first version run 200 times with an observer thread was **never
+    /// caught** (the waker practically always wins the race), so that harness was green with the wrong order; for "the order of two statements"
+    /// measuring it directly is honest. ★The share measured by running is the sibling below★ — "did both happen".
     // ADR-0203
     #[test]
     fn a_stream_end_writes_the_state_before_it_wakes_the_waiters() {
@@ -7071,8 +6452,8 @@ mod tests {
         );
     }
 
-    /// Measures by running not the order but **whether both happened** — removing either one gets caught here
-    /// (removing the waking is a permanent hang, removing the state write leaves a dead link as alive).
+    /// Measures by running **whether both happened** — removing either is caught here (no waking = permanent hang; no state write = a dead
+    /// link stays alive).
     #[test]
     fn a_stream_end_both_wakes_the_waiters_and_marks_the_link_down() {
         let state = shared();
@@ -7099,7 +6480,6 @@ mod tests {
         });
     }
 
-    /// The same when **only the closed marker** stands, not the delivery channel — only the reason wording is missing; the conclusion is the same.
     #[test]
     fn a_gate_does_not_open_over_a_closed_link() {
         let state = shared();
@@ -7110,7 +6490,6 @@ mod tests {
         });
     }
 
-    /// On a sound connection it opens as is and the handle is carried — the opposite side of the two above.
     #[test]
     fn a_healthy_link_opens_the_gate_and_carries_the_thread_id() {
         let state = shared();
@@ -7121,17 +6500,13 @@ mod tests {
         });
     }
 
-    /// ★If one round trip uses up the budget, **the next is not asked**★ — this is where this loop actually enforces the shared budget.
-    /// The overrun **inside** one request (one response-wait slice, 500ms) cannot be blocked by this loop.
+    /// ★If one round trip uses up the budget, **the next is not asked**★ — where this loop enforces the shared budget; the overrun **inside**
+    /// one request (one 500ms slice) it cannot block.
     ///
-    /// ★★This spot once said 「10s + 0.5s」, and that figure was **wrong**★★ — that calculation assumed only one overrun,
-    /// but the unit that counts overruns is not the loop but the [`request_blocking`] **call**: the success branch does not look at the deadline
-    /// again, and even with a budget of 0 it waits out the whole next slice. So the two round trips of [`handshake`] can each
-    /// exceed by one slice (if the first round trip succeeds during its own overrun, the second starts with a remainder of 0
-    /// and uses one more slice), and **the cap until `Ready` is 10s + 2×0.5s = 11s**.
-    /// ★Why it does not grow further after that is what this item measures★ — the first check of paging sees a remainder of 0 and cuts, so
-    /// there is no third overrun. ★Adding one more round trip to the handshake grows it by that much★ (11s → 11.5s).
-    /// The 15s backstop stays above it as is.
+    /// ★The cap until `Ready` is 10s + 2×0.5s = 11s★: the unit counting overruns is the [`request_blocking`] **call** — the success branch
+    /// does not re-check the deadline and even with budget 0 waits out the next slice, so [`handshake`]'s two round trips can each overrun by
+    /// one slice. Paging's first check sees remainder 0 and cuts (no third overrun) — measured here. ★One more handshake round trip adds
+    /// that much★. The 15s backstop stays above it.
     #[test]
     fn a_page_that_burns_the_budget_is_the_last_one() {
         let mut calls = 0usize;
@@ -7155,8 +6530,8 @@ mod tests {
         );
     }
 
-    /// ★If the budget is already gone, **it never asks**★ — that is the case where the handshake used up the budget and barely succeeded,
-    /// and if even one more round trip went out there, `Ready` would be pushed behind the manager's backstop.
+    /// ★If the budget is already gone, **it never asks**★ — the handshake barely succeeded using it up; one more round trip would push
+    /// `Ready` behind the manager's backstop.
     #[test]
     fn an_exhausted_budget_asks_for_nothing() {
         let mut calls = 0;
@@ -7173,7 +6548,7 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    /// ★If there is nothing to resume, there is no round trip at all★ — an incarnation that came up with `thread/start` (new conversation) falls here.
+    /// ★With nothing to resume there is no round trip at all★ — an incarnation from `thread/start` (new conversation) falls here.
     #[test]
     fn a_thread_without_a_history_cursor_never_pages() {
         let state = shared();
@@ -7192,14 +6567,11 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    /// ★★History must go into the ring **before** the gate opens — this is the order contract of this path★★:
-    /// if the gate opened first, queued user turns would go out, and their responses would go into the ring before the history not yet carried,
-    /// and the restored conversation would attach **after** the new answer. This order carries in place what the seed-before-publish of ADR-0079
-    /// kept (it cannot be pulled ahead of registry registration as that one was — because the history exists only after the
-    /// handshake).
-    ///
-    /// ★The reason for measuring in the source is the same as the sibling item★ — measuring by actually running needs a child process and a peer to
-    /// round-trip with, and what that harness measures becomes not the order but the harness itself.
+    /// ★★History must go into the ring **before** the gate opens — this path's order contract★★: gate first, and queued user turns go out
+    /// and their responses enter the ring before the unraised history, attaching the restored conversation **after** the new answer. This
+    /// replaces what ADR-0079's seed-before-publish kept (it cannot be pulled ahead of registry registration — the history exists only after
+    /// the handshake).
+    /// ★Measured in the source for the same reason as the sibling★ — running needs a child and a peer, and the harness would measure itself.
     /// Sibling = [`tests::the_session_id_is_recorded_before_the_gate_opens`].
     #[test]
     fn the_history_is_emitted_before_the_gate_opens() {
@@ -7208,7 +6580,6 @@ mod tests {
         let hydrated = body.find("hydrate_history(").expect(
             "there is no `hydrate_history(` call in writer_loop — this item's premise is stale",
         );
-        // The reason for anchoring on `open_gate(` = the same spot of the sibling item.
         let gate_open = body
             .find("open_gate(")
             .expect("there is no `open_gate(` call in writer_loop — this item's premise is stale");
@@ -7217,13 +6588,11 @@ mod tests {
             "the history restore stands after the gate — the restored conversation attaches after the new answer"
         );
 
-        // ★★The entry door must be **the one that does fanout too**★★: at this spot the session is already in the registry,
-        //   so with `OutputCore::seed` (puts into the ring only, no fanout), a subscriber that attached in between has already replayed the empty ring
-        //   and **never sees** the past screen. `seed` was enough for ADR-0079 because that one was **before**
-        //   registry registration, and this path cannot be pulled to that place.
-        // ★What is required is **the chunk door**★ — switching to the item-by-item door keeps fanout, but between calls
-        //   the reader's live lines take seqs and the middle of the restored conversation is split
-        //   ([`crate::output_core::OutputCore::emit_batch_without_turn_observation`]).
+        // ★The entry door must **fan out too**★: the session is already in the registry, so with `OutputCore::seed` (ring only, no fanout) a
+        //   subscriber attached in between has replayed the empty ring and **never sees** the past screen (`seed` sufficed for ADR-0079 because
+        //   that was **before** registry registration).
+        // ★It must be **the chunk door**★ — the item-by-item door keeps fanout but lets the reader's live lines take seqs between calls and split
+        //   the restored conversation ([`crate::output_core::OutputCore::emit_batch_without_turn_observation`]).
         assert!(
             body.contains("emit_batch_without_turn_observation"),
             "history goes in through the item-by-item door — fanout works but the middle of the chunk is split"
@@ -7234,15 +6603,15 @@ mod tests {
         );
     }
 
-    /// ★★The handshake and the history **share one budget**★★ — if each took its own, the time until the connection stands would be up to two
-    /// budgets, exceeding the manager's backstop, and **a resume that succeeded while fetching history would be decided as a failure.**
-    /// The concrete form of that contract is 「`writer_loop` starts the clock only once and passes the same value to both」.
+    /// ★★The handshake and the history **share one budget**★★ — separate budgets could reach two budgets before the connection stands,
+    /// exceed the manager's backstop and **decide a successful resume a failure**. Concretely: `writer_loop` starts the clock once and passes
+    /// the same value to both.
     #[test]
     fn the_handshake_and_the_history_share_one_budget() {
         let code = writer_loop_code();
 
-        // ★Measured not by call shape but by **the number of appearances of the name**★ — line breaks in the argument list are decided by `cargo fmt`,
-        //   so comparing whole call strings would break this item on a mere formatting change (it actually broke).
+        // ★Measured by **the number of appearances of the name**, not call shape★ — `cargo fmt` decides argument-list line breaks, so whole-call
+        //   comparison would break on a formatting change (it did).
         assert_eq!(
             code.matches("HANDSHAKE_BUDGET").count(),
             1,
@@ -7255,11 +6624,8 @@ mod tests {
         );
     }
 
-    /// ★If the user turned it off, **the connection outcome is not delivered**★ — the root of defect ③.
-    ///
-    /// kill closes the waiting table and wakes the handshake with `Err`. Delivering that as is would **record the user's cancellation as a
-    /// resume failure** and run cleanup once more on top of that. On that branch the only fact the supervisor sees must be the end state,
-    /// and there the discipline 「what the user turned off is not a failure」 already exists.
+    /// ★If the user turned it off, **the connection outcome is not delivered**★ — the root of defect ③: kill wakes the handshake with `Err`,
+    /// and delivering that would record the user's cancellation as a resume failure and run cleanup once more.
     #[test]
     fn a_shutdown_suppresses_the_link_delivery() {
         let seen: Arc<Mutex<Vec<LinkResolution>>> = Arc::new(Mutex::new(Vec::new()));
@@ -7293,13 +6659,9 @@ mod tests {
         );
     }
 
-    /// ★The link's handshake cap must be **smaller** than the manager's liveness backstop★.
-    ///
-    /// The two do different jobs: the cap **makes a reason** (if the peer does not answer, it writes that fact into `Down`),
-    /// the backstop **gives up without a reason** (when the link cannot reach an outcome at all — a hanging write). If the backstop were smaller,
-    /// the outcome with a reason would be covered by the give-up without one, and no cause would remain on screen or in 「last failure」.
-    /// ★This relation exists only between two constants scattered across two files, so the compiler cannot see it★ — adjusting only one side breaks
-    /// nothing and only revives the defect, so it is measured here.
+    /// ★The link's handshake cap must be **smaller** than the manager's liveness backstop★: the cap **makes a reason** (writes the peer's
+    /// silence into `Down`); the backstop **gives up without one**. A smaller backstop would cover a reasoned outcome with a reasonless one.
+    /// ★Two constants in two files — the compiler cannot see the relation★, so it is measured here.
     #[test]
     fn the_handshake_budget_expires_before_the_managers_backstop() {
         assert!(
@@ -7311,19 +6673,12 @@ mod tests {
 
     /// ★Pins the number of places in the production section that take the stdin lock **blocking**★.
     ///
-    /// Why a count = the grounds that the handshake failure branch of [`writer_loop`] taking that lock is safe are 「in the production
-    /// graph only those two take this lock blocking, and of them [`write_line`] is called only by the writer」.
-    /// If a third quietly appears, those grounds go stale silently — and what happens then is not a compile error but
-    /// **a deadlock**.
-    ///
-    /// ★This item does not pin places, only the count★ — pinning positions goes stale every time lines shift. If it grew,
-    /// fix this number **after deciding directly** on which thread the new place is called (do not just raise the number).
-    /// The counting rule is held by [`count_blocking_stdin_locks`]. ★Comment lines are not counted★ — this file quotes
-    /// `stdin.lock()` in prose (comments attached at line ends are not filtered and can over-count — that direction is red, so it is fine).
-    /// ★The test section is out of range★ — that side has an item that holds the lock on purpose
-    /// ([`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`]). That item is harmless because
-    /// it does not call [`AgentTransport::start`], so the writer thread itself does not come up, and the moment `start` is added
-    /// the harmlessness breaks.
+    /// The safety of the handshake failure branch of [`writer_loop`] taking that lock rests on "only those two take it blocking in the
+    /// production graph, and [`write_line`] is called only by the writer"; a quiet third would make that stale — and the result is **a
+    /// deadlock**, not a compile error. ★Counts, not positions★; if it grew, fix the number **after deciding which thread calls the new
+    /// place**. Rule: [`count_blocking_stdin_locks`]. Comment lines are not counted (trailing comments can over-count — red direction, fine).
+    /// ★The test section is out of range★: it holds the lock on purpose in
+    /// [`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`], harmless because it never calls [`AgentTransport::start`].
     #[test]
     fn the_production_blocking_stdin_locks_are_counted() {
         let src = include_str!("transport.rs");
@@ -7341,20 +6696,15 @@ mod tests {
         );
     }
 
-    /// Counts blocking stdin lock acquisition places — counts two forms together.
+    /// Counts blocking stdin lock acquisition places — two forms together.
     ///
-    /// ① A place where `.lock()` comes after `stdin`, skipping whitespace (including newlines).
-    /// ② A place where `stdin` is in the argument of a `lock(` whose preceding character is not an identifier character (`_` · alphanumeric) — catches `sync::lock(` ·
-    ///    full paths · a bare `lock(` after `use` · `Mutex::lock(` all. Argument = up to the matching parenthesis, and if it does not
-    ///    match, that line and the next two lines. Today's two production places are of form ② (ADR-0275).
-    ///
-    /// Not counted = a `lock(` attached to an identifier like `try_lock(` (it does not wait, so it is not in this risk —
-    /// the spot in [`AgentTransport::shutdown`]) · `.lock()` with an empty argument (that is ①'s share, so it is not counted twice).
-    /// ★Do not count only one form★ — a third place written in the other form would not be caught by the count and pass green. Going back to ① is
-    /// blocking too. ★Leaning toward over-counting is intended★ — unrelated arguments with `stdin` in the name like `stdin_buf`
-    /// are counted too. Over-counting calls for a decision with red, but under-counting lets a third place pass green.
-    /// ★Forms it cannot catch remain★ — method chains whose receiver does not end in `stdin` (`stdin.as_ref().lock()` ·
-    /// `(*stdin).lock()`) hit neither ① nor ②.
+    /// ① `.lock()` after `stdin`, skipping whitespace (incl. newlines). ② `stdin` in the argument of a `lock(` whose preceding character is
+    /// not an identifier character — `sync::lock(` · full paths · a bare `lock(` · `Mutex::lock(`; argument = up to the matching
+    /// parenthesis, else that line and the next two. Today's two production places are form ② (ADR-0275).
+    /// Not counted: `try_lock(` (does not wait — [`AgentTransport::shutdown`]) · `.lock()` with an empty argument (① covers it).
+    /// ★Do not count only one form★ (a third place in the other would pass green); ★over-counting is intended★ (`stdin_buf`): red calls
+    /// for a decision, under-counting lets a third pass. ★Uncatchable forms remain★: receivers not ending in `stdin`
+    /// (`stdin.as_ref().lock()` · `(*stdin).lock()`).
     fn count_blocking_stdin_locks(src: &str) -> usize {
         let mut found = 0;
         let mut from = 0;
@@ -7377,7 +6727,7 @@ mod tests {
         found
     }
 
-    /// `rest` = right after `lock(`. Returns up to before the matching closing parenthesis, and if there is no match, returns that line and the next two lines.
+    /// `rest` = right after `lock(`. Returns up to before the matching closing parenthesis, else that line and the next two.
     fn lock_argument(rest: &str) -> &str {
         let mut depth = 1usize;
         for (i, b) in rest.bytes().enumerate() {
@@ -7399,7 +6749,6 @@ mod tests {
         &rest[..end]
     }
 
-    /// Measures whether [`count_blocking_stdin_locks`] counts each of the false-pass forms reproduced in review.
     #[test]
     fn blocking_stdin_lock_counter_catches_every_shape() {
         let cases: &[(&str, usize)] = &[
@@ -7436,7 +6785,7 @@ mod tests {
 
     // ── List announcement · floor decision · echo comparison · ✕ (ADR-0231) ──────────────────────
 
-    /// List events (ring order). ★The handed-over mark (`HandedOver`) is excluded★ — it is a row mark, not an outcome, so it is measured separately ([`handed`]).
+    /// List events (ring order). ★The handed-over mark (`HandedOver`) is excluded★ — a row mark, not an outcome; measured by [`handed`].
     fn list_ops(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<QueuedInputEvent> {
         seen.lock()
             .unwrap()
@@ -7449,7 +6798,6 @@ mod tests {
             .collect()
     }
 
-    /// (uuid, body) of user bubbles (synthetic · echoed).
     fn user_bubbles(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<(Option<String>, String)> {
         seen.lock()
             .unwrap()
@@ -7516,7 +6864,6 @@ mod tests {
         .expect("accepts");
     }
 
-    /// One echoed user message line — `clientId` is our id.
     fn echo_line(turn: &str, client_id: &str, text: &str) -> String {
         serde_json::json!({
             "method": "item/started",
@@ -7528,8 +6875,8 @@ mod tests {
         .to_string()
     }
 
-    /// ★Our edition in the trailing parenthesis is not read · unknown means below the floor★ — carrying `clientUserMessageId` on an unknown edition quietly breaks the echo
-    /// comparison.
+    /// ★Our edition in the trailing parenthesis is not read · unknown means below the floor★ — `clientUserMessageId` on an unknown edition
+    /// quietly breaks the echo comparison.
     #[test]
     fn floor_verdict_reads_cli_version_first_then_the_agent_s_own_version_and_falls_below_when_unsure(
     ) {
@@ -7604,8 +6951,8 @@ mod tests {
         }
     }
 
-    /// ★Pre-decision items are not announced, and the side the decision lands on emits them all at once★ — putting them up in advance would create list items
-    /// that meet a below-floor decision. Items during connecting are not synthetic bubbles (Direct stands only after `Ready`).
+    /// ★Pre-decision items are not announced; the side the decision lands on emits them all at once★ — earlier, list items would meet a
+    /// below-floor decision. Items while connecting are not synthetic bubbles (Direct stands only after `Ready`).
     #[test]
     fn user_input_before_the_verdict_is_listed_only_once_the_verdict_is_above() {
         let h = harness();
@@ -7660,8 +7007,8 @@ mod tests {
         assert_eq!(list_ops(&h.seen).len(), 2, "0 re-announcements");
     }
 
-    /// ★Below the floor = today's path★ (user decision N1 (a)) — 0 events · no identifier · the `turn/start` bytes are the same as before this field
-    /// existed · it leaves at the moment of opening.
+    /// ★Below the floor = today's path★ (user decision N1 (a)) — 0 events · no identifier · `turn/start` bytes as before this field existed
+    /// · it leaves at the moment of opening.
     #[test]
     fn a_below_verdict_is_today_s_path_with_no_events_no_ids_and_today_s_bytes() {
         let h = harness();
@@ -7702,9 +7049,6 @@ mod tests {
         assert!(with_state(&h.state, |s| s.pending.is_empty()));
     }
 
-    /// `clientUserMessageId` stands only on items carrying an identifier — the bytes of items without an identifier are as today and
-    /// they leave at the moment of opening, while items carrying one remain `InFlight` waiting for the echo. Mail carries only the id without an announcement. The opening order is the Idle
-    /// order — user text goes ahead of mail typed earlier (including items without an identifier) (N6).
     #[test]
     fn turn_start_carries_the_client_message_id_only_for_id_bearing_items() {
         let h = harness();
@@ -7765,8 +7109,8 @@ mod tests {
         assert!(user_bubbles(&h.seen).is_empty());
     }
 
-    /// ★Two inputs at the same idle moment → the first Direct · the second Queued★ — Direct also goes into pending, so the second cannot see
-    /// 「empty」. With the Direct id, `Queued` goes out on no branch, and one `turn/start` is one item.
+    /// ★Two inputs at the same idle moment → first Direct · second Queued★ — Direct also goes into pending, so the second cannot see "empty".
+    /// With the Direct id `Queued` goes out on no branch, and one `turn/start` is one item.
     #[test]
     fn an_idle_input_is_a_direct_bubble_and_the_next_one_in_the_same_moment_is_queued() {
         let h = harness();
@@ -7808,8 +7152,8 @@ mod tests {
         assert!(take(&h).is_none());
     }
 
-    /// ★After the link's synthetic bubble the turn table stays idle★ (ADR-0127) — emitted through the ordinary door, the classifier would write it as progress,
-    /// and if that `turn/start` were refused, a turn that never opened would remain 「in progress」 and mail would be blocked.
+    /// ★After the link's synthetic bubble the turn table stays idle★ (ADR-0127) — the ordinary door would count it as progress, and a
+    /// refused `turn/start` would leave a never-opened turn "in progress", blocking mail.
     #[test]
     fn the_direct_bubble_leaves_the_turn_table_idle() {
         let h = fact_harness();
@@ -7825,8 +7169,8 @@ mod tests {
         );
     }
 
-    /// ★The writer does not skip a pre-announce head★ — if the handover outran the announcement, the receipt would be dropped with an id the registry does not know,
-    /// and skipping would break typing order.
+    /// ★The writer does not skip a pre-announce head★ — a handover outrunning the announcement would drop the receipt for an id the
+    /// registry does not know, and skipping would break typing order.
     #[test]
     fn the_writer_waits_for_an_unannounced_head_instead_of_skipping_it() {
         let h = harness();
@@ -7846,8 +7190,8 @@ mod tests {
         assert_eq!(v["params"]["input"][0]["text"], "first");
     }
 
-    /// A success response writes the turn id onto the item it carried and only releases the response wait (it is not receipt). ★Generation masking★ — a late response
-    /// of a turn with a different marker does not touch that item.
+    /// A success response writes the turn id onto its item and only releases the response wait (not receipt). ★Generation masking★ — a late
+    /// response of a turn with a different marker does not touch it.
     #[test]
     fn a_turn_start_reply_marks_its_carrier_and_a_stale_reply_moves_nothing() {
         let mut h = harness();
@@ -7894,8 +7238,8 @@ mod tests {
         );
     }
 
-    /// ★Receipt is right before the bubble, and it is removed from pending whatever stage it came in (receipt wins)★ — if it is a held item,
-    /// it does not go out again. There is no open turn, so a turn boundary stands after the receipt ([`Reader::note_delivered`]).
+    /// ★Receipt wins at any stage★ — a held item does not go out again; with no open turn a turn boundary stands after the receipt
+    /// ([`Reader::note_delivered`]).
     #[test]
     fn our_echo_is_delivered_before_its_bubble_and_leaves_pending_whatever_the_stage() {
         for stage in ["held", "in-flight"] {
@@ -7936,8 +7280,6 @@ mod tests {
         }
     }
 
-    /// A receipt of an id the link does not know (mail · already resolved) does not touch pending — the event flows as is (the registry's
-    /// tombstone takes it).
     #[test]
     fn an_echo_for_an_id_we_do_not_hold_leaves_pending_alone() {
         let mut h = harness_with_real_decoder();
@@ -7957,7 +7299,6 @@ mod tests {
         assert_eq!(stage_of(&h.state, "mine").as_deref(), Some("held"));
     }
 
-    /// ✕ on `Held` → `Withdrawn` · `Dropped{Withdrawn}` · 0 vendor requests. An overlapping second ✕ is `NotHeld`.
     #[test]
     fn withdrawing_a_held_listed_item_drops_it_and_sends_nothing() {
         let h = harness();
@@ -7988,8 +7329,7 @@ mod tests {
         assert_eq!(list_ops(&h.seen).len(), 2, "the second ✕ emitted an event");
     }
 
-    /// ★✕ on a pre-announce item → ring order `Queued` → `Dropped`★ — only the death mark is attached, and the announcing side follows right after
-    /// `Queued`.
+    /// ★✕ on a pre-announce item → ring order `Queued` → `Dropped`★ — only the death mark is attached; the announcing side follows `Queued`.
     #[test]
     fn withdrawing_before_the_announcement_lands_the_drop_right_after_the_queued_line() {
         let h = harness();
@@ -8021,8 +7361,8 @@ mod tests {
         assert!(with_state(&h.state, |s| s.pending.is_empty()));
     }
 
-    /// Outside the list (Direct · mail · pre-decision) and unknown ids are `NotHeld` with no event. A handed-over list item (here, one
-    /// `turn/start` carried) cannot be withdrawn — `TooLate` with the cancellation receipt · 「could not remove」 (ADR-0231 · TRD §5-5 「✕」).
+    /// Outside the list (Direct · mail · pre-decision) and unknown ids are `NotHeld` with no event. A handed-over list item cannot be
+    /// withdrawn — `TooLate` with the cancellation receipt (ADR-0231 · TRD §5-5 「✕」).
     #[test]
     fn only_a_listed_held_item_can_be_withdrawn() {
         let before = harness();
@@ -8085,7 +7425,6 @@ mod tests {
 
     // ── Turn-end disposal v1 (ADR-0231 · TRD §5-5) ───────────────────────────────
 
-    /// A connection where the decision (`Above`) landed — list · synthetic bubble · echo comparison stand.
     fn above(h: &Harness) -> Arc<Announcer> {
         make_ready(&h.state, "T");
         let ann = announcer();
@@ -8093,7 +7432,6 @@ mod tests {
         ann
     }
 
-    /// Opens a turn with the oldest `Held` and registers that `turn/start`'s waiting entry — exactly as the writer does.
     fn open_turn(h: &Harness) -> (i64, u64) {
         let Some(Job::Turn { id, seq, .. }) = take(h) else {
             panic!("turn/start did not go out")
@@ -8118,8 +7456,8 @@ mod tests {
         })
     }
 
-    /// List events · bubbles · turn boundaries in ring order — also checks whether disposal events come before the boundary. ★The handed-over mark (`HandedOver`) is
-    /// excluded★ — it is a row mark, not an outcome, so it is measured separately ([`handed`]).
+    /// List events · bubbles · turn boundaries in ring order — also checks disposal events come before the boundary. ★The handed-over mark
+    /// is excluded★ (a row mark; measured by [`handed`]).
     fn trace(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<String> {
         seen.lock()
             .unwrap()
@@ -8154,7 +7492,6 @@ mod tests {
             .collect()
     }
 
-    /// Only the handed-over marks in ring order — `sent <id>` · `held <id>`.
     fn handed(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<String> {
         seen.lock()
             .unwrap()
@@ -8181,18 +7518,14 @@ mod tests {
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum Whose {
-        /// Text typed mid-turn — it goes into the list.
         Listed,
-        /// Text typed while idle — synthetic bubble · outside the list.
         Direct,
         Mail,
     }
 
     #[derive(Debug, Clone, Copy)]
     enum End {
-        /// `turn/completed(status)` after the response.
         Completed(&'static str),
-        /// `turn/completed(status)` **before** the response — it ends where the response releases it.
         Early(&'static str),
         ErrorReply,
         WriteFailed,
@@ -8201,8 +7534,8 @@ mod tests {
         LongTurnId,
     }
 
-    /// Ends a turn that handed over one item with `end` and returns the traces after it (from opening the turn on). ★At every end the turn must be
-    /// closed and pending must have no `InFlight`★ (TRD §5-5 invariant).
+    /// Ends a turn that handed over one item with `end` and returns the traces after it. ★At every end the turn must be closed and pending
+    /// must have no `InFlight`★ (TRD §5-5 invariant).
     fn end_a_turn(whose: Whose, end: End) -> (Harness, &'static str, Vec<String>) {
         let mut h = harness_with_real_decoder();
         let ann = above(&h);
@@ -8245,7 +7578,6 @@ mod tests {
         (h, id, t)
     }
 
-    /// Ends the turn of marker `seq` (its `turn/start` request `request`) with `end` — exactly as the writer · reader do.
     fn finish_turn(h: &mut Harness, request: i64, seq: u64, end: End) {
         match end {
             End::Completed(status) => {
@@ -8296,7 +7628,6 @@ mod tests {
         }
     }
 
-    /// An item outside the list left without an event — pending is empty, so the next idle input becomes Direct again.
     fn assert_left_silently(h: Harness, whose: Whose, end: End, t: &[String], ending: &str) {
         assert_eq!(t, [ending], "{whose:?}/{end:?}");
         assert!(
@@ -8312,8 +7643,6 @@ mod tests {
         );
     }
 
-    /// The handed-over user text `id` returned to the held place — 0 events (list row · drawn bubble as is) · no halt · it rides the next turn
-    /// **once**.
     fn assert_held_again(h: Harness, whose: Whose, end: End, id: &str, t: &[String], ending: &str) {
         let at = format!("{whose:?}/{end:?}");
         assert_eq!(t, [ending], "{at}: a list event happened");
@@ -8338,8 +7667,8 @@ mod tests {
         assert!(take(&h).is_none(), "{at}: went out twice");
     }
 
-    /// The handed-over user text `id` returns to the held place after a failure end and waits behind the halt — 0 events (list row · drawn bubble as is) ·
-    /// 0 turns while halted · when the next user text lifts the halt, the returned text rides the next turn **once**, before that text (what remains goes first).
+    /// The handed-over user text `id` returns after a failure end and waits behind the halt — 0 events · 0 turns while halted · when the
+    /// next user text lifts the halt, the returned text rides the next turn **once**, before that text (what remains goes first).
     fn assert_held_behind_the_halt(h: Harness, whose: Whose, end: End, id: &str, t: &[String]) {
         let at = format!("{whose:?}/{end:?}");
         assert_eq!(t, ["end failed"], "{at}: a list event happened");
@@ -8364,11 +7693,11 @@ mod tests {
         assert!(take(&h).is_none(), "{at}: went out twice");
     }
 
-    /// ★User text (list · Direct) of a turn that ended without an echo returns to the held place regardless of the shape of the end★ (user decision 2026-09-26 · ADR-0235
-    /// — replaces 「erase on failure」). Ends that spoke an outcome (`completed` · a status of unknown meaning) and the interruption let it ride the next turn once right away
-    /// (no halt), and failure ends (`failed` · write failure of `turn/start` · error response · deadline · decode failure · long turn id) set the halt
-    /// and it waits until the next user text — neither side has an event (list row · drawn bubble as is). After the response · before the response (early-end release)
-    /// are all the same. Mail leaves without an event.
+    /// ★User text of a turn that ended without an echo returns to the held place whatever the end shape★ (user decision 2026-09-26 ·
+    /// ADR-0235 — replaces 「erase on failure」). Outcome-speaking ends (`completed` · unknown status) and interruption let it ride the
+    /// next turn at once (no halt); failure ends (`failed` · `turn/start` write failure · error response · deadline · decode failure · long
+    /// turn id) set the halt and it waits for the next user text. No events either way; before/after the response and early-end release are
+    /// the same. Mail leaves without an event.
     #[test]
     fn a_turn_that_ends_without_our_echo_returns_its_user_item_to_held_whatever_the_close() {
         for (end, ending) in [
@@ -8403,8 +7732,6 @@ mod tests {
         }
     }
 
-    /// One `held_again` trace line per text returned to the held place — it carries the shape of that end and (if known) the id of the turn it was handed to. Failure ends also
-    /// return to the held place, so the line stands — text of a `turn/start` refused before receiving the turn id has no `turn_id`.
     #[test]
     fn a_return_to_held_writes_one_held_again_line_with_the_close() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -8445,9 +7772,9 @@ mod tests {
         );
     }
 
-    /// ★An interruption returns the list items handed over in that turn to the held place and leaves held items as is★ (user decision 2026-09-26 — interruption = held
-    /// text goes right away into a new turn) — pre-announce items also only get `Queued` and are not dropped. Held mail · items without an identifier also
-    /// stay as is and no halt stands, and the next Idle opens from the oldest user text (the returned text) in typing order.
+    /// ★An interruption returns that turn's handed-over list items to the held place and leaves held items as is★ (user decision
+    /// 2026-09-26 — held text goes right away into a new turn) — pre-announce items only get `Queued`, not dropped. Held mail · items
+    /// without an identifier stay, no halt, and the next Idle opens from the oldest user text in typing order.
     #[test]
     fn an_interrupt_returns_the_handed_over_item_to_held_and_keeps_held_items_for_the_next_idle() {
         let mut h = harness_with_real_decoder();
@@ -8498,7 +7825,6 @@ mod tests {
         assert_eq!(v["params"]["clientUserMessageId"], "q-1");
     }
 
-    /// If the echo came before the turn end, there is nothing to dispose — receipt wins.
     #[test]
     fn an_echo_before_the_turn_end_leaves_nothing_to_dispose() {
         let mut h = harness_with_real_decoder();
@@ -8525,8 +7851,8 @@ mod tests {
         assert!(with_state(&h.state, |s| s.pending.is_empty()));
     }
 
-    /// ★If the old request's echo comes late for text returned to the held place, it is receipt — it does not go out again★ (both outcome-speaking ends · interruption).
-    /// There is no open turn, so a boundary stands after the receipt.
+    /// ★A late echo for text returned to the held place is receipt — it does not go out again★ (both outcome-speaking ends · interruption).
+    /// No open turn, so a boundary stands after the receipt.
     #[test]
     fn a_late_echo_after_the_return_to_held_delivers_the_item_and_it_is_not_sent_again() {
         for end in [End::Completed("completed"), End::Completed("interrupted")] {
@@ -8552,8 +7878,6 @@ mod tests {
         }
     }
 
-    /// If the old request's echo comes after it was already handed over again, that is the receipt, and the new request's echo passes as an unknown id — the list
-    /// closes once and that text does not go out a third time.
     #[test]
     fn a_late_echo_of_the_old_send_after_the_re_send_delivers_the_item_once() {
         let (mut h, _, _) = end_a_turn(Whose::Listed, End::Completed("completed"));
@@ -8582,7 +7906,6 @@ mod tests {
         assert!(take(&h).is_none(), "received text went out once more");
     }
 
-    /// While returned to the held place, the kernel's 「pending input exists」 is true (it stands in the registry) — false once the echo closes it.
     #[test]
     fn an_item_returned_to_held_keeps_the_kernel_s_inputs_pending_true_until_it_leaves() {
         let id = AgentId::new_v4();
@@ -8621,8 +7944,6 @@ mod tests {
         assert_eq!(table.get(id, 1), Some(false));
     }
 
-    /// The link does not dispose on stream close — list items (handed over · held · returned to the held place) are closed **once each** by the core's end synthesis
-    /// as `Dropped{AgentEnded}`.
     #[test]
     fn a_stream_end_leaves_the_list_to_the_core_s_synthesis_exactly_once() {
         let (mut h, _, _) = end_a_turn(Whose::Listed, End::Completed("completed"));
@@ -8657,8 +7978,8 @@ mod tests {
         );
     }
 
-    /// The floor decision is written **after** the record returns and **before** the history — brought forward, the record failure branch would erase items already in the list
-    /// without an event, and pushed after the history, the window in which the list comes up late would grow by the history paging.
+    /// The floor decision is written **after** the record returns and **before** the history — earlier, the record failure branch would
+    /// erase list items without an event; after the history, the late-list window would grow by the paging.
     #[test]
     fn the_floor_is_settled_after_the_session_id_is_recorded_and_before_the_history() {
         let body = writer_loop_code();
@@ -8677,8 +7998,6 @@ mod tests {
         );
     }
 
-    /// The `Arc` the assembly point carries on the session is **the very one** the decision fills — a separately made one would have the session and the link see different
-    /// values.
     #[cfg(windows)]
     #[test]
     fn the_transport_hands_out_the_very_ack_its_verdict_fills() {
@@ -8692,8 +8011,6 @@ mod tests {
         t.shutdown();
     }
 
-    /// `shutdown` completes even while a blocking write holds the stdin lock — flipping the order (trying to close stdin before
-    /// kill) would make this item catch it with a timeout.
     #[cfg(windows)]
     #[test]
     fn shutdown_completes_even_if_a_write_blocks_on_a_full_pipe() {
@@ -8724,7 +8041,6 @@ mod tests {
 
     // ── Tool-end trigger · trace lines (ADR-0231 · ADR-0235) ─────────────
 
-    /// One item notification line — turn `turn` of our thread (`T`).
     fn item_line(method_name: &str, turn: &str, kind: &str, id: &str) -> String {
         serde_json::json!({
             "method": method_name,
@@ -8744,8 +8060,8 @@ mod tests {
             .handle_line(item_line(method::ITEM_COMPLETED, turn, kind, id).as_bytes());
     }
 
-    /// The steer the writer picks right where our turn's tool just ended — sets the tool-end trigger like [`Reader::note_tool_item`] and
-    /// picks it (`None` = nothing to hand over). It does not go through the sweep wait of [`next_job`].
+    /// The steer the writer picks right where our turn's tool just ended — sets the trigger like [`Reader::note_tool_item`] and picks it
+    /// (`None` = nothing to hand over). It does not go through [`next_job`]'s sweep wait.
     fn steer_at_tool_end(h: &Harness) -> Option<Steer> {
         with_state(&h.state, |s| {
             s.steer_due = true;
@@ -8753,7 +8069,7 @@ mod tests {
         })
     }
 
-    /// The steer the writer would pick now — it does not set the trigger and uses only what was standing (`None` = the writer sleeps).
+    /// The steer the writer would pick now — does not set the trigger, uses only what stood (`None` = the writer sleeps).
     fn steer_next(h: &Harness) -> Option<Steer> {
         with_state(&h.state, |s| take_steer_locked(s, &h.next_id))
     }
@@ -8762,7 +8078,7 @@ mod tests {
         with_state(state, |s| s.steer_due)
     }
 
-    /// The next job the writer picks must be a steer — if the trigger stands, [`next_job`] returns right away without waiting.
+    /// The next job the writer picks must be a steer — with the trigger standing, [`next_job`] returns at once without waiting.
     fn next_steer_job(h: &Harness, why: &str) -> Steer {
         match next_job(&h.state, &h.next_id) {
             Some(Job::Steer(s)) => s,
@@ -8770,9 +8086,9 @@ mod tests {
         }
     }
 
-    /// ★Only the end of a tool item of our current turn is a trigger★ — the end of a non-tool item (output · echo · a known variant with no grounds to be a tool · an unknown
-    /// variant) · the start of a tool · another turn id (late completion of a tool of an interrupted turn — M6) · a tool end of another thread hand over nothing (held
-    /// text stays held). Only when a tool end of the same turn comes is it handed over.
+    /// ★Only the end of a tool item of our current turn is a trigger★ — a non-tool item end (output · echo · known variant with no grounds
+    /// to be a tool · unknown variant) · a tool start · another turn id (late completion of an interrupted turn's tool — M6) · another
+    /// thread's tool end hand over nothing (held text stays).
     #[test]
     fn only_a_tool_item_ending_in_our_current_turn_arms_the_steer() {
         let mut h = harness();
@@ -8819,8 +8135,8 @@ mod tests {
         assert_eq!(steer_params(&s)["clientUserMessageId"], "q-1");
     }
 
-    /// ★A tool end before the turn id is known is not a trigger★ — without `expectedTurnId` there is no means to hand over. Even a line that came with that turn's id
-    /// is ignored before the response gives that id, and the held text is handed over where the response gives the turn id ([`Reader::resolve`]).
+    /// ★A tool end before the turn id is known is not a trigger★ — no `expectedTurnId`, nothing to hand over; held text is handed over where
+    /// the response gives the turn id ([`Reader::resolve`]).
     #[test]
     fn a_tool_end_before_the_turn_id_is_known_arms_nothing() {
         let mut h = harness();
@@ -8845,8 +8161,8 @@ mod tests {
         assert_eq!(steer_params(&s)["expectedTurnId"], "t1");
     }
 
-    /// A tool end wakes the waiting writer right away — without the wake-up, the writer sees the trigger only after the sweep interval ([`SWEEP_INTERVAL`])
-    /// runs out (the tool end is fed after the writer fell asleep).
+    /// A tool end wakes the waiting writer right away — without the wake-up the writer sees the trigger only after [`SWEEP_INTERVAL`] (the
+    /// tool end is fed after the writer fell asleep).
     #[test]
     fn a_tool_end_wakes_a_waiting_writer_at_once() {
         let mut h = harness();
@@ -8866,7 +8182,6 @@ mod tests {
                 }
             })
         };
-        // Room for the writer to see the held text and fall asleep.
         std::thread::sleep(Duration::from_millis(50));
         item_started(&mut h, "t1", "commandExecution", "c");
         let fed = Instant::now();
@@ -8886,10 +8201,9 @@ mod tests {
         writer.join().expect("writer");
     }
 
-    /// One [`STEER_TRACE`] line — field name → value (as a string).
     type TraceLine = std::collections::BTreeMap<String, String>;
 
-    /// A subscriber that collects only this thread's trace lines — field names are the contract with QA, so it measures whether they go out as documented.
+    /// A subscriber collecting only this thread's trace lines — field names are the contract with QA, so it measures they go out as documented.
     struct TraceCapture(Arc<Mutex<Vec<TraceLine>>>);
 
     struct TraceFields<'a>(&'a mut TraceLine);
@@ -8922,9 +8236,6 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    /// The fields of trace lines follow the doc ([`STEER_TRACE`]) — one line per event, every line carries `agent` · `phase` · `item_id` · (if that turn is
-    /// known) `turn_id`, `tool_end` also carries `held`, `steer` also carries `request`. The message is the one line of that kind.
-    /// Non-tool items have no line.
     #[test]
     fn the_steer_trace_lines_carry_the_documented_fields_per_phase() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -8940,7 +8251,6 @@ mod tests {
                 item_completed(&mut h, "t1", "commandExecution", "c");
                 let s = steer_next(&h).expect("the tool end did not release the held text");
                 let first = s.request;
-                // Exactly as the writer does — written after finishing the write ([`writer_loop`]).
                 let trace = s
                     .trace(SteerPhase::Steer)
                     .expect("the line is on but there is no material");
@@ -9015,8 +8325,6 @@ mod tests {
         }
     }
 
-    /// A steer write failure leaves one `write_failed` trace line apart from the warn of the default target — QA reading only the trace sees that the text
-    /// did not reach the vendor. The fields are the same as the `steer` line (the turn id it was handed to · that item · request id).
     #[test]
     fn a_steer_that_cannot_be_written_writes_one_write_failed_trace_line() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -9051,10 +8359,9 @@ mod tests {
 
     // ── steer — handing over to the running turn · response pairing · ✕ on a handed-over item (ADR-0231 · TRD §5-5) ──
     //
-    // On a connection where the decision (`Above`) landed, it steers exactly as production — this section is measured with the [`above`] test bench. The trigger to hand over is the tool end
-    // ([`steer_at_tool_end`] — measures at the spot where the trigger was set what is handed over and what is not).
+    // Measured with the [`above`] bench (decision `Above`), steering exactly as production; the trigger is the tool end
+    // ([`steer_at_tool_end`]).
 
-    /// The params of that steer — also looks at the envelope's method and request id.
     fn steer_params(steer: &Steer) -> Value {
         let v: Value = serde_json::from_str(&steer.line).unwrap();
         assert_eq!(v["method"], "turn/steer");
@@ -9062,7 +8369,6 @@ mod tests {
         v["params"].clone()
     }
 
-    /// Registers the waiting entry and writes exactly as the writer does (the write succeeds).
     fn issue(h: &Harness, steer: Steer) -> Issued {
         issue_steer(&h.state, &h.pending, &h.reader.core, steer, |_| Ok(()))
     }
@@ -9082,10 +8388,10 @@ mod tests {
         );
     }
 
-    /// The spot where a turn was opened with `head`, text typed while idle, and that `turn/start` response gave the turn id `turn` — returns that turn's marker.
-    /// The turn id signal the response set is left unpicked. `head` is already received (the vendor echoes the text `turn/start` carried as the first item of
-    /// that turn) — if not received, the turn end would return that text to the held place and it would become the head of the next turn. The [`RecordingDecoder`]
-    /// test bench cannot make a receipt from an echo line, so it calls the link's receipt verb directly.
+    /// A turn opened with `head`, text typed while idle, and that `turn/start` response gave turn id `turn` — returns that turn's marker.
+    /// The turn id signal the response set is left unpicked. `head` is already received (the vendor echoes the `turn/start` text as the
+    /// turn's first item) — unreceived, the turn end would return it to the held place as the next turn's head. [`RecordingDecoder`] cannot
+    /// make a receipt from an echo line, so it calls the link's receipt verb directly.
     fn running_turn(h: &mut Harness, ann: &Announcer, turn: &str) -> u64 {
         accept_user(&h.state, "head", "first");
         announce(&h.reader.core, &h.state, ann);
@@ -9108,8 +8414,8 @@ mod tests {
     }
 
     /// ★Nothing is handed over while waiting for the turn id — neither on a tool end nor by `turn/started`★. When the `turn/start` response
-    /// gives the turn id, the text held meanwhile is handed over one at a time from the head without waiting for a tool end (`expectedTurnId` ·
-    /// `clientUserMessageId`), and the writer hands over the following items in turn (ADR-0235). There are no list events.
+    /// gives the turn id, text held meanwhile is handed over one at a time from the head without waiting for a tool end (`expectedTurnId`
+    /// · `clientUserMessageId`), and the writer hands over the rest in turn (ADR-0235). No list events.
     #[test]
     fn a_held_item_is_steered_only_once_the_turn_start_reply_names_the_turn() {
         let mut h = harness();
@@ -9161,8 +8467,6 @@ mod tests {
         );
     }
 
-    /// A pre-announce head at a tool end is not skipped — it waits with the trigger left standing, and when the announcement wakes the writer, that text is handed over. Held mail
-    /// is neither handed over nor blocking, and Direct does not go out as a steer (the trigger is lowered).
     #[test]
     fn a_tool_end_waits_for_an_unannounced_head_and_never_steers_mail_or_a_direct_item() {
         let mut h = harness();
@@ -9208,8 +8512,8 @@ mod tests {
         );
     }
 
-    /// A steer's success response and deadline expiry do not move the item — it is not receipt (the echo is receipt), and it stays in the list at the handed-over stage
-    /// · no list event and no turn end.
+    /// A steer's success response and deadline expiry do not move the item — not receipt (the echo is); it stays in the list at the
+    /// handed-over stage, no list event, no turn end.
     #[test]
     fn a_steer_reply_or_its_deadline_moves_nothing_and_the_row_stays_listed() {
         for deadline in [false, true] {
@@ -9257,9 +8561,9 @@ mod tests {
         }
     }
 
-    /// steer error response → that item returns to `Held` (0 list events) and that turn is 「steer refused」 — even when a tool end comes, both the returned
-    /// text and newly arrived text are held. When the turn ends, the returned text opens the next `turn/start` in typing order, and when that turn id comes it is handed over
-    /// again.
+    /// Steer error response → the item returns to `Held` (0 list events) and the turn is 「steer refused」 — even on a tool end both returned
+    /// and newly arrived text stay held. At turn end the returned text opens the next `turn/start` in typing order and is handed over again
+    /// when that turn id comes.
     #[test]
     fn a_refused_steer_is_held_again_and_that_turn_steers_nothing_more() {
         let mut h = harness();
@@ -9309,8 +8613,8 @@ mod tests {
         assert_eq!(p["expectedTurnId"], "t2");
     }
 
-    /// If the steer of a handed-over item ✕ reached is refused, it is withdrawn instead of held again (`Dropped{Withdrawn}`) — the vendor never saw that text
-    /// and the user already removed it. That turn's 「steer refused」 mark stands as is.
+    /// If the steer of a handed-over item ✕ reached is refused, it is withdrawn (`Dropped{Withdrawn}`), not held again — the vendor never
+    /// saw it and the user removed it. The turn's 「steer refused」 mark stands.
     #[test]
     fn a_refused_steer_the_user_already_cancelled_is_withdrawn_instead_of_held() {
         let mut h = harness();
@@ -9345,8 +8649,6 @@ mod tests {
         );
     }
 
-    /// The write-failure version of refusal — if a steer ✕ reached after being picked cannot be written, it is withdrawn instead of held again (`Dropped{Withdrawn}` — it did not
-    /// reach the vendor and the user already removed it). It could not be written, so there is no handed-over mark, and that turn's 「steer refused」 mark stands.
     #[test]
     fn a_steer_the_user_cancelled_that_cannot_be_written_is_withdrawn_instead_of_held() {
         let mut h = harness();
@@ -9391,8 +8693,8 @@ mod tests {
         );
     }
 
-    /// ★Generation masking★ — a late steer response for an item already removed by echo moves nothing (it does not hold it again · does not attach
-    /// the mark). A response of a waiting entry with another generation cannot touch that item either.
+    /// ★Generation masking★ — a late steer response for an item already removed by echo moves nothing (not held again · no mark). A
+    /// response of a waiting entry with another generation cannot touch the item either.
     #[test]
     fn a_late_steer_reply_moves_only_the_item_and_stage_it_was_sent_for() {
         let mut h = harness_with_real_decoder();
@@ -9438,8 +8740,6 @@ mod tests {
         );
     }
 
-    /// A steer waiting entry registered when the stream closes is taken away without hanging, and the link does not touch that item — the core's
-    /// end synthesis closes it once as `Dropped{AgentEnded}`.
     #[test]
     fn a_stream_end_with_a_steer_waiting_hangs_nothing_and_leaves_the_item_to_the_core() {
         let mut h = harness();
@@ -9466,8 +8766,6 @@ mod tests {
         assert_eq!(trace(&h.seen), ["dropped q-1 AgentEnded"]);
     }
 
-    /// ✕ on a handed-over item → `TooLate` · `CancelRequested` followed right away by `CancelAnswered{false}` · not sent again. An overlapping
-    /// second ✕ is `TooLate` without an event. If the echo comes after that, it is receipt (it leaves the list, and a bubble).
     #[test]
     fn cancelling_a_handed_over_item_is_too_late_says_so_once_and_its_echo_still_delivers_it() {
         let mut h = harness_with_real_decoder();
@@ -9512,7 +8810,6 @@ mod tests {
 
     // ── Handed-over mark — a handed-over row is 「sent」 (✕ hidden) · a returned row is 「waiting」 (ADR-0231 · ADR-0235) ──
 
-    /// (id, handed-over mark) of registry rows — the value the list query · reattach read.
     fn sent_marks(h: &Harness) -> Vec<(String, bool)> {
         h.reader
             .core
@@ -9524,8 +8821,6 @@ mod tests {
             .collect()
     }
 
-    /// Writing a steer sets the handed-over mark on that row (it stays in the list — receipt is only the echo) · when it is refused and returns to the held place, the mark
-    /// is lowered (row as is · no outcome event). The list query carries the handed-over row as `sent`.
     #[test]
     fn a_written_steer_marks_its_row_sent_and_a_refusal_hands_it_back() {
         let mut h = harness();
@@ -9565,8 +8860,6 @@ mod tests {
         );
     }
 
-    /// If the turn of a handed-over list item ends without an echo — regardless of the shape of the end — the mark is lowered (`held`). Items outside the list (Direct · mail)
-    /// emit no mark. `turn/start` emits the mark after the writer writes, so it is done the same way here.
     #[test]
     fn a_turn_end_without_the_echo_hands_a_listed_row_back_at_every_close() {
         for end in [
@@ -9590,7 +8883,6 @@ mod tests {
             }
         }
 
-        // The mark emitted after the writer wrote `turn/start` → an end without an echo lowers it.
         let mut h = harness_with_real_decoder();
         let ann = above(&h);
         activate(&h.state, 0, Some("U0"));
@@ -9617,8 +8909,8 @@ mod tests {
         assert_eq!(sent_marks(&h), [("q-1".to_string(), false)]);
     }
 
-    /// The mark target `turn/start` carries — list items only (`None` for Direct · mail · items without an identifier below the floor). The mark value is read not by the
-    /// caller but from the current stage — nothing is emitted for items already gone · items outside the list.
+    /// The mark target `turn/start` carries — list items only (`None` for Direct · mail · below-floor items without an identifier). The value
+    /// is read from the current stage, not by the caller — nothing is emitted for gone items · items outside the list.
     #[test]
     fn only_a_listed_carrier_is_marked_and_the_mark_is_read_from_the_stage() {
         let item_of = |h: &Harness| match take(h) {
@@ -9675,8 +8967,6 @@ mod tests {
         );
     }
 
-    /// ✕ overlapped the handover (✕ after picking to hand over, before writing) — it answers that it could not remove it (`TooLate`), and the row stays in the list and becomes
-    /// 「sent」 by the mark after the write. When the echo comes, it leaves as received.
     #[test]
     fn a_cancel_racing_a_push_is_not_removed_and_the_row_flips_to_sent() {
         let mut h = harness_with_real_decoder();
@@ -9707,9 +8997,9 @@ mod tests {
         );
     }
 
-    /// A subscriber that flips that item's stage once the moment it receives the handed-over mark `sent` — imitates the spot where, between [`publish_hand_over`] reading and emitting the value,
-    /// another thread's transition (the reader's turn end · the writer picking it for the next turn) took the state lock. The emitting side lets go of the state lock
-    /// before emitting, so taking it here is fine.
+    /// A subscriber that flips that item's stage once on receiving the handed-over mark `sent` — imitates another thread's transition (the
+    /// reader's turn end · the writer picking it for the next turn) taking the state lock between [`publish_hand_over`]'s read and emit.
+    /// The emitting side releases the state lock before emitting, so taking it here is fine.
     struct FlipOnMark {
         id: SinkId,
         state: SharedState,
@@ -9757,7 +9047,6 @@ mod tests {
         }));
     }
 
-    /// The state word the list query carries for that row.
     fn listed_state(h: &Harness, id: &str) -> String {
         let (rows, _) = h.reader.core.queued_inputs().snapshot();
         crate::queued_input::overlay_unconfirmed(rows, &[])
@@ -9767,9 +9056,9 @@ mod tests {
             .expect("not in the list")
     }
 
-    /// ★If the turn closes between reading and emitting the mark and it returns to the held place, the last mark is `held`★ — the spot where the writer read `sent` after writing the steer
-    /// but before emitting, the reader returned that text with a turn end without an echo. Without reading again, the stale `sent` would remain as the last mark of the ring
-    /// and the held text would be drawn as 「sent」 without ✕.
+    /// ★If the turn closes between reading and emitting the mark and returns it to the held place, the last mark is `held`★ — the writer
+    /// read `sent` after the steer write but before emitting, the reader returned the text at a turn end without an echo. Without re-reading,
+    /// the stale `sent` stays the ring's last mark and held text is drawn 「sent」 without ✕.
     #[test]
     fn a_sent_mark_overtaken_by_a_return_to_held_is_followed_by_held() {
         let mut h = harness();
@@ -9785,9 +9074,9 @@ mod tests {
         assert_eq!(listed_state(&h, "q-1"), "queued");
     }
 
-    /// Mirror — ★if the writer opens the next turn with that text between reading and emitting the mark, the last mark is `sent`★. The spot where the reader read `held`
-    /// after returning it with a turn end without an echo, but before emitting the writer picked that text with `turn/start`. Without reading again, the handed-over text would be drawn as
-    /// 「waiting」 with ✕ standing again.
+    /// Mirror — ★if the writer opens the next turn with that text between reading and emitting, the last mark is `sent`★. The reader read
+    /// `held` after returning it, then before emitting the writer picked it with `turn/start`; without re-reading, handed-over text would
+    /// be drawn 「waiting」 with ✕ again.
     #[test]
     fn a_held_mark_overtaken_by_the_next_turn_start_is_followed_by_sent() {
         let mut h = harness();
@@ -9797,7 +9086,7 @@ mod tests {
         announce(&h.reader.core, &h.state, &ann);
         let s = steer_at_tool_end(&h).expect("steer");
         assert!(matches!(issue(&h, s), Issued::Written));
-        // The spot where the next turn's (marker 1) `turn/start` carried it — the mark does not look at the generation, so the value only matches the shape.
+        // The next turn's (marker 1) `turn/start` carried it — the mark does not look at the generation, so the value only matches the shape.
         flip_on_mark(&h, "q-1", false, || Stage::InFlight {
             gen: 1,
             turn_id: None,
@@ -9809,8 +9098,6 @@ mod tests {
         assert_eq!(listed_state(&h, "q-1"), "sent");
     }
 
-    /// ✕ on an item held while waiting for the turn id withdraws the text — even if the turn id comes after that, the text is not handed over (the handover and ✕
-    /// get their order under the same state lock — the opposite order is ✕ on a handed-over item).
     #[test]
     fn a_cancel_while_the_turn_id_is_pending_withdraws_and_nothing_is_steered() {
         let mut h = harness();
@@ -9841,9 +9128,9 @@ mod tests {
 
     // ── Handover at a tool end (ADR-0231 · ADR-0235) ──
 
-    /// ★One tool end hands over all held user text in typing order★ — one `turn/steer` per text · its own `clientUserMessageId` ·
-    /// the current turn id. Mail is neither handed over nor blocking (held until the turn end). Handed-over text stays in the list (receipt is only the echo — the only list event is
-    /// `Queued`) and once everything is handed over the trigger is lowered.
+    /// ★One tool end hands over all held user text in typing order★ — one `turn/steer` per text · its own `clientUserMessageId` · the current
+    /// turn id. Mail neither hands over nor blocks (held until the turn end). Handed-over text stays in the list (receipt is only the echo —
+    /// the only list event is `Queued`) and the trigger is lowered once all is handed over.
     #[test]
     fn a_current_turn_tool_end_steers_every_held_user_item_in_typed_order_and_never_mail() {
         let mut h = harness();
@@ -9897,8 +9184,6 @@ mod tests {
         );
     }
 
-    /// ✕ while a tool runs withdraws the held text (`Withdrawn` · `Dropped{Withdrawn}` · 0 vendor requests) — even when the tool end comes there is nothing to hand over,
-    /// so the trigger is lowered right away. An overlapping second ✕ is an id the link does not know.
     #[test]
     fn a_cancel_during_a_tool_withdraws_the_text_and_the_tool_end_steers_nothing() {
         let mut h = harness();
@@ -9929,9 +9214,9 @@ mod tests {
         );
     }
 
-    /// ★Without a tool end, it is held until the turn end★ — text typed **after** the tool ended is not handed over if no tool follows (it only writes the answer and ends),
-    /// and remains with 0 list events. When the turn ends, the oldest text opens the next turn with `turn/start`, and the moment that turn id comes
-    /// the rest goes right into that turn (it does not wait for a tool end — the remaining text gathers into one turn).
+    /// ★Without a tool end it is held until the turn end★ — text typed **after** the tool ended is not handed over if no tool follows, and
+    /// stays with 0 list events. At turn end the oldest text opens the next turn with `turn/start`, and when that turn id comes the rest go
+    /// into it (no wait for a tool end — remaining text gathers into one turn).
     #[test]
     fn text_typed_with_no_tool_afterwards_waits_for_the_turn_end_and_the_rest_ride_the_next_turn_once_its_id_is_known(
     ) {
@@ -9940,7 +9225,6 @@ mod tests {
         running_turn(&mut h, &ann, "t1");
         item_started(&mut h, "t1", "commandExecution", "c");
         item_completed(&mut h, "t1", "commandExecution", "c");
-        // Exactly as the writer does — a tool end with no held text lowers the trigger right away.
         assert!(steer_next(&h).is_none());
         assert!(!steer_due(&h.state));
         accept_user(&h.state, "q-1", "a");
@@ -9984,9 +9268,9 @@ mod tests {
         );
     }
 
-    /// ★The tool-end trigger is lowered with the turn★ — if the turn ends before the writer sees the trigger set by a tool end with no held text (during a blocking write)
-    /// and the writer opens from the next turn, text typed after that turn id came with no held text waits for that turn's tool end — it is not handed over
-    /// by the previous turn's trigger (if it were, it would go in without a tool end, and could only be recorded without getting an answer).
+    /// ★The tool-end trigger is lowered with the turn★ — if the turn ends before the writer sees a trigger set by a tool end with no held text
+    /// (during a blocking write) and the writer opens the next turn, text typed after that turn id came waits for that turn's tool end — it is
+    /// not handed over by the previous turn's trigger (it would go in without a tool end, recorded but never answered).
     #[test]
     fn a_tool_end_armed_just_before_its_turn_closes_does_not_steer_text_typed_into_the_next_turn() {
         let mut h = harness();
@@ -10024,9 +9308,9 @@ mod tests {
         assert_eq!(stage_of(&h.state, "q-1"), steered_stage(seq, "t2"));
     }
 
-    /// ★The tool-end fixture (M7 trial 1 — measured codex-cli 0.156.1)★: text typed while a tool runs is held and handed over at the tool's `item/completed`
-    /// (request id 3 of the fixture), and the vendor echoes that text in the same turn and answers — receipt (`Delivered`) · 0 waiting entries.
-    /// The request ids are matched to the fixture's response ids (`fixtures/README.md`).
+    /// ★The tool-end fixture (M7 trial 1 — measured codex-cli 0.156.1)★: text typed while a tool runs is held and handed over at the tool's
+    /// `item/completed` (request id 3 of the fixture); the vendor echoes it in the same turn and answers — receipt (`Delivered`) · 0 waiting
+    /// entries. Request ids match the fixture's response ids (`fixtures/README.md`).
     #[test]
     fn the_tool_end_fixture_holds_text_typed_during_the_tool_and_delivers_it_in_that_turn() {
         const THREAD: &str = "01a0d4b3-6048-7b41-aa4b-eec199dd1c40";
@@ -10034,7 +9318,6 @@ mod tests {
         const CARRIER: &str = "e53bb68a-aea6-421e-b04f-45caea0fc6f1";
         const TYPED: &str = "d05ef2f8-fa23-4c56-b379-b5aba4dc39e1";
         let lines: Vec<&str> = include_str!("fixtures/tool_end_m7.jsonl").lines().collect();
-        // 1-based line numbers (the same counting as the README table).
         let feed = |h: &mut Harness, range: std::ops::RangeInclusive<usize>| {
             for n in range {
                 h.reader.handle_line(lines[n - 1].as_bytes());
@@ -10088,9 +9371,10 @@ mod tests {
         );
     }
 
-    /// ★If the steer cannot be written, that text returns to the held place★ (user decision 2026-09-26 · ADR-0235 — not erased) · 0 list events · the waiting entry is
-    /// taken away and the turn keeps running (it is not a trigger of the halt after error). That turn gets the 「steer refused」 mark, so the next tool end of the same turn does not
-    /// write that text again right away (no retry loop), and after the turn ends it goes out **once** with `turn/start` at the next Idle.
+    /// ★If the steer cannot be written, the text returns to the held place★ (user decision 2026-09-26 · ADR-0235 — not erased) · 0 list
+    /// events · the waiting entry is removed and the turn keeps running (no halt trigger). The turn gets the 「steer refused」 mark, so the
+    /// next tool end of the turn does not rewrite it (no retry loop), and after the turn ends it goes out **once** with `turn/start` at the
+    /// next Idle.
     #[test]
     fn a_steer_that_cannot_be_written_is_held_not_retried_in_that_turn_and_sent_once_at_the_next_idle(
     ) {
@@ -10136,9 +9420,9 @@ mod tests {
         assert!(take(&h).is_none(), "went out twice");
     }
 
-    /// ★Production steers at the tool end★ — in a state built without test seams (floor decision `Above`), text typed in the running turn is held, and when our turn's
-    /// tool-end line passes the reader, the next job the writer picks ([`next_job`]) is that text's `turn/steer`. A below-floor incarnation is today's path
-    /// as is — even when the turn id comes · the tool ends, it stays held and goes out with `turn/start` after the turn end.
+    /// ★Production steers at the tool end★ — in a state built without test seams (decision `Above`), text typed in the running turn is held,
+    /// and when our turn's tool-end line passes the reader the next job the writer picks ([`next_job`]) is that text's `turn/steer`. A
+    /// below-floor incarnation is today's path — it stays held and goes with `turn/start` after the turn end.
     #[test]
     fn production_steers_a_held_item_through_the_writer_after_a_tool_end() {
         let mut h = harness();
@@ -10181,11 +9465,11 @@ mod tests {
 
     // ── First user message echo → session id latch (ADR-0226 amendment · user decision 2026-09-26) ──
     //
-    // ★Plugged in the same shape as production★: the handshake's record port = latch receipt, the reader's first-turn port = the same latch.
-    //   This mode's session does not count submissions, so commit happens only at the echo.
+    // ★Plugged in as production★: the handshake's record port = latch receipt, the reader's first-turn port = the same latch. This mode's
+    //   session does not count submissions, so commit happens only at the echo.
 
-    /// Real translator test bench + latch — the spot after finishing what the handshake does (handing the thread id to the latch and becoming ready).
-    /// The returned record = the values the commit port received.
+    /// Real translator bench + latch — after the handshake finished (thread id handed to the latch, ready). Returns the values the commit
+    /// port received.
     fn harness_with_latch() -> (Harness, Arc<Mutex<Vec<String>>>) {
         let mut h = harness_with_real_decoder();
         let commits = Arc::new(Mutex::new(Vec::new()));
@@ -10206,7 +9490,6 @@ mod tests {
         (h, commits)
     }
 
-    /// One echoed user message line — without `clientId` (below the floor · mail turn without an identifier), choosing the thread.
     fn anonymous_echo_line(method_name: &str, thread: &str, turn: &str, item_id: &str) -> String {
         serde_json::json!({
             "method": method_name,
@@ -10217,7 +9500,6 @@ mod tests {
         .to_string()
     }
 
-    /// (a)·(b) — nothing is persisted by the handshake and sending, and it is persisted exactly once at the peer's first echo.
     #[test]
     fn the_thread_id_persists_at_the_first_user_message_echo_and_only_once() {
         let (mut h, commits) = harness_with_latch();
@@ -10250,7 +9532,6 @@ mod tests {
         );
     }
 
-    /// (e) — an echo without `clientId` counts too: every turn of a below-floor incarnation · mail turns without an identifier.
     #[test]
     fn an_echo_without_our_client_id_persists_the_thread_id_too() {
         let (mut h, commits) = harness_with_latch();
@@ -10264,9 +9545,8 @@ mod tests {
         assert_eq!(commits.lock().unwrap().as_slice(), ["T"]);
     }
 
-    /// (d)·(f) — lines that are not a live user message echo open no persistence: an echo that declares another
-    ///   thread · an agent answer item · a turn end (a turn that ended before the echo) · a **response** line carrying a user message (the door history restore
-    ///   rides).
+    /// (d)·(f) — lines that are not a live user message echo open no persistence: an echo declaring another thread · an agent answer item · a
+    ///   turn end · a **response** line carrying a user message (the door history restore rides).
     /// ★The last echo keeps that decision from being empty★ — the same reader does count a real echo.
     #[test]
     fn nothing_but_a_live_user_message_echo_of_our_thread_persists_the_thread_id() {
@@ -10309,7 +9589,7 @@ mod tests {
         assert_eq!(commits.lock().unwrap().as_slice(), ["T"]);
     }
 
-    /// A reader without a first-turn port (the assembly point did not give one) also handles echoes as usual — there is just nowhere to call.
+    /// A reader without a first-turn port (none given by the assembly point) handles echoes as usual — there is just nowhere to call.
     #[test]
     fn a_reader_without_a_first_turn_port_handles_the_echo_as_usual() {
         let mut h = harness_with_real_decoder();
@@ -10331,7 +9611,8 @@ mod tests {
         );
     }
 
-    /// The first-turn port is called outside the marking — the reader runs inside the pump's containment, but the latch commit changes the shared profile table.
+    /// The first-turn port is called outside the marking — the reader runs inside the pump's containment, but the latch commit changes the
+    /// shared profile table.
     // ADR-0292
     #[test]
     fn the_first_turn_port_runs_outside_the_contain_mark() {
@@ -10364,9 +9645,8 @@ mod tests {
 
     // ── Returning to the held place at the turn end (ADR-0231 · TRD §5-5) ──────────────────────────
     //
-    // The turn end does not wait for the steer response — the test bench where the decision (`Above`) landed ([`above`]) steers exactly as production.
+    // The turn end does not wait for the steer response — the [`above`] bench steers exactly as production.
 
-    /// The spot where one `id` was handed to the running turn as a steer and the waiting entry was registered — that steer's request id.
     fn steer_one(h: &Harness, ann: &Announcer, id: &str, text: &str) -> i64 {
         accept_user(&h.state, id, text);
         announce(&h.reader.core, &h.state, ann);
@@ -10380,8 +9660,8 @@ mod tests {
         Some(format!("in-flight gen={seq} turn=Some(\"{turn}\")"))
     }
 
-    /// Does `act` wake the side sleeping on the state condition variable? ★The sleeping side signals readiness while holding the lock and lets go of the lock as it falls asleep★ — so
-    /// the moment `act` gets the lock, the sleeping side is already asleep (there is no window to miss the wake-up).
+    /// Does `act` wake the side sleeping on the state condition variable? ★The sleeper signals readiness while holding the lock and releases
+    /// it as it falls asleep★ — so when `act` gets the lock the sleeper is already asleep (no window to miss the wake-up).
     fn wakes_a_waiter(state: &SharedState, act: impl FnOnce()) -> bool {
         let (ready_tx, ready_rx) = mpsc::channel();
         let waiter = {
@@ -10401,11 +9681,11 @@ mod tests {
         waiter.join().unwrap()
     }
 
-    /// ★The window between the turn end and the steer response★ — whether −32600 (no turn running) comes after or before `turn/completed`, that text remains `Held`
-    /// and goes out **exactly once** with `turn/start` (M10 — no order is assumed) · 0 list events · the turn end does not wait for that response
-    /// · a refusal of the old request that came after it went out again is a no-op (generation masking). The `failed` end also holds the same text — text returned by a mid-turn refusal
-    /// stays as is, and text before the refusal came is returned by the end (user decision 2026-09-26 · ADR-0235). That `turn/start` is after the text typed after the halt
-    /// arrived (halt after error).
+    /// ★The window between the turn end and the steer response★ — whether −32600 (no turn running) comes after or before `turn/completed`
+    /// (M10 — no order assumed), the text remains `Held` and goes out **exactly once** with `turn/start` · 0 list events · the turn end does
+    /// not wait for that response · a refusal of the old request after it went out again is a no-op (generation masking). `failed` also holds
+    /// the same text — text returned by a mid-turn refusal stays, text before the refusal came is returned by the end (user decision
+    /// 2026-09-26 · ADR-0235). That `turn/start` comes after the text typed after the halt (halt after error).
     #[test]
     fn a_refused_steer_is_held_and_sent_once_whether_its_error_comes_before_or_after_the_turn_end()
     {
@@ -10432,7 +9712,7 @@ mod tests {
             );
             let mut listed = vec![queued("q-1", "second")];
             if status == "failed" {
-                // Halt after error — text held from before the halt does not go out on its own, and goes in as the head of the turn of the text typed after the halt (AC24).
+                // Halt after error — text held before the halt does not go out on its own and enters as the head of the turn of text typed after the halt (AC24).
                 assert!(take(&h).is_none(), "{at}: a turn opened during the halt");
                 accept_user(&h.state, "u-2", "later");
                 announce(&h.reader.core, &h.state, &ann);
@@ -10454,9 +9734,9 @@ mod tests {
         }
     }
 
-    /// Text of a steer that got no response until the turn end returns to the held place at the turn end (0 list events · stays in the list) and rides the next `turn/start`
-    /// once right away without waiting for that response. The old request's success response · deadline · refusal that came after it went out again do not move that text
-    /// (generation masking).
+    /// Text of a steer with no response until the turn end returns to the held place at the turn end (0 list events · stays in the list) and
+    /// rides the next `turn/start` at once without waiting for that response. The old request's success response · deadline · refusal after
+    /// it went out again do not move that text (generation masking).
     #[test]
     fn a_steer_answered_only_after_its_turn_ended_rides_the_next_turn_once() {
         for deadline in [false, true] {
@@ -10517,8 +9797,9 @@ mod tests {
         }
     }
 
-    /// Text handed over as a steer in an interrupted turn also returns to the held place if there is no echo and rides the next turn once right away — the interruption does not
-    /// set the halt. It is the same whether the response was already received or not, and a late response of the old request does not move the text handed over again.
+    /// Text handed over as a steer in an interrupted turn also returns to the held place without an echo and rides the next turn at once —
+    /// interruption does not set the halt. Same whether the response was received; a late response of the old request does not move the
+    /// re-handed-over text.
     #[test]
     fn a_steered_item_without_its_echo_returns_to_held_when_the_turn_is_interrupted() {
         for replied in [true, false] {
@@ -10553,8 +9834,6 @@ mod tests {
         }
     }
 
-    /// If the turn of a steer's text ✕ reached ends without an echo, it does not return to the held place but is withdrawn at that turn end (`Dropped{Withdrawn}` —
-    /// returned, it would go out in the next turn). The responses after that (refusal · success) emit no more events.
     #[test]
     fn a_cancelled_steer_whose_turn_ends_without_its_echo_is_withdrawn_at_the_end() {
         for how in ["refused", "accepted"] {
@@ -10591,8 +9870,6 @@ mod tests {
         }
     }
 
-    /// Two steer texts returned to the held place at the turn end go out in typing order without waiting for responses — the earlier typed one with `turn/start`,
-    /// the later one as a steer at the wake-up where that turn id comes. Late refusals of the old requests move neither text and attach no mark.
     #[test]
     fn steers_returned_at_the_close_go_in_typed_order_without_waiting_for_their_replies() {
         let mut h = harness();
@@ -10621,8 +9898,6 @@ mod tests {
         );
     }
 
-    /// Even if a steer whose turn ended before the write cannot be written, text already returned to the held place at the turn end is not touched — it is not closed as a refusal (generation masking),
-    /// the 「steer refused」 mark is not attached either, and it rides the next turn once.
     #[test]
     fn a_steer_write_failure_after_its_turn_ended_leaves_the_returned_item_alone() {
         let mut h = harness();
@@ -10645,9 +9920,10 @@ mod tests {
         assert_eq!(v["params"]["clientUserMessageId"], "q-1");
     }
 
-    /// ★A receipt that came after the turn end★ — if the echo of a steer that got no response comes after `turn/completed` (that text has returned to the held place),
-    /// it is closed as received (it leaves the list, and the vendor bubble) · 0 empty `turn/start`. There is no open turn, so **a turn boundary after the receipt**
-    /// stands (it turns off the frontend's waiting indicator) — it is the observation-free door, so the turn table stays as is. A late success response emits nothing.
+    /// ★A receipt after the turn end★ — if the echo of a steer with no response comes after `turn/completed` (the text has returned to the
+    /// held place), it closes as received (leaves the list, and the vendor bubble) · 0 empty `turn/start`. No open turn, so **a turn
+    /// boundary after the receipt** stands (turns off the frontend waiting indicator) — through the observation-free door, so the turn
+    /// table stays as is. A late success response emits nothing.
     #[test]
     fn a_late_echo_after_the_close_delivers_the_returned_item_and_its_late_reply_changes_nothing() {
         let (mut h, turns, id) = harness_with_facts();
@@ -10690,8 +9966,8 @@ mod tests {
         assert!(take(&h).is_none(), "an empty turn/start went out");
     }
 
-    /// ★If the echo came before the steer response, the turn end does not wait for that response★ — the receipt removes the item, so there is no text to dispose at the turn end,
-    /// and the next user text's `turn/start` goes out right away before the response. A late success response emits nothing.
+    /// ★If the echo came before the steer response, the turn end does not wait for it★ — the receipt removes the item, so there is nothing to
+    /// dispose at the turn end and the next user text's `turn/start` goes out at once before the response. A late success response emits nothing.
     #[test]
     fn an_echoed_steer_whose_reply_is_still_owed_does_not_hold_the_turn_end() {
         let mut h = harness_with_real_decoder();
@@ -10723,8 +9999,6 @@ mod tests {
         );
     }
 
-    /// If an error response comes to an echoed steer, the item is not revived (receipt wins) · 0 list events · the 「steer refused」 mark is
-    /// not attached — whether the turn is running or has ended.
     #[test]
     fn a_refusal_after_the_echo_never_resurrects_the_item() {
         for after_turn_end in [false, true] {
@@ -10752,8 +10026,6 @@ mod tests {
         }
     }
 
-    /// After a late receipt that came inside an open turn (an old echo of text that returned to the held place in the previous turn and was handed over again in this turn), no boundary
-    /// is set — that turn's end is the boundary.
     #[test]
     fn a_late_echo_inside_a_running_turn_adds_no_boundary() {
         let (mut h, _, _) = end_a_turn(Whose::Listed, End::Completed("completed"));
@@ -10770,7 +10042,6 @@ mod tests {
         assert_eq!(stage_of(&h.state, "q-2").as_deref(), Some("held"));
     }
 
-    /// A late receipt of text returned to the held place wakes the writer the moment it leaves pending.
     #[test]
     fn a_late_echo_of_an_item_returned_to_held_wakes_the_writer() {
         let (mut h, _, _) = end_a_turn(Whose::Listed, End::Completed("completed"));
@@ -10785,8 +10056,6 @@ mod tests {
         assert_eq!(stage_of(&h.state, "q-1"), None);
     }
 
-    /// ✕ on text returned to the held place is the same as on held text — `Withdrawn` · `Dropped{Withdrawn}` right away (no cancellation wait) · it leaves pending
-    /// and wakes the writer · the registry empties · it does not go out again. An overlapping second ✕ is `NotHeld`.
     #[test]
     fn cancelling_an_item_returned_to_held_withdraws_it_at_once() {
         let (h, _, _) = end_a_turn(Whose::Listed, End::Completed("completed"));
@@ -10817,8 +10086,6 @@ mod tests {
         );
     }
 
-    /// If the turn of handed-over text ✕ reached (text `turn/start` carried) ends without an echo, it does not return to the held place regardless of the shape of the end but
-    /// is withdrawn (`Dropped{Withdrawn}`) — no cancellation wait remains in the registry to block mail, and it does not go out in the next turn.
     #[test]
     fn a_cancelled_handed_over_item_is_withdrawn_when_its_turn_ends_without_its_echo() {
         for end in [
@@ -10859,7 +10126,6 @@ mod tests {
 
     // ── Idle order (ADR-0231 · TRD §5-5 「the order of opening turns」) ─────────────────────────────────────────
 
-    /// The turn the writer opens now — registers the waiting entry too (exactly as the writer does). (request id, marker, params).
     fn opens(h: &Harness) -> Option<(i64, u64, Value)> {
         let Some(Job::Turn { id, seq, line, .. }) = take(h) else {
             return None;
@@ -10872,8 +10138,6 @@ mod tests {
         Some((id, seq, v["params"].clone()))
     }
 
-    /// The spot where turn `turn` was opened with text typed while idle, that text was echoed and the model wrote and finished an answer — that turn's marker (accepted head ·
-    /// the common setup of tests that use the spot after the translator saw that turn's lines).
     fn answered_turn(h: &mut Harness, ann: &Announcer, turn: &str) -> u64 {
         let seq = running_turn(h, ann, turn);
         h.reader
@@ -10883,16 +10147,15 @@ mod tests {
         seq
     }
 
-    /// The spot where `id` was handed to the running turn `turn` as a steer, got a success response and was echoed — the sampling start after it has not come yet.
     fn steer_recorded(h: &mut Harness, ann: &Announcer, turn: &str, id: &str, text: &str) {
         let request = steer_one(h, ann, id, text);
         steer_accepted_reply(h, request, turn);
         h.reader.handle_line(echo_line(turn, id, text).as_bytes());
     }
 
-    /// ★Idle order = user first → mail★ (PRD §3-9 · N6) — when held mail and user text are together, the user turn comes before mail typed earlier,
-    /// and the mail opens after that turn ends. ★Even if an accepted steer ends without getting an answer, no empty `turn/start` goes out★ (the follow-up
-    /// turn debt was removed — ADR-0235).
+    /// ★Idle order = user first → mail★ (PRD §3-9 · N6) — with held mail and user text together, the user turn comes before earlier-typed
+    /// mail, and the mail opens after that turn ends. ★Even if an accepted steer ends without an answer, no empty `turn/start` goes out★
+    /// (the follow-up turn debt was removed — ADR-0235).
     #[test]
     fn the_idle_order_is_user_then_mail() {
         for with_user in [true, false] {
@@ -10928,8 +10191,8 @@ mod tests {
         }
     }
 
-    /// At Idle `[U1, M, U2]` (M = mail) → U1's `turn/start` · U2 steered right away on the new turn id · M gets `turn/start` only at the Idle after the user `Held`
-    /// are empty (TRD §7-1 · AC22 · N6).
+    /// At Idle `[U1, M, U2]` (M = mail) → U1's `turn/start` · U2 steered at once on the new turn id · M gets `turn/start` only at the Idle
+    /// after the user `Held` are empty (TRD §7-1 · AC22 · N6).
     #[test]
     fn mail_between_user_items_waits_until_the_user_items_are_in() {
         let mut h = harness_with_real_decoder();
@@ -10965,8 +10228,8 @@ mod tests {
         assert_eq!(p["clientUserMessageId"], "m-1");
     }
 
-    /// ★User text returned to the held place goes out before mail held earlier★ (Idle order = user first — N6) — the mail opens at the Idle after that text is
-    /// accepted.
+    /// ★User text returned to the held place goes out before earlier-held mail★ (Idle order = user first — N6) — the mail opens at the Idle
+    /// after that text is accepted.
     #[test]
     fn a_user_item_returned_to_held_opens_before_older_held_mail() {
         let mut h = harness_with_real_decoder();
@@ -11012,14 +10275,11 @@ mod tests {
     /// The kind of turn that sets the halt — what its `turn/start` carried (TRD §7-1).
     #[derive(Debug, Clone, Copy)]
     enum Kind {
-        /// A user turn opened by a list item typed mid-turn as `Held`.
         Listed,
-        /// A turn opened by text typed while idle (synthetic bubble).
         Direct,
         Mail,
     }
 
-    /// The six triggers (`failed` — including the early-end release · the five `turn/start` exits).
     const HALTING_ENDS: [End; 7] = [
         End::Completed("failed"),
         End::Early("failed"),
@@ -11030,8 +10290,8 @@ mod tests {
         End::LongTurnId,
     ];
 
-    /// The spot where one turn of `kind` is opened (including the waiting entry) and user text `pre` and mail `m-pre` are held during that turn — (request id, marker).
-    /// `pre` comes in while waiting for the turn id and stays held (the test bench does not run the writer).
+    /// One turn of `kind` opened (incl. waiting entry) with user text `pre` and mail `m-pre` held during it — (request id, marker). `pre`
+    /// comes in while waiting for the turn id and stays held (the bench does not run the writer).
     fn open_kind(h: &mut Harness, ann: &Announcer, kind: Kind) -> (i64, u64) {
         match kind {
             Kind::Listed => {
@@ -11064,14 +10324,13 @@ mod tests {
         (request, seq)
     }
 
-    /// ★Six triggers × three kinds — either way the halt stands★ · the user text that turn carried is not erased but returned to the held place (user
-    /// decision 2026-09-26 B — mail leaves as today) · 0 turns opened by Idle while halted (returned text · user text held from before the halt ·
-    /// held mail) · the moment the next user text comes in, the halt lifts and a `turn/start` with the remaining text as head opens, and the following text goes into that turn id
-    /// as a steer — what remains goes first, in typing order (AC24).
+    /// ★Six triggers × three kinds — the halt stands either way★ · the user text that turn carried is returned, not erased (user decision
+    /// 2026-09-26 B — mail leaves as today) · 0 turns opened by Idle while halted (returned text · text held before the halt · held mail) ·
+    /// when the next user text comes in the halt lifts and a `turn/start` with the remaining text as head opens, the following text entering
+    /// that turn id as a steer — what remains goes first, in typing order (AC24).
     #[test]
     fn every_abnormal_end_halts_whatever_the_turn_kind_until_the_next_user_item() {
         for kind in [Kind::Listed, Kind::Direct, Kind::Mail] {
-            // The head of the turn opened after the halt lifts and the next text going into that turn as a steer — the user text that turn carried returns to the held place and is the head.
             let (head, next) = match kind {
                 Kind::Listed => ("q-1", "pre"),
                 Kind::Direct => ("d-1", "pre"),
@@ -11110,8 +10369,8 @@ mod tests {
         }
     }
 
-    /// ★The halt is not lifted by mail — it is lifted the moment user text comes in★ · it stays even if all held text is removed by ✕ and the list empties (0 held
-    /// mail). The Idle order after lifting is as usual — when the user turn ends, the held mail goes out.
+    /// ★The halt is not lifted by mail — only the moment user text comes in★ · it stays even if all held text is removed by ✕ and the list
+    /// empties (0 held mail). Idle order after lifting is as usual — when the user turn ends, held mail goes out.
     #[test]
     fn only_a_user_item_lifts_the_halt_and_the_idle_order_resumes() {
         let mut h = harness_with_real_decoder();
@@ -11156,9 +10415,9 @@ mod tests {
         assert_eq!(p["clientUserMessageId"], "m-pre");
     }
 
-    /// ★An interruption (`interrupted`) does not set the halt★ — the user text the interrupted turn carried (it returns to the held place) and the user text held during that turn
-    /// are not dropped and go out right away with `turn/start` from the next Idle in typing order, and the held mail goes out after those user turns
-    /// end (user decision 2026-09-26 — interruption = held text goes right away into a new turn).
+    /// ★An interruption (`interrupted`) does not set the halt★ — the interrupted turn's returned user text and the text held during it are
+    /// not dropped and go out at once with `turn/start` from the next Idle in typing order; held mail goes after those user turns end (user
+    /// decision 2026-09-26).
     #[test]
     fn an_interrupted_turn_does_not_halt_and_held_items_go_at_the_next_idle() {
         for kind in [Kind::Listed, Kind::Direct, Kind::Mail] {
@@ -11196,9 +10455,9 @@ mod tests {
         }
     }
 
-    /// ★A failed turn holds until the next user text — when that text comes in, the held text goes first★ (the text that turn carried returns to the held place
-    /// and is the head, and the text held during that turn follows in typing order) · even if the text typed after the halt is removed by ✕ after lifting the halt, the halt does not stand
-    /// again — the remaining held text goes out right away (lifting is an arrival event).
+    /// ★A failed turn holds until the next user text — then held text goes first★ (the turn's carried text returns as the head, text held
+    /// during it follows in typing order) · text typed after the halt and then ✕-removed after lifting does not re-stand the halt — the
+    /// remaining held text goes out at once (lifting is an arrival event).
     #[test]
     fn a_failed_turn_holds_until_the_next_user_item_then_the_older_held_items_go_first() {
         let mut h = harness_with_real_decoder();
@@ -11230,9 +10489,10 @@ mod tests {
         }
     }
 
-    /// ★Accepted consequence (1) — if the turn of the text that lifted the halt is interrupted, held text and mail that went into the link go out at the next Idle★ (ADR-0235 「accepted
-    /// consequences」 first item): a failure end sets the halt → it lifts the moment user text comes in → even if the turn opened after that is interrupted, the halt does not stand again
-    /// → handed-over text returns to the held place and goes out again right away in typing order, and when that user turn ends, the held mail goes out.
+    /// ★Accepted consequence (1) — if the turn of the text that lifted the halt is interrupted, held text and mail that went into the link go
+    /// out at the next Idle★ (ADR-0235 「accepted consequences」 first item): failure end sets the halt → lifts when user text comes in →
+    /// even if the turn opened after is interrupted, the halt does not stand again → handed-over text returns and goes out again at once in
+    /// typing order, and when that user turn ends, held mail goes out.
     #[test]
     fn an_interrupted_turn_after_the_halt_is_lifted_lets_held_items_and_mail_go_at_the_next_idle() {
         let mut h = harness_with_real_decoder();
@@ -11291,8 +10551,8 @@ mod tests {
         assert_eq!(p["clientUserMessageId"], "m-pre");
     }
 
-    /// ★The halt does not stand on a below-floor incarnation★ (N1 (a)) — even after `failed` · an exit, held input goes out right away with `turn/start`
-    /// as today.
+    /// ★The halt does not stand on a below-floor incarnation★ (N1 (a)) — even after `failed` · an exit, held input goes out at once with
+    /// `turn/start` as today.
     #[test]
     fn below_the_floor_no_halt_stands_and_held_input_goes_at_once() {
         for end in [End::Completed("failed"), End::ErrorReply, End::Deadline] {
@@ -11310,10 +10570,10 @@ mod tests {
         }
     }
 
-    /// ★Steer text without an echo carried by a `failed` turn is not erased but held behind the halt★ (user decision 2026-09-26 · ADR-0235 — replaces 「erase on failure」)
-    /// · 0 list events (row as is) · accepted text leaves and held mail stays · the halt stands. It does not wait for that steer's
-    /// response — when the next user text lifts the halt, the returned text goes out right away with `turn/start` before that text (before the held mail),
-    /// and a late success response of the old request emits nothing.
+    /// ★Steer text without an echo carried by a `failed` turn is not erased but held behind the halt★ (user decision 2026-09-26 · ADR-0235
+    /// — replaces 「erase on failure」) · 0 list events · accepted text leaves and held mail stays · the halt stands. It does not wait for
+    /// that steer's response — when the next user text lifts the halt the returned text goes out at once with `turn/start` before that text
+    /// (before held mail); a late success response of the old request emits nothing.
     #[test]
     fn a_failed_turn_keeps_its_unechoed_steer_held_behind_the_halt_and_it_opens_first_without_waiting_for_the_reply(
     ) {
@@ -11364,9 +10624,9 @@ mod tests {
         );
     }
 
-    /// ★A late receipt during the halt★ — if the echo of text a failure end returned to the held place comes late, receipt + vendor bubble + display-only boundary stand and that
-    /// text leaves (it does not go out again), but the halt stays (0 mail turns), and that boundary does not pass the turn table, so the kernel's error
-    /// end (`last_end_failed`) stays too (TRD §5-5 「when a receipt comes after the turn end」).
+    /// ★A late receipt during the halt★ — if the echo of text a failure end returned comes late, receipt + vendor bubble + display-only
+    /// boundary stand and the text leaves (not sent again), but the halt stays (0 mail turns) and that boundary does not pass the turn
+    /// table, so the kernel's error end (`last_end_failed`) stays too (TRD §5-5 「when a receipt comes after the turn end」).
     #[test]
     fn a_late_echo_while_halted_keeps_the_halt_and_the_kernel_s_error_end() {
         let (mut h, turns, id) = harness_with_facts();
@@ -11414,8 +10674,8 @@ mod tests {
         );
     }
 
-    /// ★The error end of the codex classifier (TRD §5-0)★ — an attributed `TurnEnd{Failed}` (translated `failed` · early-end release · each of the five exits)
-    /// → `last_end_failed` of the turn table true · the next `completed` → false (lifted) · interruption → unchanged.
+    /// ★The error end of the codex classifier (TRD §5-0)★ — an attributed `TurnEnd{Failed}` (translated `failed` · early-end release · each
+    /// of the five exits) → turn table `last_end_failed` true · next `completed` → false (lifted) · interruption → unchanged.
     #[test]
     fn every_attributed_failed_end_sets_the_kernel_s_error_end_and_only_a_completed_end_lifts_it() {
         for end in HALTING_ENDS {
@@ -11456,7 +10716,6 @@ mod tests {
 
     // ── Ends of unknown meaning (ADR-0231 · P2 review doc-aware F2) ─────────────────────────────────────────────
 
-    /// `turn/completed` without a status field.
     fn statusless_completed_line(thread_id: &str, turn_id: &str) -> String {
         serde_json::json!({
             "method": "turn/completed",
@@ -11465,7 +10724,6 @@ mod tests {
         .to_string()
     }
 
-    /// The three statuses of unknown meaning — absent · a value not carried into an outcome · drift.
     const UNKNOWN_STATUSES: [Option<&str>; 3] =
         [None, Some("inProgress"), Some("quantumCollapsed")];
 
@@ -11493,9 +10751,9 @@ mod tests {
         );
     }
 
-    /// ★An end of unknown meaning neither sets the halt after error nor lifts the kernel's error end★ — if the turn opened after user text lifted the halt after `failed`
-    /// ends with a status of unknown meaning, the link's halt does not stand and the kernel's `last_end_failed` stays as is. Item disposal is the same as `completed`
-    /// — list items that ended without an echo return to the held place.
+    /// ★An end of unknown meaning neither sets the halt nor lifts the kernel's error end★ — if the turn opened after user text lifted the halt
+    /// after `failed` ends with an unknown status, the link's halt does not stand and the kernel's `last_end_failed` stays. Item disposal =
+    /// `completed` — list items ended without an echo return to the held place.
     #[test]
     fn an_unknown_status_after_a_failed_turn_raises_no_halt_and_keeps_the_kernel_s_error_end() {
         for status in UNKNOWN_STATUSES {
@@ -11534,8 +10792,8 @@ mod tests {
         }
     }
 
-    /// An end of unknown meaning also returns steer text without an echo to the held place like `completed` and lets it ride the next turn right away (it does not wait for the response
-    /// · if nothing is held, no turn opens).
+    /// An end of unknown meaning also returns steer text without an echo to the held place like `completed` and lets it ride the next turn at
+    /// once (no wait for the response · if nothing is held, no turn opens).
     #[test]
     fn an_unknown_status_returns_an_unechoed_steer_to_held_like_completed() {
         for status in UNKNOWN_STATUSES {
@@ -11567,7 +10825,6 @@ mod tests {
 
     // ── Transition logs (ADR-0231 · P2 review doc-aware F1 · logging-conventions 「instrumentation duty」) ────────────────
 
-    /// (level, field name → value) — every event of this thread.
     type LogLine = (tracing::Level, TraceLine);
 
     struct LogCapture(Arc<Mutex<Vec<LogLine>>>);
@@ -11599,7 +10856,6 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    /// The lines whose message contains `needle`.
     fn logged<'a>(lines: &'a [LogLine], needle: &str) -> Vec<&'a LogLine> {
         lines
             .iter()
@@ -11607,8 +10863,8 @@ mod tests {
             .collect()
     }
 
-    /// ★The halt's transitions remain in the log★ — the halt setting and lifting = info (end kind · agent). User text is in no line. The lift
-    /// line is written by `send_turn` outside the lock — the test bench runs without a link, so it measures only that line's level · fields.
+    /// ★The halt's transitions remain in the log★ — set and lift = info (end kind · agent). User text is in no line. The lift line is
+    /// written by `send_turn` outside the lock — the bench runs without a link, so it measures only that line's level · fields.
     #[test]
     fn halt_transitions_are_logged_at_their_levels() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -11647,7 +10903,6 @@ mod tests {
         );
     }
 
-    /// A halt discarded as the link closes leaves one line (debug · agent) — the close of a link that had no halt leaves no such line.
     #[test]
     fn a_halt_discarded_at_the_stream_end_is_logged_once() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -11690,7 +10945,6 @@ mod tests {
         serde_json::json!({"id": id, "method": method_name, "params": params}).to_string()
     }
 
-    /// A command approval request — from the measured shape (fixture `refuse_u2a`), only the fields attribution reads and a few beside them were kept.
     fn command_approval(id: i64, item_id: &str) -> String {
         server_request(
             id,
@@ -11708,7 +10962,6 @@ mod tests {
         )
     }
 
-    /// One end line of a tool item. The command is the measured shape of our refusal (`exitCode` · `aggregatedOutput` are `null`).
     fn tool_end(kind: &str, item_id: &str, status: &str) -> String {
         let item = match kind {
             "commandExecution" => serde_json::json!({
@@ -11760,7 +11013,6 @@ mod tests {
         (id.to_string(), outcome)
     }
 
-    /// The memory is one slot per id, and over the cap it drops the oldest and leaves that fact at debug.
     #[test]
     fn refused_items_hold_one_slot_per_id_and_drop_the_oldest_past_the_cap() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -11790,8 +11042,6 @@ mod tests {
         assert_eq!(evicted[0].1.get("evicted").map(String::as_str), Some("a"));
     }
 
-    /// One end line takes out the memory and changes only the `Failed` · `Declined` results of that id to `Refused` — other ids · other outcomes ·
-    /// lines that are not ends stay as is.
     #[test]
     fn refused_items_rewrite_only_the_failed_or_declined_result_of_the_item_whose_end_this_is() {
         let end_of = |id: &str| serde_json::json!({"item": {"id": id}});
@@ -11850,7 +11100,6 @@ mod tests {
         assert_eq!(items.ids, VecDeque::from(vec!["b".to_string()]));
     }
 
-    /// The boundary of the id cap — up to the same [`MAX_ID_BYTES`] as the translator it points, and over by even one byte it does not point (both approvals).
     #[test]
     fn a_refused_item_id_is_bounded_exactly_at_the_decoders_id_limit() {
         for method_name in [
@@ -11873,7 +11122,6 @@ mod tests {
         }
     }
 
-    /// ① Command approval (no `approvalId`) → one refusal line → a `failed` end of the same `itemId` (`exitCode: null`) = `Refused`.
     #[test]
     fn a_refused_command_approval_turns_its_failed_end_into_refused() {
         let mut h = harness_with_real_decoder();
@@ -11893,7 +11141,6 @@ mod tests {
         );
     }
 
-    /// ② A `failed` end that came without a refusal stays `Failed`.
     #[test]
     fn a_failed_end_we_never_refused_stays_failed() {
         let mut h = harness_with_real_decoder();
@@ -11904,8 +11151,6 @@ mod tests {
         );
     }
 
-    /// ③ Two sources — in one reader, a refused id is `Refused`, and `declined` of an id not refused is the vendor denial `Declined` (the spot where the reason
-    /// splits).
     #[test]
     fn in_one_reader_our_refusal_and_the_vendors_own_decline_keep_their_own_outcomes() {
         let mut h = harness_with_real_decoder();
@@ -11926,7 +11171,6 @@ mod tests {
         );
     }
 
-    /// ④ File change approval refused → `declined` end (measured shape) = `Refused` · even a `failed` end after the same refusal is `Refused`.
     #[test]
     fn a_refused_file_change_approval_turns_its_end_into_refused_whether_declined_or_failed() {
         let mut h = harness_with_real_decoder();
@@ -11949,7 +11193,6 @@ mod tests {
         );
     }
 
-    /// ⑤ No attribution — other requests · sub-command approval · network approval · no `itemId` are only refused and not remembered.
     #[test]
     fn requests_that_do_not_point_at_a_drawn_tool_item_are_refused_but_not_remembered() {
         let with_item = |extra: Value| {
@@ -12023,9 +11266,9 @@ mod tests {
         }
     }
 
-    /// ⑤ continued — an `itemId` over the cap (128 B) is not remembered, and the translator emits no result for its end (there is no row to point to).
-    /// ★Whether it is remembered is looked at **before** the end line★ — the end line takes out a remembered id in its original shape, so looking afterwards it would
-    ///   look empty even if the filtering were missing.
+    /// ⑤ continued — an `itemId` over the cap (128 B) is not remembered and the translator emits no result for its end (no row to point to).
+    /// ★Whether it is remembered is looked at **before** the end line★ — the end line takes out a remembered id in its original shape, so
+    /// afterwards it would look empty even if the filtering were missing.
     #[test]
     fn an_item_id_past_the_id_bound_is_neither_remembered_nor_given_a_result() {
         let long = "x".repeat(MAX_ID_BYTES + 1);
@@ -12045,7 +11288,6 @@ mod tests {
         );
     }
 
-    /// The boundary of ⑤ — `approvalId` · `networkApprovalContext` of a command approval being `null` is the same as absent (it remembers).
     #[test]
     fn a_command_approval_whose_sub_and_network_fields_are_null_is_still_remembered() {
         let mut h = harness_with_real_decoder();
@@ -12067,7 +11309,6 @@ mod tests {
         );
     }
 
-    /// ⑥ The end line takes out the memory — the second end of the same id is the vendor outcome as is, and a `completed` end also takes it out.
     #[test]
     fn the_end_line_takes_the_memory_out_whatever_its_status() {
         let mut h = harness_with_real_decoder();
@@ -12101,7 +11342,6 @@ mod tests {
         );
     }
 
-    /// ⑦ Cap — with 17 refusals the first id is pushed out and its end is `Failed`, and the second id is `Refused`.
     #[test]
     fn past_the_slot_cap_the_oldest_refusal_loses_its_attribution() {
         let mut h = harness_with_real_decoder();
@@ -12128,7 +11368,6 @@ mod tests {
         );
     }
 
-    /// ⑧ Not emptied at the turn end — even if the end comes after the turn end (the shape of the last line of measured `steer_m6`), it is `Refused`.
     #[test]
     fn a_turn_end_does_not_clear_the_memory() {
         let mut h = harness_with_real_decoder();
@@ -12147,7 +11386,6 @@ mod tests {
         );
     }
 
-    /// ⑨ Overflow · closed — if the refusal line could not go into the control queue, the peer gets no answer, so it is not remembered.
     #[test]
     fn a_refusal_that_never_reached_the_control_queue_is_not_remembered() {
         let mut full = harness_with_real_decoder();
@@ -12180,7 +11418,7 @@ mod tests {
         }
     }
 
-    /// ⑩ New reader = empty memory — one reader's refusals do not leak into another reader (= the next incarnation).
+    /// ⑩ New reader = empty memory — one reader's refusals do not leak into another (= the next incarnation).
     #[test]
     fn a_new_reader_starts_with_no_memory() {
         let mut first = harness_with_real_decoder();
@@ -12200,9 +11438,10 @@ mod tests {
         );
     }
 
-    /// ⑪ ★Measured (codex-cli 0.156.1 · fixture `refuse_u2a` — third B5 capture)★: after each call of the command turn · the file change turn, there is exactly one
-    /// `Refused` result of the same id. One refusal line goes out for each of the two server request lines (those answers are not in the fixture — the reader
-    /// builds them itself), and the `serverRequest/resolved` · `thread/status/changed` in between do not shake the attribution.
+    /// ⑪ ★Measured (codex-cli 0.156.1 · fixture `refuse_u2a` — third B5 capture)★: after each call of the command turn · the file change
+    /// turn there is exactly one `Refused` result of the same id. One refusal line goes out for each of the two server request lines (those
+    /// answers are not in the fixture — the reader builds them), and the in-between `serverRequest/resolved` · `thread/status/changed` do not
+    /// shake the attribution.
     #[test]
     fn the_refusal_fixture_yields_each_call_then_exactly_one_refused_result() {
         const COMMAND: &str = "exec-e59b2cc3-9cdc-49a5-954d-a9e9ec098636";
@@ -12248,7 +11487,6 @@ mod tests {
         );
     }
 
-    /// ⑫ The same id is one slot — even if the same `itemId` is refused twice the memory is one, so the first end takes it out as `Refused` and the second end is `Failed`.
     #[test]
     fn the_same_item_refused_twice_takes_one_slot() {
         let mut h = harness_with_real_decoder();

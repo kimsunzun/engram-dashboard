@@ -1,16 +1,14 @@
 //! Active usage query for codex — starts a short-lived `codex app-server --stdio`, exchanges `initialize` → `initialized` →
-//! `account/rateLimits/read`, and decodes the response into a [`UsageObservation`]. Callers see
-//! [`CODEX_USAGE_PROBE`] only as a [`UsageProbe`].
+//! `account/rateLimits/read`, and decodes the response into a [`UsageObservation`]. Callers see [`CODEX_USAGE_PROBE`] only as a [`UsageProbe`].
 //!
-//! ★No model turn★ — no thread is opened (no `thread/start`). Once the read response (or a refusal) arrives it closes stdin,
-//!   waits briefly, and ends ([`finish_after_answer`]).
-//! ★It does not use the request machinery of the conversation path (`transport`)★ — that side's wait table and writer thread are tied
-//!   to the path's shared state. Here requests are written one at a time and the response is read on one thread.
-//! ★The response's `accountId` is not even read — it is nowhere in logs · error strings · observations · the raw-text field★ (TRD §1-3): strings
-//!   given by upstream (the response · RPC error text · stderr) are not put into logs or error strings — only sentences we wrote and numbers go in.
-//!   Serde error text can also repeat the received value, so it is not put in either. Two exceptions = short names that go into display fields (plan · bucket name) and
-//!   the RPC error's `error.message` (raw-text-only field [`UsageDetail::upstream`] — the `data` field is not put in).
-//! The source of the shape = codex-cli 0.156.1's JSON Schema (the `GetAccountRateLimitsResponse` doc in `protocol`).
+//! ★No model turn★ — no thread is opened (no `thread/start`). After the read response (or a refusal) it closes stdin and ends
+//!   ([`finish_after_answer`]).
+//! ★Does not use the conversation path's request machinery (`transport`)★ — its wait table and writer thread are tied to that path's state;
+//!   here requests are written one at a time and the response is read on one thread.
+//! ★The response's `accountId` is not read at all — it is nowhere in logs · errors · observations · the raw-text field★ (TRD §1-3): upstream
+//!   strings (response · RPC error text · stderr) and serde error text (it can repeat the value) never go into logs or errors. Exceptions:
+//!   short display names (plan · bucket name) and the RPC `error.message` (raw-text-only [`UsageDetail::upstream`]; `data` is not put in).
+//! Shape source = codex-cli 0.156.1's JSON Schema (`GetAccountRateLimitsResponse` doc in `protocol`).
 // ADR-0004
 
 use std::path::Path;
@@ -33,11 +31,11 @@ use crate::usage::{
     UsagePolicy, UsageProbe, UsageSource, UsageVendorKey,
 };
 
-/// Minimum interval between automatic queries (user decision 2026-09-27 — the same value as Claude).
+/// Minimum interval between automatic queries (same value as Claude).
 const CODEX_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 
-/// The time limit of one query — it prevents hangs. The measured total is 0.74–0.94 s (0.156.1 · 3 runs), but in conversation resume right after a daemon restart
-/// `initialize` was observed once at about 9.7 s (cause unknown — TRD §6 #5).
+/// The time limit of one query — prevents hangs. Measured total 0.74–0.94 s (0.156.1); `initialize` was once ~9.7 s right after a daemon
+/// restart (cause unknown — TRD §6 #5).
 const CODEX_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const INITIALIZE_ID: i64 = 1;
@@ -55,7 +53,6 @@ const MODEL_SCOPED_MAX: usize = 16;
 /// Response classification words ([`UsageDetail::kind`]) — they go out on the wire and the screen shows them without translation.
 const KIND_RPC_ERROR: &str = "rpc_error";
 
-/// The codex usage querier. Callers use the singleton [`CODEX_USAGE_PROBE`].
 pub(crate) struct CodexUsageProbe;
 
 pub(crate) static CODEX_USAGE_PROBE: CodexUsageProbe = CodexUsageProbe;
@@ -74,8 +71,8 @@ impl UsageProbe for CodexUsageProbe {
 
     fn query(&self, env: &ProbeEnv<'_>) -> Result<UsageObservation, ProbeFailure> {
         env.require_time_left()?;
-        // ★Declaration order decides drop order — the folder comes before the child★: the child must be dropped first (tree kill + wait for exit)
-        //   before Windows can delete that working folder.
+        // ★Declaration order decides drop order — the folder before the child★: Windows deletes the working folder only after the child is
+        //   dropped.
         let scratch = ScratchDir::create(env.scratch_root)?;
         let mut child = env
             .spawner
@@ -86,8 +83,8 @@ impl UsageProbe for CodexUsageProbe {
     }
 }
 
-/// The env is inherited from the daemon as is (TRD §3 #9 — it looks at the default login). There are no conversation arguments (`--cd` · policy · `-c`) —
-/// no thread is opened.
+/// The env is inherited from the daemon as is (TRD §3 #9 — the default login). No conversation arguments (`--cd` · policy · `-c`) — no
+///   thread is opened.
 fn probe_command(scratch: &Path) -> ProbeCommand {
     let (program, args) = console_command(
         CODEX_PROGRAM,
@@ -105,12 +102,11 @@ fn probe_command(scratch: &Path) -> ProbeCommand {
     }
 }
 
-/// The server's answer to one request of ours — on success `result`, on an error response its classification ([`classify_rpc_error`]).
-/// It is told apart from the outer `Result` error (no answer received) — once an answer is received, the child is given a grace period to end.
+/// The server's answer to one request — `result` on success, its classification ([`classify_rpc_error`]) on an error response. Distinct from the
+/// outer `Result` error (no answer): once answered, the child gets a grace period to end.
 type Answer = Result<Value, ProbeFailure>;
 
-/// Handshake → read request → its answer. For each request we wait until its response arrives before writing the next line. If the handshake is refused, that refusal
-/// is the answer (the read request is not sent).
+/// Handshake → read request → its answer; each request waits for its response before the next write. A refused handshake is the answer.
 fn converse(child: &mut dyn ProbeChild, deadline: Instant) -> Result<Answer, ProbeError> {
     let initialize = InitializeParams {
         client_info: ClientInfo {
@@ -119,8 +115,8 @@ fn converse(child: &mut dyn ProbeChild, deadline: Instant) -> Result<Answer, Pro
         },
     };
     let initialize_line = request_text(INITIALIZE_ID, method::INITIALIZE, &initialize)?;
-    // If the wrapping shell could not find the target and already exited, the first write fails first — returning right away misses the exit
-    //   status that carries 「not installed」. Hold the error, read to EOF, then tell apart by the exit.
+    // If the wrapping shell could not find the target and already exited, the first write fails first — returning at once would miss the exit
+    //   status that carries 「not installed」. Hold the error, read to EOF, tell apart by the exit.
     let write_error = match send(child, &initialize_line, deadline) {
         Ok(()) => None,
         Err(err @ ProbeError::Io(_)) => Some(err),
@@ -148,19 +144,18 @@ fn request_text<P: Serialize>(id: i64, method: &str, params: &P) -> Result<Strin
     })
 }
 
-/// The line tool in `protocol` attaches the trailing newline and [`ProbeChild::write_line`] attaches one too — if one is not stripped, an empty line
-/// goes out as an extra line.
+/// Both the `protocol` line tool and [`ProbeChild::write_line`] attach the newline — unstripped, an extra empty line goes out.
 fn send(child: &mut dyn ProbeChild, line: &str, deadline: Instant) -> Result<(), ProbeError> {
     child.write_line(line.strip_suffix('\n').unwrap_or(line), deadline)
 }
 
-/// Read until the response for our request `id` arrives — an error response is an answer too (it is classified and returned).
+/// Read until the response for our request `id` — an error response is an answer too (classified and returned).
 ///
-/// - A server **request** is answered with a refusal response — if we do not answer, the peer may stall waiting for it.
-/// - Notifications · responses with other ids · lines that cannot be read as an envelope are discarded.
-/// - ★If a line carrying our id cannot be read as an envelope (it carries both success and failure, or the error body is broken), it is `Parse` right away★ —
-///   waiting will not bring another response. A line that is not JSON at all cannot have its id read, so it is discarded (then we go to the time limit).
-/// - `write_error` = the I/O error from the failed write of that request — if it ends without a response and is not 「not installed」 either, this is returned.
+/// - A server **request** gets a refusal response — unanswered, the peer may stall.
+/// - Notifications · other ids · lines unreadable as an envelope are discarded.
+/// - ★A line with our id that is not a valid envelope (both success and failure, or a broken error body) is `Parse` at once★ — waiting will
+///   not bring another response. A non-JSON line has no readable id and is discarded (→ time limit).
+/// - `write_error` = the I/O error of that request's failed write — returned if it ends without a response and is not 「not installed」.
 fn await_result(
     child: &mut dyn ProbeChild,
     id: i64,
@@ -173,7 +168,8 @@ fn await_result(
         let line = match child.read_line(deadline) {
             Ok(Some(line)) => line,
             Ok(None) => return Err(ended_without_response(child, deadline, read_error)),
-            // Either a single line that hit the cap or a read failure — in the former the stream continues to the next line, in the latter EOF comes soon.
+            // Either a single line that hit the cap or a read failure — in the former the stream continues to the next line, in the latter
+            //   EOF comes soon.
             Err(err @ ProbeError::Io(_)) => {
                 read_error = Some(err);
                 continue;
@@ -207,8 +203,8 @@ fn is_reply_to(line: &str, id: i64) -> bool {
         && (obj.contains_key("result") || obj.contains_key("error"))
 }
 
-/// ★Do not fake success★ — returning a success response to an approval request is an automatic approval (the same spot in `transport`).
-/// We do not write down what the request was — it is a string decided by upstream.
+/// ★Do not fake success★ — a success response to an approval request is an automatic approval (same spot in `transport`). The request content is
+/// not written down (upstream-decided string).
 fn refuse(child: &mut dyn ProbeChild, id: &RequestId, deadline: Instant) -> Result<(), ProbeError> {
     tracing::debug!("codex usage query: refusing a server request");
     send(
@@ -218,7 +214,6 @@ fn refuse(child: &mut dyn ProbeChild, id: &RequestId, deadline: Instant) -> Resu
     )
 }
 
-/// stdout closed without a response — tell apart 「not installed」 by the exit status.
 fn ended_without_response(
     child: &mut dyn ProbeChild,
     deadline: Instant,
@@ -231,7 +226,8 @@ fn ended_without_response(
     if exit.looks_not_installed() {
         return ProbeError::NotInstalled;
     }
-    // The stderr content is not put in — what gets masked is only token shapes, and account identifiers · paths may remain. Only the line count is written.
+    // The stderr content is not put in — what gets masked is only token shapes, and account identifiers · paths may remain. Only the line
+    //   count is written.
     tracing::debug!(
         code = ?exit.code(),
         stderr_lines = child.stderr_tail().len(),
@@ -246,10 +242,9 @@ fn ended_without_response(
     })
 }
 
-/// ★This phrase table is a guess★ — we have not yet seen codex's not-logged-in error text (TRD §6 #5 — the stage-3 real smoke collects it).
-///   Even if wrong, it falls into `Upstream` (= query failure). Not separating the limit text into [`ProbeError::RateLimited`] is
-///   the decision of TRD §3 #7. The `Upstream` text is fixed — upstream text is not repeated (only the code number is put in).
-/// The evidence is one thing regardless of classification — [`KIND_RPC_ERROR`] + `error.code` + raw `error.message` (no raw text if it is only whitespace).
+/// ★This phrase table is a guess★ — codex's not-logged-in error text has not been seen (TRD §6 #5 — the stage-3 real smoke collects it).
+///   If wrong, it falls into `Upstream` (= query failure). The limit text is deliberately not split into [`ProbeError::RateLimited`] (TRD
+/// §3 #7). Evidence is the same for every classification — [`KIND_RPC_ERROR`] + `error.code` + raw `error.message` (none if only whitespace).
 fn classify_rpc_error(error: &RpcError) -> ProbeFailure {
     const UNAUTHENTICATED: [&str; 10] = [
         "authenticat",
@@ -287,15 +282,14 @@ fn classify_rpc_error(error: &RpcError) -> ProbeFailure {
 
 /// The read response's `result` → observation.
 ///
-/// - ★Default bucket = [`DEFAULT_LIMIT_ID`] in `rateLimitsByLimitId` comes first★ — the schema describes the top-level `rateLimits` as a 「backward-compatible
-///   single-bucket view」, so it can mirror another bucket (the peer t3code also reads the map first). Only when it is not in the map do we use the top level,
-///   and only when its `limitId` points to the default bucket ([`names_default_bucket`]).
-/// - ★If the default bucket is not found, it is `Parse`★ — if we read that as 「no windows」, a response carrying only other buckets would enter as a success
-///   and wipe every value held. On failure the receiving side keeps its values. It is also `Parse` if `result` is not an object.
-/// - Windows are told apart by duration (rule = [`windows_by_duration`] of the sibling `usage`). A `None` field = not carried (the receiving side keeps it).
-/// - The remaining buckets of the map → per-model windows ([`model_scoped_windows`]) · `planType` → plan (the default bucket's, or the top level's if absent).
-///   ★If the map was read, the per-model windows are `Some` even when empty★ — if folded to `None`, a vanished model window stays on the receiving side forever.
-///   If there is no map (top level only), we do not know the other buckets, so it is `None`.
+/// - ★Default bucket = [`DEFAULT_LIMIT_ID`] in `rateLimitsByLimitId` first★ — the top-level `rateLimits` is a 「backward-compatible
+///   single-bucket view」 that can mirror another bucket; use it only when the map lacks the default and its `limitId` names the default
+///   ([`names_default_bucket`]).
+/// - ★Default bucket not found = `Parse`★ — reading it as 「no windows」 would let other-bucket-only responses succeed and wipe every held value;
+///   on failure the receiving side keeps its values. Also `Parse` if `result` is not an object.
+/// - Windows by duration ([`windows_by_duration`], sibling `usage`). `None` field = not carried (the receiving side keeps it).
+/// - Other map buckets → per-model windows ([`model_scoped_windows`]); `planType` → plan. ★If the map was read, per-model windows are `Some`
+///   even when empty★ — `None` would leave a vanished model window forever. No map (top level only) → other buckets unknown → `None`.
 fn observation_from_result(result: Value) -> Result<UsageObservation, ProbeFailure> {
     let response: GetAccountRateLimitsResponse = serde_json::from_value(result)
         .map_err(|_| parse_error("the response result is not an object"))?;
@@ -329,8 +323,8 @@ fn parse_error(what: &str) -> ProbeError {
     ProbeError::Parse(format!("codex usage response: {what}"))
 }
 
-/// For each non-default bucket, its one **weekly** window (D8) — name = `limitName`, or the bucket id if unusable. Buckets with no weekly window or
-/// that cannot be given a name are left out. Of the same name (ASCII case-insensitive), only the first one stays (in bucket id order).
+/// Each non-default bucket's one **weekly** window (D8) — name = `limitName`, or the bucket id if unusable. Buckets with no weekly window or no
+/// usable name are left out. Same name (ASCII case-insensitive): the first stays (bucket id order).
 fn model_scoped_windows(buckets: &[(String, RateLimitSnapshot)]) -> Vec<ScopedWindowObs> {
     let mut windows: Vec<ScopedWindowObs> = Vec::new();
     for (id, snapshot) in buckets {
@@ -412,7 +406,6 @@ mod tests {
         );
     }
 
-    /// The four fields of a real `initialize` response (values are fake).
     fn init_response() -> String {
         json!({
             "id": 1,
@@ -499,7 +492,6 @@ mod tests {
         observation_from_result(result)
     }
 
-    /// Is it a `Parse` whose only evidence is the classification.
     fn is_bare_parse(result: &Result<UsageObservation, ProbeFailure>) -> bool {
         matches!(
             result,
@@ -554,7 +546,8 @@ mod tests {
         assert!(!spawner.cut_at_deadline());
     }
 
-    /// A child that does not end even after stdin is closed after the response — it is interrupted after the grace period, but the query succeeds.
+    /// A child that does not end even after stdin is closed after the response — it is interrupted after the grace period, but the query
+    ///   succeeds.
     #[test]
     fn a_child_that_lingers_after_the_answer_is_cut_but_the_query_succeeds() {
         let (result, spawner) = run(answering(typical_result()).hang_after_lines());
@@ -580,7 +573,8 @@ mod tests {
         assert_scratch_gone(&root);
     }
 
-    /// As in the measurement of research doc §4-1, if the map has no default bucket we use the top level, and the map's buckets become per-model windows.
+    /// As in the measurement of research doc §4-1, if the map has no default bucket we use the top level, and the map's buckets become
+    ///   per-model windows.
     #[test]
     fn without_the_codex_bucket_in_the_map_the_top_level_view_is_used() {
         let mut top_level = codex_bucket();
@@ -611,7 +605,6 @@ mod tests {
                 "if the map was read, it is carried even when empty: {by_limit_id}"
             );
         }
-        // It is the same if the map field is absent altogether, or the `limitId` field is absent.
         let mut bare = codex_bucket();
         bare.as_object_mut().expect("object").remove("limitId");
         let obs = observe(json!({ "rateLimits": bare })).expect("observation");
@@ -699,7 +692,6 @@ mod tests {
         );
         assert_eq!(obs.weekly, None);
 
-        // If a model bucket's window is not weekly, that bucket has no per-model window.
         let obs = observe(json!({
             "rateLimits": codex_bucket(),
             "rateLimitsByLimitId": {
@@ -730,7 +722,6 @@ mod tests {
             assert!(is_bare_parse(&got), "{result}: {got:?}");
         }
 
-        // If the map field or its entry is not an object, only that spot is missing — the top level's default bucket is used.
         for by_limit_id in [
             json!([["codex", codex_bucket()]]),
             json!({ "codex": array_bucket }),
@@ -753,7 +744,6 @@ mod tests {
             );
         }
 
-        // If the window slot is an array, only that window is missing · if the model bucket is an array, only that bucket is missing.
         let obs = observe(json!({
             "rateLimits": {
                 "limitId": "codex",
@@ -903,7 +893,6 @@ mod tests {
         }
     }
 
-    /// An empty text means there is no raw text — the code is put in as is.
     #[test]
     fn a_blank_rpc_message_carries_the_code_without_upstream() {
         for blank in ["", "  ", "   "] {
@@ -922,8 +911,8 @@ mod tests {
         }
     }
 
-    /// The read request's error response and the handshake's error response take the same classification — evidence = [`KIND_RPC_ERROR`] + code + the raw `message`
-    ///   text (token shapes masked · the `data` field is not put in), and the raw text is not visible in the failure's `Display` · `Debug`.
+    /// The read request's and the handshake's error responses classify the same way — evidence = [`KIND_RPC_ERROR`] + code + raw `message`
+    ///   (token shapes masked · no `data`), and the raw text is not visible in `Display` · `Debug`.
     #[test]
     fn rpc_errors_carry_the_code_and_message_only_in_the_detail() {
         const MARKER: &str = "someone@example.com";
@@ -1080,7 +1069,6 @@ mod tests {
         assert_eq!(obs.weekly, window(Some(58.0), Some(WEEKLY_RESET)));
     }
 
-    /// If the response carrying our id cannot be read as an envelope, we do not wait until the time limit.
     #[test]
     fn a_broken_reply_to_our_request_is_a_parse_error_without_waiting() {
         for broken in [
@@ -1105,7 +1093,8 @@ mod tests {
         }
     }
 
-    /// A child that emits a read error first — the real spawner's 「a single line over the cap」 shape (a scripted stand-in cannot emit an error line).
+    /// A child that emits a read error first — the real spawner's 「a single line over the cap」 shape (a scripted stand-in cannot emit an
+    ///   error line).
     struct IoFirstSpawner {
         then_answer: bool,
     }
@@ -1227,7 +1216,6 @@ mod tests {
         assert_eq!(result, Err(ProbeError::NotInstalled.into()));
         assert!(spawner.child_dropped());
 
-        // The same holds if it ends after the handshake — stderr is not put in (nor in the raw-text field).
         let stderr = format!("Error: account {ACCOUNT_ID} is not allowed");
         let (result, _) = run(ChildScript::new()
             .line(init_response())
@@ -1254,8 +1242,8 @@ mod tests {
         assert_scratch_gone(&root);
     }
 
-    /// ★A failure of the first write does not hide 「not installed」★ — even if the wrapping shell already ended and the handshake write fails, we tell apart by the exit.
-    ///   If it is a failure on the installed side, it is the write error as is.
+    /// ★A failed first write does not hide 「not installed」★ — even if the shell already ended and the handshake write fails, we tell apart
+    ///   by the exit.
     #[test]
     fn a_failed_handshake_write_still_reads_the_exit() {
         let (result, spawner) = run(ChildScript::new().fail_writes().exit_not_installed());
@@ -1275,7 +1263,6 @@ mod tests {
         );
     }
 
-    /// A spawner seam failure comes up without evidence (`?`) — the receiving side fills it with the classification word.
     #[test]
     fn a_spawn_failure_passes_through_and_cleans_up() {
         let root = TempRoot::new("codex-probe-missing");
@@ -1301,7 +1288,6 @@ mod tests {
         let scan_root = root.path().to_path_buf();
         let spawner =
             ScriptedSpawner::new(ChildScript::new().line(init_response()).reply(move |_| {
-                // While the child is up — the temp folder must be in place.
                 let dir = fs::read_dir(&scan_root)
                     .expect("root")
                     .flatten()
@@ -1371,7 +1357,8 @@ mod tests {
             );
         }
 
-        // Across the whole conversation too — even if it arrives in any field outside the display fields put into the observation (plan · bucket name).
+        // Across the whole conversation too — even if it arrives in any field outside the display fields put into the observation (plan ·
+        //   bucket name).
         let mut result = typical_result();
         result["rateLimits"]["accountId"] = json!(ACCOUNT_ID);
         result["rateLimitsByLimitId"]["codex"]["accountId"] = json!(ACCOUNT_ID);
@@ -1461,7 +1448,6 @@ mod tests {
             }
         }
 
-        // Conversation side — a response is received even after a batch of lines that cannot be read as an envelope.
         let mut script = ChildScript::new();
         for junk in [
             "",

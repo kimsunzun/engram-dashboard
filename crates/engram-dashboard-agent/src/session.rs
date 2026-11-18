@@ -1,13 +1,9 @@
-//! AgentSession — one agent = a composite of OutputCore (output side) + Box<dyn AgentTransport> (channel/resource side).
+//! AgentSession — one agent = OutputCore (output side) + `Box<dyn AgentTransport>` (channel/resource side), exposing a surface independent
+//!   of the transport kind.
 //!
-//! It exposes a shared surface independent of the transport kind (PTY/API) and delegates internally to core/transport.
-//!
-//! Ownership split (impl-spec table): master/child/shutdown/job/reader/writer → inside the transport (PtyTransport),
-//!   subscribers/replay/seq/status/finalized → inside core (OutputCore).
-//!
-//! So every method only touches its own fields (cols/rows atomics) or delegates to core/transport.
-//!
-//! tauri import 0.
+//! Ownership split: master/child/shutdown/job/reader/writer → transport (PtyTransport); subscribers/replay/seq/status/finalized → core
+//!   (OutputCore).
+//! Every method touches only its own fields (cols/rows atomics) or delegates to core/transport. Zero tauri imports.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
@@ -42,19 +38,20 @@ pub struct AgentSession {
     /// The input encoding applied **right before** write_input is passed to the transport (ADR-0044/0004).
     /// manager.spawn computes and injects it.
     encoder: InputEncoder,
-    /// Whether this session is **a reader of mail** (= eligibility for the mail recipient list). It holds as is the value the backend computed
-    /// at spawn — a backend-derived fact of the same kind as the encoder.
+    /// Whether this session is **a reader of mail** (eligibility for the mail recipient list) — the value the backend computed at spawn.
     ///
-    /// ★Why the **session** holds it, not the profile (load-bearing)★: `DeleteProfile` does not kill a live session.
-    ///   Deciding by the profile would make a live shell whose profile was deleted "unknown", putting it back on the list, and envelopes would be
-    ///   executed as commands. The session knows what it was spawned as, and that fact does not change with profile deletion.
+    /// ★Why the **session** holds it, not the profile (load-bearing)★: `DeleteProfile` does not kill a live session; deciding by the
+    ///   profile would make a live shell whose
+    ///   profile was deleted "unknown", put it back on the list, and execute envelopes as commands. The session knows what it was spawned as.
     reads_messages: bool,
-    /// The wait between the body write and the submit write — grounds and value source in `backend::SUBMIT_PACING`.
+    /// The wait between the body write and the submit write — grounds and value in `backend::SUBMIT_PACING`.
     ///
-    /// ★The default is set by `new` (it is not a constructor argument)★: letting the caller pick the value would make this defect silently recur
-    ///   the moment some assembly path passes 0. The only way to lower it is one test-only seam.
+    /// ★The default is set by `new`, not a constructor argument★: a caller-chosen value would silently reintroduce the defect when an
+    ///   assembly path passes 0. The only way to
+    ///   lower it is one test-only seam.
     submit_pacing: Duration,
-    /// The function that actually sleeps the wait above. In production it is a blocking sleep, and tests plug in one that **does not sleep but only records the call**
+    /// The function that actually sleeps the wait above. In production it is a blocking sleep, and tests plug in one that **does not sleep
+    ///   but only records the call**
     /// to assert "the wait was issued" without time measurement (= non-flaky).
     sleeper: fn(Duration),
     /// This incarnation launched to resume a stored conversation — invariant per incarnation. The subscription response carries it with `epoch`.
@@ -65,32 +62,29 @@ pub struct AgentSession {
     /// Mid-turn input policy — the backend's reported value. Default (`with_mid_turn` not called) = `None` (today's path).
     // ADR-0231
     mid_turn: MidTurnPolicy,
-    /// Ack availability the backend fills — the very Arc `SpawnParts` carried.
     delivery_ack: Arc<DeliveryAck>,
-    /// The session input lock — ★takes only `SessionClassified` user input and cancellation★. The output pump does not take it: this
-    ///   lock contains the first-submission latch commit (a disk write), so if the pump waited, output would stand behind disk I/O.
-    ///   Lock order = `input_order` → replay → registry → waiting-list table (emit does not take this, so there is no reverse order).
+    /// The session input lock — ★takes only `SessionClassified` user input and cancellation★. The output pump does not take it: the lock
+    ///   contains the first-submission
+    ///   latch commit (a disk write), and a waiting pump would put output behind disk I/O.
+    ///   Lock order = `input_order` → replay → registry → waiting-list table (emit does not take this, so no reverse order).
     // ADR-0231
     input_order: Mutex<()>,
     core: Arc<OutputCore>,
     transport: Box<dyn AgentTransport>,
 }
 
-/// The time limit at which to give up confirming whether a delivery write **actually went out** ([`AgentTransport::flush_input`]).
+/// Time limit for confirming a delivery write **actually went out** ([`AgentTransport::flush_input`]).
 ///
-/// ★The axis this value measures★: the place that tells 「not out yet」 from 「never going out」. Too short, and a briefly busy
-///   receiver (a TUI reading input late because it is rendering a turn) is reported as a delivery failure and **the redelivery creates a duplicate**;
-///   too long, and one stuck agent holds the delivery loop that long. ★Of the two, the worse is the duplicate★ —
-///   a failure is recovered by retry, but a duplicate makes the receiver read the same mail twice. So it leans to the generous side.
-/// ★Source of the value = a number this repository already uses for 「it should have finished by now」★: the `join_pump` cap of the kill causality is
-///   5 seconds (ADR-0001). Instead of inventing a new number, the same place is used — this path's decision is also the same ("if it has not gone out
-///   after 5 seconds, it is stuck").
-/// ★The only path taking this wait is mail delivery★ — that path is a verb that already holds the caller 0.5 seconds because of
-///   [`crate::backend::SUBMIT_PACING`], so waiting here is **not a new kind of blocking.** The keystroke
-///   path (`write_input`) does not take this wait.
+/// ★Balance★: too short → a briefly busy receiver (a TUI rendering a turn) is reported as a delivery failure and **the redelivery
+///   duplicates**; too long → one stuck agent holds the delivery loop. ★The duplicate is worse★ (a failure is
+///   retried; a duplicate makes the receiver read the same mail twice), so it leans generous.
+/// ★Source★: the kill causality's `join_pump` cap, 5 s (ADR-0001) — the repo's number for 「it should have finished by now」.
+/// ★Only mail delivery takes this wait★ — it already holds the caller 0.5 s for [`crate::backend::SUBMIT_PACING`], so **no new kind of
+///   blocking**; the keystroke path (`write_input`) does not.
 const INPUT_FLUSH_BUDGET: Duration = Duration::from_secs(5);
 
-/// Production sleeper — this layer is a synchronous path, so it just sleeps blocking (the delivery loop being held that long is an accepted property:
+/// Production sleeper — this layer is a synchronous path, so it just sleeps blocking (the delivery loop being held that long is an
+///   accepted property:
 /// terminal reception is for demos, and async separation is a structural change and a separate decision).
 fn blocking_sleep(d: Duration) {
     std::thread::sleep(d);
@@ -144,10 +138,11 @@ impl AgentSession {
 
     /// Carries the session id first-submission latch — default (not called) = no latch.
     ///
-    /// ★If omitted at the production assembly point, every resume silently disappears★ — no submission is ever counted, so no
-    ///   incarnation persists its id, and every next activation becomes a new conversation (with no error).
-    /// ★A `TransportOwned` session does not count this latch's submissions★ — the first-turn port of the same latch must be plugged into the link
-    ///   ([`SessionIdLatch::first_turn_sink`] · assembly point = `open_spawn`).
+    /// ★If omitted at the production assembly point, every resume silently disappears★ — no submission is counted, no incarnation persists
+    ///   its id, and each activation becomes a
+    ///   new conversation with no error.
+    /// ★A `TransportOwned` session does not count this latch's submissions★ — plug the latch's first-turn port into the link
+    ///   ([`SessionIdLatch::first_turn_sink`] · assembly = `open_spawn`).
     // ADR-0226
     pub(crate) fn with_session_id_latch(mut self, latch: Arc<SessionIdLatch>) -> Self {
         self.session_id_latch = Some(latch);
@@ -156,7 +151,7 @@ impl AgentSession {
 
     /// Carries the mid-turn input policy and ack availability — default (not called) = `None` · `Unknown`.
     ///
-    /// ★If omitted at the production assembly point, the list silently disappears★ — all input goes to today's path, with no error.
+    /// ★If omitted at the production assembly point, the list silently disappears★ (all input takes today's path, no error).
     // ADR-0231
     pub(crate) fn with_mid_turn(
         mut self,
@@ -168,9 +163,8 @@ impl AgentSession {
         self
     }
 
-    /// ★Test-only seam★ — lowers the submit wait (so the harness does not sleep 0.5 seconds each time) or observes the wait issuance itself.
-    /// **The production default is always `backend::SUBMIT_PACING`** (field doc above) — this function does not change that default;
-    /// a test lowers it explicitly only for its own instance.
+    /// ★Test-only seam★ — lowers the submit wait or observes its issuance. The production default stays `backend::SUBMIT_PACING`; a test
+    ///   lowers it only for its own instance.
     #[cfg(test)]
     pub(crate) fn with_submit_pacing(mut self, pacing: Duration, sleeper: fn(Duration)) -> Self {
         self.submit_pacing = pacing;
@@ -178,76 +172,71 @@ impl AgentSession {
         self
     }
 
-    /// Whether this session is a reader of mail — the decision grounds are in the field doc.
     pub fn reads_messages(&self) -> bool {
         self.reads_messages
     }
 
     /// This incarnation's queued input registry — **the very** Arc the core feeds in emit.
-    /// ★Taken from the core rather than held separately by the session★: plugging it into two places separately could split the registry the session reads
-    ///   from the one the core feeds, and that mismatch shows only as an empty list, with no compile error or runtime error.
-    /// ★Do not emit while holding the guard★ — the lock order is replay → registry (`OutputCore::queued_inputs`).
+    /// ★Taken from the core, not held separately★: two separate plug-ins could split the registry the session reads from the one the core
+    ///   feeds, showing only as an empty list
+    ///   with no compile or runtime error.
+    /// ★Do not emit while holding the guard★ — lock order replay → registry (`OutputCore::queued_inputs`).
     // ADR-0231
     pub fn queued_inputs(&self) -> &Arc<QueuedInputs> {
         self.core.queued_inputs()
     }
 
-    /// User exit intent tagging (ADR-0019) — kill_agent calls it **before** transport.shutdown.
-    /// The finish hook snapshots this value at the moment of finish, so it must be set before shutdown so that when the pump
-    /// wakes up and finishes, UserKill is observed (the order is the key to race prevention).
+    /// User exit intent tagging (ADR-0019) — kill_agent calls it **before** transport.shutdown, because the finish hook snapshots the
+    ///   value at finish: set after, the
+    /// pump would finish without observing UserKill (the order prevents the race).
     pub fn set_intent(&self, intent: TerminationIntent) {
         self.intent.store(intent as u8, Ordering::SeqCst);
     }
 
-    /// The exit intent observed so far — ★a value meant to be read as a monotonic latch★.
+    /// The exit intent observed so far — ★meant to be read as a monotonic latch★.
     ///
-    /// ★Why a reading verb was needed★: the activation decision must know **the user's cancellation before the terminal state**.
-    ///   `kill_agent` sets this value even before `enter_exiting` ([`AgentManager::kill_agent`]),
-    ///   and only after that brings the link down. So this latch is **always seen first** before any observation caused by the kill (the link's delivery stop · delivery channel closed ·
-    ///   `Exiting` state) — the terminal transition (`Killed`) does not stand until the pump wakes up,
-    ///   so a decision looking only at it misreads the interval as 「connection failure」.
-    /// ★Read with `Ordering::SeqCst`★ — the same ordering as the writing side (`set_intent`), so they pair.
-    /// ★A new value per incarnation★ — `spawn_session` makes a new `Arc<AtomicU8>` per incarnation. So the kill intent of the previous
-    ///   incarnation is not visible in this incarnation.
+    /// ★Why a reading verb exists★: the activation decision must see **the user's cancellation before the terminal state**. `kill_agent`
+    ///   sets this even before `enter_exiting` ([`AgentManager::kill_agent`]) and only then brings the link
+    ///   down, so it is **always seen first** before any kill-caused observation; the terminal `Killed` does not stand until the pump
+    ///   wakes, and a decision looking only at it misreads the interval as 「connection failure」.
+    /// ★Read with `Ordering::SeqCst`★ (pairs with `set_intent`). ★A new `Arc<AtomicU8>` per incarnation★ (`spawn_session`) — the previous
+    ///   incarnation's kill intent is not visible.
     // ADR-0019
     pub fn termination_intent(&self) -> TerminationIntent {
         TerminationIntent::from_u8(self.intent.load(Ordering::SeqCst))
     }
 
-    /// Delegates the pump startup (transport.start). ★ADR-0019 reaper order★: the manager starts this session **after inserting** it into the sessions
-    /// map. Even if the pump immediately sends EOF→finish→ReapMsg, it is already in the map by then,
-    /// so the reaper reaps it normally (if start came before insert, the hook send would point at an id not in the map and
-    /// become a zombie). attach_pump completes synchronously inside start, so it is independent of the insert order (no effect on join_pump).
+    /// Delegates the pump startup (transport.start). ★ADR-0019 reaper order★: the manager starts this session **after inserting** it into
+    ///   the sessions map, so a pump that
+    /// immediately sends EOF→finish→ReapMsg finds it there (start before insert → the hook send points at an id not in the map → zombie).
+    ///   attach_pump completes synchronously inside
+    /// start, so it is independent of insert order (no effect on join_pump).
     pub fn start_pump(&self) {
         self.transport.start(self.core.clone());
     }
 
     /// Passes input bytes → (encoder applied) → transport.
     ///
-    /// ★Wiring point (ADR-0044)★: applies the encoder to wrap a text turn per the backend convention, then
-    ///   passes it to the transport **always as Raw bytes**. The transport is a dumb pipe and does not know the shape.
-    ///   - Raw (terminal · shell): `encode` copies the bytes as is → **byte-identical** to the existing path.
-    ///   - ClaudeStreamJson (json mode): wraps the text into a claude user JSON line (escaping and schema are
-    ///     backend/claude/ alone — the session holds only the tag and does not know the shape, ADR-0004 isolation).
+    /// ★Wiring point (ADR-0044)★: applies the encoder to wrap a text turn per the backend convention, then passes it to the transport
+    ///   **always as Raw bytes** (a dumb pipe).
+    ///   - Raw (terminal · shell): `encode` copies the bytes → **byte-identical** to the existing path.
+    ///   - ClaudeStreamJson (json mode): wraps the text into a claude user JSON line (schema in `backend/claude/` alone, ADR-0004).
     ///
-    /// ★Call contract (FIX 6a) — in json mode `1 write_input call == 1 complete user turn`★:
-    ///   the ClaudeStreamJson encoder wraps every call into **one** `{"type":"user",…}\n` line. That is, per call
-    ///   claude receives one whole user turn. Calling **one keystroke at a time** like the terminal path
-    ///   would create a wrong one-character turn per character and break the conversation. So json-mode callers (RichSlot · M2)
-    ///   must send **the whole completed message at once** (accumulating partial input is the frontend input box's job). The terminal path
-    ///   is Raw, so streaming byte calls are normal as before (this contract is json mode only).
-    /// Origin = `Mail` (same as [`AgentSession::write_input_observed`]) — human input carries its origin through
-    /// [`AgentSession::write_input_from`].
+    /// ★Call contract (FIX 6a) — in json mode `1 write_input call == 1 complete user turn`★: the encoder wraps every call into **one**
+    ///   `{"type":"user",…}\n` line, so one-keystroke calls would make a one-character turn each.
+    ///   json-mode callers (RichSlot · M2) send **the whole completed message at once** (accumulating partial input is the frontend input
+    ///   box's job); the terminal path is Raw, so streaming byte calls stay normal.
+    /// Origin = `Mail` (as [`AgentSession::write_input_observed`]); human input carries its origin through [`AgentSession::write_input_from`].
     pub fn write_input(&self, bytes: &[u8]) -> Result<(), PtyError> {
         self.write_input_observed(bytes).map(|_| ())
     }
 
-    /// A write carrying its origin — behavior, return and byte contract are the same as [`AgentSession::write_input_observed`], and the only difference is
-    /// that `origin` reaches the policy branch.
+    /// A write carrying its origin — behavior, return and byte contract as [`AgentSession::write_input_observed`]; the only difference is
+    ///   that `origin` reaches the policy branch.
     ///
-    /// ★With policy `None`, `origin` changes nothing★ — both origins take today's path (byte-identical · no list
-    ///   events). `TransportOwned` hands the body and origin to the link turn verb — the link classifies.
-    ///   `SessionClassified` classifies only `User` (below, [`Self::write_user_classified`]) and `Mail` takes today's path.
+    /// ★With policy `None`, `origin` changes nothing★ — today's path (byte-identical · no list events). `TransportOwned` hands body and
+    ///   origin to the link turn verb (the link
+    ///   classifies). `SessionClassified` classifies only `User` ([`Self::write_user_classified`]); `Mail` takes today's path.
     // ADR-0231
     pub fn write_input_from(
         &self,
@@ -266,20 +255,20 @@ impl AgentSession {
         }
     }
 
-    /// User input under `SessionClassified` — classification → list event → write run as one lump while holding the input lock.
+    /// User input under `SessionClassified` — classification → list event → write, as one lump under the input lock.
     ///
-    /// ★If idle or ack-unavailable is settled (`Unavailable`), it is today's path (write + synthetic echo)★. Idle = waiting-list table empty ∧
-    ///   turn observation not in a turn ([`OutputCore::classified_input_busy`]) — the stop after error is not read (text typed during the stop
-    ///   also takes today's path if idle, and that turn clears the stop).
-    /// Otherwise it is the list branch and emits no synthetic echo (the bubble stands at the vendor's acceptance position):
-    ///   - `Available` — emits `Queued` **before** the write: the lifecycle comes within 1 ms after writing, so emitting after would have the acceptance dropped as an
-    ///     unknown id. Write failure = emit `Dropped{Rejected}` and `Err`.
-    ///   - `Unknown` — emits `Queued` **only after** the write succeeds. Emitting before would, if the pump settled ack-unavailable while the write runs,
-    ///     close that entry as accepted, and even if the write then failed, `Dropped{Rejected}` would be swallowed by the terminal tombstone, leaving
-    ///     unsent text as a bubble. Write failure = emit nothing and `Err`.
-    /// ★What the lock guards★: the classification and emit order of two inputs do not diverge, and the cancel line for the same id goes out only after this write returns
-    ///   ([`Self::cancel_queued_input`]). Emits under this lock run while holding the subscriber fanout —
-    ///   the contract that `OutputSink::send` does not block backs that (an exception to ADR-0006).
+    /// ★Idle, or ack-unavailable settled (`Unavailable`) → today's path (write + synthetic echo)★. Idle = waiting-list table empty ∧ turn
+    ///   observation not in a turn ([`OutputCore::classified_input_busy`]); the stop
+    ///   after error is not read (text typed during the stop also takes today's path if idle, and that turn clears the stop).
+    /// Otherwise the list branch, with no synthetic echo (the bubble stands at the vendor's acceptance position):
+    ///   - `Available` — emits `Queued` **before** the write (the lifecycle comes within 1 ms of writing; emitting after would drop the
+    ///   acceptance as an unknown id). Write failure = emit `Dropped{Rejected}` and `Err`.
+    ///   - `Unknown` — emits `Queued` **only after** the write succeeds (before, a pump settling ack-unavailable during the write would
+    ///   close the entry as accepted and a failed write's `Dropped{Rejected}` would be
+    ///     swallowed by the terminal tombstone, leaving unsent text as a bubble). Write failure = emit nothing and `Err`.
+    /// ★What the lock guards★: classification and emit order of two inputs do not diverge, and the cancel line for an id goes out only
+    ///   after this write returns ([`Self::cancel_queued_input`]). Emits run under the subscriber
+    ///   fanout — backed by `OutputSink::send` not blocking (an exception to ADR-0006).
     // ADR-0231
     fn write_user_classified(&self, bytes: &[u8]) -> Result<WriteOutcome, PtyError> {
         let _order = sync::lock(&self.input_order);
@@ -319,25 +308,19 @@ impl AgentSession {
         })
     }
 
-    /// The delivery-boundary instrumented version of `write_input` (ADR-0088 Stage 0) — on success returns `WriteOutcome` (logical message bytes +
-    ///   this turn's `msg_uuid`). Behavior and bytes are **exactly the same** as `write_input` (same body),
-    ///   and the only difference is that it **returns the observation output instead of swallowing it**. The control channel relay (ingress::handle_send)
-    ///   builds the delivery observation record from this output (the premise of telling "send failure" vs "ignored by the model" — ADR-0088).
+    /// The delivery-boundary instrumented `write_input` (ADR-0088 Stage 0) — on success returns `WriteOutcome` (logical message bytes +
+    ///   this turn's `msg_uuid`). Behavior and bytes are **exactly** `write_input`'s; it only
+    ///   **returns the observation instead of swallowing it**, which the control channel relay (ingress::handle_send) turns into the
+    ///   delivery observation record ("send failure" vs "ignored by the model" — ADR-0088).
     ///
-    /// ★Completeness = Ok-vs-Err★: when `send_input` returns `Ok(())`, the requested bytes were **fully accepted**
-    ///   (partial acceptance is not hidden as `Ok`). Non-full acceptance is returned by this function as `Err`, not shrunk into
-    ///   `Ok`. The byte fields of `WriteOutcome` are not the completeness decision lever (reasons in the
-    ///   `WriteOutcome` comment) — completeness is seen through this function's `Ok`/`Err`.
+    /// ★Completeness = Ok-vs-Err★: `Ok(())` from `send_input` means the bytes were **fully accepted**; partial acceptance comes back as
+    ///   `Err`. The byte fields of `WriteOutcome` are not the completeness lever.
     ///
-    /// ★★The meaning of that 「acceptance」 changed — the old sentence's 「inner `write_all`」 and 「std write_all contract」 are now
-    ///   false★★: all three links (PTY · stdio · codex) put input into **a bounded input queue** that a dedicated writer thread pops and
-    ///   writes. So `Ok` is not 「it went to the child」 but **「the whole thing was accepted with its order settled」**, and
-    ///   ★a write that fails after being accepted does not come back in this return value★ — where it appears is **the `Err` of the next
-    ///   call** and the log, and usually the terminal transition that follows soon after.
-    /// ★The effect on ADR-0088's delivery observation (precisely)★: of 「send failure vs ignored by the model」, which that record told apart,
-    ///   **the range 「send failure」 catches shrank** — now that place catches 「not even accepted」 (the link closed or the cap
-    ///   was exceeded), and 「accepted but could not write」 is reported as `Err` by **the next** delivery. The canonical contract is the
-    ///   module header of [`crate::transport::input_queue`].
+    /// ★★「Acceptance」 = the whole input accepted with its order settled — not 「it went to the child」★★: all three links (PTY · stdio ·
+    ///   codex) put input into **a bounded input queue** popped by a dedicated writer thread.
+    ///   ★A write that fails after acceptance does not come back here★ — it surfaces as **the next call's `Err`**, in the log, and usually
+    ///   the terminal transition. So the range 「send failure」 catches shrank to 「not even
+    ///   accepted」 (link closed or cap exceeded). Canonical contract: the module header of [`crate::transport::input_queue`].
     /// Origin = `Mail` (mail delivery · non-human callers) — it does not go onto the waiting list even mid-turn.
     // ADR-0088
     // ADR-0231
@@ -345,24 +328,24 @@ impl AgentSession {
         self.write_input_from(bytes, InputOrigin::Mail)
     }
 
-    /// The write that sends now — the body of today's path. `turn_origin` = if `Some`, hands it to the link turn verb with the origin
-    /// (`TransportOwned`); if `None`, it is `send_input(Raw)`. The bytes the two branches hand over are the same.
-    /// ★The `Some` branch emits no synthetic echo — even if the encoder declares an echo★: the bubbles and list events of that branch are
-    ///   classified and emitted by the link (idle = synthetic bubble · otherwise = `Queued`). If the session emitted one more copy, text standing on the list
-    ///   would also be drawn as a bubble.
+    /// The write that sends now — today's path. `turn_origin` `Some` → hands body and origin to the link turn verb (`TransportOwned`);
+    ///   `None` → `send_input(Raw)`. Same bytes either way.
+    /// ★The `Some` branch emits no synthetic echo — even if the encoder declares one★: the link classifies and emits that branch's bubbles
+    ///   and list events; a second copy would draw
+    ///   listed text as a bubble too.
     fn write_now(
         &self,
         bytes: &[u8],
         turn_origin: Option<InputOrigin>,
     ) -> Result<WriteOutcome, PtyError> {
-        // ADR-0226: a write that opens a turn is counted **before** sending — the session id is persisted before the first turn reaches the other side.
+        // ADR-0226: a write that opens a turn is counted **before** sending — the session id is persisted before the first turn reaches
+        //   the other side.
         //   The `Some` branch (`TransportOwned`) takes only the user-exit refusal and does not count (that function's doc).
         self.count_turn_submission(bytes)?;
-        // ★The message uuid of this user turn (replay dedup key)★: one is generated per write_input and passed as **the same value to both**
-        //   (a) the stdin user line (encode) and (b) the input-time synthetic echo (input_echo_event).
-        //   In json mode claude echoes this uuid back as is on replay (measured). The session knows only an opaque Uuid
-        //   token and does not know the json shape or where the uuid is attached (ADR-0004 isolation — schema knowledge is
-        //   backend/claude/ alone). The Raw (terminal) encoder ignores this uuid.
+        // ★The message uuid of this user turn (replay dedup key)★: one per write_input, passed as **the same value to both** (a) the stdin
+        //   user line (encode) and (b) the input-time synthetic echo
+        //   (input_echo_event). In json mode claude echoes it back on replay (measured). The session knows only an opaque Uuid token, not
+        //   the json shape (ADR-0004); the Raw encoder ignores it.
         let msg_uuid = uuid::Uuid::new_v4();
         let encoded = self.encoder.encode(bytes, msg_uuid);
         match turn_origin {
@@ -375,15 +358,12 @@ impl AgentSession {
             })?,
         }
 
-        // ★ADR-0044/0045 · why: the input-time user echo★: for the terminal (Raw) the PTY echoes input locally right away, but
-        //   in json (stream-json) mode the user message does not appear on screen until claude echoes it back with `--replay-user-messages`
-        //   (round-trip delay). So **after** send_input succeeds, if the encoder is json mode, the same
-        //   user event is core.emitted right away to imitate the terminal's immediate echo (perceived responsiveness). The replay duplicate claude
-        //   echoes back later is deduped by uuid in the frontend accumulator (same msg_uuid) — the decoder does not
-        //   suppress it but passes it through carrying the uuid (backend/claude/). Past/non-matching-uuid user
-        //   text (resumed portions) is not deduped and is all preserved (vanish regression removed).
-        //   ★Lock discipline (ADR-0006)★: reuses core.emit without a new lock — it rides the discipline where emit takes the replay/subscribers locks only briefly
-        //   and sends outside the lock. It emits after send_input succeeds, so the order is natural too.
+        // ★ADR-0044/0045 — the input-time user echo★: terminal (Raw) input echoes locally at once, but in json (stream-json) mode the user
+        //   message appears only when claude echoes it back with `--replay-user-messages`. So **after**
+        //   send_input succeeds, a json-mode encoder core.emits the same user event right away; the later replay duplicate is deduped by
+        //   uuid in the frontend accumulator (the decoder passes it through carrying the uuid), and
+        //   non-matching-uuid user text (resumed portions) is kept. ★Lock discipline (ADR-0006)★: reuses core.emit (replay/subscribers
+        //   locks briefly, sends outside the lock).
         // ADR-0231: the bubble of text handed to the link turn verb is emitted by the link (this function's doc).
         if turn_origin.is_none() {
             if let Some(event) = self.encoder.input_echo_event(bytes, msg_uuid) {
@@ -399,40 +379,30 @@ impl AgentSession {
         })
     }
 
-    /// `write_input_observed` + **submit**: after writing the body, if the encoder requires submit bytes, it emits them once more
-    /// **as a separate write**. The return value, user echo and byte accounting are the same as `write_input_observed`
-    /// (the submit bytes are not a logical message, so they are not counted in `WriteOutcome`).
+    /// `write_input_observed` + **submit**: after the body, if the encoder requires submit bytes, emits them **as a separate write**.
+    ///   Return value, user echo and byte accounting are `write_input_observed`'s
+    /// (submit bytes are not a logical message, so not counted in `WriteOutcome`).
     ///
-    /// ★Why it writes twice · why the encoder cannot merge them★ = the `InputEncoder::submit_sequence` comment (measured grounds).
-    /// ★It sleeps `backend::SUBMIT_PACING` between the two writes★: splitting alone is not enough; without a gap
-    ///   they are bundled into one chunk in the PTY and the receiver gets them in one read (that constant's doc — the old observation "it works with 0ms"
-    ///   was a measurement error). **So this verb holds the calling thread that long.**
-    /// ★★That gap is measured from **when the body actually went out** — not from when it was queued★★: since `send_input`
-    ///   became queueing, measuring from the queueing time shrinks the actual gap to `wait - time for the body to go out`,
-    ///   and if that time is longer than the wait it **becomes 0** (the two writes are bundled into one chunk and the submit fails). So the body
-    ///   first confirms the body's OS landing with `confirm_written` and then sleeps.
-    /// ★At one point this said 「that condition means the child does not read stdin, so the submit would not work anyway」 —
-    ///   **that excuse was wrong**★: a body larger than the pipe/ConPTY buffer (4–64KiB) takes several write cycles even against
-    ///   **a child reading perfectly well**, and mail delivery sending large envelopes is exactly that path. That is, the gap collapses not on a stuck agent
-    ///   but on **normal delivery**. And the gap was **always** shrunk by the `body write
-    ///   time` even before crossing that threshold — the direction was wrong regardless of size.
-    /// ★Why this layer★: this is the lowest layer that owns the transport and can issue `send_input` twice. The upper layers
-    ///   (manager · daemon adapter · messaging kernel) do not know the transport, and the lower layer (encoder) has a contract returning one byte sequence,
-    ///   so it cannot make a write boundary.
-    /// ★Why it is split from `write_input`★: for terminal keystrokes a person types Enter directly — if that path took this verb,
-    ///   a turn would be submitted on every keystroke. This verb is only for callers that "put one completed message in as a turn"
-    ///   (mail delivery).
-    /// ★Error contract★: if the body went but the submit write failed, it is `Err` — a delivery whose turn did not start is not a delivery,
-    ///   so the upper layer (parking · retry) must treat it as a failure.
+    /// ★Why two writes · why the encoder cannot merge them★ = the `InputEncoder::submit_sequence` comment (measured).
+    /// ★Sleeps `backend::SUBMIT_PACING` between the two writes★ (without a gap the PTY bundles them into one chunk — that constant's doc).
+    ///   **This verb holds the calling thread that long.**
+    /// ★★The gap is measured from **when the body actually went out**, not from queueing★★: `send_input` queues, so measuring from
+    ///   queueing shrinks the gap to `wait - body go-out time` and **0** when that exceeds the wait
+    ///   (one chunk, submit fails; a 4–64 KiB body takes several write cycles even against a healthy reader — **normal delivery**). So the
+    ///   body first confirms its OS landing with `confirm_written`, then sleeps.
+    /// ★Why this layer★: the lowest layer owning the transport that can issue `send_input` twice (the encoder returns one byte sequence).
+    ///   ★Why split from `write_input`★: a person types Enter directly for terminal
+    ///   keystrokes; this verb is only for callers that "put one completed message in as a turn" (mail delivery).
+    /// ★Error contract★: body went but submit failed → `Err` — a delivery whose turn did not start is not a delivery; the upper layer
+    ///   (parking · retry) must treat it as a failure.
     pub fn submit_input_observed(&self, bytes: &[u8]) -> Result<WriteOutcome, PtyError> {
         let outcome = self.write_input_observed(bytes)?;
         if let Some(submit) = self.encoder.submit_sequence() {
-            // ★★The wait is measured from **when the body actually went out** — this one line makes the wait below meaningful★★:
-            //   `send_input` now queues and returns immediately, so measuring from the queueing time shrinks the actual gap
-            //   to `wait - time for the body to go out`, and if that time is longer than the wait it **becomes 0.**
-            //   Then the two writes are bundled into one chunk, the receiver gets them in one read and **the turn is not submitted**
-            //   (the defect `backend::SUBMIT_PACING` recorded by measurement). What must be widened is not our call gap
-            //   but **the receiver's read boundary**, so the reference point must be the time it went out to the OS.
+            // ★The wait is measured from **when the body actually went out**★: `send_input` queues and returns at once, so measuring from
+            //   queueing shrinks the actual gap to
+            //   `wait - body go-out time` (0 if longer); then the two writes bundle into one chunk and **the turn is not submitted** (the
+            //   `backend::SUBMIT_PACING` defect). What must widen is
+            //   **the receiver's read boundary**, so the reference point is the time it went out to the OS.
             self.confirm_written().map_err(|e| {
                 tracing::warn!(
                     agent = %self.id,
@@ -445,15 +415,17 @@ impl AgentSession {
             // ★This wait is part of the submit (without it the submit fails — measured)★: the grounds, value source and why the old observation
             //   "it works with 0ms" was wrong are in the `backend::SUBMIT_PACING` doc.
             (self.sleeper)(self.submit_pacing);
-            // ADR-0226: ★counted right before the submit CR — do not move it to the very front★. What opens the turn is this CR,
-            //   and it goes out without passing through `write_input_observed`. Counting at the very front would put the body write, the landing confirmation and
-            //   the wait between persistence and the turn, and a kill or failure in that window would leave **persistence without a turn**.
+            // ADR-0226: ★counted right before the submit CR — do not move it to the very front★. This CR opens the turn and goes out
+            //   without passing through `write_input_observed`;
+            //   counting at the front would put the body write, landing confirmation and wait between persistence and the turn, and a kill
+            //   or failure there would leave **persistence without a turn**.
             self.count_turn_submission(submit)?;
             //
-            // ★The two failures are told apart in the log (even the body did not go vs the body went and only the submit failed)★: the latter leaves an unsubmitted
-            //   envelope in the receiver's input box, and the upper layer's lossless reparking overwrites the same envelope on top of it at the next flush
-            //   (two copies in one turn). A verb that clears the input box is outside this layer's contract, so it cannot
-            //   erase it, and leaving it so a person can recognize that leftover is all that can be done here.
+            // ★The two failures are told apart in the log (body did not go vs body went and only submit failed)★: the latter leaves an
+            //   unsubmitted envelope in the receiver's input box, and
+            //   the upper layer's lossless reparking overwrites the same envelope on top at the next flush (two copies in one turn).
+            //   Clearing the input box is outside this layer's contract;
+            //   leaving the leftover recognizable to a person is all that can be done here.
             if let Err(e) = self.transport.send_input(InputEvent::Raw(submit.to_vec())) {
                 tracing::warn!(
                     agent = %self.id,
@@ -464,11 +436,12 @@ impl AgentSession {
                 return Err(e);
             }
         }
-        // ★★The place that turns the meaning of the receipt from 「accepted」 back to 「went out」★★ — without this confirmation, a body that was only
-        //   queued would be recorded as **delivery success**, and the two cases ADR-0088 wants to tell apart ("send failure" vs "ignored by the
-        //   model") would be exactly inverted. Whether there is a submit path (terminal) or not (json), the end gathers here.
-        // ★The confirmation includes even the submit bytes★: a delivery whose submit did not go out is a delivery whose turn did not start, and that is
-        //   the state the `★Error contract★` above already set as `Err`.
+        // ★Turns the receipt's meaning from 「accepted」 back to 「went out」★ — without this confirmation a merely queued body would be
+        //   recorded as **delivery success**, inverting the two cases
+        //   ADR-0088 tells apart ("send failure" vs "ignored by the model"). With or without a submit path (terminal / json), the end
+        //   gathers here.
+        // ★The confirmation includes the submit bytes★: a delivery whose submit did not go out did not start its turn — the `★Error
+        //   contract★` above sets `Err`.
         self.confirm_written().map_err(|e| {
             tracing::warn!(
                 agent = %self.id,
@@ -481,18 +454,18 @@ impl AgentSession {
         Ok(outcome)
     }
 
-    /// If this write opens a turn ([`InputEncoder::submits_turn`]), counts the submission in the session id latch — the caller calls it **before sending**
-    /// that write, and does not send on `Err`. A no-op without a latch.
+    /// If this write opens a turn ([`InputEncoder::submits_turn`]), counts the submission in the session id latch — called **before
+    ///   sending** that write; do not send on `Err`. A no-op without a latch.
     ///
-    /// ★`TransportOwned` is not counted — it takes only the user-exit refusal below★: the first input of that mode can be withdrawn with ✕,
-    ///   so counting at send time would persist an id without a conversation. Submissions of that mode are counted by the link at the other side's echo of the first user message
-    ///   through the latch's first-turn port ([`SessionIdLatch::first_turn_sink`]) — 「persist before the first turn」 does not exist for that mode.
+    /// ★`TransportOwned` is not counted — it takes only the user-exit refusal below★: that mode's first input can be withdrawn with ✕, so
+    ///   counting at send time would persist an id without a conversation; the link counts it
+    ///   at the other side's first echo through the latch's first-turn port ([`SessionIdLatch::first_turn_sink`]).
     ///
-    /// ★While the user is exiting, it neither counts nor sends (`Err`)★: counting and sending would persist an id without a conversation, and sending without
-    ///   counting could hand a turn accepted before the input queue closed to a dying child, creating **a conversation of an unpersisted
-    ///   id**. The outcome is the same `WriteFailed` as a `send_input` after the queue closed — it only moves that error
-    ///   forward to the moment the exit intent stood.
-    /// ★The check is one atomic read★ — no lock is taken. It checks even after the latch already finished persisting.
+    /// ★While the user is exiting, it neither counts nor sends (`Err`)★: counting and sending would persist an id without a conversation;
+    ///   sending without counting could hand a turn accepted before the queue closed to a dying
+    ///   child — **a conversation of an unpersisted id**. Same `WriteFailed` as a `send_input` after the queue closed, moved forward to
+    ///   when the exit intent stood.
+    /// ★One atomic read, no lock★; it applies even after the latch finished persisting.
     // ADR-0226
     // ADR-0233
     fn count_turn_submission(&self, bytes: &[u8]) -> Result<(), PtyError> {
@@ -521,17 +494,15 @@ impl AgentSession {
         Ok(())
     }
 
-    /// Confirms with the link whether accepted input actually went out. ★A link that **says it has no means** of confirming is
-    /// passed through as is★ — those links (codex app-server · test-rig seam) had only that level of knowledge **since before** this change,
-    /// and turning that into `Err` here would newly fail deliveries unrelated to what this change fixes.
+    /// Confirms with the link whether accepted input actually went out. ★A link that **says it has no means** of confirming is passed
+    ///   through as is★ (codex app-server and the test-rig seam never knew more; turning that into
+    /// `Err` would newly fail unrelated deliveries).
     ///
-    /// ★So this function treats two things **differently**★: 「checked and it did not go out」 (`WriteFailed`) is
-    ///   a failure, and 「no means to check」 (`Unsupported`) is not. Folding the latter into a failure would look honest
-    ///   but actually kills a healthy delivery.
-    /// ★Known residual — exceeding the time limit is not 「did not go out」★: even if it returns `Err` past [`INPUT_FLUSH_BUDGET`],
-    ///   the queued bytes **are not cancelled** and may go out late. Then the upper layer's reparking delivers the same
-    ///   envelope once more (two copies in one turn). Removing that residual would require a cancel verb that takes that chunk out of the queue on timeout,
-    ///   which is the separate question 「how far a partial delivery can be rolled back」.
+    /// ★Two things are **different**★: 「checked and it did not go out」 (`WriteFailed`) is a failure; 「no means to check」 (`Unsupported`)
+    ///   is not — folding it into failure would kill a healthy delivery.
+    /// ★Known residual — exceeding the time limit is not 「did not go out」★: even on `Err` past [`INPUT_FLUSH_BUDGET`] the queued bytes
+    ///   **are not cancelled** and may go out late, and the upper layer's reparking then delivers
+    ///   the same envelope again (two copies in one turn). Removing it needs a cancel verb taking the chunk out of the queue on timeout.
     fn confirm_written(&self) -> Result<(), PtyError> {
         match self.transport.flush_input(INPUT_FLUSH_BUDGET) {
             Err(PtyError::Unsupported(_)) => Ok(()),
@@ -541,22 +512,21 @@ impl AgentSession {
 
     /// Cancels one queued input of the list (the session side of the command `agent.cancelQueuedInput`).
     ///
-    /// ★The registry check comes first★: an id not on the list (unknown · already has an outcome) = `NotFound` · already pending cancel = no event,
-    ///   `Requested` (idempotent). A session that does not use the list (`None`) is always `NotFound` — it does not reach the link.
-    /// Per-policy branches:
-    ///   - `SessionClassified` — inside the input lock: check → `CancelRequested` → cancel line `send_input` →
-    ///     `Requested`. User input is also written inside the same lock, so the cancel line for that id goes out **only after the text write returns**
-    ///     (if the cancel overtook the text, no reservation would be made mid-turn and the text would be delivered while the screen believes the cancel).
-    ///     ★The check and `CancelRequested` are one replay section★ (`OutputCore::emit_cancel_request`) — if the pump's outcome slips in
-    ///     after the check, that entry answers `NotFound` and the cancel line is not written either. An outcome arriving after the record (a late acceptance etc.)
-    ///     stays `Requested`, and the registry decides the outcome.
-    ///     ★Cancel line write failure = emit `CancelFailed` and `Err(Write)`★ — the entry stays pending cancel as 「could not remove」 (the reason it is not
-    ///     returned to waiting = the `QueuedInputEvent::CancelFailed` doc).
-    ///   - `TransportOwned` — check without the lock → `withdraw`: `Withdrawn` = `Cancelled` · `TooLate` = `Requested`
-    ///     · `NotHeld` = `NotFound` (an outcome happened between the check and the withdrawal — that outcome event soon stands in the registry). List
-    ///     events are emitted by the link.
-    /// ★Do not emit while holding the registry guard★ — the lock order is replay → registry (the `TransportOwned` check copies and releases right away,
-    ///   and the `SessionClassified` check is done by the core under the replay lock).
+    /// ★The registry check comes first★: an id not on the list (unknown · already has an outcome) = `NotFound`; already pending cancel =
+    ///   no event, `Requested` (idempotent). A session not using the list (`None`) is always
+    /// `NotFound` — it does not reach the link.
+    /// Per policy:
+    ///   - `SessionClassified` — inside the input lock: check → `CancelRequested` → cancel line `send_input` → `Requested`. User input is
+    ///   written under the same lock, so the cancel line goes out **only after the
+    ///     text write returns** (an overtaking cancel would reserve nothing mid-turn and the text would be delivered). ★The check and
+    ///   `CancelRequested` are one replay section★ (`OutputCore::emit_cancel_request`): an outcome
+    ///     slipping in after the check answers `NotFound` with no cancel line; one after the record (a late acceptance) stays `Requested`
+    ///   and the registry decides.
+    ///     ★Cancel line write failure = emit `CancelFailed` and `Err(Write)`★ — the entry stays pending cancel as 「could not remove」 (why:
+    ///   `QueuedInputEvent::CancelFailed` doc).
+    ///   - `TransportOwned` — check without the lock → `withdraw`: `Withdrawn` = `Cancelled` · `TooLate` = `Requested` · `NotHeld` =
+    ///   `NotFound` (an outcome happened in between). The link emits list events.
+    /// ★Do not emit while holding the registry guard★ — lock order replay → registry.
     // ADR-0231
     pub fn cancel_queued_input(&self, id: &str) -> Result<CancelOutcome, CancelError> {
         match self.mid_turn {
@@ -607,10 +577,11 @@ impl AgentSession {
         }
     }
 
-    /// The session side of the list query — reads the registry rows and `as_of_seq` under one lock and, **after** releasing that lock, asks the link
-    /// about acceptance-unknown and adds it to `Queued` rows. The marker is the link state at query time, so it is not one atom with the row snapshot (the next query fixes it).
-    /// ★No link fills that marker today★ — codex is the default implementation too (empty list) (`AgentTransport::unconfirmed_inputs`).
-    /// It does not take the input lock — it is a read.
+    /// The session side of the list query — reads registry rows and `as_of_seq` under one lock and, **after** releasing it, asks the link
+    ///   about acceptance-unknown and adds it to `Queued`
+    /// rows. The marker is the link state at query time, not atomic with the row snapshot (the next query fixes it). ★No link fills that
+    ///   marker today★ (codex = default implementation, empty list;
+    /// `AgentTransport::unconfirmed_inputs`). It does not take the input lock — it is a read.
     // ADR-0006
     // ADR-0231
     pub fn list_queued_inputs(&self) -> (Vec<ListedRow>, Option<u64>) {
@@ -619,7 +590,6 @@ impl AgentSession {
         (overlay_unconfirmed(rows, &unconfirmed), as_of_seq)
     }
 
-    /// Updates the cols/rows atomics only after transport.resize succeeds — on failure the old values are kept.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
         self.transport.resize(cols, rows)?;
         self.cols.store(cols, Ordering::Relaxed);
@@ -638,15 +608,15 @@ impl AgentSession {
         self.transport.begin_retire();
     }
 
-    /// Forced resource teardown, then waiting for the pump. **This two-verb order (shutdown THEN
-    /// join_pump) is the core of the kill causality**: shutdown destroys the transport's resources so the
-    /// pump's read wakes and ends (→ `core.finish(Killed)`), and join_pump waits for that end. Reversed, it
-    /// hangs (waiting on a pump that is still alive).
+    /// Forced resource teardown, then waiting for the pump. **The order shutdown THEN join_pump is the core of the kill causality**:
+    ///   shutdown destroys the transport's resources so the
+    /// pump's read wakes and ends (→ `core.finish(Killed)`), and join_pump waits for that end; reversed, it hangs on a live pump.
     ///
-    /// Only the join is bounded (`timeout`); `shutdown` has no bound of its own. For a PTY transport on
-    /// Windows it returns because a running pump keeps draining after shutdown until the master is
-    /// closed — otherwise `ClosePseudoConsole` can block (rule = `transport::pty::run_pump`; with no live
-    /// pump, e.g. after a contained pump panic, the close can still block — S34 TRD §3B residual).
+    /// Only the join is bounded (`timeout`); `shutdown` has no bound of its own. For a PTY transport on Windows it returns because a
+    ///   running pump keeps draining after shutdown until the
+    /// master is closed — otherwise `ClosePseudoConsole` can block (rule = `transport::pty::run_pump`; with no live pump, e.g. after a
+    ///   contained pump panic, the close can still block —
+    /// S34 TRD §3B residual).
     // ADR-0001
     pub fn kill(&self, timeout: Duration) {
         self.transport.shutdown();
@@ -659,9 +629,9 @@ impl AgentSession {
         self.core.enter_exiting()
     }
 
-    /// Final capabilities — the composition of transport (physical: input/output/control) and backend (program:
-    /// session/model). The sources are separated by type, so the accident of the transport filling resume or the backend filling resize
-    /// is structurally impossible.
+    /// Final capabilities — transport (physical: input/output/control) composed with backend (program: session/model). Sources are
+    ///   separated by type, so the transport filling resume or the
+    /// backend filling resize is structurally impossible.
     pub fn capabilities(&self) -> Capabilities {
         Capabilities::compose(self.transport.capabilities(), self.backend_caps.clone())
     }
@@ -670,10 +640,11 @@ impl AgentSession {
         self.core.subscribe(sink)
     }
 
-    /// `on_ready`: called once right before the replay is sent (while holding the subscribers lock) — delegated to core (invariant 2/TOCTOU).
+    /// `on_ready`: called once right before the replay is sent (under the subscribers lock) — delegated to core (invariant 2/TOCTOU).
     ///
-    /// Compares `requested_epoch` with **this session's** marker to decide whether to continue by seq. The response `on_ready` receives and
-    /// the response returned are the same value — the marker, the resume marker and the replay all come from this one incarnation.
+    /// Compares `requested_epoch` with **this session's** marker to decide whether to continue by seq. The response passed to `on_ready`
+    ///   and the one returned are the same value — marker,
+    /// resume marker and replay all come from this one incarnation.
     // ADR-0226
     pub fn subscribe_from(
         &self,
@@ -717,9 +688,9 @@ impl AgentSession {
 
     /// The tail of the **diagnostic (stderr) text** this incarnation emitted (contract and cap in `OutputCore::diagnostic_tail`).
     ///
-    /// ★Not a substitute for `terminal_tail` but its pair★: depending on the transport the two streams fill exclusively
-    ///   — for a pipe (structured) session this one fills and the ring is empty, for a PTY (terminal) session it is the opposite. So the classification
-    ///   caller does not pick one of the two but passes them **merged**.
+    /// ★The pair of `terminal_tail`, not a substitute★: the two streams fill exclusively by transport — a pipe (structured) session fills
+    ///   this and leaves the ring empty; a PTY session is the
+    ///   opposite. So the classification caller passes them **merged**.
     // ADR-0172
     pub fn diagnostic_tail(&self) -> String {
         self.core.diagnostic_tail()
@@ -747,9 +718,9 @@ mod tests {
     use crate::types::{ControlCaps, InputCaps, OutputCaps, TransportCaps};
     use std::sync::Mutex;
 
-    /// An isolation harness for asserting the encoding wiring without a real process (ADR-0012).
-    /// `fail_from`: makes writes fail from this ordinal (0-based) on — it is for making the branch where the body succeeds and only the submit fails
-    ///   (`None` = all succeed).
+    /// An isolation harness for asserting the encoding wiring without a real process (ADR-0012). `fail_from`: writes fail from this
+    ///   ordinal (0-based) on — for the branch where the body
+    ///   succeeds and only the submit fails (`None` = all succeed).
     struct CapturingTransport {
         captured: Arc<Mutex<Vec<Vec<u8>>>>,
         fail_from: Option<usize>,
@@ -876,7 +847,8 @@ mod tests {
             core,
             transport,
         )
-        // The harness does not sleep — **whether the wait was issued** is asserted through sleeper calls by the dedicated test below (without time
+        // The harness does not sleep — **whether the wait was issued** is asserted through sleeper calls by the dedicated test below
+        //   (without time
         //   measurement). Actually sleeping here would hold the unit tests 0.5 seconds per call.
         .with_submit_pacing(Duration::ZERO, |_| {});
         (session, captured)
@@ -923,7 +895,6 @@ mod tests {
             outcome.epoch, 0,
             "WriteOutcome.epoch = the epoch of the session that performed the write (by-construction)"
         );
-        // The instrumented version does not break Raw byte identity.
         assert_eq!(captured.lock().unwrap()[0], input.to_vec());
     }
 
@@ -949,9 +920,9 @@ mod tests {
 
     // ── Submit split (submit_input_observed) ──
     //
-    // ★The regression axis is not bytes but **the write boundary**★: the envelope bytes reached the PTY before too, but the turn did not
-    //   start. Combining `body+CR` into one write makes the claude TUI not submit, and splitting it into two writes submits
-    //   (measured 2026-08-17). So the assertions below look at the **number and boundaries** of writes — not the concatenated bytes.
+    // ★The regression axis is **the write boundary**, not bytes★: the envelope bytes reached the PTY before too but the turn did not start
+    //   — `body+CR` in one write makes the claude TUI not
+    //   submit, two writes submit (measured 2026-08-17). So the assertions look at the **number and boundaries** of writes.
 
     #[test]
     fn submit_input_terminal_writes_the_body_then_the_submit_byte_separately() {
@@ -995,10 +966,9 @@ mod tests {
             .submit_input_observed(body)
             .expect("submit_input_observed ok");
 
-        // ★exact comparison★: rebuilds the expected line with the returned msg_uuid and checks **an exact byte match**. Every regression that
-        //   adds a submit write or appends characters to the envelope is caught here (unlike weak assertions such as "there is no CR",
-        //   it catches whatever is added). Why it does not compare identity with `write_input` directly = that one draws its own
-        //   new msg_uuid, so the two outputs differ by the uuid.
+        // ★Exact comparison★: rebuilds the expected line with the returned msg_uuid and checks **an exact byte match**, catching any added
+        //   submit write or appended character (unlike weak
+        //   assertions such as "no CR"). It does not compare with `write_input` directly because that draws its own msg_uuid.
         let expected = InputEncoder::ClaudeStreamJson.encode(body, outcome.msg_uuid);
         let got = captured.lock().unwrap();
         assert_eq!(
@@ -1014,24 +984,18 @@ mod tests {
         );
     }
 
-    /// ★Pins down both whether the wait **is actually issued** and what the production default is★.
+    /// ★Pins both that the wait **is actually issued** and the production default★.
     ///
-    /// The body of this defect was not the number of writes but the receiver's read boundary — even when split, without a gap they are bundled
-    /// into one chunk and not submitted (`backend::SUBMIT_PACING` doc). So both "was there a wait before the submit write" and
-    /// "is that value the production default" are regression axes. It asserts by recording sleeper calls without measuring time, so it is
-    /// not flaky, and the test does not actually sleep 0.5 seconds.
+    /// The defect was the receiver's read boundary, not the write count — split writes without a gap bundle into one chunk
+    ///   (`backend::SUBMIT_PACING` doc). It records sleeper calls instead of measuring time (not flaky, no 0.5 s sleep).
     ///
-    /// ★★It **states clearly what this entry cannot catch** — that is why there is a paired entry★★: the oracle here is only
-    ///   「was the wait called」, so **it lets through a defect that measures the wait from the wrong point.** After the queue came in, that defect
-    ///   actually happened — measuring the wait from the queueing time eats the gap while the body goes out and makes it 0. What catches that
-    ///   branch is the entry looking at **the physical read boundary**, which needs a real pipe and is in the integration test rig:
-    ///   in `tests/submit_delivery_boundary.rs`
-    ///   `submit_byte_lands_in_its_own_read_even_when_the_body_takes_many_write_cycles`.
-    ///   ★Do not keep only one of the two★ — this entry carries the constant and the call, that entry the actual gap the call makes.
+    /// ★What it **cannot catch** (hence the pair)★: the oracle is only 「was the wait called」, so **a wait measured from the wrong point
+    ///   passes** (from queueing it eats the gap, making it 0). The physical read boundary is checked by
+    ///   `tests/submit_delivery_boundary.rs` `submit_byte_lands_in_its_own_read_even_when_the_body_takes_many_write_cycles`. ★Keep both★ —
+    ///   this one carries the constant and the call, that one the actual gap.
     #[test]
     fn submit_input_waits_between_the_body_and_the_submit_write() {
         use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-        // The record board for this test only — other tests' harnesses use the no-op sleeper, so they do not reach here.
         static SLEPT_MICROS: AtomicU64 = AtomicU64::new(0);
         static CALLS: AtomicU64 = AtomicU64::new(0);
         fn recording_sleep(d: Duration) {
@@ -1040,7 +1004,8 @@ mod tests {
         }
 
         let (session, captured) = session_harness(InputEncoder::Raw, None);
-        // ★Keep the production default as is and change only the sleeping function★: if the test also decided the value, it could not see a default regression.
+        // ★Keep the production default as is and change only the sleeping function★: if the test also decided the value, it could not see
+        //   a default regression.
         let session = session.with_submit_pacing(crate::backend::SUBMIT_PACING, recording_sleep);
 
         session
@@ -1070,7 +1035,8 @@ mod tests {
 
     #[test]
     fn submit_input_reports_a_failure_that_only_hit_the_submit_write() {
-        // The branch where the body has already gone into the receiver's input box and only the submit fails — for the upper layer to handle it by reparking,
+        // The branch where the body has already gone into the receiver's input box and only the submit fails — for the upper layer to
+        //   handle it by reparking,
         // it must not be swallowed as success (the meaning of that leftover is in the submit_input_observed doc).
         let (session, captured) = session_failing_after(InputEncoder::Raw, 1);
 
@@ -1089,7 +1055,6 @@ mod tests {
 
     #[test]
     fn write_input_does_not_submit() {
-        // The keystroke path where a person types Enter directly — if a submit slipped in here, a turn would go out on every keystroke.
         let (session, captured) = session_with(InputEncoder::Raw);
         session.write_input(b"partial").unwrap();
         let got = captured.lock().unwrap();
@@ -1240,7 +1205,6 @@ mod tests {
         // json mode = structured carrier → structured=true injected into StdioTransport (in production the backend building that link
         //   puts in the same value — ADR-0191).
         let (transport, _pid) = StdioTransport::open(&spec, true, None).expect("open");
-        // json-mode command — the backend looks at it to compute caps.
         let json_cmd = crate::profile::AgentCommand::Claude {
             extra_args: vec![],
             output_format: crate::profile::AgentOutputFormat::StreamJson,
@@ -1267,9 +1231,8 @@ mod tests {
             !caps.control.interrupt,
             "a link with no interrupt line injected = no interrupt capability (in production, claude JSON gets it injected by the backend — ADR-0238)"
         );
-        // ★ADR-0044 follow-up done★: json mode also supports --resume (spike-verified, claude 2.1.170) → resume=true.
-        //   build_spec emits --resume in SpawnMode::Resume and reuses the controlled sid (ADR-0008), so there is no sid
-        //   collision.
+        // json mode supports --resume (spike-verified, claude 2.1.170) → resume=true; build_spec emits --resume in SpawnMode::Resume and
+        //   reuses the controlled sid (ADR-0008), so no sid collision.
         assert!(
             caps.session.resume,
             "json-mode session → resume=true (--resume supported, spike-verified)"
@@ -1279,8 +1242,8 @@ mod tests {
 
     // ── Session id first-submission latch — where the two input verbs count (ADR-0226) ──
     //
-    // ★The axis measured is order★: the link's writes and the latch commit port calls are put into **one event record**, so 「commit before the write opening the turn」
-    //   is seen by event order, not by bytes.
+    // ★Measures order★: link writes and latch commit port calls go into **one event record**, so 「commit before the write opening the
+    //   turn」 is seen by event order, not bytes.
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Ev {
@@ -1427,12 +1390,12 @@ mod tests {
         assert!(matches!(got[1], Ev::Send(_)), "{got:?}");
     }
 
-    /// ★`Raw` mail counts after the body, after the wait, right before the submit CR★ — counting at the very front would put the body write, the landing confirmation and the wait
+    /// ★`Raw` mail counts after the body, after the wait, right before the submit CR★ — counting at the very front would put the body
+    ///   write, the landing confirmation and the wait
     ///   between persistence and the turn, and a failure or kill in that window would leave persistence without a turn.
     #[test]
     fn raw_mail_is_counted_after_the_body_and_the_pacing_right_before_the_submit_cr() {
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-        // The record board for this test only — at the moment of commit it reads whether the wait was issued before the commit.
         static SLEPT: AtomicBool = AtomicBool::new(false);
         fn mark_slept(_d: Duration) {
             SLEPT.store(true, AtomicOrdering::SeqCst);
@@ -1508,7 +1471,8 @@ mod tests {
         );
     }
 
-    /// The default session without a latch is a no-op for both counting and the user-exit check — behavior unchanged until production carries a latch.
+    /// The default session without a latch is a no-op for both counting and the user-exit check — behavior unchanged until production
+    ///   carries a latch.
     #[test]
     fn a_session_without_a_latch_is_untouched_even_during_a_user_kill() {
         let (session, captured) = session_with(InputEncoder::Raw);
@@ -1537,7 +1501,8 @@ mod tests {
         }
     }
 
-    /// ★While the user is exiting, it neither counts nor sends★ — counting and sending would persist an id without a conversation, and sending without
+    /// ★While the user is exiting, it neither counts nor sends★ — counting and sending would persist an id without a conversation, and
+    ///   sending without
     ///   counting could create a conversation of an unpersisted id.
     #[test]
     fn a_user_kill_refuses_turn_submissions_without_counting_them() {
@@ -1584,10 +1549,11 @@ mod tests {
         );
     }
 
-    // ── Submissions in the mode where the link owns the turn (ADR-0226 amendment · user decision 2026-09-26) ──
+    // ── Submissions in the mode where the link owns the turn (ADR-0226 amendment) ──
     //
-    // ★The session of that mode does not count submissions — it takes only the user-exit refusal★. A turn happening in the conversation is the other side's first
-    //   echo, and the link counts it through the latch's first-turn port (the echo side = the `backend/codex/transport.rs` tests).
+    // ★The session of that mode does not count submissions — it takes only the user-exit refusal★. The turn is the other side's first
+    //   echo, which the link counts through the latch's
+    //   first-turn port (echo side = the `backend/codex/transport.rs` tests).
 
     /// A `TransportOwned` session carrying a latch — the latch is empty (in production the link's handshake offers).
     fn transport_owned_latched() -> (
@@ -1753,7 +1719,8 @@ mod tests {
             .collect()
     }
 
-    /// A policy-`None` session standing with the same wiring as the manager (shared turn observation table + waiting-list table) — returned in a state where
+    /// A policy-`None` session standing with the same wiring as the manager (shared turn observation table + waiting-list table) —
+    ///   returned in a state where
     /// **the core answers that it is in a turn**.
     fn in_turn_policy_none_session(
         encoder: InputEncoder,
@@ -2199,7 +2166,8 @@ mod tests {
         assert!(list_events(&seen).is_empty(), "the link classifies");
     }
 
-    /// The bubbles of the link turn verb branch are emitted by the link — even if the encoder declares a synthetic echo, the session emits not one copy.
+    /// The bubbles of the link turn verb branch are emitted by the link — even if the encoder declares a synthetic echo, the session emits
+    ///   not one copy.
     /// Policy `None` with the same encoder (control group) emits the echo as today.
     #[test]
     fn a_transport_owned_write_makes_no_session_echo_even_with_an_echoing_encoder() {
@@ -2232,7 +2200,8 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
 
-    /// A link observing writes — records per write (the bytes, the ids standing in the registry **at that moment**), and fails or is held per the script.
+    /// A link observing writes — records per write (the bytes, the ids standing in the registry **at that moment**), and fails or is held
+    ///   per the script.
     struct Gate {
         core: Arc<OutputCore>,
         writes: Mutex<Vec<(Vec<u8>, Vec<String>)>>,
@@ -2338,7 +2307,8 @@ mod tests {
             Self::build(classify, false)
         }
 
-        /// A claude session carrying a session id latch — the latch already holds the id (same as `latched_session_with`), so the first submission
+        /// A claude session carrying a session id latch — the latch already holds the id (same as `latched_session_with`), so the first
+        ///   submission
         /// commits on the spot, and that commit stands in the same event record (`trace`) as the writes and `Queued`.
         fn with_session_id_latch() -> Self {
             let fx = Self::build(crate::backend::claude::classify_turn, true);
@@ -2442,7 +2412,6 @@ mod tests {
             assert!(self.turns.is_in_turn(self.id(), 0), "premise: in a turn");
         }
 
-        /// Collects only events **after** subscribing, as (seq, event).
         fn watch(&self) -> Arc<Mutex<Vec<(u64, OutputEvent)>>> {
             let seen = Arc::new(Mutex::new(Vec::new()));
             self.session.subscribe(Arc::new(SeqSink {
@@ -2602,7 +2571,8 @@ mod tests {
         assert_eq!(echoes(&seen), 0);
     }
 
-    /// A classifier that holds the emit of the drain `Delivered` emptying the list **after** the registry reduction and **before** turn observation — it applies only to the one id
+    /// A classifier that holds the emit of the drain `Delivered` emptying the list **after** the registry reduction and **before** turn
+    ///   observation — it applies only to the one id
     /// [`DRAIN_GATE_ID`], so it does not mix with other tests running in parallel.
     static DRAIN_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = Mutex::new(None);
     const DRAIN_GATE_ID: &str = "drain-gate";
@@ -2666,7 +2636,8 @@ mod tests {
         );
     }
 
-    // TRD §7-1: the classification does not read the registry — it looks only at the waiting-list table (a state where the table and the registry diverge is made by hand).
+    // TRD §7-1: the classification does not read the registry — it looks only at the waiting-list table (a state where the table and the
+    //   registry diverge is made by hand).
     #[test]
     fn the_classification_reads_the_pending_table_not_the_registry() {
         let fx = Classified::claude();
@@ -2753,7 +2724,8 @@ mod tests {
         assert!(fx.listed().is_empty());
     }
 
-    // TRD §7-1: if, while the write is held, the pump side sets `AckUnavailable` and the write is made to fail, that text does not become a bubble
+    // TRD §7-1: if, while the write is held, the pump side sets `AckUnavailable` and the write is made to fail, that text does not become
+    //   a bubble
     //   (`Delivered`) · the pump-side emit does not take the input lock.
     #[test]
     fn a_failed_unknown_ack_write_is_not_turned_into_a_bubble_by_ack_unavailable() {
@@ -2936,7 +2908,8 @@ mod tests {
         assert!(fx.trace().is_empty(), "{:?}", fx.trace());
     }
 
-    // TRD §7-1: input lock contention — even if another thread cancels the same id while the text write is held, the order written to the link is
+    // TRD §7-1: input lock contention — even if another thread cancels the same id while the text write is held, the order written to the
+    //   link is
     //   text line → cancel line.
     #[test]
     fn a_cancel_line_is_never_written_before_its_input_line() {
@@ -2953,9 +2926,9 @@ mod tests {
         assert_eq!(listed.len(), 1, "Queued stood before the write");
         let id = listed[0].clone();
 
-        // ★So it does not spin idly★: a barrier confirms the cancel thread got right up to the cancel call, and confirms at that moment the text write holds the input
-        //   lock — so during the window below, the cancel is actually contending for that lock. The length of the window is
-        //   not the grounds of the order but a grace period for a regression skipping the lock to show itself.
+        // ★Not an idle spin★: a barrier confirms the cancel thread reached the cancel call and that the text write holds the input lock at
+        //   that moment, so the window below is real contention.
+        //   The window length is a grace period for a lock-skipping regression to show itself, not the grounds of the order.
         let started = Arc::new(std::sync::Barrier::new(2));
         let (done_tx, done_rx) = mpsc::channel();
         let session = fx.session.clone();
@@ -3004,7 +2977,8 @@ mod tests {
         ));
     }
 
-    // TRD §7-1: the classification and emit order of two concurrent inputs match — of two overlapping while idle, exactly one takes today's path (echo),
+    // TRD §7-1: the classification and emit order of two concurrent inputs match — of two overlapping while idle, exactly one takes
+    //   today's path (echo),
     //   and it is the one written first.
     #[test]
     fn concurrent_user_inputs_are_classified_in_the_order_they_are_written() {
@@ -3101,7 +3075,8 @@ mod tests {
         }
     }
 
-    // TRD §7-1 (the session column of the 「stop after error for mail」 row): stop after error ∧ idle ∧ list empty → Direct (write + echo — the session does not read that column).
+    // TRD §7-1 (the session column of the 「stop after error for mail」 row): stop after error ∧ idle ∧ list empty → Direct (write + echo —
+    //   the session does not read that column).
     #[test]
     fn a_halted_idle_session_still_sends_a_user_input_directly() {
         let fx = Classified::claude();

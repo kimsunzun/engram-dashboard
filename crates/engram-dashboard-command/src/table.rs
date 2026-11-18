@@ -22,9 +22,9 @@ pub enum TableError {
     Duplicate(&'static str),
     /// A name not in the declaration set of the crate that made this table — blocks a second vocabulary from arising here.
     NotDeclared(&'static str),
-    /// The declaration's schema text (`args` or `ok`) is not JSON — it can be neither advertised nor used to fit
-    /// arguments. ★Both fields are checked together★ — if either breaks, the registration packet's `help` breaks whole.
-    /// (`lint_spec` catches it first in the declaration crate's tests, but assembly does not run carrying it either.)
+    /// The declaration's schema text (`args` or `ok`) is not JSON — it can be neither advertised nor used to fit arguments.
+    /// ★Both fields are checked together★ — either breaking breaks the registration packet's `help` whole. (`lint_spec` catches it first
+    ///   in the declaration crate's tests.)
     InvalidSchema(&'static str),
 }
 
@@ -51,10 +51,10 @@ struct Entry {
     handler: Arc<dyn CommandHandler>,
 }
 
-/// The table of commands one process (strictly, one assembly unit) **can run directly**.
+/// The table of commands one process (one assembly unit) **can run directly**.
 ///
-/// ★It is not a global static★ — `make_table(deps)` builds it at assembly and handlers are injected then (rule T-1).
-/// So a harness can plug in fake dependencies and assert handlers without a process (ADR-0012).
+/// ★Not a global static★ — `make_table(deps)` builds it at assembly and injects handlers (rule T-1), so a harness can plug in fake
+///   dependencies (ADR-0012).
 // ADR-0155
 pub struct CommandTable {
     declared: &'static [&'static CommandSpec],
@@ -62,11 +62,11 @@ pub struct CommandTable {
 }
 
 impl CommandTable {
-    /// `declared` = **the set the crate building this table declared** (`COMMAND_SPECS`, made by the declaration macro).
-    /// It is not the whole binary ([`crate::command_specs`]) — putting another crate's names into my table must be blocked too.
+    /// `declared` = **the set the crate building this table declared** (`COMMAND_SPECS`, from the declaration macro), not the whole binary
+    ///   ([`crate::command_specs`]) — another crate's names must be blocked too.
     ///
-    /// ★If the same name is declared twice, it panics here★ — blow up before assembly. A duplicate is a value
-    /// decided by the build and does not change at runtime, and if left, the table and the advertised schema would point at different declarations.
+    /// ★A name declared twice panics here★ — blow up before assembly: the duplicate is fixed by the build, and left alone the table and
+    ///   the advertised schema would point at different declarations.
     pub fn new(declared: &'static [&'static CommandSpec]) -> Self {
         for (i, spec) in declared.iter().enumerate() {
             if declared[i + 1..]
@@ -99,10 +99,9 @@ impl CommandTable {
         let Ok(args_schema) = serde_json::from_str::<serde_json::Value>(spec.args_schema) else {
             return Err(TableError::InvalidSchema(name));
         };
-        // ★The table does not use `ok_schema`, but we check it here too★: since `spec_item_json` attaches it into `help`
-        //   **as is** (`spec.rs`), a single broken `ok` makes the registration packet's `help` as a whole not JSON.
-        //   Since it is right for the daemon to store that as an opaque string (ADR-0156), the breakage would only surface in front of the LLM or CLI reading that
-        //   string — assembly is the last checkpoint. We do not use the value, so we discard it.
+        // ★The table does not use `ok_schema`, but checks it too★: `spec_item_json` attaches it into `help` **as is** (`spec.rs`), so one
+        //   broken `ok` makes the registration packet's `help` not JSON;
+        //   the daemon stores it as an opaque string (ADR-0156), so assembly is the last checkpoint. The value is discarded.
         if serde_json::from_str::<serde::de::IgnoredAny>(spec.ok_schema).is_err() {
             return Err(TableError::InvalidSchema(name));
         }
@@ -117,14 +116,13 @@ impl CommandTable {
         Ok(())
     }
 
-    /// Runs one name **by the advertised contract** — if it is not in the table, `None`, and `args` remains untouched
-    /// (the next step, the registry, must carry it as is).
+    /// Runs one name **by the advertised contract** — not in the table → `None`, `args` untouched (the registry, the next step, carries it
+    ///   as is).
     ///
-    /// ★The point is that there is no door that hands out the handler★: only if fitting arguments to the declared schema happens in this
-    /// one place does 「what is advertised is actually accepted」 become a property of **the whole table**, not of each adapter
-    /// ([`crate::coerce`]). So a handler that implements [`CommandHandler`] directly gets the same coercion.
-    /// The net that folds body panics is not here — the caller ([`crate::route`]) covers both entry points (`call` · first poll)
-    /// together.
+    /// ★There is no door that hands out the handler★: fitting arguments to the declared schema in this one place makes "what is advertised
+    ///   is accepted" a property of **the whole table**
+    /// ([`crate::coerce`]), so a handler implementing [`CommandHandler`] directly gets the same coercion. The net that folds body panics
+    ///   is the caller's ([`crate::route`], covering both `call` and first poll).
     pub fn call(&self, name: &str, args: &mut serde_json::Value) -> Option<CommandFuture> {
         let entry = self.entries.get(name)?;
         crate::coerce::integral_numbers_to_integers(&entry.args_schema, args);
@@ -132,30 +130,28 @@ impl CommandTable {
         Some(entry.handler.call(args.take()))
     }
 
-    /// Checks **whether the arguments match the declaration** before the call — rejects unknown fields and missing required fields by naming them.
+    /// Checks **whether the arguments match the declaration** before the call — rejects unknown fields and missing required fields by
+    ///   naming them.
     ///
-    /// ★The only place that calls it is the surface where what a person or LLM just typed comes in (ADR-0157)★. If it were called in inter-hop wiring,
-    /// a new field sent by a caller on a newer version would hard-fail an old owner and additive evolution would die (TRD §4-③) —
-    /// [`crate::route`] not calling it is the concrete form of that decision, and wedging it in there would break it.
+    /// ★Called only on the surface where what a person or LLM just typed comes in (ADR-0157)★: in inter-hop wiring a new field from a
+    ///   newer caller would hard-fail an old owner and kill additive evolution (TRD §4-③) —
+    /// [`crate::route`] not calling it is the concrete form of that decision.
     ///
-    /// The rejection message carries **the wrong fields and the whole set of declared fields** together — the net is only worth something if the caller can fix it
-    /// itself. ★Do not put the vocabulary of the calling surface in the message★: this crate does not know what that surface is, and
-    /// its own guidance is added by the adapter through [`CommandError::set_message`].
+    /// The rejection message carries **the wrong fields and the whole declared set** so the caller can fix it itself. ★No vocabulary of
+    ///   the calling surface in the message★: this crate does not know it;
+    /// the adapter adds guidance via [`CommandError::set_message`].
     ///
-    /// Three things pass through (places with no material to check):
-    /// - **A name not in this table** — that contract is held by another, so there is no declaration here to compare against. ★Nobody behind it
-    ///   checks on our behalf★: if the registry knows the name, delivery **forwards the envelope as is**, and the receiving hop's
-    ///   [`crate::route`]→[`CommandTable::call`] does not screen either (that is the decision in the paragraph just above). So
-    ///   if a person or LLM types another owner's name with a mistyped field, that field is caught nowhere, deserialization silently
-    ///   drops it, and success is reported — the very failure ADR-0157 meant to block lives on one hop further along (the layering
-    ///   of that decision is by **origin**, not by who owns the name).
-    ///   ★This hole remains a duty of the entry adapter **pair** — the wiring wave decides which side★: the typing-side
-    ///   adapter does not hold another's declaration (the registry's shape is an opaque string to the daemon — ADR-0156), and the owner-side
-    ///   adapter cannot tell from the envelope alone whether it is what a person or LLM just typed. Which side gets that material
-    ///   is a decision item, so this crate does not close it.
-    /// - **A declaration that does not carry `properties`** — rejecting without knowing the allowed set would block perfectly good arguments.
-    /// - **Below the top level** — this is a comparison against the declaration's property set, not a schema validator. A typo inside a nested object
-    ///   passes, and that spot is caught by deserialization (if it is a declared field the type does not match, otherwise it is ignored).
+    /// Three things pass through (no material to check):
+    /// - **A name not in this table** — its contract is held by another. ★Nobody behind it checks for us★: delivery forwards the envelope
+    ///   as is and the receiving hop's [`crate::route`]→[`CommandTable::call`] does not screen,
+    ///   so another owner's name with a mistyped field is caught nowhere (deserialization silently drops it) — the failure ADR-0157 meant
+    ///   to block, one hop later (that decision layers by **origin**, not by name owner).
+    ///   ★A duty of the entry adapter **pair**; the wiring wave decides which side★: the typing-side adapter holds no other's declaration
+    ///   (opaque to the daemon — ADR-0156), the owner-side adapter cannot tell from the envelope
+    ///   whether it was typed. Not closed here.
+    /// - **A declaration without `properties`** — rejecting without the allowed set would block good arguments.
+    /// - **Below the top level** — this compares against the property set, not a schema validator; a nested typo passes and is caught by
+    ///   deserialization (type mismatch) or ignored.
     // ADR-0157
     pub fn check_args(&self, name: &str, args: &serde_json::Value) -> Result<(), CommandError> {
         let Some(entry) = self.entries.get(name) else {
@@ -174,10 +170,9 @@ impl CommandTable {
         else {
             return Ok(());
         };
-        // Look at unknown fields first — a typo is caught together as 「one unknown field + one missing required field」, but what the caller
-        //   should fix is **the very field it typed**.
-        // ★Count **all** wrong fields★: if only one is pointed out, the caller fixes it, resends, and is rejected again, repeatedly
-        //   (field order is alphabetical, so it is not 「the one typed first」 either). Showing three typos at once is what the net is worth.
+        // Unknown fields first — what the caller should fix is **the field it typed**, not the missing required field a typo causes.
+        // ★Count **all** wrong fields★: naming one makes the caller fix, resend and be rejected again (field order is alphabetical, not
+        //   "typed first"); showing three typos at once is the net's worth.
         let unknown: Vec<&String> = given
             .keys()
             .filter(|key| !declared.contains_key(key.as_str()))
@@ -236,15 +231,16 @@ impl CommandTable {
     }
 }
 
-/// The allowed set the rejection message carries — not truncated. With a truncated list the caller cannot tell whether the name it failed to pick is
-/// on the truncated side, so it cannot fix it itself (these names are **our declaration**, so the size is in our hands —
-/// the string the caller gave is truncated by [`quoted_input`]).
+/// The allowed set the rejection message carries — not truncated: with a truncated list the caller cannot tell whether the name it failed
+///   to pick is on the cut side
+/// (these names are **our declaration**; the caller's string is truncated by [`quoted_input`]).
 fn declared_names(args_schema: &serde_json::Value) -> String {
     let Some(properties) = args_schema
         .get("properties")
         .and_then(serde_json::Value::as_object)
     else {
-        // A declaration that does not carry the allowed set — that case passes through (`check_args`), so what arrives here is only the case caught as
+        // A declaration that does not carry the allowed set — that case passes through (`check_args`), so what arrives here is only the
+        //   case caught as
         //   a non-object argument.
         return "(not declared)".to_string();
     };
@@ -260,23 +256,21 @@ fn declared_names(args_schema: &serde_json::Value) -> String {
 
 /// The upper bound on the **number of wrong fields** named in one message.
 ///
-/// ★Count them all but do not carry them all★: the number of fields can grow as large as the request body (thousands), and without a cap the rejection
-/// message grows by that much — and that cost is paid by the receiving side, not the typing side (same argument as [`quoted_input`]). If exceeded,
-/// it **says how many more there are** (if it did not, the caller would read the list as everything and could not fix the remaining fields).
-/// ★The eight named are **not** 「the eight the caller typed first」★ — the argument map is a sorted data structure so they are the first
-/// eight alphabetically, and that order was not made by the caller. To get 「from the one typed first」, the map would have to be changed
-/// to an insertion-order-preserving form, and that is a decision outside this crate (the test below pins this choice).
+/// ★Count them all but do not carry them all★: the field count can grow as large as the request body, and the receiving side pays for the
+///   message (as [`quoted_input`]). Beyond the cap it
+/// **says how many more there are**, so the caller does not read the list as everything.
+/// ★The eight named are the first eight **alphabetically**, not "typed first"★ — the argument map is sorted; insertion order would need an
+///   insertion-order-preserving map, a decision outside this crate (the test below pins this).
 const MAX_NAMED_UNKNOWN: usize = 8;
 
-/// The size cap (bytes) of one name's **literal** (`"…"` — including the opening and closing quotes and the ellipsis).
+/// The size cap (bytes) of one name's **literal** (`"…"` — including the quotes and ellipsis).
 ///
-/// ★Without it, one 100 MiB field name would make a message of that size★ — that message is carried in the error reply onto the wire,
-/// and the cost of making it is paid by the receiving side, not the side that typed the arguments. The value is just enough for a person to recognize their own typo.
-/// ★What this number **measures and does not measure**★: it measures the literal, and the piece that actually goes into the message adds the truncation
-/// marker (`(truncated, input was N bytes)` — a bit over 30 B) on top, reaching up to **~170 B**. If you need a count for the whole piece,
-/// use that sum — do not copy this constant over into that place.
-/// ★It is not a cap set in order to shrink things★: for input whose escaped notation is 129~158 B, the truncated form is actually
-/// **longer** than the original notation (because the tag is attached). What this cap guards is not the average size but **the finiteness of the tail**.
+/// ★Without it one 100 MiB field name makes a message of that size★ — carried in the error reply onto the wire, paid by the receiving
+///   side. The value is just enough for a person to recognize their typo.
+/// ★Measures the literal only★: the truncation marker (`(truncated, input was N bytes)`, a bit over 30 B) is on top, up to **~170 B** per
+///   piece — use that sum for a whole-piece count, do not reuse this constant.
+/// ★Not a cap to shrink things★: for input whose escaped notation is 129~158 B the truncated form is **longer** than the original; what it
+///   guards is **the finiteness of the tail**.
 const MAX_QUOTED_INPUT_BYTES: usize = 128;
 
 /// Puts the wrong field names into the message — each name is subject to the [`quoted_input`] cap, and the count to [`MAX_NAMED_UNKNOWN`].
@@ -293,21 +287,19 @@ fn quoted_list(keys: &[&String]) -> String {
     }
 }
 
-/// Trims a name the caller gave so it can be quoted in the message — when it truncates it **says it truncated** (otherwise the caller
-/// would read the truncated name as the name it typed and go fix a perfectly good field).
+/// Trims a name the caller gave so it can be quoted in the message — a truncation **says it truncated** (else the caller would fix a
+///   perfectly good field).
 ///
-/// ★The name is wrapped in Rust string-literal notation★: if wrapped in single quotes, **one** field `a', 'b` would be printed as `'a', 'b'`
-/// and read as **two wrong fields** — the caller would go fix fields that do not even exist. `{:?}` escapes quotes, backslashes and control
-/// characters and removes that ambiguity.
-/// ★A truncated name also **closes its quote** (load-bearing)★: if it did not, in a message joining several names the quote pairing
-/// would go out of step and the very ambiguity just removed would come back (a piece with no closing quote + the next name's opening quote would
-/// read as a pair).
-/// ★The cap is applied **after escaping**★: if truncated first, one control character would swell to six bytes as `\u{1b}` and the message
-/// would grow up to six times the cap — the cap would vary 「by input kind」 and the number written in the docs would become false.
-/// ★Do not truncate in the middle of an escape sequence★: it accumulates character by character and stops at the budget, so no piece
-/// with only a lone `\` is produced — such a piece has broken notation and would violate the 「literal notation」 promise above.
-/// ★The truncation marker states **what the number counts**★: what is visible is the escaped notation while the number is original bytes, so without a label
-/// 30 control characters (180 characters in notation) would read as 「truncated 30 bytes」 and the two would look inconsistent.
+/// ★The name is wrapped in Rust string-literal notation★: single quotes would print **one** field `a', 'b` as `'a', 'b'` and read as
+///   **two** wrong fields; `{:?}` escapes quotes, backslashes and control characters.
+/// ★A truncated name also **closes its quote** (load-bearing)★: otherwise in a message joining several names the quote pairing goes out of
+///   step and the ambiguity returns.
+/// ★The cap is applied **after escaping**★: truncating first lets one control character swell to six bytes (`\u{1b}`), so the message
+///   would grow up to six times the cap by input kind and the documented number would be false.
+/// ★Do not truncate in the middle of an escape sequence★: it accumulates character by character and stops at the budget, so no lone `\`
+///   piece appears (broken notation).
+/// ★The marker states **what the number counts**★: what is visible is the escaped notation but the number is original bytes — unlabeled,
+///   30 control characters (180 characters shown) would read as "truncated 30 bytes".
 fn quoted_input(text: &str) -> String {
     let quoted = format!("{text:?}");
     if quoted.len() <= MAX_QUOTED_INPUT_BYTES {
@@ -338,9 +330,9 @@ where
     O: serde::Serialize + Send + 'static,
 {
     fn call(&self, args: serde_json::Value) -> CommandFuture {
-        // ★The body runs inside the future (not inside `call`)★: if `call` finished the work and returned a future holding only the result,
-        //   `timeout(d, handler.call(args))` would **never fire** — the deadline (TRD §4-⑥)
-        //   cannot stand on this shape. Before polling, cancellation really is cancellation.
+        // ★The body runs inside the future (not inside `call`)★: if `call` did the work and returned a future holding only the result,
+        //   `timeout(d, handler.call(args))` would **never fire** — the deadline
+        //   (TRD §4-⑥) cannot stand on that shape. Before polling, cancellation really is cancellation.
         let run = Arc::clone(&self.run);
         Box::pin(async move { crate::route::guard_panic(|| Self::apply(&run, args)) })
     }
@@ -362,12 +354,12 @@ where
 
 /// Wraps a synchronous (blocking) body as a handler — argument deserialization and return serialization are done here, once.
 ///
-/// ★Blocking contract (for the caller to keep)★: the body **runs to the end on the first poll**. If the assembly code polls it on an async runtime
-/// thread, it blocks that thread — the agent control verbs write to disk while holding the profile lock and
-/// poll for early resume exit (the same contract in daemon `control/commands.rs`), so it must be called behind `spawn_blocking`.
-/// Argument deserialization failure = `INVALID_ARGUMENT` · body panic = `INTERNAL` (it does not end without a reply).
-/// ★The coercion between schema and serde is not here★ — [`CommandTable::call`] does it by looking at the declaration, so putting it
-/// back into this adapter would give the two places different rules.
+/// ★Blocking contract (for the caller)★: the body **runs to the end on the first poll**; polled on an async runtime thread it blocks that
+///   thread (the agent control verbs write to disk under the profile lock and poll
+/// for early resume exit — same contract in daemon `control/commands.rs`), so call it behind `spawn_blocking`. Deserialization failure =
+///   `INVALID_ARGUMENT` · body panic = `INTERNAL` (never ends without a reply).
+/// ★The schema↔serde coercion is not here★ — [`CommandTable::call`] does it from the declaration; putting it here would give two places
+///   different rules.
 pub fn blocking_handler<A, O, F>(run: F) -> Arc<dyn CommandHandler>
 where
     F: Fn(A) -> Result<O, CommandError> + Send + Sync + 'static,
@@ -539,9 +531,9 @@ mod tests {
         assert!(table.is_empty());
     }
 
-    /// ★The same holds when `ok` is broken★ — the table does not use `ok_schema`, but `spec_item_json` attaches it into `help` as is,
-    /// so looking only at the argument schema would let **a registration packet carrying a broken `help` through**. The daemon is right to store it as an opaque
-    /// string (ADR-0156), so by then there is no place left to catch it.
+    /// ★The same holds when `ok` is broken★ — `spec_item_json` attaches `ok_schema` into `help` as is, so checking only the argument
+    ///   schema would let **a packet with a broken `help` through**;
+    /// the daemon stores it as an opaque string (ADR-0156), so nothing catches it later.
     #[test]
     fn a_declaration_whose_ok_schema_is_not_json_is_refused_at_assembly() {
         static BROKEN_OK: CommandSpec = CommandSpec {
@@ -590,10 +582,9 @@ mod tests {
         assert_eq!(parsed["errors"][1], "INVALID_ARGUMENT");
     }
 
-    /// ★Confirms in bytes the claim that the disk file and the registration packet have **the same single origin**★ (ADR-0156).
-    ///
-    /// If we compared the two paths against each other, it would be an identity that calls the same function twice, so **it passes even if both drift together** — so
-    /// we put a fixed expected byte string in the middle.
+    /// ★Confirms in bytes that the disk file and the registration packet have **the same single origin**★ (ADR-0156). Comparing the two
+    ///   paths against each other would call the same function twice
+    /// and **pass even if both drift together**, so a fixed expected byte string sits in the middle.
     #[test]
     fn the_schema_file_element_is_byte_identical_to_help() {
         const EXPECTED: &str = concat!(
@@ -689,9 +680,9 @@ mod tests {
         size: u32,
     }
 
-    /// ★A handler that does not go through the adapter★ — if the coercion were a property of `blocking_handler`, this handler would advertise the same schema
-    /// and accept input differently. So we build the coercion test on this shape (the `await`ing commands of Step 3 are
-    /// this shape).
+    /// ★A handler that does not go through the adapter★ — were coercion a property of `blocking_handler`, this handler would advertise the
+    ///   same schema and accept input differently,
+    /// so the coercion test is built on this shape (Step 3's `await`ing commands are this shape).
     struct RawNumbers;
     impl CommandHandler for RawNumbers {
         fn call(&self, args: serde_json::Value) -> CommandFuture {
@@ -825,14 +816,15 @@ mod tests {
 
     /// A rejection message carrying `count` fields absent from the declaration (each `key_bytes` bytes).
     ///
-    /// ★Insert in **reverse alphabetical order**★: if inserted ascending, insertion order and alphabetical order coincide, so even if the map changes
-    /// to an insertion-order-preserving form (`preserve_order`) the 「first eight alphabetically」 assertion still passes — and nobody would
-    /// know the property that assertion meant to measure is gone.
+    /// ★Insert in **reverse alphabetical order**★: ascending would make insertion and alphabetical order coincide, so a switch to an
+    ///   insertion-order map (`preserve_order`) would still pass the
+    /// "first eight alphabetically" assertion unnoticed.
     fn flood_refusal(count: usize, key_bytes: usize) -> String {
         flood_refusal_of(count, key_bytes, "x")
     }
 
-    /// `fill` = the character that fills the name — kept separate so we can measure whether printable characters and escaped characters fall under the same cap
+    /// `fill` = the character that fills the name — kept separate so we can measure whether printable characters and escaped characters
+    ///   fall under the same cap
     /// (escape expansion is an axis that can make the cap differ by kind).
     fn flood_refusal_of(count: usize, key_bytes: usize, fill: &str) -> String {
         let mut given = serde_json::Map::new();
@@ -847,7 +839,8 @@ mod tests {
             .to_string()
     }
 
-    /// If the count cap is exceeded it says **how many more there are** — if the caller thinks the list is everything it cannot fix the remaining fields.
+    /// If the count cap is exceeded it says **how many more there are** — if the caller thinks the list is everything it cannot fix the
+    ///   remaining fields.
     #[test]
     fn a_flood_of_unknown_fields_is_capped_and_says_how_many_are_left() {
         let message = flood_refusal(40, 0);
@@ -862,19 +855,19 @@ mod tests {
         );
     }
 
-    /// ★The message length is **unrelated** to the request size★ — the property to keep is not 「at most so many bytes」 but 「does not grow as the input grows」. The cap on one name is held by [`quoted_input`] and the cap on the number of names by [`MAX_NAMED_UNKNOWN`], and
-    /// only with both standing does this property stand (with only one, it grows along the other axis).
+    /// ★The message length is **unrelated** to the request size★ — the property is not "at most N bytes" but "does not grow as the input
+    ///   grows"; the per-name cap ([`quoted_input`]) and the count cap
+    /// ([`MAX_NAMED_UNKNOWN`]) are both needed (one alone grows along the other axis).
     ///
-    /// The measured worst case is **about 1.4 KB** (eight names × quote cap 128B + truncation marker + declared set), and an escaped
-    /// name gives the same value (since the cap applies **after** escaping) — still, do not read that number as a contract. The contract is
-    /// the first assertion below (even if the input grows, the message grows only by the number of digits).
+    /// The measured worst case is **about 1.4 KB** (eight names × quote cap 128B + marker + declared set), the same for escaped names (the
+    ///   cap applies **after** escaping) — not a contract; the contract is the first assertion below.
     #[test]
     fn the_refusal_message_does_not_grow_with_the_body() {
         let small = flood_refusal(40, 1 << 10);
         let huge = flood_refusal(4_000, 1 << 14);
 
-        // The width allowed to grow = **the number of digits only**: the 「N bytes」 notation of the eight names and the number in 「+N more」 get longer.
-        //   The margin of 32 is sized to cover that growth in digits (even if the input is 1000 times larger, decimal digits grow by only a few).
+        // The width allowed to grow = **the number of digits only** (the "N bytes" notation of the eight names and the "+N more"); the
+        //   margin of 32 covers that.
         assert!(
             huge.len() <= small.len() + 32,
             "100x the field count·16x the name size, yet the message grew beyond the digits: {} → {} bytes",
@@ -891,11 +884,10 @@ mod tests {
         }
     }
 
-    /// ★The eight named are **the first eight alphabetically**, and the **order carried is also alphabetical**★ — they are not the eight the caller
-    /// typed first (the argument map is a sorted data structure). The fixture inserts in **reverse** alphabetical order, so if the map changes to an insertion-order-
-    /// preserving form this turns red.
-    /// ★Letting the names be truncated is the point★: only a combination where the name cap and the count cap apply **together** checks that the two do not
-    /// mask each other (with only short names, the truncation path never runs once in this combination).
+    /// ★The eight named are **the first eight alphabetically**, in **alphabetical order**★ — not the eight typed first (the map is
+    ///   sorted). The fixture inserts in **reverse** order,
+    /// so a switch to an insertion-order map turns this red.
+    /// ★Letting the names be truncated is the point★: only name cap and count cap applying **together** checks that they do not mask each other.
     #[test]
     fn the_named_subset_is_the_alphabetically_first_ones_in_order() {
         let message = flood_refusal(40, 1 << 8);
@@ -936,13 +928,13 @@ mod tests {
         (literal, body)
     }
 
-    /// ★A truncated name must also be a **closed string literal**★ — if in a message joining several names the quote pairing goes
-    /// out of step, the ambiguity `{:?}` was meant to remove (one field read as two) comes right back.
+    /// ★A truncated name must also be a **closed string literal**★ — else in a joined message the quote pairing goes out of step and the
+    ///   one-field-read-as-two ambiguity `{:?}` removed returns.
     ///
-    /// ★Three things are measured, and all three are needed★: ① whether the literal **size** keeps the cap (if the budget forgets the room for the opening and closing quotes,
-    /// this catches it) ② whether the body has no **unescaped quote** (if the truncation branch forgets to escape,
-    /// this catches it — which is why the fixture name contains a quote) ③ whether it was not truncated in the middle of an escape.
-    /// If any one of the three is missing, the defects that the old versions of this function actually produced pass through.
+    /// ★Three things are measured, all needed★: ① the literal **size** keeps the cap (catches a budget that forgets the quotes) ② no
+    ///   **unescaped quote** in the body
+    /// (catches a truncation branch that forgets to escape — hence the quote in the fixture name) ③ not truncated in the middle of an
+    ///   escape. Missing any one lets defects of the old versions through.
     #[test]
     fn a_truncated_name_is_still_a_closed_string_literal() {
         let key = format!("a\"b{}", "c".repeat(300));
@@ -976,9 +968,9 @@ mod tests {
             }
         }
 
-        // ★Checks **whether the last escape of the body is intact**★: `\u{1b}` is six characters so there are five places to be cut in the middle, and of those only 「right after the backslash」 is
-        //   caught by backslash parity. The other four (`\u`·`\u{`·`\u{1`·
-        //   `\u{1b`) pass the parity check as is, so we check whether everything from the last `\` to the end is a **closed sequence**.
+        // ★Checks **whether the last escape of the body is intact**★: `\u{1b}` has five mid-cut places and only "right after the
+        //   backslash" is caught by backslash parity,
+        //   so check that everything from the last `\` to the end is a **closed sequence**.
         let control = quoted_input(&"\u{1b}".repeat(200));
         let (control_literal, control_body) = literal_and_body(&control);
         if let Some(last) = control_body.rfind('\\') {
@@ -1007,9 +999,8 @@ mod tests {
         );
     }
 
-    /// ★The cap must also be unrelated to the input **kind**★: if truncated before escaping, one control character swells to six bytes,
-    /// and the same cap becomes 128 B for printable characters and six times that for control characters — the number written in the docs
-    /// becomes false at that moment.
+    /// ★The cap must also be unrelated to the input **kind**★: truncating before escaping makes the same cap 128 B for printable and six
+    ///   times that for control characters.
     #[test]
     fn an_escape_heavy_key_obeys_the_same_bound_as_a_printable_one() {
         let refusal_len = |key: String| {
@@ -1031,7 +1022,8 @@ mod tests {
         );
     }
 
-    /// ★It is caught before the handler runs★ — the screening is a pure up-front decision, so it gives the same answer whether or not there is a body, and even if the body blows up
+    /// ★It is caught before the handler runs★ — the screening is a pure up-front decision, so it gives the same answer whether or not
+    ///   there is a body, and even if the body blows up
     /// (a handler that blows up asserts that).
     #[test]
     fn a_missing_required_field_is_refused_before_the_handler() {
@@ -1101,9 +1093,9 @@ mod tests {
             .check_args("fixture.entrance", &serde_json::Value::Object(given))
             .expect_err("field not in the declaration");
 
-        // The measured size of a single-name message is ~230 bytes (quote cap 128 + truncation marker + declared set) — the numbers below are
-        //   that measurement plus margin, not a contract. The contract is 「unrelated to input size」 and
-        //   `the_refusal_message_does_not_grow_with_the_body` measures it.
+        // The single-name message is ~230 bytes (quote cap 128 + marker + declared set) — the numbers below are that plus margin, not a
+        //   contract;
+        //   the contract is "unrelated to input size" (`the_refusal_message_does_not_grow_with_the_body`).
         assert!(
             err.message().len() < 512,
             "a single 1 MiB name made a message that large: {} bytes",

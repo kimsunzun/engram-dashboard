@@ -1,21 +1,21 @@
 //! ledger — message history + request reply tracking + group delivery ledger (spec §2·§3·§5).
 //!
-//! ★Role★: holds three axes.
-//!   ① **History ring buffer** — state transitions + timestamps of every message (`pending→delivered→replied` / `expired` / `skipped`).
-//!      "The state-transition time is the reply/send time data" (not exposed in the envelope — spec §5).
-//!   ② **Request tracking** — opens `awaiting_reply`, closes by **strict matching** on `in_reply_to`, and computes
-//!      `reply_by` timeout overruns (a later increment creates the notice to the sender — here we only compute "who exceeded").
-//!      ★There are two closing reasons (amendment 4 — ADR-0116 decisions 2/3 · ADR-0118 decision 1)★: reply accepted (`replied`) or **failure
-//!      close** (`reply_failed` — the reply send hits `RECIPIENT_NOT_FOUND` / requester profile deletion cleanup).
-//!      Missing the deadline is still **not a closing reason** (ADR-0108 decision 1 — notice ≠ close).
-//!   ③ **Group delivery ledger** — 1 message : N delivery records (spec §4). Supports dead members as `skipped`.
+//! ★Three axes★:
+//!   ① **History ring buffer** — state transitions + timestamps of every message (`pending→delivered→replied` / `expired` / `skipped`);
+//!      transition time is the reply/send time data (not exposed in the envelope — spec §5).
+//!   ② **Request tracking** — opens `awaiting_reply`, closes by **strict matching** on `in_reply_to`, computes `reply_by` overruns (here only
+//!      "who exceeded"). ★Two closing reasons (ADR-0116 decisions 2/3, ADR-0118 decision 1)★: reply accepted (`replied`) or failure close
+//!      (`reply_failed` — reply hits `RECIPIENT_NOT_FOUND` / requester profile deletion cleanup). Missing the deadline is **not** a
+//!   closing reason (ADR-0108 decision 1).
+//!   ③ **Group delivery ledger** — 1 message : N delivery records (spec §4); dead members as `skipped`.
 //!
-//! ★Pure, injected clock (load-bearing — module header invariant)★: every timestamp in state transitions and timeout decisions takes
-//!   `now: Instant` as an argument. The ring buffer and the tracking map hold no clock — TTL and reply-by boundaries are asserted in deterministic unit tests.
+//! ★Pure, injected clock (load-bearing)★: every state transition and timeout decision takes `now: Instant`; the ring and tracking map hold
+//!   no clock,
+//! so TTL and reply-by boundaries are asserted in deterministic tests.
 //!
-//! ★Strict reply matching (load-bearing — spec §2 · ADR-0103 invariant)★: a reply closes a request only when `in_reply_to` points
-//!   **exactly** at an open request id. Lenient matching (treating the next message from a non-replying peer as a reply)
-//!   was rejected as an accidental-close misfire — a wrong id closes nothing.
+//! ★Strict reply matching (spec §2, ADR-0103 invariant)★: a reply closes a request only when `in_reply_to` points **exactly** at an open
+//!   request id;
+//! lenient matching (next message from a non-replying peer) was rejected as an accidental-close misfire.
 // ADR-0103
 
 use std::collections::{HashSet, VecDeque};
@@ -24,41 +24,31 @@ use std::time::{Duration, Instant};
 
 use crate::PeerId;
 
-/// History ring buffer capacity — when exceeded, the oldest record is evicted first (spec §5 "history ring buffer").
-///
-/// ★4096 (user-ratified 2026-07-26 — raised from 1024)★: the unit of this ring is not a message but a **delivery record**.
-///   One broadcast writes **N** `(msg_id, member)` records (spec §4 "1 msg_id : N delivery records"), so broadcasting 100 times
-///   to a 10-member group filled 1024 by itself — rotation was too fast, so ① the queryable history got sharply shorter and ② expiry/recall
-///   transitions fell to `NotFound` and that fact never reached the ledger (the only evidence left then is the debug log
-///   of `sweep`/`flush_for` — C4 review fix J). Raising it 4x absorbs group-sized fan-out.
-/// ★Memory profile (honest upper bound)★: a record **keeps the full body as is** (no summary, no truncation). So the worst case is
-///   `max body size × capacity` = 64KiB(`control::ingress::MAX_BODY_BYTES`) × 4096 ≈ **256MiB** — human-conversation-sized bodies
-///   (hundreds of bytes to a few KiB) come to only ~1–2MB, but a pathological stream of consecutive max-size
-///   messages is far larger. This value is for the in-memory stage only and is a tuning target that can be changed without breaking anything.
-/// ★Follow-ups (identified only — not implemented now, user mention 2026-07-26)★: ⓐ expose this value as a runtime setting/command
-///   ⓑ store truncated bodies for audit purposes (instead of keeping the full text). Both are separate items and no precondition for changing this constant.
-/// ★Relation between evict and request tracking (narrowed by C3 review fix 3)★: previously a history evict
-///   unconditionally dropped the tracking entry, so an open request whose history was pushed out **lost both its way to be closed by a reply and its deadline notice**
-///   (silent contract loss = the worst failure mode). The bound now comes from `MAX_OPEN_REQUESTS`, not the history capacity.
+/// History ring buffer capacity — the oldest record is evicted first (spec §5).
+/// ★4096★: the unit is a **delivery record**, not a message — one broadcast writes N `(msg_id, member)` records (spec §4), so 100
+///   broadcasts to a
+/// 10-member group filled the old 1024: history got too short and expiry/recall transitions fell to `NotFound`, never reaching the ledger
+///   (C4 review fix J).
+/// ★Memory upper bound★: a record keeps the full body, so worst case = `MAX_BODY_BYTES` 64KiB × 4096 ≈ **256MiB**; human-sized bodies come
+///   to ~1–2MB.
+/// In-memory stage only; a tuning target. Follow-ups (not implemented): ⓐ runtime setting ⓑ truncated bodies for audit.
+/// ★Evict vs request tracking (C3 review fix 3)★: an evict used to drop the tracking entry, so an open request whose history was pushed
+///   out lost both
+/// its reply path and its deadline notice (silent contract loss). The bound now comes from `MAX_OPEN_REQUESTS`, not this capacity.
 const HISTORY_CAPACITY: usize = 4096;
 
-/// Upper bound on the number of request contracts that can be open at once (not replied, not notified).
-///
-/// ★Why it is needed (the counterpart of fix 3 — load-bearing)★: once open contracts were made to survive history evict (comment on the constant above),
-///   the history capacity **no longer supplies** a bound on the tracking list. Without a cap, requests whose reply never comes
-///   (including those with no deadline) pile up and break the bounded guarantee of in-memory v1. So the cap is put on open contracts themselves,
-///   and at the cap a **new request is bounced** (old contracts are not silently dropped — no silent loss).
-/// ★Basis for 512★: a rough figure that comfortably covers mailbox cap 100 × a few dozen concurrent recipients. If open contracts reach this number at
-///   human-conversation message rates, that is not normal load but peers that do not reply piling up,
-///   so it is right to make it visible to the sender through a bounce (a tuning target like HISTORY_CAPACITY — can be changed without breaking anything).
+/// Upper bound on request contracts open at once (not replied, not notified).
+/// ★Why (counterpart of fix 3)★: once open contracts survive history evict, history capacity no longer bounds the tracking list; without a cap,
+/// never-replied requests pile up. At the cap a **new request is bounced** (old contracts are not silently dropped).
+/// ★512★: a rough figure above mailbox cap 100 × a few dozen concurrent recipients; reaching it at human message rates means non-replying
+///   peers piling up,
+/// which the sender should see as a bounce. Tuning target like HISTORY_CAPACITY.
 const MAX_OPEN_REQUESTS: usize = 512;
 
 /// State of one message delivery (spec §5·§6 state vocabulary — do not invent new vocabulary).
-///
-/// ★State transitions (load-bearing)★: `Pending → Delivered → Replied` (request only) / `Expired` (TTL) / `Skipped`
-///   (notice lane retirement) / `Failed`.
-///   Each transition leaves a timestamp (spec §5 "the state-transition time is the reply/send time"). Busy waiting, injection-failure parking and
-///   **sleep parking** (ADR-0116 decision 1) are all `Pending` (shared state vocabulary — spec §5 branch 3).
+/// ★Transitions (load-bearing)★: `Pending → Delivered → Replied` (request only) / `Expired` (TTL) / `Skipped` (notice lane retirement) /
+///   `Failed`.
+/// Each leaves a timestamp (spec §5). Busy waiting, injection-failure parking and **sleep parking** (ADR-0116 decision 1) are all `Pending`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryStatus {
     Pending,
@@ -67,36 +57,33 @@ pub enum DeliveryStatus {
     Replied,
     /// Parking expired by exceeding TTL (24h) (the ledger keeps the record, spec §5, ADR-0105).
     Expired,
-    /// ★Ledger-only terminal★ — the oldest notice was retired because the notice lane (`NOTICE_CAP`) was exceeded (spec §6 mapping table).
-    ///   ★It is not in the send-response vocabulary★ (ADR-0111 decision 3 removed group-member skip, so it was dropped from the response axis).
+    /// ★Ledger-only terminal★ — the oldest notice was retired because the notice lane (`NOTICE_CAP`) overflowed (spec §6). Not in the
+    ///   send-response vocabulary (ADR-0111 decision 3).
     Skipped,
-    /// ★Per-recipient failure terminal (new — ADR-0111 decision 3 · spec §5 "failed recipients stay in the ledger too")★:
-    ///   entry bounce (`RECIPIENT_NOT_FOUND`/`RECIPIENT_AMBIGUOUS`) ·
-    ///   `MAILBOX_FULL` · `REQUEST_CAPACITY` · **deletion cleanup** (`RECIPIENT_DELETED` — amendment 4).
-    ///
-    /// ★Why it stays in the ledger (load-bearing)★: the sender must be able to look later via `eg_messages{id}` at "who did not receive it",
-    ///   and only then does **ledger expected row count = send response row count** hold, removing `may_be_truncated` false positives
-    ///   (spec §5·§6). There is no parking, but there is a record.
-    /// ★The moment of recording is the terminal — **with exactly one exception** (amendment 4 · ADR-0116 decision 4)★: entry-bounce kinds are
-    ///   `record`ed in this state and no transition leaves it. Only deletion cleanup closes an *already parked* record after the fact,
-    ///   so it uses the one edge `Pending → Failed`.
-    // ADR-0111
-    // ADR-0116 (pending→failed = deletion cleanup only)
+    /// ★Per-recipient failure terminal (ADR-0111 decision 3, spec §5 "failed recipients stay in the ledger too")★: entry bounce
+    ///   (`RECIPIENT_NOT_FOUND`/`RECIPIENT_AMBIGUOUS`),
+    /// `MAILBOX_FULL`, `REQUEST_CAPACITY`, **deletion cleanup** (`RECIPIENT_DELETED`).
+    /// ★Stays in the ledger (load-bearing)★: the sender must be able to look up "who did not receive it" via `eg_messages{id}`, and only
+    ///   then does
+    /// **expected row count = response row count** hold (no `may_be_truncated` false positives; spec §5·§6). No parking, but a record.
+    /// ★Recorded as terminal — with exactly one exception (ADR-0116 decision 4)★: entry bounces are `record`ed in this state and never
+    ///   leave it; only
+    /// deletion cleanup closes an *already parked* record after the fact, via the one edge `Pending → Failed`.
+    // ADR-0111, ADR-0116
     Failed,
 }
 
 impl DeliveryStatus {
-    /// Is the transition from this state to `next` **legal** (spec §5 state-transition graph — load-bearing).
-    ///
-    /// Every other edge is illegal — in particular a re-transition out of a **terminal** (`Replied`/`Expired`/`Skipped`/`Failed`),
-    ///   and a revert (`*→Pending`) or a skip-ahead (`Pending→Replied`, `Expired→Delivered`, etc.) are rejected.
-    ///   Allowing reverts or skip-aheads pollutes the ledger meaning "state-transition time = reply/send time" (misfire closes,
-    ///   retroactive timestamps). A self-transition to the same state is also illegal (prevents meaningless timestamp refreshes).
-    /// ★No edge into `Failed` exists in this **general** graph (ADR-0111 · kept in amendment 4 as well)★: a failure row is
-    ///   recorded in that state **from the start**. Opening it as a general transition would make the impossible history
-    ///   "delivered, then turned back into failure" expressible, so the `Pending → Failed` (deletion cleanup) added in amendment 4 is also not put here but opened
-    ///   only through a **dedicated verb** (`fail_pending` → `can_fail_by_cleanup`).
-    // ADR-0116 (pending→failed is path-limited — general graph unchanged)
+    /// Is the transition from this state to `next` **legal** (spec §5 graph — load-bearing). Every other edge is illegal: re-transition
+    ///   out of a **terminal**
+    /// (`Replied`/`Expired`/`Skipped`/`Failed`), reverts (`*→Pending`), skip-aheads (`Pending→Replied`, `Expired→Delivered`) and
+    ///   self-transitions (meaningless timestamp
+    /// refresh); they would pollute "transition time = reply/send time" (misfire closes, retroactive timestamps).
+    /// ★No edge into `Failed` in this **general** graph (ADR-0111, kept by ADR-0116)★: a failure row is recorded `Failed` from the start;
+    ///   a general edge would make
+    /// "delivered, then turned into failure" expressible, so `Pending → Failed` (deletion cleanup) is opened only through the dedicated
+    ///   verb `fail_pending` (`can_fail_by_cleanup`).
+    // ADR-0116
     fn can_transition_to(self, next: DeliveryStatus) -> bool {
         use DeliveryStatus::*;
         matches!(
@@ -109,29 +96,24 @@ impl DeliveryStatus {
         )
     }
 
-    /// ★Deletion-cleanup-only edge (`Pending → Failed`, spec §6 · ADR-0116 decision 4)★ — can this state go to
-    /// `Failed` **by deletion cleanup**?
-    ///
-    /// ★Why a separate predicate (load-bearing)★: this edge is legal only on "the one path that closes an already parked record after the fact".
-    ///   Putting it in the general graph (`can_transition_to`) would let **any caller** turn a pending row into a failure
-    ///   (e.g. an expiry sweep bug, a flush misbranch), producing the history "mail that was waiting for delivery was written as failed with no reason".
-    ///   With the predicates split, that ability lives in the single verb `fail_pending`, and `Delivered → Failed` is in
-    ///   neither predicate, so it stays illegal forever.
+    /// ★Deletion-cleanup-only edge (`Pending → Failed`, spec §6, ADR-0116 decision 4)★. ★Separate predicate (load-bearing)★: in the
+    ///   general graph (`can_transition_to`)
+    /// any caller bug (expiry sweep, flush misbranch) could turn a pending row into a reasonless failure; split, that ability lives only
+    ///   in `fail_pending`, and
+    /// `Delivered → Failed` is in neither predicate, so it stays illegal.
     fn can_fail_by_cleanup(self) -> bool {
         matches!(self, DeliveryStatus::Pending)
     }
 }
 
 /// One history record — the delivery history of one (message, recipient) pair.
-///
-/// ★1 message : N delivery records (spec §4 · load-bearing)★: a group send delivers one logical message (`msg_id` shared) to several
-///   recipients individually, so there is **one delivery record per recipient** (each with independent status and timestamps). A single send is N=1.
-/// ★body is kept in full, not as a summary (design decision)★: this is the in-memory stage with no separate store, and re-injecting a parked envelope and
-///   ledger lookup (`messages { id }` — spec §6) need the original text. Keeping only a summary loses the original for re-injection and audit.
-///   Memory is capped by the ring capacity (HISTORY_CAPACITY) — summary/offload will be revisited with v2 persistence (SQLite) (non-breaking).
-/// ★Who is by id, what is shown is the name at send time (ADR-0309 decision 4)★: the axis that picks a row (`transition` ·
-///   `fail_pending`) is `(msg_id, to_id)`, while `from` · `to` are **name snapshots at send time**, so a later rename
-///   does not change what a lookup displays.
+/// ★1 message : N delivery records (spec §4, load-bearing)★: a group send shares `msg_id` and has one record per recipient with
+///   independent status and timestamps; a single send is N=1.
+/// ★body is kept in full★: no separate store in this in-memory stage, and re-injecting a parked envelope and `messages { id }` lookup
+///   (spec §6) need the original;
+/// memory is capped by HISTORY_CAPACITY (summary/offload revisited with v2 SQLite persistence).
+/// ★Rows are picked by id, shown by send-time name (ADR-0309 decision 4)★: the pick axis (`transition`, `fail_pending`) is `(msg_id,
+///   to_id)`; `from`/`to` are name snapshots, so a rename does not change a lookup.
 #[derive(Debug, Clone)]
 pub struct MessageRecord {
     pub msg_id: String,
@@ -141,160 +123,135 @@ pub struct MessageRecord {
     pub from_id: PeerId,
     /// Recipient name — snapshot at send time. For a failure row where the recipient was not found, it is the spelling the sender wrote.
     pub to: String,
-    /// Recipient agent id. `None` = a failure row where the recipient was not found (none · duplicate name) — that row is already a terminal, so
-    ///   there is no need to pick it again by id.
-    // ADR-0309 (decisions 1 · 4)
+    /// Recipient agent id. `None` = a failure row where the recipient was not found (none / duplicate name) — already terminal, never
+    ///   picked by id.
+    // ADR-0309
     pub to_id: Option<PeerId>,
     pub body: String,
     pub status: DeliveryStatus,
     pub created_at: Instant,
     pub transitioned_at: Instant,
-    /// ★The **total number of delivery records** this logical message will leave (fixed at send time — round-2 review F3)★. Single send · notice = 1,
-    /// group fan-out = member count N. Every row with the same `msg_id` carries **the same value**.
-    ///
-    /// ★Why it is needed (where the old "front position" proof was wrong)★: a lookup must answer "are the remaining rows all of them?", but
-    ///   group rows are recorded in **two phases** (parked/skipped under the plan lock, then delivered in the per-member section).
-    ///   Rows of other messages can slip in between, so the rows of one msg_id are **not contiguous** in the ring — even when the front rows
-    ///   are evicted and only the back rows remain, the ring front may be someone else's row. So the position-based proof "if it is not the front, it is complete"
-    ///   gives a **false negative**. Pinning the expected count at send time turns it into the **deterministic** comparison `remaining rows < expected`
-    ///   (it does not depend on position or order).
-    /// ★Why u16★: a broadcast's member count is roster-sized, so 65535 is enough, and at 2 bytes per record it adds only
-    ///   8KiB to a 4096-entry ring (negligible next to the cost of keeping bodies).
+    /// ★Total delivery records this logical message will leave (fixed at send time — round-2 review F3)★: single send / notice = 1, group
+    ///   = member count N; every row of one `msg_id`
+    /// carries the same value. ★Why★: a lookup must answer "are the remaining rows all of them?", but group rows are recorded in two
+    ///   phases and other messages' rows can slip between,
+    /// so rows of one msg_id are not contiguous and the position-based proof ("not the front → complete") gives a false negative; pinning
+    ///   N turns it into the deterministic
+    /// `remaining rows < expected`. ★u16★: roster-sized; 2 bytes × 4096 = 8KiB.
     // round-2 review F3
     pub expected_rows: u16,
-    /// ★Failure code to carry in lookups (new in amendment 4 — spec §6 `RECIPIENT_DELETED`)★.
-    ///
-    /// ★Why it holds the wire string as is (load-bearing)★: the place where this code first appears is **not the send response but the
-    ///   `eg_messages{id}` lookup** (at send time it was `pending` — spec §6). So the value must be **kept** until a later time than the send response,
-    ///   hence it rides on the record. The canonical vocabulary is `service::FailCode::as_str` and its return value goes in here
-    ///   as is — if the ledger knew service's enum as a type, the pure storage layer would stick to the policy vocabulary, so
-    ///   it takes only a `&'static str` layer (no value copy).
-    /// ★Only one path fills it now: deletion cleanup★: for `failed` rows of the entry-bounce kinds, the send response already delivered
-    ///   code/hint on the spot (spec §6), so they are not kept twice on the lookup axis (`None`).
-    // ADR-0116 (RECIPIENT_DELETED — lookup-time code)
+    /// ★Failure code carried in lookups (spec §6 `RECIPIENT_DELETED`)★. ★Holds the wire string as is★: the code first appears not in the
+    ///   send response but in the `eg_messages{id}` lookup
+    /// (at send time the row was `pending`), so it must be kept on the record. Canonical vocabulary = `service::FailCode::as_str` (a
+    ///   `&'static str` — the pure storage layer must not know
+    /// service's enum). ★Only deletion cleanup fills it★: entry-bounce `failed` rows already delivered code/hint in the send response (`None`).
+    // ADR-0116
     pub fail_code: Option<&'static str>,
 }
 
-/// One open-request tracking entry (spec §3). It is a **separate map** from the history records, so ring evict does not affect it.
-///
-/// ★notified flag (load-bearing — prevents double notification)★: once a `reply_by` overrun is reported through `due_timeouts`,
-///   this flag is set and it is **not reported again** (spec §7 "no double-notification"). When a reply arrives it is `closed`, so it drops out of
-///   the `due_timeouts` targets (replied never comes out as due).
-// R1: `reservation_token`(Weak) has no meaning under value comparison, so the PartialEq/Eq derive was dropped (nobody used it).
+/// One open-request tracking entry (spec §3) — a **separate map** from history, so ring evict does not affect it.
+/// ★notified (prevents double notification)★: once a `reply_by` overrun is reported through `due_timeouts` it is set and not reported
+///   again (spec §7); a reply sets `closed`,
+/// dropping it from `due_timeouts` targets.
+// R1: `reservation_token`(Weak) has no meaning under value comparison, so the PartialEq/Eq derive was dropped.
 #[derive(Debug, Clone)]
 struct RequestEntry {
     request_id: String,
     /// The display name **at send time**.
     sender: String,
-    /// ★The request sender's PeerId (C3 review fix 2 — load-bearing)★: the queue key under which the deadline-overrun notice is entrusted (ADR-0309 —
-    ///   the queue key is the id, so even if the sender renamed in the meantime the notice goes to them. The notice has no re-fire because of `notified`,
-    ///   so missing it here silently halves the contract).
+    /// ★The request sender's PeerId (C3 review fix 2)★: the queue key under which the overrun notice is entrusted (ADR-0309 — an id, so a
+    ///   rename in between still reaches them);
+    /// `notified` prevents re-fire, so missing it silently halves the contract.
     sender_id: PeerId,
-    /// The recipient name **at send time** (for lookups · deadline-notice body display). The axis that picks the contract is `recipient_id`.
+    /// The recipient name **at send time** (lookups, notice body). The contract is picked by `recipient_id`.
     recipient: String,
-    /// ★The recipient axis of the contract key = agent id (ADR-0309 decisions 1 · 7)★ — the id for a live recipient, and **for a sleeping recipient too it is
-    /// that profile's id from the moment of opening** (the daemon passes the sleeping side as an (id, name) pair). So there is no name-fallback matching — even if it is renamed,
-    /// or another agent with the same name appears, the obligation stays with this id.
-    /// ★epoch is not carried★: a restart of the same agent keeps the PeerId and only raises the epoch (ADR-0007) —
-    ///   the restarted agent is still the party to answer, so narrowing by epoch would wrongly make the obligation vanish.
+    /// ★Recipient axis of the contract key = agent id (ADR-0309 decisions 1·7)★ — the id for a live recipient and, for a sleeping one,
+    ///   that profile's id from the moment of opening
+    /// (the daemon passes the sleeping side as an (id, name) pair). No name-fallback: a rename or a same-name agent leaves the obligation
+    ///   with this id.
+    /// ★epoch is not carried★: a restart keeps the PeerId and only raises the epoch (ADR-0007); narrowing by epoch would make the
+    ///   obligation vanish.
     // ADR-0309
     recipient_id: PeerId,
-    /// Reply deadline = (offset from send, **original spelling the sender wrote**). `None` = no deadline (no timeout).
-    ///
-    /// ★Why the spelling is kept too (C3 review fix 6)★: previously only the Duration was kept, and when building the notice text the upper layer
-    ///   **back-computed** the spelling — that back-computation normalized, so a deadline sent as `60m` was notified as `1h`, and the envelope (`reply-by="60m"`)
-    ///   and the text disagreed. Contract text must be exactly what the sender wrote, so the spelling is kept as the original (the two
-    ///   are bound in one tuple so the type enforces "if there is a deadline, the spelling is always there").
+    /// Reply deadline = (offset from send, **original spelling the sender wrote**). `None` = no deadline.
+    /// ★Spelling kept too (C3 review fix 6)★: back-computing it from the Duration normalized `60m` to `1h`, so the envelope
+    ///   (`reply-by="60m"`) and notice text disagreed;
+    /// one tuple makes the type enforce "deadline ⇒ spelling".
     reply_by: Option<(Duration, String)>,
     created_at: Instant,
     closed: bool,
-    /// ★Failure-close marker (new in amendment 4 — ADR-0116 decisions 2/3 · ADR-0118 decision 1)★. It is set **always together with** `closed`,
-    /// and when this value is `true` the terminal vocabulary is `reply_failed`, not `replied` (contract axis — spec §6).
-    ///
-    /// ★Why one bit next to `closed` (load-bearing)★: the **consequences** of closing (removal from the open list, no deadline-sweep fire, exclusion from the 512
-    ///   count) are exactly the same as `replied` — so those decisions are not made twice, and the single `closed` predicate is
-    ///   used as is (ADR-0118 decision 4 "keep the single `occupied_slots` predicate"). This bit carries only the **reason**:
-    ///   the fact that this terminal does not claim "a reply was established" (§6 axis distinction), and the observable face of the rule that deletion cleanup **does not touch a contract that is
-    ///   already `replied`** (§3 item 7-④ no reverting).
-    /// ★There are exactly two firing paths★: ① the reply send row is `RECIPIENT_NOT_FOUND` (`fail_on_undeliverable_reply`)
-    ///   ② requester profile deletion cleanup (`fail_open_requests_from`). Any other reply failure is a **no-op**.
-    // ADR-0116 (decision 2) / ADR-0118 (decisions 1·4)
+    /// ★Failure-close marker (ADR-0116 decisions 2/3, ADR-0118 decision 1)★: set **always together with** `closed`; `true` ⇒ terminal
+    ///   vocabulary `reply_failed`, not `replied` (contract axis, spec §6).
+    /// ★One bit next to `closed`★: the consequences (leave the open list, no deadline-sweep fire, leave the 512 count) equal `replied`, so
+    ///   the single `closed` predicate is reused
+    /// (ADR-0118 decision 4 "keep the single `occupied_slots` predicate"); this bit carries only the **reason** and the rule that deletion
+    ///   cleanup does not touch an already `replied`
+    /// contract (§3 item 7-④). ★Exactly two firing paths★: ① reply row `RECIPIENT_NOT_FOUND` (`fail_on_undeliverable_reply`) ② requester
+    ///   profile deletion cleanup
+    /// (`fail_open_requests_from`); any other reply failure is a no-op.
+    // ADR-0116, ADR-0118
     reply_failed: bool,
     notified: bool,
-    /// ★**Marked for retirement** under cap pressure (round-5 mark-and-sweep)★ — it is still alive in the list and can still receive
-    /// a reply. It is physically removed only at commit, and on rollback only the mark is cleared, returning to the state where nothing happened.
-    ///
-    /// ★Why a mark (why physical removal was dropped — load-bearing)★: the old design **took the victim out** of the list at reservation time.
-    ///   During that window the contract behaved as if it did not exist in the world, so ① a legitimate reply missed with
-    ///   `NoMatch` in `close_on_reply` and ② rollback put it back "open", creating a ghost state and a false notice. If it is not taken out and only
-    ///   marked, that window does not exist — replies, lookups and duplicate checks all keep working on the usual path.
+    /// ★**Marked for retirement** under cap pressure (round-5 mark-and-sweep)★ — still in the list and can still receive a reply;
+    ///   physically removed only at commit, and rollback clears only the mark.
+    /// ★Why a mark★: the old design took the victim out at reservation time, so in that window ① a legitimate reply missed with `NoMatch`
+    ///   in `close_on_reply` ② rollback re-inserted it "open",
+    /// creating a ghost state and a false notice.
     // round-5 mark-and-sweep
     pending_retirement: bool,
-    /// ★A new contract whose acceptance is not yet confirmed (round-5 mark-and-sweep)★ — when the send passes dispatch, this mark is cleared at commit,
-    /// and on bounce or panic the rollback removes this entry.
-    ///
-    /// ★Why it is needed★: this entry **occupies a slot but is not yet entitled to take someone else's place**. Without the mark,
-    ///   another send arriving at the same time could pick this unconfirmed contract as "the oldest retirable contract" and remove it,
-    ///   and then the original send would be in the state **delivered successfully but no contract** (every reply to that request
-    ///   is `NoMatch`). So it is explicitly excluded from victim selection.
+    /// ★A new contract whose acceptance is not yet confirmed (round-5 mark-and-sweep)★ — cleared at commit; on bounce or panic the
+    ///   rollback removes the entry.
+    /// ★Why★: it occupies a slot but is not entitled to take someone else's place; without the mark a concurrent send could pick this
+    ///   unconfirmed contract as "oldest retirable" and remove it,
+    /// leaving the original send delivered but with no contract (every reply `NoMatch`). So it is excluded from victim selection.
     // round-5 mark-and-sweep
     provisional: bool,
-    /// ★The contract key of the **victim this reservation marked for retirement** (F1)★ — `Some((msg_id, recipient_id))`.
-    ///
-    /// ★Why remember it (load-bearing)★: a reservation left without settlement must be **reclaimable by the periodic sweep itself**
-    ///   (RAII Drop can do nothing if `try_lock` fails — `service::Reservation` header). Then the sweep
-    ///   must know "whom did this reservation mark" so it can release exactly that mark. The value the caller was carrying
-    ///   (`RetiredContract`) disappears together with the reservation if it is lost, so it is kept inside the ledger.
+    /// ★Contract key of the victim this reservation marked for retirement (F1)★ — `Some((msg_id, recipient_id))`. ★Why remember it★: an
+    ///   unsettled reservation must be reclaimable by the periodic
+    /// sweep (RAII Drop does nothing if `try_lock` fails — `service::Reservation` header), which must know whom it marked; the caller's
+    ///   `RetiredContract` is lost with the reservation.
     marked_victim: Option<(String, PeerId)>,
-    /// ★The **owner liveness token** of this reservation (R1)★ — `Some(weak)` = a guard is attached, `None` = one was never attached.
-    ///
-    /// It is the sweep's reclaim criterion (`reclaim_abandoned_reservations`): if it upgrades, the owner is still working, so
-    /// **it is not touched**. For the rationale and the rejected alternative (a time threshold), see the `ReservationLiveness` header.
-    /// ★Why `None` is a reclaim target (fail-safe)★: attachment happens in the **same lock section** as `open_request`
-    ///   (operations pass A). So if the sweep can see a provisional entry that is `None`, the opener released the lock without creating a guard
-    ///   = a reservation nobody will settle. Leaving that kind behind would permanently shrink the cap denominator.
+    /// ★Owner liveness token of this reservation (R1)★ — `Some(weak)` = a guard is attached, `None` = never attached. The sweep's reclaim
+    ///   criterion (`reclaim_abandoned_reservations`): if it
+    /// upgrades the owner is working and the entry is **not touched** (rationale + rejected time threshold: `ReservationLiveness` header).
+    ///   ★`None` is a reclaim target (fail-safe)★: attachment is in
+    /// the same lock section as `open_request`, so a provisional `None` means the opener released the lock without a guard — a reservation
+    ///   nobody will settle that would permanently shrink the cap denominator.
     // R1
     reservation_token: Option<Weak<()>>,
 }
 
 impl RequestEntry {
-    /// ★Criterion = `!closed` alone (D review B3 — corrected from the old `!closed && !notified`)★: previously a contract for which the deadline-overrun notice
-    ///   had gone out (`notified`) was treated as "finished" and dropped together on history evict. But the notice is only the fact that **the sender
-    ///   was told**, not that a reply came — the recipient still has the duty to answer (spec §3 "reply even if late"), and D's pending lookup
-    ///   contracted to **keep showing** such contracts as `timed_out=true`
-    ///   (`open_requests` filters by `!closed`). When the two criteria diverged, the obligation actually evaporated in this order:
-    ///   ① request opens → ② 4096 entries push its history row out by evict → ③ deadline passes and `notified=true` →
-    ///   ④ `purge_finished_without_history` deletes the contract as "finished and no history either" → it vanishes from the pending list.
-    ///   This is a silent loss that both sender and recipient misread as "a finished matter", so the definition is aligned to the pending lookup side.
-    /// ★The bound is kept★: notified unreplied contracts are now counted in the cap too, so the tracking list is tied to `MAX_OPEN_REQUESTS` (512)
-    ///   — at the limit a new request is bounced with `REQUEST_CAPACITY` (a visible failure instead of silent loss).
+    /// ★Criterion = `!closed` alone (D review B3 — was `!closed && !notified`)★: a contract whose overrun notice went out (`notified`)
+    ///   used to count as "finished" and was dropped on history evict, but
+    /// the notice only means the sender was told — the recipient still owes an answer (spec §3 "reply even if late") and the pending
+    ///   lookup keeps showing it as `timed_out=true` (`open_requests` filters
+    /// `!closed`). With diverging criteria the obligation evaporated: ① request opens ② 4096 entries evict its history row ③ deadline
+    ///   passes, `notified=true` ④ `purge_finished_without_history`
+    /// deletes it as "finished, no history" → gone from the pending list, a silent loss. ★Bound kept★: notified unreplied contracts count
+    ///   toward `MAX_OPEN_REQUESTS` (512); at the limit a new request
+    /// is bounced with `REQUEST_CAPACITY`.
     // review B3
     fn is_live(&self) -> bool {
         !self.closed
     }
 
-    /// ★Does it occupy a `MAX_OPEN_REQUESTS` slot (round-5 mark-and-sweep · round-6 I1)★ — the sole criterion of the cap decision.
-    ///
-    /// - **A contract marked for retirement is not counted**: its slot leaves at commit, so it already belongs to the new contract. If it were counted, the cap
-    ///   would still hold right after the mark, the new contract could not be accepted, and the retirement itself would be pointless.
-    /// - **A provisional contract **is counted** (important)**: even before confirmation it is an intake that really exists, and if it were not counted, several simultaneous sends
-    ///   would all decide "there is room" and get in past the limit (the cap is breached).
-    /// - ★**A closed provisional contract keeps being counted until settlement**(round-6 I1 · load-bearing)★: looking only at `!closed`,
-    ///   the moment a reply arrives during the provisional window the contract **loses its own slot**. In fact the following 6 steps
-    ///   permanently breached the limit: ① A marks V1 and inserts provisional PA (512) ② a fast reply closes PA (511) ③ B sees
-    ///   "there is room" and inserts PB **without marking anyone** (512) ④ A rolls back and releases the V1 mark,
-    ///   +1, and even deleting the closed PA gives 0 → **stuck at 513**. The slot is **reserved** as the price of accepting the send, so that reservation
-    ///   must hold until the guard settles it (commit/rollback) — the fact that the reply was fast must not create someone else's slot.
-    /// ★Arithmetic at settlement (both branches come out exactly right)★:
-    ///   - **Commit**: the provisional mark is released → if that contract was closed, the slot is released at that point **legitimately**
-    ///     (it is a contract that actually got its reply, so releasing the slot is right).
-    ///   - **Rollback**: remove the closed provisional contract (-1) and release the victim mark (+1) → the sum is 0, exactly keeping the cap.
-    /// ★`reply_failed` also drops out here **automatically** (ADR-0118 decision 4 — no second capacity concept)★: a failure close
-    ///   sets `closed`, so this predicate yields false as is. Do not add a separate branch — the very reason this function exists is
-    ///   that the cap count is a single predicate (the settlement arithmetic holds in this one place only).
-    // round-5 mark-and-sweep / round-6 I1
-    // ADR-0108 (capacity predicate single point — a provisional contract keeps its weight even when closed)
-    // ADR-0118 (decision 4 — reply_failed drops out of the count)
+    /// ★Does it occupy a `MAX_OPEN_REQUESTS` slot (round-5 mark-and-sweep, round-6 I1)★ — the sole criterion of the cap decision.
+    /// - **A contract marked for retirement is not counted**: its slot already belongs to the new contract; counting it would hold the cap
+    ///   after the mark and make the retirement pointless.
+    /// - **A provisional contract is counted**: it is a real intake; uncounted, simultaneous sends would all see room and breach the limit.
+    /// - ★**A closed provisional contract keeps being counted until settlement** (round-6 I1, load-bearing)★: `!closed` alone loses the
+    ///   slot the moment a reply arrives in the provisional window,
+    ///   which breached the limit: ① A marks V1, inserts provisional PA (512) ② a fast reply closes PA (511) ③ B sees room and inserts PB
+    ///   without marking (512) ④ A rolls back, V1 mark released (+1),
+    ///   deleting closed PA gives 0 → **513**. The slot is reserved as the price of accepting the send and holds until the guard settles
+    ///   (commit/rollback).
+    /// ★Settlement arithmetic★: **Commit** — mark released; if the contract was closed its slot is released then, legitimately.
+    ///   **Rollback** — remove the closed provisional (-1) and release the victim mark (+1) → 0.
+    /// ★`reply_failed` drops out automatically (ADR-0118 decision 4 — no second capacity concept)★: failure close sets `closed`. Do not
+    ///   add a separate branch — the cap count is a single predicate
+    /// and the settlement arithmetic holds only here.
+    // round-5 mark-and-sweep, round-6 I1, ADR-0108, ADR-0118
     fn occupies_slot(&self) -> bool {
         (!self.closed || self.provisional) && !self.pending_retirement
     }
@@ -302,15 +259,13 @@ impl RequestEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyOutcome {
-    /// An open request was closed exactly (the first valid reply). History also transitioned normally to `Replied`.
+    /// An open request was closed exactly (the first valid reply); history also transitioned to `Replied`.
     Closed,
-    /// The contract (tracking) was closed but the history `Replied` transition is an illegal edge and did not happen — for anomaly observation.
-    ///
-    /// ★Why a separate variant (load-bearing — finding 1)★: the reply **actually happened**, and reopening the contract is
-    ///   worse (the source of truth is tracking). So the contract is still closed. But if the history is still in a state like `Pending` (not injected) that
-    ///   cannot take the `Delivered → Replied` edge, the history stays without reflecting the reply — this is not swallowed silently
-    ///   (it used to be hidden as `Closed`); it is returned carrying `from` (the history state at that moment) so the upper layer (MessagingService) can
-    ///   **observe and log** it. Closing the contract and history bookkeeping are separate concerns: anomaly = observable, not silent.
+    /// The contract was closed but the history `Replied` transition is an illegal edge and did not happen — for anomaly observation.
+    /// ★Separate variant (finding 1)★: the reply actually happened and tracking is the source of truth, so the contract stays closed; but
+    ///   if history is still e.g. `Pending` and cannot take
+    /// `Delivered → Replied`, that is not hidden as `Closed` — it is returned with `from` (the history state then) so MessagingService can
+    ///   observe and log it.
     ClosedHistoryAnomaly { from: DeliveryStatus },
     /// No matching open request — a wrong id, or already closed/nonexistent (strict: closes nothing).
     NoMatch,
@@ -318,10 +273,9 @@ pub enum ReplyOutcome {
     AlreadyClosed,
 }
 
-/// ★Outcome of a reply-failure close attempt (new in amendment 4 — spec §3 item 7-④ · ADR-0118)★.
-///
-/// ★The three other than `Failed` are all **no-ops**★ — the contract stays open or is already closed. The caller differs only
-///   in the log per outcome (no effect on delivery or the response — the outcome of the reply message itself was already reported as a failure row).
+/// ★Outcome of a reply-failure close attempt (spec §3 item 7-④, ADR-0118)★. The three other than `Failed` are all **no-ops**; the caller
+///   differs only in the log
+/// (no effect on delivery or the response — the reply message itself was already reported as a failure row).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyFailOutcome {
     /// Closed the contract with the `reply_failed` terminal (removed from the open list, deadline sweep and 512 count; history remains).
@@ -339,13 +293,14 @@ pub enum ReplyFailOutcome {
 pub struct RequesterCleanup {
     /// Contract keys `(request_id, recipient_id)` closed as `reply_failed`.
     pub failed: Vec<(String, PeerId)>,
-    /// Number of contracts skipped because of a guard (provisional / marked for retirement) — they do not re-fire (one shot at deletion time, spec §5).
+    /// Number of contracts skipped because of a guard (provisional / marked for retirement) — they do not re-fire (one shot at deletion
+    ///   time, spec §5).
     pub guard_held: usize,
 }
 
-/// ★Why a typed error (load-bearing)★: the old `transition` returned only a `bool` (success/nonexistent) and **silently performed
-///   illegal transitions** (allowing reverts and skip-aheads like `Expired → Delivered`). That pollutes the ledger meaning
-///   "state-transition time = reply/send time". Now an illegal transition is rejected by type so the upper layer notices the bug at once (spec §5).
+/// ★Typed error (load-bearing)★: the old `transition` returned a `bool` and silently performed illegal transitions (reverts, `Expired →
+///   Delivered`), polluting "transition time = reply/send time";
+/// now an illegal transition is rejected by type so the upper layer notices at once (spec §5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransitionError {
     /// No (msg_id, to) record — evicted or nonexistent.
@@ -356,16 +311,11 @@ pub enum TransitionError {
     },
 }
 
-/// ★One contract **marked for retirement** under cap pressure (round-2 review F1 · user decision 2026-07-27)★ — the material from which the caller
-/// writes an instrumentation log **outside the lock** (no silent disappearance).
-///
-/// ★When it arises★: unreplied contracts have hit `MAX_OPEN_REQUESTS`, a new request came in, and the tracking list has
-///   a **retirable** contract (= one with no remaining notice promise to the sender). The oldest of those gives up its
-///   place — the same pattern as the mailbox and notice lane "retiring the oldest" at the cap.
-///
-/// ★It holds values only (it does not carry the original entry)★: the victim never left the list, so there is no state
-///   to revert — rollback only has to clear that entry's mark. So this struct does nothing beyond carrying
-///   "what was about to retire" in a human-readable way.
+/// ★One contract **marked for retirement** under cap pressure (round-2 review F1)★ — material for the caller's out-of-lock instrumentation
+///   log (no silent disappearance).
+/// ★Arises★: unreplied contracts hit `MAX_OPEN_REQUESTS`, a new request came, and a **retirable** contract exists (no remaining notice
+///   promise to the sender); the oldest gives up its place
+/// (same pattern as mailbox/notice lane). ★Holds values only★: the victim never left the list, so rollback only clears its mark.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetiredContract {
     pub request_id: String,
@@ -376,19 +326,17 @@ pub struct RetiredContract {
     pub age: Duration,
 }
 
-/// ★Reservation liveness token (R1 — replaces the time threshold with a **liveness decision**)★. The strong side is held by the `service::Reservation` guard,
-/// and the ledger sees only the weak side (`Weak`). While the guard is alive upgrade succeeds, and when it is destroyed without settlement it fails.
-///
-/// ★Why liveness, not time (load-bearing — the failure mode this design removes)★: a reservation lives through "decide under lock → inject outside lock
-///   → settle under lock". That **injection is unbounded** — a child's stdin can block
-///   forever under backpressure (see agent `stdio.rs`). So any constant like "over N seconds means abandoned" can be wrong,
-///   and the way it was wrong was the worst: if the sweep reclaims a reservation that is **still working**, the later injection succeeds
-///   and even when `commit` runs the contract is already gone → a `type="request"` envelope was delivered but there is no contract (the sender's
-///   `awaiting_their_reply` is 0 · the recipient's `reply_owed_by_me` is 0 · the deadline notice never comes · a legitimate later reply is
-///   `NoMatch`, so the history row stays `Delivered` forever = the audit record lies "no answer"). The liveness decision removes that
-///   race itself **structurally** — while the owner is alive the sweep is not entitled to see that reservation.
-/// ★The threshold constant was deleted★: do not revive it (basis above = unbounded injection).
-// ADR-0108 (mark-and-sweep — reclaim criterion = liveness)
+/// ★Reservation liveness token (R1 — replaces the time threshold with a **liveness decision**)★. The strong side is held by the
+///   `service::Reservation` guard; the ledger sees only a `Weak`:
+/// upgrade succeeds while the guard lives and fails once it is destroyed unsettled.
+/// ★Why liveness, not time (load-bearing)★: a reservation spans "decide under lock → inject outside lock → settle under lock", and
+///   **injection is unbounded** (a child's stdin can block forever
+/// under backpressure — agent `stdio.rs`), so any "over N seconds means abandoned" constant can reclaim a **still-working** reservation:
+///   the later injection succeeds, `commit` finds the contract
+/// gone, and a `type="request"` envelope is delivered with no contract (`awaiting_their_reply` 0, `reply_owed_by_me` 0, no deadline
+///   notice, a later reply `NoMatch`, history `Delivered` forever).
+/// Liveness removes that race structurally. ★The threshold constant was deleted — do not revive it★ (unbounded injection).
+// ADR-0108
 #[derive(Debug)]
 pub struct ReservationLiveness(Arc<()>);
 
@@ -408,18 +356,16 @@ impl Default for ReservationLiveness {
     }
 }
 
-/// ★What the commit **actually did** (R2)★ — a fact, not a plan.
-///
-/// ★Why it is needed (load-bearing — instrumentation pollution)★: the old `commit_open` had no return value and the caller **assumed** "the planned
-///   retirement happened" and printed the instrumentation log. But a marked victim can vanish before commit (in the meantime
-///   it is closed by a reply, and if its history row is also pushed out of the ring, `purge_finished_without_history` cleans it up —
-///   a known residual noted in the `rollback_open` comment). Then a **retirement that did not happen** is reported, contaminating the axis that ADR-0108 decision 2 nailed down as the
-///   sole evidence of retirement (operators chase a phantom retirement).
+/// ★What the commit **actually did** (R2)★ — a fact, not a plan. ★Why (instrumentation pollution)★: `commit_open` used to return nothing
+///   and the caller assumed the planned retirement happened,
+/// but a marked victim can vanish before commit (closed by a reply and its history row pushed out → `purge_finished_without_history`;
+///   known residual in `rollback_open`), so a retirement that
+/// did not happen was reported, contaminating the sole evidence of retirement (ADR-0108 decision 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommitOutcome {
     /// Did it actually clear the provisional mark (= was that contract still in the list).
     pub confirmed: bool,
-    /// Did it **actually physically remove** the marked victim = did the retirement actually happen.
+    /// Did it **actually physically remove** the marked victim = did the retirement happen.
     pub retired: bool,
 }
 
@@ -427,31 +373,28 @@ pub struct CommitOutcome {
 pub enum OpenOutcome {
     Opened,
     /// Opened a new request (provisionally), and under cap pressure **marked the oldest retirable contract** for retirement.
-    ///
-    /// ★Caller obligation (round-5 mark-and-sweep · load-bearing)★: the mark is **provisional**. The caller must call exactly one of
-    ///   the two — ① `commit_open` on send acceptance (physically remove the marked victim + clear the provisional mark, and log
-    ///   instrumentation then) ② `rollback_open` on every other exit (bounce, panic) (clear the mark + remove the provisional contract).
-    ///   ★The structural guarantee owner of ② = the Drop of `service::Reservation` (RAII guard)★ (ADR-0108 decision 3). If that value is
-    ///   destroyed without settlement, a debug build blows up at once and a release build attempts the rollback with an error log — round 1's
-    ///   plain `Option<Option<_>>` **had nobody to catch a forgotten branch** (measured by the review prober).
+    /// ★Caller obligation (round-5, load-bearing)★: the mark is provisional — call exactly one of ① `commit_open` on acceptance (remove
+    ///   the victim + clear the mark; log instrumentation then)
+    /// ② `rollback_open` on every other exit (clear the mark + remove the provisional contract). ★Structural guarantee owner of ② = Drop
+    ///   of `service::Reservation` (RAII)★ (ADR-0108 decision 3):
+    /// unsettled → debug blows up, release attempts rollback with an error log (a plain `Option<Option<_>>` had nobody to catch a
+    ///   forgotten branch).
     OpenedAfterMarking(RetiredContract),
-    /// Rejected because the same request_id already exists in tracking (open or closed) — no-op. The id is a daemon-generated unique value, so
-    /// reuse is a non-scenario (finding 2 — lenient reopen caused a shadowing bug and was removed).
+    /// Rejected because the same request_id already exists in tracking (open or closed) — no-op. Ids are daemon-generated unique, so reuse
+    ///   is a non-scenario (a lenient reopen caused a shadowing bug).
     DuplicateId,
-    /// ★Open-contract cap (`MAX_OPEN_REQUESTS`) reached (C3 review fix 3)★ — no new contract is opened (no-op). The upper layer makes it
-    /// visible to the sender as a bounce (rejecting the new one instead of silently dropping an old contract — no silent loss).
+    /// ★Open-contract cap (`MAX_OPEN_REQUESTS`) reached (C3 review fix 3)★ — no contract opened (no-op); the upper layer shows a bounce
+    ///   rather than silently dropping an old contract.
     Full,
 }
 
-/// `drop_request` result — whether it was removed + **whether that contract was already in the notified state** (C3 review fix 5).
-///
-/// ★Why it returns notified too (load-bearing — observation)★: reclaiming on bounce (`drop_request`) means "the contract was never established",
-///   but if that entry was already `notified`, it means **the deadline-overrun notice had already gone out to the sender**
-///   (a notice cannot be recalled — it is a message already sent). This double outcome ("the notice went out and it was also bounced") is rare, but
-///   it is a state that must not be passed over silently, so the fact is returned along with it so the caller can log it.
+/// `drop_request` result — removed or not + **whether the contract was already `notified`** (C3 review fix 5). ★Why notified too★:
+///   reclaiming on bounce means "never established", but a `notified`
+/// entry means the overrun notice already went out (not recallable); "noticed and also bounced" is rare but must not pass silently, so the
+///   caller can log it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropOutcome {
-    /// Removed the entry. `notified` = was the timeout notice already out at removal time.
+    /// Removed the entry. `notified` = was the timeout notice already out at removal.
     Removed { notified: bool },
     /// No such id in tracking (idempotent — no-op).
     NotFound,
@@ -460,36 +403,32 @@ pub enum DropOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DueTimeout {
     pub request_id: String,
-    /// Name of the sender who will receive the notice (display name **at send time** — it may have been renamed since).
+    /// Name of the sender who will receive the notice (display name **at send time** — may have been renamed since).
     pub sender: String,
-    /// ★Sender id for notice delivery (C3 review fix 2)★ — the upper layer uses it as the queue key under which to entrust the notice + the flush doorbell
-    ///   target (`RequestEntry.sender_id` comment).
+    /// ★Sender id for notice delivery (C3 review fix 2)★ — queue key for the notice + flush doorbell target (`RequestEntry.sender_id`).
     pub sender_id: PeerId,
     /// Recipient name (**at send time** — for the notice body).
     pub recipient: String,
-    /// The recipient axis of the contract key — the re-check 「did it close in the meantime」 just before notifying finds the contract by this key.
+    /// The recipient axis of the contract key — the re-check "did it close in the meantime" just before notifying finds the contract by it.
     pub recipient_id: PeerId,
-    /// ★The **original spelling** of the exceeded deadline (C3 review fix 6 — for the notice text)★: the spec §1 notice template exposes
-    ///   `deadline ({reply_by})` as is, so the spelling the sender wrote (`"60m"`) is carried **as is**.
+    /// ★Original spelling of the exceeded deadline (C3 review fix 6)★: the spec §1 notice template exposes `deadline ({reply_by})` as
+    ///   written (`"60m"`).
     pub reply_by_raw: String,
 }
 
-/// ★Lookup view of one unreplied request (S18 D — `eg_messages` no-argument "my pending")★.
-///
-/// ★Why `RequestEntry` is not exposed directly★: a tracking entry holds the ledger's **internal state** (closed/notified flags,
-///   sender_id and other delivery-wiring fields) — exposing it as is would stick the lookup surface to the internal representation, and it would set
-///   hard together with it at v2 persistence. Only the facts a lookup needs are copied out as values (pure, read-only).
-/// ★Why `notified` is carried★: a contract whose deadline has passed and whose notice went out to the sender is **still unreplied** (it
-///   closes when a reply arrives). Dropping it from the pending list would leave "something left to answer but not in the list", so it is included, and
-///   the fact that the notice went out is carried along so it can be told apart (the upper layer decides whether to show it).
+/// ★Lookup view of one unreplied request (`eg_messages` no-argument "my pending")★. ★`RequestEntry` is not exposed★: it holds internal
+///   state (closed/notified flags, sender_id wiring) and
+/// would tie the lookup surface to it (and to v2 persistence); only needed facts are copied. ★`notified` is carried★: an overdue, notified
+///   contract is still unreplied (closes on reply);
+/// dropping it would leave "something to answer but not in the list", so it is listed with the notice fact so the upper layer can tell it apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenRequestView {
     pub request_id: String,
     pub sender: String,
-    /// The request sender's PeerId — the axis a pending lookup uses to tell "requests I made" apart **by id, not by name** (review B1).
+    /// The request sender's PeerId — a pending lookup tells "requests I made" apart **by id, not name** (review B1).
     pub sender_id: PeerId,
     pub recipient: String,
-    /// The axis a pending lookup uses to tell apart 「the obligation I owe an answer」 (ADR-0309 — not told apart by name).
+    /// How a pending lookup tells apart "the obligation I owe an answer" (ADR-0309 — by id, not name).
     pub recipient_id: PeerId,
     pub reply_by_raw: Option<String>,
     pub created_at: Instant,
@@ -501,9 +440,8 @@ pub struct Ledger {
     history: VecDeque<MessageRecord>,
     requests: Vec<RequestEntry>,
     capacity: usize,
-    /// ★Has an evict happened even once (D review B2 — lookup honesty)★.
-    /// ★Why not "exactly how many were cut"★: how many rows of which msg_id disappeared is already discarded data and
-    ///   cannot be reconstructed. Without inventing accuracy that is not there, it honestly conveys **only the fact that "it may have been truncated"**.
+    /// ★Has an evict happened even once (D review B2 — lookup honesty)★. Not "how many were cut": that data is gone, so it honestly says
+    ///   only "it may have been truncated".
     // review B2
     evicted_any: bool,
 }
@@ -519,26 +457,24 @@ impl Ledger {
         Self::default()
     }
 
-    /// Capacity-injected — unit tests verify the evict boundary quickly with a small capacity (consistent with the purity principle).
+    /// Capacity-injected — unit tests verify the evict boundary with a small capacity (purity principle).
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             history: VecDeque::new(),
             requests: Vec::new(),
-            // capacity 0 is meaningless (always evicts at once) — corrected to a minimum of 1 (defensive).
+            // capacity 0 would always evict at once — raised to 1 (defensive).
             capacity: capacity.max(1),
             evicted_any: false,
         }
     }
 
-    /// ★Initial state as a parameter★: a single/group send starts as `Pending` (waiting for injection) or `Delivered` (immediate-injection fallback),
-    ///   and a dead group member starts as `Skipped`, so the caller decides the initial state (spec §4·§5).
-    /// ★evict = front (the oldest) + clean up **only contracts closed by a reply** together (narrowed by C3 fix 3 → D review B3)★: it is a ring buffer, so
-    ///   when capacity is exceeded the oldest history is discarded first. At that time the request tracking entries of the same msg_id are dropped together
-    ///   **only if closed by a reply** (dangling cleanup + bound). ★An unreplied contract survives evict whether notified or not★ —
-    ///   previously notified ones were dropped together, so after the history was pushed out first, a contract past its deadline **evaporated
-    ///   from the pending list entirely** (review B3 — sequence in the `RequestEntry::is_live` comment). The source of truth of a contract is tracking, not history
-    ///   (ReplyOutcome comment), so history capacity must not kill a contract. The bound for unreplied contracts is given separately by `MAX_OPEN_REQUESTS`
-    ///   (`Full` of open_request).
+    /// ★Initial state is a parameter★: a single/group send starts `Pending` or `Delivered` (immediate-injection fallback), a dead group
+    ///   member `Skipped` (spec §4·§5).
+    /// ★evict = front (oldest) + clean up **only reply-closed contracts** of the same msg_id (C3 fix 3 → D review B3)★: dangling cleanup +
+    ///   bound. ★An unreplied contract survives evict, notified or not★ —
+    /// dropping notified ones let a past-deadline contract evaporate from the pending list (sequence: `RequestEntry::is_live`). The
+    ///   contract's source of truth is tracking, not history
+    /// (ReplyOutcome), so history capacity must not kill it; the unreplied bound is `MAX_OPEN_REQUESTS` (`Full` of open_request).
     /// ★Parties = (name at send time, id) pair★: `MessageRecord` is the source of truth for the field meanings.
     #[allow(clippy::too_many_arguments)]
     pub fn record(
@@ -555,8 +491,8 @@ impl Ledger {
         self.record_with_expected(msg_id, from, from_id, to, to_id, body, status, now, 1);
     }
 
-    /// `record` + **expected delivery record count** (round-2 review F3). A group fan-out records in two phases (plan lock / per-member section),
-    /// so both places must pass the same N.
+    /// `record` + **expected delivery record count** (round-2 review F3). A group fan-out records in two phases (plan lock / per-member
+    ///   section), so both must pass the same N.
     #[allow(clippy::too_many_arguments)]
     pub fn record_with_expected(
         &mut self,
@@ -580,8 +516,7 @@ impl Ledger {
             status,
             created_at: now,
             transitioned_at: now,
-            // 0 is meaningless (every send has at least 1 row) — defensively raised to 1 so that the `rows < expected` decision
-            //   does not fall into a contradictory state like "there are rows but expected is 0".
+            // 0 is meaningless (every send has ≥1 row) — raised to 1 so `rows < expected` cannot be contradictory ("rows exist but expected 0").
             expected_rows: expected_rows.max(1),
             fail_code: None,
         });
@@ -592,43 +527,39 @@ impl Ledger {
             }
         }
         if evicted_now {
-            // Lookup honesty flag (B2) — once set it never goes back down (discarded data does not come back).
+            // Lookup honesty flag (B2) — once set never lowered (discarded data does not return).
             self.evicted_any = true;
             self.purge_finished_without_history();
         }
     }
 
-    /// ★Removes tracking entries of **closed** (replied) contracts that have no history to point at (round-final fix 1 · load-bearing)★.
-    ///
-    /// ★What it prevents = zombie tracking entries★: the normal cleanup trigger for a closed entry is "when the same-msg_id history is evicted" (`record`).
-    ///   But once fix 3 made **unreplied contracts survive evict**, a contract whose history was pushed out first
-    ///   is in the state where **the evict event that would clean it up has already passed** by the time it closes later. That entry has `is_live()` false, so
-    ///   it is not counted in `MAX_OPEN_REQUESTS` either, and it piles up forever **with no limit applied** (the bounded guarantee of in-memory v1
-    ///   collapses). So at the moment of closing and at evict, we check whether history exists and delete orphans at once.
-    /// ★An unreplied contract is never touched (scope narrowed by D review B3)★: previously **notified** (deadline-overrun) contracts were also seen as "finished"
-    ///   and deleted together, but a notice is not a reply — that deletion made the obligation evaporate from the pending lookup
-    ///   (the 4-step sequence in the `RequestEntry::is_live` comment). Now `is_live() == !closed`, so notified ones are not caught
-    ///   here, and their bound is given by `MAX_OPEN_REQUESTS`.
-    // review B3
-    // ADR-0108 (provisional purge exemption — the lifetime of an unsettled entry belongs to its guard)
+    /// ★Removes tracking entries of **closed** (replied) contracts that have no history to point at (round-final fix 1, load-bearing)★.
+    ///   ★Prevents zombie entries★: a closed entry is normally
+    /// cleaned when same-msg_id history is evicted (`record`), but since unreplied contracts survive evict, a contract whose history was
+    ///   pushed out first has already missed that event when it closes;
+    /// it has `is_live()` false, so it is outside `MAX_OPEN_REQUESTS` too and would pile up unbounded. So at close and at evict we check
+    ///   for history and delete orphans.
+    /// ★Unreplied contracts are never touched (D review B3)★: notified ones are not "finished" (a notice is not a reply — deleting them
+    ///   evaporated the obligation, see `RequestEntry::is_live`);
+    /// `is_live() == !closed`, and their bound is `MAX_OPEN_REQUESTS`.
+    // review B3, ADR-0108
     fn purge_finished_without_history(&mut self) {
         if self.requests.iter().all(|r| r.is_live() || r.provisional) {
             return;
         }
         let live_ids: HashSet<&str> = self.history.iter().map(|r| r.msg_id.as_str()).collect();
-        // ★A provisional contract is **never deleted here** (round-6 I1 · load-bearing)★: in the provisional window there may be no history
-        //   row yet (contract reservation is **before** dispatch, history recording is **inside** dispatch). If a reply arrives in that window
-        //   and closes the contract, the condition "finished and no history either" holds and this cleanup deleted the whole entry —
-        //   then the reserved slot evaporates and the cap breach I1 was meant to stop comes back **through another door**, and the guard's
-        //   rollback gets `NotFound` and settles nothing. The lifetime of an unconfirmed entry is **owned by the guard**.
+        // ★A provisional contract is **never deleted here** (round-6 I1, load-bearing)★: reservation is **before** dispatch and history
+        //   recording **inside** it, so in the provisional window there may be
+        //   no history row; a reply closing the contract then would match "finished, no history" and delete the entry — the reserved slot
+        //   evaporates (I1's cap breach through another door) and the
+        //   guard's rollback gets `NotFound`. An unconfirmed entry's lifetime is owned by the guard.
         self.requests
             .retain(|r| r.is_live() || r.provisional || live_ids.contains(r.request_id.as_str()));
     }
 
-    /// ★Why pick by (msg_id, recipient id)★: a group broadcast has N per-recipient records under one msg_id, so msg_id alone cannot
-    ///   identify which delivery — picking the recipient together transitions exactly one record (1:N accounting, spec §4).
-    ///   The recipient axis is the id, not the name, so the same row is picked even when the name at send time and the current name differ
-    ///   (ADR-0309).
+    /// ★Pick by (msg_id, recipient id)★: a group broadcast has N records per msg_id, so the recipient is needed to transition exactly one
+    ///   (1:N accounting, spec §4); the axis is the id, so a renamed
+    /// recipient still matches (ADR-0309).
     // ADR-0309
     pub fn transition(
         &mut self,
@@ -655,12 +586,10 @@ impl Ledger {
         Ok(())
     }
 
-    /// ★Deletion-cleanup-only close (`Pending → Failed` + reason code — spec §5 deletion cleanup · §6 transition graph amendment)★.
-    ///
-    /// ★Why the **reason code is a required argument** (load-bearing)★: the type prevents the state where a lookup sees a `failed` with no code and
-    ///   cannot answer "why did it fail".
-    /// ★`NotFound` (the record was pushed out of the ring) is logged at debug by the caller **outside the lock** — no silent loss.
-    // ADR-0116 (decisions 3/4 — deletion cleanup)
+    /// ★Deletion-cleanup-only close (`Pending → Failed` + reason code — spec §5·§6)★. ★The reason code is a required argument★ so a lookup
+    ///   never sees a codeless `failed`.
+    /// ★`NotFound` (record pushed out of the ring)★ is logged at debug by the caller outside the lock — no silent loss.
+    // ADR-0116
     pub fn fail_pending(
         &mut self,
         msg_id: &str,
@@ -687,40 +616,26 @@ impl Ledger {
         Ok(())
     }
 
-    /// Request open — starts `awaiting_reply` tracking (spec §3 step 2). **Contract key = `(request_id, recipient_id)`**
-    /// (ADR-0309 — `recipient` is only a name snapshot at send time, not a key).
-    ///
-    /// ★Multi-recipient request = N independent contracts (ADR-0111 decision 5 · load-bearing)★: the message id is common to the N contracts
-    ///   (the ledger keeps the 1 message : N delivery records principle) and **the contract splits by who the replier is**. So this function is called with the same
-    ///   `request_id` **once per recipient**.
-    ///   No contract is opened for a recipient that could not be delivered to (entry bounce · `MAILBOX_FULL` · `REQUEST_CAPACITY`).
-    ///
-    /// ★reply_by clock = from send (spec §3·§5 · ADR-0104)★: absolute deadline = `created_at(now) + reply_by`. It is a contract from the sender's viewpoint,
-    ///   independent of receive delay, so it is fixed on now (the send time).
-    /// ★Duplicate **key** rejection — rejected if it exists, open or closed (load-bearing · finding 2)★: if **even one** of the same
-    ///   `(request_id, recipient_id)` exists in tracking (open OR closed), it is rejected with `DuplicateId`
-    ///   (no-op). The message id is a **daemon-generated unique value** and recipients are already deduplicated at the send resolution step
-    ///   (spec §5 resolution order ④), so reuse of this combination is a non-scenario. ★A parked recipient also opens a contract (spec §3
-    ///   item 2)★ — whether busy or **sleeping** (ADR-0116 decision 1), acceptance is acceptance, so the reply obligation holds and the deadline sweep
-    ///   fires normally.
-    ///   The old leniency "a closed id may be reopened"
-    ///   left two entries at once and caused (a) a reply meeting the earlier closed entry first and misfiring `AlreadyClosed`, (b) a shadowing bug where same-id history
-    ///   evict dropped the reopened tracking.
-    /// ★At cap = **let the oldest retirable contract go and accept**(user decision 2026-07-27 · round-2 F1)★.
-    ///   A full bounce (`Full`) happens only when there is nothing at all to retire.
-    ///
-    /// ★Why it changed (the hole B3 left)★: once B3 made "notified unreplied contracts" stay in tracking, that kind has
-    ///   **neither TTL nor cancel** — if the reply never comes it holds a slot forever. If 512 fill up that way, **every** new request is blocked with `REQUEST_CAPACITY`
-    ///   until the daemon restarts (global feature stop). The pressure is relieved with the same pattern as the mailbox and
-    ///   notice lane "retiring the oldest" at the cap.
-    /// ★Retirable (evictable) = a contract with **no remaining notice promise** to the sender★:
-    ///     (a) `notified == true` — the deadline-overrun notice already went out (the sender was told the outcome), or
-    ///     (b) `reply_by == None` — there was no deadline to begin with, so no notice was ever promised.
-    ///   ★Never retired★: a contract that still has a deadline but has not been notified — that contract is a **debt the daemon owes the sender**
-    ///   (the notice on deadline overrun). Deleting it would be a silent breach where the promised notice never goes out.
-    /// ★History ring rows are not touched★ (the ring owns its own lifetime — retirement is a matter of **contract tracking** only).
-    // round-2 review F1 / user decision 2026-07-27
-    // ADR-0309 (contract key = recipient id)
+    /// Request open — starts `awaiting_reply` tracking (spec §3 step 2). **Contract key = `(request_id, recipient_id)`** (ADR-0309 —
+    ///   `recipient` is only a send-time name snapshot).
+    /// ★Multi-recipient request = N independent contracts (ADR-0111 decision 5, load-bearing)★: the message id is common and the contract
+    ///   splits by replier, so this is called with the same
+    /// `request_id` **once per recipient**; none is opened for an undeliverable recipient (entry bounce, `MAILBOX_FULL`, `REQUEST_CAPACITY`).
+    /// ★reply_by clock = from send (spec §3·§5, ADR-0104)★: absolute deadline = `created_at(now) + reply_by`, independent of receive delay.
+    /// ★Duplicate key rejection, open or closed (finding 2)★: an existing `(request_id, recipient_id)` is rejected with `DuplicateId`
+    ///   (no-op); ids are daemon-unique and recipients are deduplicated at resolution
+    /// (spec §5 ④), so reuse is a non-scenario. The old leniency "reopen a closed id" left two entries (a reply met the earlier closed one
+    ///   first → `AlreadyClosed` misfire; same-id history evict dropped
+    /// the reopened tracking). ★A parked recipient also opens a contract (spec §3 item 2)★ — busy or **sleeping** (ADR-0116 decision 1):
+    ///   acceptance is acceptance, the obligation and deadline sweep hold.
+    /// ★At cap = let the oldest retirable contract go and accept (round-2 F1)★; `Full` only when nothing is retirable. ★Why (B3's hole)★:
+    ///   notified unreplied contracts have neither TTL nor cancel, so if
+    /// 512 fill up **every** new request is blocked with `REQUEST_CAPACITY` until restart; relieved like the mailbox/notice lane "retire
+    ///   the oldest".
+    /// ★Retirable = no remaining notice promise★: (a) `notified == true` or (b) `reply_by == None`. ★Never retired★: a contract with a
+    ///   deadline not yet notified — a **debt the daemon owes the sender**;
+    /// deleting it silently breaks the promised notice. ★History ring rows are not touched★ (retirement concerns contract tracking only).
+    // round-2 review F1, ADR-0309
     #[allow(clippy::too_many_arguments)]
     pub fn open_request(
         &mut self,
@@ -741,13 +656,11 @@ impl Ledger {
         }
         let mut retired = None;
         if self.occupied_slots() >= MAX_OPEN_REQUESTS {
-            // ★Two kinds removed from the candidates (round-5 mark-and-sweep · load-bearing)★:
-            //   ① a contract already marked for retirement (`pending_retirement`) — if two sends aim at the same victim, one commit
-            //      deletes the other's victim first, and the other's rollback/commit points at thin air (the count also goes off).
-            //   ② a **provisional contract** (`provisional`) — the failure mode in that field's comment.
-            // ADR-0108 (cap retirement — pick the oldest among the retirable)
-            // ★"Oldest" is by `created_at`★ — it does not depend on list position. On a tie `min_by_key` gives the
-            //   first element, so append order remains as the tie-break.
+            // ★Two kinds removed from the candidates (round-5, load-bearing)★: ① already marked (`pending_retirement`) — two sends aiming
+            //   at one victim would have one commit delete the other's victim,
+            //   leaving its rollback/commit pointing at thin air (and the count off) ② **provisional** (`provisional`) — see that field.
+            // ADR-0108
+            // ★"Oldest" is by `created_at`★, not list position; `min_by_key` returns the first on a tie, so append order is the tie-break.
             let victim = self
                 .requests
                 .iter_mut()
@@ -766,8 +679,8 @@ impl Ledger {
                         age: now.saturating_duration_since(v.created_at),
                     });
                 }
-                // ★Getting `Full` when only provisional contracts remain is also an honest answer★: at that moment the cap really is full,
-                //   and once the racing sender finishes its commit/rollback a slot opens soon.
+                // ★`Full` with only provisional contracts left is also honest★: the cap really is full, and a slot opens soon when the
+                //   racing sender commits/rolls back.
                 None => return OpenOutcome::Full,
             }
         }
@@ -795,11 +708,9 @@ impl Ledger {
         }
     }
 
-    /// ★Attach the **owner liveness token** to the provisional reservation just opened (R1)★ — it must be called in the **same lock section** as `open_request`
-    /// (if the sweep slips in between, it reads an entry before the guard is attached as abandoned —
-    /// `RequestEntry::reservation_token` comment).
-    ///
-    /// If there is no entry it is a no-op (not in the normal flow — it is an entry just created).
+    /// ★Attach the owner liveness token to the provisional reservation just opened (R1)★ — call in the **same lock section** as
+    ///   `open_request` (a sweep in between would read the entry
+    /// as abandoned — `RequestEntry::reservation_token`). No-op if the entry is missing (not in normal flow).
     // R1
     pub fn attach_reservation_liveness(
         &mut self,
@@ -816,13 +727,11 @@ impl Ledger {
         }
     }
 
-    /// ★Reservation confirm (commit) — **physically remove** the marked victim and clear the provisional mark (round-5 mark-and-sweep)★.
-    ///
-    /// ★Even if the victim was closed by a reply in the meantime, it is simply removed★: `replied` is a terminal with nothing more to look at, and that
-    ///   fact is already in the history record as `Replied` (a tracking entry is only for accounting).
-    /// ★If the victim is not found, no-op★: not in the normal flow (a marked entry stays in the list until commit/rollback).
-    /// ★Return = **what was actually done** (R2)★ — the caller must not assume the planned retirement happened but look at this value
-    /// (the instrumentation pollution rationale in the `CommitOutcome` header).
+    /// ★Reservation confirm (commit) — physically remove the marked victim and clear the provisional mark (round-5)★. A victim closed by a
+    ///   reply meanwhile is simply removed (`replied` is terminal and
+    /// history already holds `Replied`; tracking is accounting). Victim not found → no-op (not in normal flow). ★Return = what was
+    ///   actually done (R2)★: callers must not assume the planned retirement
+    /// happened (`CommitOutcome` header).
     // round-5 mark-and-sweep
     pub fn commit_open(
         &mut self,
@@ -851,33 +760,28 @@ impl Ledger {
             self.requests.retain(|r| {
                 !(r.request_id == id && r.recipient_id == recipient_id && r.pending_retirement)
             });
-            // ★Decide **before** purge (R2)★: purge also deletes entries, so comparing lengths afterwards would mix "what I retired"
-            //   with "what vanished by zombie cleanup".
+            // ★Decide **before** purge (R2)★: purge also deletes entries, so comparing lengths afterwards would mix "what I retired" with
+            //   "what vanished by zombie cleanup".
             out.retired = self.requests.len() < before;
             self.purge_finished_without_history();
         }
         out
     }
 
-    /// ★Reservation cancel (rollback) — clear only the mark and remove the provisional contract (round-5 mark-and-sweep)★. Return = the result of removing the provisional
-    /// contract (the caller logs outside the lock).
-    ///
-    /// ★The point of this design is that there is no state to revert★: the victim never left the list, so clearing a single mark bit
-    ///   gives the **state where nothing happened** — the old design's re-insert (restore position/age) machinery is gone entirely, and with it
-    ///   the failure mode of the "we restored it and someone had already used the slot" kind.
-    /// ★Even if the victim was closed by a reply in the meantime, only the mark is cleared★: the close stays as is (it was a legitimate reply) —
-    ///   no ghost reopening, no late false deadline notice (`due_timeouts` skips `closed`).
-    /// ★Both in one lock section★: the caller finishes with this single call, so there is no window in which the contract count looks over the cap from outside
-    ///   (the root of the 513 drift the old split-lock wiring produced).
-    /// ★Known residual — id ABA (round-6 review note · no machinery added)★: if a **retirement-marked** victim is closed by a reply in the meantime
-    ///   and its own history row is also pushed out of the ring, `purge_finished_without_history` may delete that entry
-    ///   (the provisional-contract side is **excluded** from that cleanup, so this residual does not apply to it — see that function's comment).
-    ///   Then that id becomes issuable again, and if before the guard settles a new contract is born with **the same random id**
-    ///   and happens to also get a retirement mark, the mark release here clears the mark of that **new contract** instead. The probability is
-    ///   the product of drawing the same value in a microsecond-to-millisecond window in a 36^8 (2.8×10^12) space and that being picked as a victim again,
-    ///   and the damage is bounded to one retirement cancelled (cap pressure released one time less — the next send marks again). To prevent it
-    ///   the id reservation set would have to be revived (machinery deleted in round-4), and we judged that complexity not worth this probability —
-    ///   **it is a residual left with a price put on it, not something missed**.
+    /// ★Reservation cancel (rollback) — clear only the mark and remove the provisional contract (round-5)★. Return = the result of
+    ///   removing the provisional contract (the caller logs outside the lock).
+    /// ★No state to revert★: the victim never left the list, so clearing one mark bit gives "nothing happened" — the old re-insert
+    ///   (restore position/age) machinery and its "restored but someone used the
+    /// slot" failure mode are gone. A victim closed by a reply meanwhile keeps its close (legitimate reply; no ghost reopening, no late
+    ///   false notice — `due_timeouts` skips `closed`).
+    /// ★Both in one lock section★: no window where the count looks over the cap (root of the old split-lock 513 drift).
+    /// ★Known residual — id ABA (round-6 note, no machinery added)★: a retirement-marked victim closed by a reply whose history row is
+    ///   also pushed out may be deleted by
+    /// `purge_finished_without_history` (provisional contracts are excluded from it); if before the guard settles a new contract is born
+    ///   with the **same random id** (36^8 space, microsecond-millisecond
+    /// window) and also gets marked, the release here clears the new contract's mark. Damage = one retirement cancelled (next send marks
+    ///   again); preventing it needs the id reservation set (deleted in round-4) —
+    /// judged not worth that probability: **a residual with a price, not a miss**.
     // round-5 mark-and-sweep
     pub fn rollback_open(
         &mut self,
@@ -894,56 +798,50 @@ impl Ledger {
         provisional.map(|(id, recipient_id)| self.drop_request(id, recipient_id))
     }
 
-    /// ★Why every send looks at this (C3 review fix 12 · load-bearing)★: previously only **request sends** caught id collisions
-    ///   (DuplicateId of `open_request`). But the id is both the correlation key of history records and the reply matching key, so
-    ///   if a notify/reply overlaps an existing id, (a) `records_for` and `transition` pick someone else's record and (b) the observation record
-    ///   smears two messages into one id — equally harmful even if it is not a request. So the same check is made at the reservation point regardless of
-    ///   kind.
-    /// ★Cost (basis for the choice)★: a linear scan of the ring buffer (≤ HISTORY_CAPACITY) + a linear scan of tracking. A separate id set would need
-    ///   two data structures synchronized on every evict/close/remove (mismatch = a silent false positive), and the message rate is at
-    ///   human-conversation level so scan cost is meaningless — we chose simplicity (revisit with an index at v2 persistence).
+    /// ★Why every send looks at this (C3 review fix 12, load-bearing)★: only request sends caught id collisions (`open_request`
+    ///   DuplicateId), but the id is also the history correlation key and reply matching
+    /// key — a notify/reply overlapping an existing id makes `records_for`/`transition` pick someone else's record and the observation
+    ///   record smear two messages, so the check is made at the reservation
+    /// point for every kind. ★Cost★: a linear scan of the ring (≤ HISTORY_CAPACITY) + tracking; a separate id set would need two
+    ///   structures synced on every evict/close/remove (mismatch = silent false
+    /// positive) and the message rate is human-level — simplicity chosen (index at v2 persistence).
     pub fn msg_id_in_use(&self, msg_id: &str) -> bool {
         self.history.iter().any(|r| r.msg_id == msg_id)
-            // ★Both retirement-marked contracts and provisional contracts **are right here**(round-5 mark-and-sweep)★ —
-            //   since physical removal was dropped, the ordinary tracking lookup is enough without a separate reservation set (the old `reserved_ids`).
+            // ★Retirement-marked and provisional contracts are right here (round-5)★ — physical removal was dropped, so the ordinary
+            //   tracking lookup suffices (no separate `reserved_ids`).
             || self.requests.iter().any(|r| r.request_id == msg_id)
     }
 
-    /// ★Use (C3 review fix 5 — narrowing the timeout↔reply race)★: after collecting with `due_timeouts`, the upper layer re-checks just before
-    ///   parking the notice — if a reply arrived in the meantime and closed the contract, no "no reply" notice is
-    ///   sent. It is intentional that a nonexistent id gives false: when tracking is gone due to evict etc., the timeout
-    ///   really did happen, so there is no reason to block the notice.
-    /// ★Residual (interaction with fix 1 — stated honestly)★: a contract whose history was already evicted is **removed from tracking at the moment
-    ///   it closes** (zombie prevention), so this lookup is false after that — i.e. the "reply arrived after computing" cancel does not
-    ///   catch that narrow case and the notice can go out once more. It is a path that holds only in a microsecond window after the history capacity (HISTORY_CAPACITY) has been pushed out, so
-    ///   here we chose the bound (zombie removal).
+    /// ★Use (C3 review fix 5 — narrowing the timeout↔reply race)★: the upper layer re-checks just before parking the notice — if a reply
+    ///   closed the contract meanwhile, no "no reply" notice. A nonexistent
+    /// id gives false on purpose: tracking gone (evict etc.) means the timeout did happen. ★Residual (interaction with fix 1)★: a contract
+    ///   whose history was already evicted is removed from tracking when it closes
+    /// (zombie prevention), so this is false afterwards and the notice can go out once more — a microsecond window after HISTORY_CAPACITY
+    ///   was pushed out; the zombie-removal bound was chosen.
     pub fn is_request_closed(&self, request_id: &str, recipient_id: PeerId) -> bool {
         self.requests
             .iter()
             .any(|r| r.request_id == request_id && r.recipient_id == recipient_id && r.closed)
     }
 
-    /// ★Marks (retirement-marked · provisional) do not obscure matching (round-5 mark-and-sweep · load-bearing)★: the two marks are
-    ///   **for accounting**, not about existence. Here only `!closed` is looked at, so ① a legitimate reply to a contract marked for retirement
-    ///   also closes normally (in the old physical-removal design this missed with `NoMatch` — the sender got an answer but
-    ///   the contract did not close and a false deadline notice could even go out later) ② a fast reply to a still-unconfirmed provisional contract
-    ///   also closes. Neither the later commit (removal) nor rollback (mark clear) reverses that fact.
-    /// ★The contract is picked by the replier (ADR-0111 decision 5)★: under one `request_id` there can be
-    ///   **several** contracts (multi-recipient request), so `in_reply_to` alone cannot
-    ///   identify which contract to close. Spec §3 says "only **that replier's contract** closes (other recipients' contracts stay open — no
-    ///   reply-all)", so the matching key is `(request_id, replier id)`.
-    /// ★"Not my contract" = `NoMatch` = **delivery unchanged** (spec §3 item 7-②)★: an unknown id, an already closed contract, or
-    ///   a contract I do not have — in every case **only the contract side is a no-op** and the reply message itself is delivered normally. Having the reply
-    ///   vanish entirely would be worse.
-    // L1
-    // ADR-0309 (decision 7 — no name-fallback matching)
+    /// ★Marks (retirement-marked, provisional) do not obscure matching (round-5, load-bearing)★: they are for accounting, not existence;
+    ///   only `!closed` is looked at, so ① a legitimate reply to a
+    /// retirement-marked contract closes normally (physical removal made it `NoMatch`: answered but unclosed, possible false deadline
+    ///   notice) ② a fast reply to an unconfirmed provisional contract closes too;
+    /// later commit/rollback does not reverse it. ★Contract picked by the replier (ADR-0111 decision 5)★: one `request_id` can have
+    ///   several contracts (multi-recipient), so `in_reply_to` alone is not
+    /// enough; spec §3 closes only **that replier's contract** (no reply-all) → key `(request_id, replier id)`.
+    /// ★"Not my contract" = `NoMatch` = delivery unchanged (spec §3 item 7-②)★: unknown id, already closed, or a contract I do not have →
+    ///   only the contract side is a no-op; the reply message itself is delivered
+    /// (vanishing would be worse).
+    // L1, ADR-0309 (decision 7 — no name-fallback matching)
     pub fn close_on_reply(
         &mut self,
         in_reply_to: &str,
         replier_id: PeerId,
         now: Instant,
     ) -> ReplyOutcome {
-        // Closes the tracking entry (the source of truth). The history row is picked by the same key as the contract, `(msg_id, recipient id)` (ADR-0309).
+        // Closes the tracking entry (source of truth); the history row is picked by the same key `(msg_id, recipient id)` (ADR-0309).
         let matched = self.match_contract_for_replier(in_reply_to, replier_id);
         let recipient_id = match matched.map(|i| &mut self.requests[i]) {
             Some(r) if r.closed => return ReplyOutcome::AlreadyClosed,
@@ -965,15 +863,12 @@ impl Ledger {
         outcome
     }
 
-    /// ★The **single rule** for picking the replier's contract — `close_on_reply` and `fail_on_undeliverable_reply` use **the same
-    /// function** (load-bearing)★.
-    ///
-    /// ★Why bundle it into a function★: the two verbs are two outcomes of the same single reply (accepted → `replied` / unreachable confirmed →
-    ///   `reply_failed`). If the selection rules diverge, **the same reply points at different contracts**, and the contract the success path closed
-    ///   and the contract the failure path terminated come apart (a recurrence of the class A6 caught — then too the cause was "one rule written
-    ///   separately in two places").
-    /// ★Pick by id alone — never fall back to the name (ADR-0309 decision 7)★: a contract carries an id from the moment of opening even when addressed to a sleeping recipient.
-    ///   If name fallback were revived, same-name twins · another agent that newly took an old name would close someone else's contract.
+    /// ★The **single rule** for picking the replier's contract — `close_on_reply` and `fail_on_undeliverable_reply` share this function
+    ///   (load-bearing)★: they are two outcomes of one reply (accepted → `replied` /
+    /// unreachable confirmed → `reply_failed`); diverging selection rules would point the same reply at different contracts (the A6
+    ///   class). ★Pick by id alone — never fall back to the name (ADR-0309 decision 7)★:
+    /// a contract carries an id from opening even when addressed to a sleeper; name fallback would let same-name twins or a new holder of
+    ///   an old name close someone else's contract.
     // ADR-0309
     fn match_contract_for_replier(&self, in_reply_to: &str, replier_id: PeerId) -> Option<usize> {
         self.requests
@@ -981,22 +876,18 @@ impl Ledger {
             .position(|r| r.request_id == in_reply_to && r.recipient_id == replier_id)
     }
 
-    /// ★The reply is **confirmed unreachable**, so the contract is closed as failed (spec §3 item 7-④ · ADR-0116 decision 2 · ADR-0118)★ —
-    /// it is called only when the reply send row is `RECIPIENT_NOT_FOUND` (= the requester name is **in neither the roster nor the profiles**)
-    /// and in no other case.
-    ///
-    /// ★No other reply failure calls this verb (load-bearing)★: `MAILBOX_FULL` · `RECIPIENT_AMBIGUOUS`
-    ///   are **the environment at that moment**, so a retry can actually succeed in delivering — if the
-    ///   ledger then stayed "reply failed" forever it would be a lie (ADR-0118 decision 2). That kind is a **no-op** (the contract stays
-    ///   open), and the reason it is not a zombie is "once the deadline notice goes out it earns ADR-0108 retirement eligibility".
-    /// ★Guard first (ADR-0118 decision 3 — respecting the ADR-0108 decision 4 invariant)★: **contracts carrying a provisional (`provisional`) or retirement-marked
-    ///   (`pending_retirement`) mark are not touched** (`GuardHeld`). The lifetime of an unsettled entry is owned by that guard,
-    ///   so closing here would ① let the guard's commit/rollback revive an already terminated contract (ghost reopening) or
-    ///   ② let someone else terminate the marked victim, halving the cap exchange. A failed reply arriving in between is a no-op.
-    /// ★Delivery state is not touched (spec §6 axis distinction)★: `reply_failed` is a **contract-axis** terminal — the original request's
-    ///   delivery record stays at `delivered` (or `pending`). Transitioning history here would make the history
-    ///   "delivered, then turned back into failure" expressible.
-    // ADR-0116 (decision 2) / ADR-0118 (decisions 1·2·3)
+    /// ★The reply is **confirmed unreachable**, so the contract is closed as failed (spec §3 item 7-④, ADR-0116 decision 2, ADR-0118)★ —
+    ///   called only when the reply row is `RECIPIENT_NOT_FOUND`
+    /// (requester in neither roster nor profiles). ★No other reply failure calls it★: `MAILBOX_FULL`/`RECIPIENT_AMBIGUOUS` are the
+    ///   environment of that moment and a retry may deliver — a permanent "reply failed"
+    /// would be a lie (ADR-0118 decision 2); that kind is a no-op (contract stays open; not a zombie because the deadline notice grants
+    ///   ADR-0108 retirement eligibility).
+    /// ★Guard first (ADR-0118 decision 3, ADR-0108 decision 4)★: contracts with a `provisional` or `pending_retirement` mark are not
+    ///   touched (`GuardHeld`) — the guard owns their lifetime; closing here would
+    /// ① let the guard's commit/rollback revive a terminated contract ② let someone else terminate the marked victim, halving the cap exchange.
+    /// ★Delivery state untouched (spec §6)★: `reply_failed` is a contract-axis terminal; the request's delivery record stays `delivered`
+    ///   (or `pending`) — transitioning history would make "delivered, then failure" expressible.
+    // ADR-0116, ADR-0118
     pub fn fail_on_undeliverable_reply(
         &mut self,
         in_reply_to: &str,
@@ -1018,22 +909,19 @@ impl Ledger {
         ReplyFailOutcome::Failed
     }
 
-    /// ★Requester profile deletion cleanup — closes open contracts where that id is the **requester** as `reply_failed`★
-    /// (spec §5 deletion cleanup ② · ADR-0116 decision 3 · ADR-0309 decision 6).
-    ///
-    /// ★Target = the requester (`sender`) side only★: the place the reply would go is gone, so the outcome of that contract is settled. **Contracts where the replier
-    ///   (`recipient`) side was deleted are kept** — the existing path where the sender learns of no response through the deadline notice (spec §3 items 4~5)
-    ///   is alive, and closing that contract here would erase the fact "no answer was received".
-    /// ★Already closed contracts are not touched★: `replied` is **not reverted** (spec §3 item 7-④ "acceptance =
-    ///   complete" — even if a parked reply is later cleared as `RECIPIENT_DELETED`, the contract stays `replied`).
-    ///   The `!closed` filter guarantees that rule structurally.
-    /// ★Guard first (ADR-0118 decision 3)★: provisional and retirement-marked contracts are skipped and their count is returned along with it (there is **no** re-fire
-    ///   after settlement — deletion cleanup is a one shot at deletion time, and the outcome of that residual is TTL. spec §5).
-    /// ★Match by `sender_id` — do not look at the name (`sender`) (ADR-0309 decision 6)★: `sender` is the display name at send
-    ///   time, so picking by name would miss a contract opened under the pre-rename name and also close the contract of another agent with the same name. The trigger gate
-    ///   (that profile has no live session) is decided first by the caller with the same id
+    /// ★Requester profile deletion cleanup — closes open contracts where that id is the **requester** as `reply_failed`★ (spec §5 ②,
+    ///   ADR-0116 decision 3, ADR-0309 decision 6).
+    /// ★Requester (`sender`) side only★: the reply destination is gone, so the outcome is settled; **contracts whose replier (`recipient`)
+    ///   was deleted are kept** — the sender still learns of no response through the
+    /// deadline notice (spec §3 items 4~5), and closing would erase "no answer received". ★Closed contracts untouched★: `replied` is not
+    ///   reverted (spec §3 item 7-④ — even if a parked reply is later cleared as
+    /// `RECIPIENT_DELETED`); the `!closed` filter guarantees it. ★Guard first (ADR-0118 decision 3)★: provisional/marked contracts are
+    ///   skipped and counted (no re-fire after settlement — a one shot at deletion time;
+    /// the residue ends by TTL, spec §5). ★Match by `sender_id`, not the name (ADR-0309 decision 6)★: `sender` is the send-time display
+    ///   name, so by name a pre-rename contract is missed and a same-name agent's
+    /// contract closed; the trigger gate (no live session for that profile) is decided by the caller with the same id
     ///   (`service::handle_profile_deleted`).
-    // ADR-0116 (decision 3) / ADR-0118 (decision 3) / ADR-0309 (decision 6)
+    // ADR-0116, ADR-0118, ADR-0309
     pub fn fail_open_requests_from(&mut self, sender_id: PeerId) -> RequesterCleanup {
         let mut out = RequesterCleanup::default();
         for r in self.requests.iter_mut() {
@@ -1054,14 +942,11 @@ impl Ledger {
         out
     }
 
-    /// ★**Removes** an open request tracking entry **entirely** (C3 — when the send was bounced and the contract was never established)★.
-    ///
-    /// ★Why a separate exit rather than `close_on_reply` (load-bearing — bounded guarantee)★: closing (`closed=true`) is
-    ///   the **history** of "a reply came and the contract was fulfilled", so it stays in the tracking list. That leftover entry is dropped together when the same msg_id's
-    ///   **history record is evicted**, which keeps the bound (`record` comment). But a **bounced send**
-    ///   never had a history record to begin with (it was not even parked) — so with only closing there is no trigger to ever evict that entry,
-    ///   and the more bounces repeat, the tracking list grows without bound. A bounce is not "the contract was fulfilled" but "the contract was never
-    ///   established", so erasing it with no trace and leaving no history is also right semantically.
+    /// ★**Removes** an open request tracking entry entirely (C3 — send bounced, contract never established)★. ★Separate from
+    ///   `close_on_reply` (bounded guarantee)★: a closed entry stays and is dropped with its
+    /// same-msg_id history evict (`record`), but a bounced send never had a history record, so with closing alone nothing would ever evict
+    ///   it and repeated bounces would grow tracking without bound; "never
+    /// established" is also semantically a no-trace erase.
     pub fn drop_request(&mut self, request_id: &str, recipient_id: PeerId) -> DropOutcome {
         let Some(idx) = self
             .requests
@@ -1076,20 +961,17 @@ impl Ledger {
         }
     }
 
-    /// ★Reclaims **abandoned** reservations (F1 guarantee layer · R1 criterion replaced)★: rolls back whole the **provisional** contracts whose owner guard is gone
-    /// (remove the provisional contract + clear the victim mark that reservation attached). Returns the reclaimed contract keys.
-    ///
-    /// ★Why this is the **guarantee** (RAII Drop is not a guarantee)★: `Reservation::drop` rolls back only when `try_lock` succeeds —
-    ///   under lock contention or "the same thread dropping while holding the state lock" it **can do nothing**. The wreckage left then
-    ///   has a permanent price: ① a provisional contract is skipped by `due_timeouts` forever (deadline notice lost) ② the marked
-    ///   victim drops out of `occupies_slot()` and the cap denominator shrinks permanently ③ the tracking list grows without bound.
-    ///   So the **periodic sweep** (the only maintenance point that properly owns the lock) does the same job again —
-    ///   Drop is the fast path, and this is the guarantee.
-    /// ★Idempotent★: a settled entry is not provisional (commit = mark cleared · rollback = removed), so a second call does
-    ///   nothing.
-    /// ★Reclaim is not destructive★: a provisional contract is either a reservation that has **not yet reported acceptance to the sender** (a case where the
-    ///   response vanished through a panic) or one already reported as a failure row. Either way, rolling it back is right.
-    // ADR-0108 (mark-and-sweep — guarantee layer of reservation reclaim)
+    /// ★Reclaims **abandoned** reservations (F1 guarantee layer, R1 criterion)★: rolls back whole the provisional contracts whose owner
+    ///   guard is gone (remove the contract + clear the victim mark); returns
+    /// the reclaimed keys. ★This is the guarantee, RAII Drop is not★: `Reservation::drop` rolls back only when `try_lock` succeeds; under
+    ///   contention or same-thread-holding-the-lock it does nothing, leaving
+    /// ① a provisional contract skipped by `due_timeouts` forever (deadline notice lost) ② a marked victim outside `occupies_slot()` (cap
+    ///   denominator shrinks permanently) ③ unbounded tracking growth.
+    /// The periodic sweep (the only maintenance point that properly owns the lock) redoes the job — Drop is the fast path. ★Idempotent★ (a
+    ///   settled entry is not provisional). ★Not destructive★: a provisional
+    /// contract is either not yet reported accepted (response lost via panic) or already reported as a failure row — rolling back is right
+    ///   either way.
+    // ADR-0108
     pub fn reclaim_abandoned_reservations(&mut self) -> Vec<(String, PeerId)> {
         let abandoned: Vec<(String, PeerId, Option<(String, PeerId)>)> = self
             .requests
@@ -1110,7 +992,7 @@ impl Ledger {
             .collect();
         let mut reclaimed = Vec::with_capacity(abandoned.len());
         for (id, recipient_id, victim) in abandoned {
-            // Mark clear + provisional contract removal = **the same rule** as rollback (the same verb is used so the two places do not diverge).
+            // Mark clear + provisional removal = **the same rule** as rollback (same verb, no divergence).
             if let Some((vid, vrecipient_id)) = &victim {
                 if let Some(v) = self
                     .requests
@@ -1126,21 +1008,21 @@ impl Ledger {
         reclaimed
     }
 
-    /// ★Boundary★: it is a `>` comparison, so the exact deadline instant is not yet due (the same convention as the mailbox TTL boundary — deterministic tests).
-    /// ★Retirement-marked contracts are not skipped, but **provisional contracts are skipped** (branches split in round-5 → round-6 I2)★:
-    ///   - **A retirement-marked contract can never be due in the first place** (structural, kept as is): victim eligibility is
-    ///     `notified || reply_by.is_none()` and due eligibility is `!notified && reply_by.is_some()`, so the two sets are
-    ///     **disjoint**. So adding a mark check would be a dead branch — leaving it out is more honest.
-    ///   - ★**Provisional contracts are explicitly skipped** (round-6 I2 · load-bearing)★. The provisional window covers **from reservation to the
-    ///     settlement of that recipient's outcome** (service.rs `PendingContract` — the A2 round pushed commit back to after the outcome),
-    ///     and in between sits the child stdin `write_all` — as our `stdio.rs` documents itself, under pipe backpressure that
-    ///     write **can block indefinitely**. So a request with a 1-minute deadline could be caught by the sweep inside the provisional window and a notice
-    ///     could go out, and if the send is then bounced, the sender holds a deadline-overrun notice about a **request that officially never
-    ///     existed** (the one that got a bounce). A notice cannot be recalled, so it cannot be undone either.
-    ///   - ★No loss (hand-off)★: the skipped contract's `created_at` is **the original, unchanged**. Once committed, the next sweep
-    ///     (60-second period) sees the already-passed deadline and notifies **immediately** — delayed but not lost. If rolled back,
-    ///     the contract itself becomes something that never was, so there should be no notice either. It is the only arrangement where both are right.
-    // ADR-0108 (provisional skip — after commit the next sweep notifies at the original time)
+    /// ★Boundary★: `>` comparison — the exact deadline instant is not yet due (same convention as the mailbox TTL boundary; deterministic
+    ///   tests).
+    /// ★Retirement-marked contracts are not skipped, **provisional contracts are** (round-5 → round-6 I2)★:
+    ///   - A retirement-marked contract can never be due (structural): victim eligibility `notified || reply_by.is_none()` and due
+    ///   eligibility `!notified && reply_by.is_some()` are **disjoint**, so a mark check would be a dead branch.
+    ///   - ★Provisional contracts are explicitly skipped (round-6 I2, load-bearing)★: the window spans reservation to the settlement of
+    ///   that recipient's outcome (service.rs `PendingContract`; commit moves after
+    ///     the outcome) and includes the child stdin `write_all`, which under pipe backpressure can block indefinitely (`stdio.rs`). A
+    ///   1-minute-deadline request could be swept inside the window and a notice
+    ///     sent, then the send bounced — the sender would hold an overrun notice for a request that officially never existed, and a notice
+    ///   cannot be recalled.
+    ///   - ★No loss★: the skipped contract keeps its original `created_at`; after commit the next sweep (60 s) sees the passed deadline
+    ///   and notifies immediately — delayed, not lost. After rollback the contract never
+    ///     was, so no notice is right.
+    // ADR-0108
     pub fn due_timeouts(&mut self, now: Instant) -> Vec<DueTimeout> {
         let mut due = Vec::new();
         for r in self.requests.iter_mut() {
@@ -1179,15 +1061,13 @@ impl Ledger {
         self.history.iter().filter(|r| r.msg_id == msg_id).collect()
     }
 
-    /// ★`records_for` + **incompleteness signal** (D review B2 · decision replaced by round-2 review F3)★ — `(rows, truncated)`.
-    ///
-    /// ★Why it is needed★: when the ring (4096) fills up, the front rows silently disappear. But the `messages { id }` response shows the remaining
-    ///   rows as if they were **all of that message** — if 6 rows of a 10-member broadcast are pushed out, the sender misreads it as "it went to only 4
-    ///   people" (in fact it went to all 10 and only the records vanished).
-    /// ★Decision = `remaining rows < expected rows` (deterministic)★ — `MessageRecord.expected_rows`.
-    /// ★The case where rows vanished **entirely** is not visible here★: that goes out as an empty list and the upper layer answers with the contract view or
-    ///   `MESSAGE_NOT_FOUND` (whose hint announces the history rotation).
-    // review B2 / round-2 review F3
+    /// ★`records_for` + **incompleteness signal** (D review B2, replaced by round-2 review F3)★ — `(rows, truncated)`. ★Why★: when the
+    ///   ring (4096) fills the front rows vanish silently, yet `messages { id }` would show
+    /// the rest as all of that message — 6 of 10 broadcast rows pushed out reads as "went to only 4". ★Decision = `remaining rows <
+    ///   expected rows`★ (deterministic — `MessageRecord.expected_rows`).
+    /// ★Rows vanished entirely are not visible here★: an empty list; the upper layer answers with the contract view or `MESSAGE_NOT_FOUND`
+    ///   (its hint announces the rotation).
+    // review B2, round-2 review F3
     pub fn records_for_detailed(&self, msg_id: &str) -> (Vec<&MessageRecord>, bool) {
         let rows: Vec<&MessageRecord> =
             self.history.iter().filter(|r| r.msg_id == msg_id).collect();
@@ -1201,16 +1081,15 @@ impl Ledger {
         self.evicted_any
     }
 
-    /// All history records (oldest first) — an observation/test snapshot. Used by the upper layer (MessagingService) for assertions that do not know msg_id, like "did the
-    /// notice stay in the ledger" (lookups that know msg_id use `records_for`).
+    /// All history records (oldest first) — observation/test snapshot for assertions that do not know msg_id (e.g. "did the notice stay in
+    ///   the ledger"); lookups with a msg_id use `records_for`.
     pub fn all_records(&self) -> Vec<&MessageRecord> {
         self.history.iter().collect()
     }
 
-    /// ★Number of contracts currently occupying a `MAX_OPEN_REQUESTS` slot (round-6 I1)★ — exactly the value the cap decision looks at.
-    ///
-    /// It is **different** from `open_request_count` (= number of unreplied contracts): retirement-marked contracts drop out, and provisional contracts
-    /// before settlement remain even if closed (`occupies_slot` comment). To assert the cap arithmetic, look at this one.
+    /// ★Contracts currently occupying a `MAX_OPEN_REQUESTS` slot (round-6 I1)★ — exactly what the cap decision looks at. **Differs** from
+    ///   `open_request_count`: retirement-marked contracts drop out and provisional ones
+    /// stay even if closed (`occupies_slot`). Assert cap arithmetic with this.
     pub fn occupied_slots(&self) -> usize {
         self.requests.iter().filter(|r| r.occupies_slot()).count()
     }
@@ -1228,9 +1107,9 @@ impl Ledger {
         let _ = now;
     }
 
-    /// Test-only (H2) — **number of contracts carrying a retirement mark**. Marks drop out of `occupies_slot()`, so if this value
-    ///   remains non-zero, the cap denominator shrinks permanently (the observation axis of a forgotten settlement — `service::Reservation` header).
-    ///   ★It does not duplicate the victim selection logic★: it counts only "is a mark left", not "who was marked" (no drift).
+    /// Test-only (H2) — **number of contracts carrying a retirement mark**. Marks leave `occupies_slot()`, so a non-zero remainder
+    ///   permanently shrinks the cap denominator (observes a forgotten settlement —
+    ///   `service::Reservation` header). Counts only "is a mark left", not "who" (no duplicated victim logic).
     #[cfg(any(test, feature = "test-harness"))]
     pub fn marked_retirement_count_for_test(&self) -> usize {
         self.requests
@@ -1239,12 +1118,10 @@ impl Ledger {
             .count()
     }
 
-    /// ★Observe the contract-axis terminal vocabulary (amendment 4 — spec §6 `awaiting_reply`/`replied`/`reply_failed`)★. If not in tracking,
-    ///   `None` (only history remains, or an unknown key).
-    ///
-    /// ★Why it is needed★: `replied` and `reply_failed` drop out of the open list, deadline sweep and cap count **identically**, so
-    ///   they cannot be told apart on that axis. To assert the rule "acceptance counts as complete, only confirmed unreachable counts as failure" (§3 item 7-④)
-    ///   and "deletion cleanup does not revert `replied`", the reason itself must be looked at.
+    /// ★Contract-axis terminal vocabulary (spec §6 `awaiting_reply`/`replied`/`reply_failed`)★; `None` if not tracked. `replied` and
+    ///   `reply_failed` leave the open list, deadline sweep and cap count identically, so
+    ///   asserting "acceptance counts as complete, only confirmed unreachable is failure" (§3 item 7-④) and "deletion cleanup does not
+    ///   revert `replied`" needs the reason itself.
     #[cfg(any(test, feature = "test-harness"))]
     pub fn contract_outcome_for_test(
         &self,
@@ -1261,7 +1138,8 @@ impl Ledger {
             })
     }
 
-    /// Test-only (C2) — does that contract key exist in the tracking list (closed or retirement-marked alike). The observation axis of the provisional/retirement window.
+    /// Test-only (C2) — does that contract key exist in tracking (closed or retirement-marked alike); observes the provisional/retirement
+    ///   window.
     #[cfg(any(test, feature = "test-harness"))]
     pub fn is_tracked_for_test(&self, request_id: &str, recipient_id: PeerId) -> bool {
         self.requests
@@ -1269,8 +1147,8 @@ impl Ledger {
             .any(|r| r.request_id == request_id && r.recipient_id == recipient_id)
     }
 
-    /// ★Why tests only★: production callers call with **both** parts of the contract key in hand (the send and reply paths already know the recipient)
-    ///   — this reverse lookup is just a convenience to fit tests from the old "one-id contract" days to the new key.
+    /// ★Tests only★: production callers hold both parts of the contract key; this reverse lookup just fits old "one-id contract" tests to
+    ///   the new key.
     #[cfg(test)]
     fn party_of(&self, request_id: &str) -> Option<PeerId> {
         self.requests
@@ -1284,34 +1162,23 @@ impl Ledger {
         self.requests.iter().filter(|r| !r.closed).count()
     }
 
-    /// **Total number** of tracking entries (including finished ones — observation/tests). Used to assert the bound that no zombies accumulate (fix 1):
-    ///   `open_request_count` does not count finished entries, so it cannot see a leak.
+    /// **Total** tracking entries (including finished — observation/tests); asserts the no-zombie bound (fix 1) since `open_request_count`
+    ///   cannot see a leak.
     pub fn tracking_len(&self) -> usize {
         self.requests.len()
     }
 
-    /// ★All unreplied (open) requests as lookup views (S18 D — `eg_messages` no-argument)★. **Oldest first** (`created_at`
-    /// ascending, on a tie the current list order — stable sort).
-    ///
-    /// ★Why sort explicitly (round-4 review H4)★: previously the raw Vec order was returned as is on the grounds "append order = send order", but that premise is
-    ///   an **assumption** true only when the caller uses a monotonic clock, not a property this data structure enforces
-    ///   (the clock is injected — module header purity invariant). When the order the docs
-    ///   promise and the actual order diverge, lookup consumers silently see a misordered list (and that misorder appears only on the rare path where a restore
-    ///   happened, so it is hard to reproduce). With ≤512 entries the cost of sorting on every lookup is negligible, so the promise is kept
-    ///   in code.
-    /// ★Not a double sort★: the upper `open_items_for` re-sorts by descending elapsed time **after merging** the three branches, so it
-    ///   does not depend on the order here (same result). This sort is to keep this function's contract.
-    /// ★Marked contracts are **visible** too (round-5 mark-and-sweep — an explicit choice)★:
-    ///   - **Retirement mark**: until commit it is still an open contract. If a lookup lands in that microsecond window it
-    ///     shows in the list, and that is the **fact** (nothing has retired yet). Hiding it early would be worse, as the lookup would
-    ///     report a removal that may never commit.
-    ///   - **Provisional contract**: it is an intake that really exists, so showing it is right. If it ends in a bounce it disappears then.
-    ///
-    /// ★Inclusion criterion = `!closed` (= `is_live()`) — load-bearing★: whether it was notified is **exposed as a field** and
-    ///   the entry is not excluded from the list. **If the criterion here changes, `is_live()` must change with it** (if they diverge the same bug returns —
-    ///   the 4-step sequence in the `is_live` comment).
-    /// ★The upper layer filters★: the sent/received branch is decided by the caller.
-    // ADR-0103 (spec §6 eg_messages no-argument = my pending)
+    /// ★All unreplied (open) requests as lookup views (`eg_messages` no-argument)★, **oldest first** (`created_at` ascending, ties keep
+    ///   list order — stable sort).
+    /// ★Explicit sort (round-4 review H4)★: "append order = send order" holds only with a monotonic clock, not as a property of this
+    ///   structure (injected clock), and a misorder would appear only on the rare
+    /// restore path; with ≤512 entries sorting is negligible. Not a double sort: `open_items_for` re-sorts after merging three branches.
+    /// ★Marked contracts are visible (round-5, explicit choice)★: a retirement-marked contract is still open until commit (hiding it would
+    ///   report a removal that may never commit); a provisional one is a real intake
+    /// (a bounce removes it then). ★Inclusion = `!closed` (= `is_live()`, load-bearing)★: whether it was notified is a field, not a
+    ///   filter; **if this criterion changes, `is_live()` must change with it**
+    /// (see its 4-step sequence). The sent/received branch is the caller's filter.
+    // ADR-0103
     pub fn open_requests(&self) -> Vec<OpenRequestView> {
         let mut out: Vec<OpenRequestView> = self
             .requests
@@ -1338,8 +1205,8 @@ mod tests {
     use super::*;
     use crate::tid;
 
-    /// An adapter that puts the old "one id = one contract" tests on the contract key (ADR-0111 decision 5) — interpreted as
-    /// **that contract's recipient replied in person**.
+    /// Adapter putting old "one id = one contract" tests on the contract key (ADR-0111 decision 5) — **that contract's recipient replied
+    ///   in person**.
     fn reply(l: &mut Ledger, id: &str, now: Instant) -> ReplyOutcome {
         let replier = l.party_of(id).unwrap_or_else(PeerId::nil);
         l.close_on_reply(id, replier, now)
@@ -1375,19 +1242,19 @@ mod tests {
         Instant::now()
     }
 
-    /// Sender PeerId (fix 2) — most assertions do not look at the value itself, so a fresh one is drawn each time.
+    /// Sender PeerId (fix 2) — most assertions ignore it, so a fresh one is drawn each time.
     fn sid() -> PeerId {
         PeerId::new_v4()
     }
 
-    /// Deadline tuple (fix 6) — to keep the premise in tests too that the spelling was **written by the sender**, not made from a Duration,
-    /// a conventional spelling is used where the assertion does not look at the spelling.
+    /// Deadline tuple (fix 6) — the spelling is **written by the sender**, not made from a Duration; a conventional spelling where
+    ///   assertions ignore it.
     fn rb(d: Duration) -> Option<(Duration, String)> {
         Some((d, format!("{}s", d.as_secs())))
     }
 
-    /// A cap fixture that forgot to commit stays entirely provisional and yields only `Full` — the production send path
-    /// always commits/rolls back when the outcome is settled (`service::commit_contract`), so the tests create the same state.
+    /// A cap fixture that forgot to commit stays entirely provisional and yields only `Full`; production always settles
+    ///   (`service::commit_contract`), so tests do the same.
     fn open_committed(
         l: &mut Ledger,
         id: &str,
@@ -1399,8 +1266,8 @@ mod tests {
         out
     }
 
-    /// A contract with no history exists only after evict — tests not aiming at that case use this helper to create history alongside
-    /// and reproduce the production state.
+    /// A contract with no history exists only after evict — tests not aiming at that use this helper to create history alongside
+    ///   (production state).
     fn open_delivered_request(
         l: &mut Ledger,
         id: &str,
@@ -1879,7 +1746,7 @@ mod tests {
     fn close_on_reply_with_evicted_history_is_plain_closed_not_anomaly() {
         let mut l = Ledger::with_capacity(1);
         let now = t0();
-        // Tracking is a separate map from history, so a contract can be opened without `record` — req-1 has no history row to point at from the start.
+        // Tracking is a separate map from history, so a contract can open without `record` — req-1 has no history row from the start.
         l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now);
         l.record(
             "other",
@@ -1922,7 +1789,7 @@ mod tests {
 
     #[test]
     fn due_timeout_carries_sender_id_and_raw_notation() {
-        // Why the spelling is not normalized — `60m` must stay as is so the envelope reply-by and the notice text agree.
+        // The spelling is not normalized — `60m` must stay so the envelope reply-by and notice text agree.
         let mut l = Ledger::new();
         let now = t0();
         let sender = sid();
@@ -2595,8 +2462,8 @@ mod tests {
 
     #[test]
     fn open_request_rejects_at_capacity_with_full() {
-        // Fill the cap with **non-retirable** (waiting on deadline) contracts — filling with no-deadline contracts would cause a retirement
-        //   and no Full would come out (that branch has a separate test).
+        // Fill the cap with **non-retirable** (deadline-pending) contracts — no-deadline ones would trigger a retirement and no Full
+        //   (separate test).
         let mut l = Ledger::new();
         let now = t0();
         let reply_by = Duration::from_secs(600);
@@ -2780,8 +2647,8 @@ mod tests {
     fn a_concurrent_opener_cannot_select_someone_elses_provisional_entry_as_victim() {
         let mut l = Ledger::new();
         let base = t0();
-        // Fill the cap with retirable (no deadline) contracts but leave **only the oldest one** and make the rest
-        //   non-retirable → this forces that one to be B's only legal victim.
+        // Fill the cap with retirable (no deadline) contracts but leave **only the oldest** retirable, the rest non-retirable → it is B's
+        //   only legal victim.
         let reply_by = Duration::from_secs(600);
         open_committed(&mut l, "evictable", None, base);
         for i in 1..MAX_OPEN_REQUESTS {
@@ -3204,8 +3071,8 @@ mod tests {
         );
     }
 
-    /// ★A contract is picked by the replier id alone (ADR-0309 decision 7)★ — even with two contracts holding the same name snapshot, a reply from a different id
-    ///   cannot close either, and a reply sent by another agent with the same name cannot close one either.
+    /// ★A contract is picked by the replier id alone (ADR-0309 decision 7)★ — with two contracts holding the same name snapshot, a reply
+    ///   from a different id (even a same-name agent) closes neither.
     #[test]
     fn a_reply_closes_only_the_contract_keyed_by_its_own_id() {
         let mut l = Ledger::new();
@@ -3504,10 +3371,9 @@ mod tests {
 
     #[test]
     fn both_guard_marks_hold_off_the_two_failure_closers() {
-        // ★Review fix D7 — a gap in guard coverage★: the existing guard tests created **only provisional (`provisional`)** ones, so
-        //   deleting the `pending_retirement` condition by a single line left everything green (measured as undefended).
-        // ★The mark is created by the **production path**★: setting the flag with a test setter could diverge from "the path
-        //   by which that mark actually arises".
+        // ★Review fix D7 — guard coverage gap★: the existing guard tests created only **provisional** ones, so deleting the
+        //   `pending_retirement` condition left everything green (measured undefended).
+        // ★The mark is created by the **production path**★: a test setter could diverge from how the mark actually arises.
         let mut l = Ledger::new();
         let now = t0();
         let reply_by = Duration::from_secs(60);
@@ -3582,8 +3448,8 @@ mod tests {
 
     #[test]
     fn the_general_transition_graph_rejects_both_failed_edges() {
-        // ★Mutation probe D9-c★: **adding** `(Delivered, Failed)` and `(Pending, Failed)` to the general transition graph
-        //   still left all messaging tests green (the existing illegal-edge test looked only at three unrelated edges).
+        // ★Mutation probe D9-c★: **adding** `(Delivered, Failed)` and `(Pending, Failed)` to the general graph left all messaging tests
+        //   green (the illegal-edge test looked at three unrelated edges).
         let mut l = Ledger::new();
         let now = t0();
         l.record(
@@ -3669,7 +3535,8 @@ mod tests {
         l.open_request("m-prov", "gone", gone, "w3", c, None, now);
         l.open_request("m-other", "someone", a, "w4", tid("w4"), None, now);
         l.commit_open(Some(("m-other", tid("w4"))), None);
-        // ★Pick by id (ADR-0309 decision 6)★: it catches its own contract opened under the pre-rename name, and does not close someone else's contract with the same name.
+        // ★Pick by id (ADR-0309 decision 6)★: it catches its own contract opened under the pre-rename name, and does not close someone
+        //   else's contract with the same name.
         l.open_request("m-old-name", "old-name", gone, "w5", tid("w5"), None, now);
         l.commit_open(Some(("m-old-name", tid("w5"))), None);
         l.open_request(

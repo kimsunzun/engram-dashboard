@@ -1,8 +1,9 @@
-//! Domain types (wire representation). Mirrors the serialized form of the current `agent::types` / `agent::profile`.
-//! ★Do not make `agent` depend on this crate to merge this duplication★ — that crate being protocol-independent is
-//! an invariant, so the mirror is the price (canonical = the `[dependencies]` comment of `crates/engram-dashboard-agent/Cargo.toml`).
-//! ★But the usage limit types (`Usage*`) are not mirrors★ — they are the shape of the daemon's answer, so their fields deliberately differ from
-//!   agent `usage`'s observation types (sign · age · expiry). Do not try to match them.
+//! Domain types (wire representation). Mirrors the serialized form of the agent crate's `types` / `profile`.
+//! ★Do not make `agent` depend on this crate to merge the duplication★ — agent being protocol-independent is an invariant (canonical = the
+//!   `[dependencies]` comment of
+//! `crates/engram-dashboard-agent/Cargo.toml`).
+//! ★The usage limit types (`Usage*`) are not mirrors★ — they are the daemon's answer shape and deliberately differ from agent `usage`'s
+//!   observation types (sign · age · expiry); do not match them.
 
 use ts_rs::TS;
 
@@ -129,9 +130,10 @@ pub struct RestoreReport {
 
 // ── Profile wire mirror (phase4 step 1) ──────────────────────────────────────────────
 //
-// agent is protocol-independent (§1 invariant), so agent types cannot be used here — so an independent type of the same JSON shape
-// is kept, and the explicit agent↔wire conversion is done by the daemon (no reflection round trip — the agent_info_to_wire pattern).
-// Matches the frontend `src/api/types.ts` AgentProfile/AgentCommand/RestartPolicy character for character.
+// agent is protocol-independent (§1), so these independent types of the same JSON shape are kept; the daemon does the explicit agent↔wire
+//   conversion
+// (no reflection round trip — the agent_info_to_wire pattern). Matches the frontend `src/api/types.ts`
+//   AgentProfile/AgentCommand/RestartPolicy character for character.
 
 /// Terminal=PTY interactive, StreamJson=headless NDJSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, TS)]
@@ -214,10 +216,8 @@ pub enum AgentBackendKind {
 }
 
 impl AgentBackendKind {
-    /// All wire words — ★this is the only place the spelling is written★. The expected value in the refusal message is this array as is
-    /// (`parse_backend` carries that message), and `ALL` below also takes the words from here.
-    /// Must equal the spelling `#[serde(rename_all = "lowercase")]` emits, and the place that measures that match =
-    /// `tests::backend_kind_serializes_exactly_the_declared_words`.
+    /// All wire words — ★the only place the spelling is written★ (the refusal message in `parse_backend` and `ALL` take them from here). Must equal what
+    /// `#[serde(rename_all = "lowercase")]` emits; measured by `tests::backend_kind_serializes_exactly_the_declared_words`.
     const WORDS: &'static [&'static str] = &["claude", "codex"];
 
     /// (variant, wire notation) pairs — the only table deserialization uses to go back from a word to a variant.
@@ -227,10 +227,8 @@ impl AgentBackendKind {
     ];
 }
 
-/// ★Received as `String` (do not narrow it to `&str`)★ — the same reason as sibling [`AgentFailureKind`]: if there is even one
-/// escape, serde_json goes down the scratch path, the borrowed `&str` fails, and **the whole message** breaks.
-/// ★Unknown words are refused, not absorbed★ — this is where it parts ways with that sibling: folding here would silently launch a backend
-/// different from the requested one (the same decision as 「absence means error」 in this type's doc).
+/// ★Received as `String`, not `&str`★ (as sibling [`AgentFailureKind`]): one escape sends serde_json down the scratch path, the borrowed `&str` fails, and **the whole message** breaks.
+/// ★Unknown words are refused, not absorbed★ (unlike that sibling): folding would silently launch a backend different from the requested one.
 impl<'de> serde::Deserialize<'de> for AgentBackendKind {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let raw = <String as serde::Deserialize>::deserialize(d)?;
@@ -253,16 +251,12 @@ pub enum RestartPolicy {
     Always,
 }
 
-/// Declares the 「last failure」 vocabulary **in one list** — the enum · wire notation · full list · two-way serialization
-/// all come from a single expansion of this macro.
+/// Declares the "last failure" vocabulary **in one list** — enum · wire notation · full list · two-way serialization come from one expansion.
 ///
-/// ★Reason to exist = keep half-done edits from compiling★: with two hand-written tables (the old form: one exhaustive match
-///   + one fixed-length array), fixing only one side when adding a variant **still builds**. Then two peers of the same version
-///   have serialize emitting the new string while deserialize cannot find it and folds it into `Other` — the round trip breaks and
-///   the screen shows the generic message instead of that kind's message forever. With a single list, that half-done edit is impossible.
-/// ★The wire strings are **derived from the variant names** with `stringify!`★: the TS union ts-rs emits also comes from the variant names,
-///   so unless strings are written by hand the two are structurally the same (the golden in `messages.rs` re-checks that fact by actually reading
-///   the generated `.ts`).
+/// ★Reason to exist = keep half-done edits from compiling★: with hand-written tables, fixing one side when adding a variant still builds, and then serialize emits a
+/// string deserialize folds into `Other` — the round trip breaks and the screen shows the generic message forever.
+/// ★Wire strings are derived from the variant names with `stringify!`★, as is the TS union ts-rs emits, so the two are structurally the same (the golden in `messages.rs`
+/// re-checks against the generated `.ts`).
 // ADR-0172
 macro_rules! declare_failure_kinds {
     (
@@ -283,11 +277,11 @@ macro_rules! declare_failure_kinds {
         }
 
         impl AgentFailureKind {
-            /// Full vocabulary = (variant, wire notation). The macro builds it from **the same list** as the enum.
+            /// Full vocabulary = (variant, wire notation), built from the same list as the enum.
             const ALL: &'static [(AgentFailureKind, &'static str)] =
                 &[ $( (AgentFailureKind::$variant, stringify!($variant)), )+ ];
 
-            /// Full vocabulary — the axis the golden compares with the generated TS union (so the test does not write the vocabulary again).
+            /// Full vocabulary — the axis the golden compares with the generated TS union.
             pub fn all() -> impl Iterator<Item = &'static (AgentFailureKind, &'static str)> {
                 AgentFailureKind::ALL.iter()
             }
@@ -313,19 +307,12 @@ macro_rules! declare_failure_kinds {
 
         /// Folds an unknown kind into the absorbing variant — **the only device protecting old peers when the vocabulary grows**.
         ///
-        /// ★The accident it prevents★: this type is **inside** the profile struct, so with a plain derive, one new variant string
-        ///   fails decoding of the **whole message** of `AgentProfile` — not just the field going empty, but that profile
-        ///   disappearing entirely. An old-build src-tauri shell attaching to a new daemon is a real path, and that side's
-        ///   receiver **silently discards** decode failures (the only symptom is "the tree does not change").
-        /// ★The Rust-side half of the same contract as the frontend★: `src/components/agent/failureKinds.ts` already does
-        ///   the same fail-open with `table[kind] ?? Other`.
-        /// ★The absorption covers only **unknown strings**★: non-strings like `42`·`[]`·`{}` stay errors.
-        ///   Swallowing everything would turn a broken value into the absorbing variant and **show a failure message on an item with no failure** —
-        ///   that is fabrication, not absorption.
-        /// ★Received as `String` (do not narrow it to `&str`)★: a borrowed `&str` succeeds only on an in-memory buffer without escapes
-        ///   — with even a single escape like `"Other"`, serde_json goes down the scratch
-        ///   path, emits `invalid type: string, expected a borrowed string`, and **the whole message**
-        ///   breaks. The `from_value`/`from_reader` paths are the same.
+        /// ★The accident it prevents★: this type is **inside** the profile struct, so a plain derive would fail decoding of the **whole** `AgentProfile` message on one new
+        ///   variant string — that profile disappears, and an old-build shell's receiver **silently discards** decode failures.
+        /// ★Rust-side half of the frontend contract★: `src/components/agent/failureKinds.ts` does the same fail-open (`table[kind] ?? Other`).
+        /// ★Only **unknown strings** are absorbed★: non-strings like `42`·`[]`·`{}` stay errors — swallowing everything would show a failure message on an item with no failure.
+        /// ★Received as `String`, not `&str`★: a borrowed `&str` fails on any escape (serde_json takes the scratch path: `invalid type: string, expected a borrowed string`),
+        ///   breaking **the whole message**; `from_value`/`from_reader` too.
         impl<'de> serde::Deserialize<'de> for AgentFailureKind {
             fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
                 let raw = <String as serde::Deserialize>::deserialize(d)?;
@@ -565,11 +552,8 @@ impl std::fmt::Debug for UsageStateDetail {
 mod tests {
     use super::*;
 
-    /// An old packet without this field — builds whose daemon did not carry `output_format` when sending the registry have this shape.
-    /// ★`#[serde(default)]` covers only one direction, **old daemon → new shell**★: without it, that daemon's
-    /// `ProfileList` collapses with a deserialization failure of **the whole response, not one row** (the canonical source for that failure unit is
-    /// the v4 entry of [`crate::PROTOCOL_VERSION`]). What supports the opposite direction (new daemon → old shell) is not this
-    /// attribute but serde's **unknown field tolerance**, so it is not measured here.
+    /// An old packet without `output_format` (old daemon). `#[serde(default)]` covers only old daemon → new shell: without it the whole `ProfileList` fails to deserialize
+    /// (failure unit: v4 entry of [`crate::PROTOCOL_VERSION`]); the opposite direction relies on serde's unknown-field tolerance, not measured here.
     #[test]
     fn codex_spawn_command_without_output_format_defaults_to_terminal() {
         let legacy = r#"{ "kind": "Codex", "extra_args": ["--foo"] }"#;
@@ -600,8 +584,7 @@ mod tests {
         }
     }
 
-    /// Hand-typed words are case-insensitive — `backend` of `agent.spawnInto` and the frontend's
-    /// `SpawnByCwd` carry strings typed by a person·LLM as is.
+    /// Hand-typed words are case-insensitive (`agent.spawnInto` / `SpawnByCwd` carry strings typed by a person·LLM).
     #[test]
     fn backend_kind_accepts_any_casing() {
         for (raw, want) in [

@@ -9,23 +9,20 @@ static PANIC_HOOK: Mutex<()> = Mutex::new(());
 
 /// Turns off the default output of an intended panic and runs `body` — when done, it restores the original hook.
 ///
-/// ★The tests of one test binary run **concurrently** on threads★ — if each swaps the hook, the one that finishes later
-/// restores another's hook thinking it is the original, or another's panic output gets mixed into a span that should be quiet. This race is
-/// blocked at this one place (the lock covers the whole hook-swap span).
-/// ★Inside the span, panic output from **unrelated threads** (other tests of the same binary) also disappears★ — because the hook is
-/// process-global. So the span is kept narrow to cover only the moment the intended panic occurs. Not silencing by thread is
-/// intentional — there are callers where the intended panic occurs on a thread the body launched (the codex writer · tokio blocking
-/// pool).
-/// ★A panic that leaks out of `body` is not an intended one★ — we revive its message, print it, and rethrow with **the same payload**.
-/// To the caller it looks like an ordinary test failure.
+/// ★The tests of one test binary run **concurrently** on threads★ — if each swapped the hook, a later finisher would restore another's
+///   hook as the original, or another's panic output would leak into a quiet span; the lock covers the whole swap span.
+/// ★Inside the span, panic output from **unrelated threads** also disappears★ (the hook is process-global), so keep the span narrow around
+///   the intended panic. Not silencing by thread is intentional — the intended panic may occur on a thread
+/// the body launched (the codex writer · tokio blocking pool).
+/// ★A panic that leaks out of `body` is not an intended one★ — its message is revived, printed and rethrown with **the same payload**, so
+///   it looks like an ordinary test failure.
 pub fn with_quiet_panic_hook<T>(body: impl FnOnce() -> T) -> T {
     let _held = PANIC_HOOK.lock().unwrap_or_else(PoisonError::into_inner);
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    // ★Do not move the restore into `Drop`★ — std refuses `set_hook` on a panicking thread, and that refusal becomes
-    //   a second panic inside a destructor during unwind, so the process aborts (the test binary dies whole with no
-    //   message — Windows `0xC0000409`, measured). But with only an assignment statement, unwind skips that line and
-    //   a quiet hook remains. So we restore **after** catching the unwind.
+    // ★Do not move the restore into `Drop`★ — std refuses `set_hook` on a panicking thread, a second panic inside a destructor during
+    //   unwind aborts the process (the test binary dies whole, Windows `0xC0000409`);
+    //   but a bare assignment is skipped by unwind and leaves a quiet hook. So restore **after** catching the unwind.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
     std::panic::set_hook(previous);
     outcome.unwrap_or_else(|payload| {
@@ -53,9 +50,8 @@ impl Wake for Signal {
 
 /// Runs one future to completion on this thread.
 ///
-/// ★It runs directly so as not to bring in a runtime crate★ — this crate has zero workspace dependencies and keeps external dependencies minimal
-/// too (lib.rs invariant 1). The futures the harness runs are only one handler or one fake link, so the scheduler has
-/// nothing to do.
+/// ★Runs directly so as not to bring in a runtime crate★ — zero workspace dependencies and minimal external ones (lib.rs invariant 1); the
+///   harness futures are one handler or one fake link, so there is no scheduling to do.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = Box::pin(future);
     let signal = Arc::new(Signal {

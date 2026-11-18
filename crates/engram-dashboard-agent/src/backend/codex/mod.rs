@@ -1,46 +1,28 @@
 //! CodexBackend — produces the codex-CLI-specific CommandSpec.
 //!
-//! ★The rule this folder sets = codex knowledge lives only in here (ADR-0004)★. The source of truth for the rationale, the gates and what the gates
-//! cannot see is the `backend/claude/mod.rs` header, and it is not repeated here — read it with the names swapped.
-//! The surfaces going outward are only two: the [`crate::backend::AgentBackend`] implementation + the usage prober singleton
-//! [`CODEX_USAGE_PROBE`] (why the prober is not a trait slot is in that header too) — the polling of session id recovery
-//! also runs inside [`thread_lock`], and the only place that calls that module is this folder (ADR-0218 decision 11).
+//! ★Codex knowledge lives only in this folder (ADR-0004)★. Rationale, gates and what the gates cannot see: the `backend/claude/mod.rs` header (read it with the names swapped).
+//! Only two surfaces go outward: the [`crate::backend::AgentBackend`] implementation and the usage prober singleton [`CODEX_USAGE_PROBE`]. Session id recovery polling
+//! runs inside [`thread_lock`]; this folder is its only caller (ADR-0218 decision 11).
 //!
-//! ★The codex facts written here are measured (codex-cli 0.153.4, this PC, authenticated — rechecked 2026-09-08)★.
-//! ★What was measured after that **carries its version in its own place**★ — do not read this one line as binding the whole file to one
-//! version. Upstream updates itself, so the measuring time differs per item.
-//! `tests/backend_contract.rs` **launches the argv that this file's `build_spec` emits as is**, so if an argument is
-//! changed here, that lane meets the real codex with the changed argv — ★but that lane runs only when called, since it is `#[ignore]` (not CI)★.
+//! ★The codex facts here were measured on codex-cli 0.153.4 (this PC, authenticated, 2026-09-08)★; later measurements carry their own version at their spot.
+//! `tests/backend_contract.rs` launches the argv `build_spec` emits as is — but that lane is `#[ignore]` (not CI), so it runs only when called.
 //!
-//! ★What the test bench **does not measure again** — the old sentence that said 「all measured」 was false (review finding 2026-09-08)★:
-//!   1. The **model behaviour under** the `workspace-write` · `on-request` policies — the bench measures only that it comes up with that argv and that the composer
-//!      stands up (to measure it, an agent with write permission would have to actually run in the automatic lane).
-//!   2. Arguments we do not use (`-m`) — they are only in this file's comments and nothing measures them.
-//!      ★The MCP `-c mcp_servers.…` override is now **used by us**★ — and it was measured by hand, not by the bench
-//!      (2026-09-19 · 0.155.0 · a throwaway `CODEX_HOME`): `--strict-config` accepted those keys
-//!      (two fake keys died with `unknown configuration field`), the app-server's `mcpServerStatus/list`
-//!      returned `engram` together with that server's two tools (send · query), and the stub server
-//!      received `Authorization: Bearer <ENGRAM_TOKEN value>`. The branch through `cmd.exe /c` was the same.
-//!      ★The tool names shown on screen that day were `send_message` · `messages` — those names do not exist today★:
-//!      `1b84045` renamed them to `eg_send` · `eg_messages` to cut the clash with agent built-in tools. What was measured
-//!      stays valid (the rename is only names) and only the names to call changed — measured again now, that list
-//!      shows `eg_send` · `eg_messages`.
-//!   2-1. ★`codex resume <id>` is now **used by us** — and still the bench does not measure it for real★:
-//!      [`production_spec`](../../../tests/backend_contract.rs) draws argv only with `SpawnMode::Fresh`, so
-//!      the resume branch is never carried in that lane at all. To measure it automatically, a way to supply a live thread id
-//!      to that file is needed first.
-//!      ★But **the behaviour itself was measured by hand (2026-09-19 · 0.155.0)** — the old sentence that said
-//!        「nobody looks even as far as it standing up」 is no longer true★: it actually came up with that argv, and **the session id is preserved**. A new
-//!        session reports id S with `source:"startup"`, and on resume **the same S** comes again with `source:"resume"`
-//!        (stable across repeated resumes), and the record is appended to S's original rollout file. So the recovery of a resumed
-//!        session **lands on the same value** whether it overwrites or not, and there is no branch that drifts to a stale id.
-//!        ★But this is an observation of the **hook channel** that carried the `source` field, and that channel was removed (ADR-0216)★. Today's recovery
-//!        path has no such field — terminal mode uses the name of the writer lock the child holds ([`thread_lock`] ·
-//!        ADR-0218), app-server mode uses the `thread/start` response — **so the id behaviour on resume is left unmeasured and
-//!        overwriting was chosen on top of that.** If the two look inconsistent, this paragraph is the record of the old channel.
-//!        ★Terminal-mode recovery does not run at all in a resume incarnation★ — that incarnation goes out carrying the id as argv,
-//!        so there is nothing to recover (ADR-0218 decision 5).
-//!   3. The `%VAR%` limit of `build_spec` below (the comment at that spot is the source of truth).
+//! ★What the test bench does NOT measure★:
+//!   1. The model behaviour under the `workspace-write` · `on-request` policies — the bench only proves it comes up with that argv.
+//!   2. Arguments we do not use (`-m`) — only mentioned in comments here.
+//!      The MCP `-c mcp_servers.…` override is used by us and was measured by hand (0.155.0, throwaway `CODEX_HOME`): `--strict-config` accepted the keys,
+//!      `mcpServerStatus/list` returned `engram` with its send/query tools, the stub server received `Authorization: Bearer <ENGRAM_TOKEN value>`, and the
+//!      `cmd.exe /c` branch behaved the same. The tools were later renamed `eg_send` · `eg_messages` (`1b84045`); the measurement stays valid.
+//!   2-1. `codex resume <id>` is used by us but the bench does not measure it: [`production_spec`](../../../tests/backend_contract.rs) draws argv only with
+//!      `SpawnMode::Fresh`, so the resume branch is never carried in that lane (it would need a live thread id).
+//!      Measured by hand (0.155.0): it comes up with that argv and **the session id is preserved** — a new session reports id S with `source:"startup"`, a resume
+//!      reports the same S with `source:"resume"` (stable across repeats), and the record is appended to S's rollout file. So recovery on a resumed
+//!      session lands on the same value whether it overwrites or not.
+//!      ★That observation came from the **hook channel**, which was removed (ADR-0216)★. Today terminal mode recovers via the writer-lock name the child holds
+//!      ([`thread_lock`] · ADR-0218) and app-server mode via the `thread/start` response, so the id behaviour on resume is unmeasured and overwriting was
+//!      chosen on top of that.
+//!      ★Terminal-mode recovery does not run in a resume incarnation★ — it goes out carrying the id as argv (ADR-0218 decision 5).
+//!   3. The `%VAR%` limit of `build_spec` (the comment there is the source of truth).
 //!
 //! If the capability declaration disagrees with that table, the bench's **non-`#[ignore]`** items go red.
 //!
@@ -81,11 +63,10 @@ use crate::types::{
     OutputEvent, PtyError, SessionCaps, TurnOutcome, MCP_SERVER_NAME, TOKEN_ENV,
 };
 
-/// Does it launch codex as a **resident JSON server** rather than an interactive TUI = the point where the four axes inside this folder (link shape · link object ·
+/// Whether codex launches as a **resident JSON server** rather than an interactive TUI — the point where the four axes in this folder (link shape · link object ·
 /// input encoding · output decoder) split together.
 ///
-/// ★Do not lift this predicate up into `profile` (ADR-0004)★: if it were there, codex's output-format axis would directly drive the shared layer's link
-///   choice. What goes outward is only the value of the neutral axis.
+/// ★Do not lift this predicate into `profile` (ADR-0004)★: codex's output-format axis would then drive the shared layer's link choice. Only the neutral axis value goes outward.
 fn is_app_server(command: &AgentCommand) -> bool {
     matches!(
         command,
@@ -96,37 +77,22 @@ fn is_app_server(command: &AgentCommand) -> bool {
     )
 }
 
-/// Picks this spawn's **second handshake request** — if `resume_session_id` is present it resumes that thread,
-/// otherwise it opens a new thread. Absence = nothing to resume (no stored value, or launched as Fresh).
+/// Picks this spawn's **second handshake request**: `thread/resume` if `resume_session_id` is present, otherwise open a new thread. Absence = nothing to resume
+/// (no stored value, or launched as Fresh).
 ///
-/// ★The three policies (working folder · approval · sandbox) are carried **identically** on both branches★: if left out of resume, codex runs with the values
-///   it stored when it created that thread — even if the profile's working folder changed in between, only the resumed session
-///   quietly trusts the old folder as its workspace. That mismatch leaves no sign at all on screen.
-/// ★**Write the range of what is unverified precisely — 「does it accept a different cwd」 was already measured**★
-///   (`docs/reference/backend-capabilities.md` §1 「if the cwd differs」): **it resumes.** Thread identity is
-///   per `CODEX_HOME`, not per workspace, so it is not refused even when the cwd differs. So 「if refused, it shows on screen as a resume
-///   failure」 was a sentence preparing for a branch that does not even exist.
-///   ★What is really unverified is **whether the cwd we send overrides the recorded value**★ — the same measurement writes 「the `cwd` of the response is **the original
-///   cwd recorded in the thread**」. That is, our value may be ignored, and then the mismatch the paragraph just above was meant to block
-///   (only the resumed session trusts the old folder) **remains as is even when this argument is sent.** To measure it, resume the same thread with two
-///   different folders and see on which side the turn actually runs — not measured.
-///   ★We still keep carrying the argument★: if ignored there is no loss, and if applied the intended value stands.
-/// ★Turning on `excludeTurns` is a decision★ — we do not read a single field of `thread.turns` (the response type
-///   has no such field), and if it came filled, one long conversation would exceed the link's line cap (`MAX_LINE_BYTES`), **only that line
-///   would be dropped**, and the handshake would wait until its deadline for an answer that never comes.
-///   ★**The point of this item is that that outcome cannot be told apart from a refusal**★ — the peer is alive and sent
-///   the answer on stdout, but we dropped that line, so all we see is one thing: 「the handshake failed on its deadline and
-///   the child is fine」. That is **the same shape** as `thread/resume` being refused with a JSON-RPC error,
-///   and if that shape does not close the link's stdin, the child · reader · writer are held as a whole and it becomes a wedge nobody
-///   reaps (so that close does not tell branches apart — that spot in `transport.rs`).
-///   ★That is, if upstream starts ignoring `excludeTurns`, this argument blocks nothing, and the only remaining defence is that
-///   close★ — do not read this argument as 「blocked」. Whether upstream actually honours it is unverified.
-/// ★`developer_instructions` is carried **only on the open branch**★ — [`ThreadResumeParams`] has no such field,
-///   and leaving it absent is the decision (that type's doc is the source of truth for the reason). So a resumed app-server thread
-///   gets no priming — terminal mode is argv, so it is carried on resume as well, and the gap is this one branch only.
-/// ★The received value is carried **untouched**★ — the JSON body has no command-line cap, no `%` substitution and no newline truncation.
-///   Bringing the terminal branch's conversion ([`developer_instructions_override`]) here would block no risk
-///   and only break the document the agent reads.
+/// ★The three policies (working folder · approval · sandbox) are carried identically on both branches★: left out of resume, codex runs with the values stored at thread
+///   creation, so a resumed session would quietly trust the old folder with no sign on screen.
+/// ★Unverified: whether the cwd we send overrides the recorded value★ (`docs/reference/backend-capabilities.md` §1): a different cwd is not refused (**it resumes** — thread identity is per
+///   `CODEX_HOME`), but the response's `cwd` is the original recorded one, so our value may be ignored and the old-folder mismatch remains. Not measured (resume the same thread with two folders).
+///   We keep carrying the argument: ignored costs nothing, applied gives the intended value.
+/// ★`excludeTurns` is on by decision★ — we read no field of `thread.turns`; if it came filled, one long conversation would exceed the link's line cap (`MAX_LINE_BYTES`), **only that
+///   line would be dropped**, and the handshake would wait to its deadline. That outcome is indistinguishable from `thread/resume` being refused with a JSON-RPC error — the peer is alive
+///   and answered, we only see 「handshake failed on its deadline, child fine」 — and if that shape does not close the link's stdin, child · reader · writer are held as a wedge nobody reaps
+///   (see that close in `transport.rs`). So if upstream ignores `excludeTurns`, this argument blocks nothing and that close is the only defence. Whether upstream honours it is unverified.
+/// ★`developer_instructions` is carried only on the open branch★ — [`ThreadResumeParams`] has no such field by decision (see its doc), so a resumed app-server thread gets no priming
+///   (terminal mode is argv, so it is carried on resume; the gap is this branch only).
+/// ★The received value is carried untouched★ — the JSON body has no command-line cap, `%` substitution or newline truncation; the terminal branch's conversion
+///   ([`developer_instructions_override`]) here would only break the document the agent reads.
 // ADR-0185
 // ADR-0215
 fn thread_open(
@@ -154,32 +120,24 @@ fn thread_open(
     }
 }
 
-/// Launches the name as resolved through PATH (user decision 2026-09-07 · TRD §6-H).
+/// Launches the name as resolved through PATH (TRD §6-H).
 ///
-/// ★Why we do not find the real binary and launch it directly★: on Windows, `codex` on PATH is the
-/// `codex.cmd → node → codex.exe` chain, and the real binary at its end lives under **a version-stamped `node_modules` vendor
-/// path** (measured). codex updates itself automatically, so that path changes at times we do not know —
-/// hard-coding it dies on one update, and writing a search · fallback makes us reimplement that chain.
-/// ★One more layer of shim does not change kill causality — but write the range of that guarantee precisely★:
-/// **once enrolled** in the Job, breakaway is blocked (neither `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK` is turned on),
-/// so grandchildren · great-grandchildren born below it cannot leave the Job, and `TerminateJobObject` ends the tree as a whole
-/// (the 2 verbs of ADR-0001).
-/// ★Enrolment is **after** spawn, so the window in between is outside that guarantee★ — descendants born in that window do not enter the Job.
-/// All three agent links (`pty` · `stdio` · the codex link) put it in after launching, and the existing teardown tests measure only the settled
-/// state, so this window **has never been measured**. Fixing it is a separate matter touching all three links together, and the precedent is the usage query
-/// runner — launch suspended, put it into the Job, then wake it (`usage::process` + OS layer `spawn::prepare_tree_root` ·
-/// `spawn::TreeRoot`).
+/// ★Why not find the real binary and launch it directly★: on Windows `codex` on PATH is the `codex.cmd → node → codex.exe` chain, and the real binary lives under a **version-stamped
+/// `node_modules` vendor path** (measured). codex self-updates, so hard-coding it dies on one update and a search · fallback reimplements the chain.
+/// ★Another shim layer does not change kill causality★: **once enrolled** in the Job, breakaway is blocked (neither `BREAKAWAY_OK` nor `SILENT_BREAKAWAY_OK`), so descendants cannot leave and
+/// `TerminateJobObject` ends the tree (the 2 verbs of ADR-0001).
+/// ★Enrolment is **after** spawn, so descendants born in that window never enter the Job★ — all three agent links (`pty` · `stdio` · the codex link) share this and
+/// the teardown tests measure only the settled state, so the window is unmeasured. Fixing it touches all three links; the precedent is the usage query runner (launch suspended, enrol, wake:
+/// `usage::process` + `spawn::prepare_tree_root` · `spawn::TreeRoot`).
 const CODEX_PROGRAM: &str = "codex";
 
-/// The peer wording that means 「there is no record of that thread」 (lower-case comparison). ★Taken verbatim from a measured response★ —
-/// `-32600` + `no rollout found for thread id`(`docs/reference/backend-capabilities.md` §1).
-/// ★Why this wording, not the code, is the criterion★: the same code also comes for a config error · a duplicate `initialize` · resuming a
-/// child thread. Splitting by code would stamp a sound handle with 「no conversation to resume」 on an unrelated failure.
+/// The peer wording that means 「there is no record of that thread」 (lower-case comparison), taken verbatim from a measured response: `-32600` + `no rollout found for thread id`
+/// (`docs/reference/backend-capabilities.md` §1). ★The wording, not the code, is the criterion★: the same code also comes for a config error · a duplicate `initialize` · resuming a child
+/// thread, and splitting by code would stamp a sound handle with 「no conversation to resume」 on an unrelated failure.
 const NO_ROLLOUT_MARKER: &str = "no rollout found";
 
-/// The flag through which codex receives the working folder. ★Separate from the process cwd★ — `CommandSpec.cwd` is where we launch the
-/// process, and this value is **which folder codex trusts and edits as its workspace**. We give both the same value,
-/// but they are not the same field.
+/// The flag through which codex receives the working folder — ★separate from the process cwd★: `CommandSpec.cwd` is where we launch the process, this is **which folder codex trusts and edits
+/// as its workspace**. We give both the same value, but they are different fields.
 const CD_FLAG: &str = "--cd";
 
 /// Sandbox mode — allows the commands the model emits **up to writing, inside the working folder**.
@@ -190,18 +148,13 @@ const SANDBOX_WORKSPACE_WRITE: &str = "workspace-write";
 const APPROVAL_FLAG: &str = "-a";
 const APPROVAL_ON_REQUEST: &str = "on-request";
 
-/// The subcommand that resumes a stored session. ★It is not a flag — `--resume` · `--session-id` do not exist★
-/// (measured). What it takes is a **positional argument**, and that place is the first position of `codex resume [OPTIONS] [SESSION_ID] [PROMPT]`
-/// (measured 0.155.0 `codex resume --help`).
+/// The subcommand that resumes a stored session. ★It is not a flag — `--resume` · `--session-id` do not exist★ (measured). The id is a **positional argument**, first position of
+/// `codex resume [OPTIONS] [SESSION_ID] [PROMPT]` (0.155.0 `codex resume --help`).
 ///
-/// ★The three policies (`--cd` · `-s` · `-a`) are still parsed when placed **after** this subcommand★ — those three are also declared as `resume`'s own
-///   options (same measurement). For the order of the positional argument and the options, both were seen to pass
-///   (`codex resume <id> --cd . -s <bad value>` and the pair with the options in front both died with a **sandbox value error**
-///   = parsing got as far as that point). So we put the id right after the subcommand, so that `codex resume <id>` reads
-///   as one chunk.
-/// ★The second positional argument is `[PROMPT]`★ — so if a **bare word that is not a flag** comes into `extra_args` below,
-///   it is consumed as the first prompt. The Fresh branch (`codex [OPTIONS] [PROMPT]`) has the same property, so it is not a risk resume
-///   newly brought in — the pass-through comment below is the source of truth for why it is not filtered.
+/// ★The three policies (`--cd` · `-s` · `-a`) still parse **after** this subcommand★ (they are `resume`'s own options too; `codex resume <id> --cd . -s <bad value>` and the options-first order
+///   both died with a **sandbox value error**, i.e. parsing got that far). We put the id right after the subcommand so `codex resume <id>` reads as one chunk.
+/// ★The second positional argument is `[PROMPT]`★ — a bare non-flag word in `extra_args` is consumed as the first prompt. The Fresh branch has the same property, so resume adds no new risk
+///   (the pass-through comment below says why it is not filtered).
 const RESUME_SUBCOMMAND: &str = "resume";
 
 /// The flag that overrides codex settings from the command line. ★It is the only means of getting settings without creating a single file on the user's machine★
@@ -210,83 +163,59 @@ const CONFIG_OVERRIDE_FLAG: &str = "-c";
 
 /// The env variable that overrides, per spawn, the value codex writes verbatim into the `originator` field of the session record.
 ///
-/// ★It is an **internal** variable upstream does not document★ — if it disappears, it is a silent ignore, not an error, and what remains then is
-///   one thing: 「a record without a marker」 (ADR-0217 「three unverified items」 ③). That the value stays in the record as is was measured
-///   (0.155.1 · 3 arbitrary strings · no allowlist refusal — ADR-0217 Probe B).
-/// ★This value is visible to the child and its descendants — the result of measuring and leaving it as is★: what it holds is the
-///   **identifier** `(agent_id, epoch)`, not a value that grants permission. What grants permission is the bearer token of
-///   [`TOKEN_ENV`] already carried in the same env, and that token cannot be made from knowing this pair. Moreover this
-///   value is planted **precisely to remain outside our process** (the `originator` field of the vendor record). So it was
-///   not removed. ★One condition under which this reasoning dies — the day the agent id itself becomes a key that opens something★:
-///   then revisit that key design, not this spot.
+/// ★It is an **internal** upstream variable★ — if it disappears it is a silent ignore, leaving only 「a record without a marker」 (ADR-0217 「three unverified items」 ③). That the value stays in
+///   the record as is was measured (0.155.1 · 3 arbitrary strings · no allowlist refusal — ADR-0217 Probe B).
+/// ★Visible to the child and its descendants — left as is on purpose★: it holds the **identifier** `(agent_id, epoch)`, not a permission; permission is the bearer token of [`TOKEN_ENV`]
+///   in the same env, which cannot be made from this pair. And the value is planted precisely to remain outside our process (the vendor record's `originator`). Revisit only if the
+///   agent id itself becomes a key that opens something — then fix that key design, not this spot.
 // ADR-0217
 const ORIGINATOR_ENV: &str = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
 
-/// The key prefix of the config override that attaches the daemon MCP server to this spawn. The server's logical name is appended to make
-/// the single key `mcp_servers.engram` (source of truth = [`MCP_SERVER_NAME`] — do not type the name again here).
+/// The key prefix of the config override that attaches the daemon MCP server to this spawn; the server's logical name ([`MCP_SERVER_NAME`], do not retype it) is appended to make the single key
+/// `mcp_servers.engram`.
 ///
-/// ★The mechanism **differs** from claude's `--mcp-config <file>`★ — codex does not take a file and takes only this override
-///   (measured 0.155.0). So the same endpoint is translated into different syntax in the two backends
-///   (exactly the point ADR-0004 talks about).
+/// ★The mechanism **differs** from claude's `--mcp-config <file>`★ — codex takes only this override, no file (measured 0.155.0); the same endpoint is translated into different syntax per
+///   backend (ADR-0004).
 const MCP_SERVER_OVERRIDE_PREFIX: &str = "mcp_servers.";
 
-/// The field in the MCP server config that takes **not the value of the bearer token but the name of the env variable holding it**.
+/// The MCP server config field that takes **the name of the env variable holding the bearer token**, not its value.
 ///
-/// ★Picking this field is a decision — do not revert to an inline value (`bearer_token='…'`)★: doing so
-///   **embeds the token in the command line**, and it leaks just by any process of the same user reading argv (Windows'
-///   process list · WMI give argv — the very surface this repository uses for daemon discovery). With this field the token
-///   is only the one copy already in the spawn env ([`inject_cli_entrance`] plants it as [`TOKEN_ENV`]), and no copy appears in argv
-///   or on disk.
-/// ★We saw codex actually read that env and carry it as a header (measured 2026-09-19 · 0.155.0)★ — the stub MCP server
-///   received `Authorization: Bearer <that value>` on all requests from `initialize` · `tools/list` on.
+/// ★Do not revert to an inline value (`bearer_token='…'`)★: that **embeds the token in the command line**, readable by any same-user process via argv (Windows process list · WMI — the surface this repository
+///   uses for daemon discovery). With this field the token is only the one copy already in the spawn env ([`inject_cli_entrance`] plants it as [`TOKEN_ENV`]); none in argv or on disk.
+/// Measured 0.155.0: codex reads that env and carries it as a header — the stub MCP server received `Authorization: Bearer <that value>` on every request from `initialize` · `tools/list` on.
 const MCP_BEARER_ENV_KEY: &str = "bearer_token_env_var";
 
 /// The field that removes the tool-call approval prompt, limited to this one MCP server entry.
 ///
-/// The valid values are four: `auto | prompt | writes | approve` — ★`auto` does not remove the prompt.
-///   Only `approve` removes it★ (measured 2026-09-20). Confusing these two once led to a wrong conclusion,
-///   so both names are pinned here. It was confirmed that `approve` removes approval on all three paths:
-///   the interactive TUI · `codex exec` (without this field it simply fails with
-///   "MCP tool call requires approval, but approval policy is never") ·
-///   `codex app-server --stdio` (without this field the gate comes as `mcpServer/elicitation/request`).
-/// ★It applies only to this one server entry — approval was not turned off globally★: `approvalPolicy: on-request` ·
-///   `sandbox: workspace-write` are untouched, so ordinary shell/exec approvals are still asked.
-/// ★The dialog's "Always allow" does not persist to disk★ (measured by comparing before/after snapshots with an empty `CODEX_HOME`
-///   — a new process asks again). So this value cannot be replaced by setting it once and
-///   must be carried on every spawn.
+/// Valid values: `auto | prompt | writes | approve` — ★`auto` does not remove the prompt, only `approve` does★ (measured 2026-09-20), confirmed on all three paths: the interactive TUI ·
+///   `codex exec` (without it: "MCP tool call requires approval, but approval policy is never") · `codex app-server --stdio` (without it the gate comes as `mcpServer/elicitation/request`).
+/// ★Only this one server entry — approval is not turned off globally★: `approvalPolicy: on-request` · `sandbox: workspace-write` are untouched, so ordinary shell/exec approvals are still asked.
+/// ★The dialog's "Always allow" does not persist to disk★ (before/after snapshots with an empty `CODEX_HOME`), so this value must be carried on every spawn.
 const MCP_APPROVAL_MODE_KEY: &str = "default_tools_approval_mode";
 const MCP_APPROVAL_MODE_VALUE: &str = "approve";
 
 /// The config key that **appends** the priming brief **after** codex's default instructions.
 ///
-/// ★Do not swap it with `model_instructions_file` — that one **replaces** rather than appends (measured 0.155.0)★:
-///   it is the only instruction key that takes a path, but hanging the priming there makes codex's own operating instructions disappear
-///   entirely.
-/// ★This key has **no** `*_file` counterpart that takes a path★ — `developer_instructions_file` ·
-///   `experimental_instructions_file` · `instructions_file` are all `unknown configuration field`
-///   (same measurement). So unlike claude, this backend carries the **content**, not a path, and **reads** the brief file
-///   **here**. That split is the per-backend knowledge ADR-0004 talks about.
-/// ★Authority is the same layer★ — per the OpenAI docs, the `instructions` parameter and a `developer` role message are the same grade,
-///   so the price of picking this field instead of a path is not 「instruction strength」.
+/// ★Do not swap it with `model_instructions_file`★ — that one **replaces** instead of appending (measured 0.155.0), so codex's own operating instructions would disappear.
+/// ★This key has **no** `*_file` counterpart★ — `developer_instructions_file` · `experimental_instructions_file` · `instructions_file` are all `unknown configuration field` (same measurement). So unlike
+///   claude, this backend carries the **content** and **reads** the brief file here (the per-backend knowledge of ADR-0004).
+/// Authority is the same layer: per the OpenAI docs the `instructions` parameter and a `developer` message are the same grade, so this field costs no 「instruction strength」.
 // ADR-0004
 // ADR-0215
 const DEVELOPER_INSTRUCTIONS_KEY: &str = "developer_instructions";
 
-/// The two characters (backslash + `n`) that stand in for a newline when carried on the command line.
+/// The two characters (backslash + `n`) that stand in for a newline on the command line.
 ///
-/// ★If even one real LF remains, `cmd` **cuts the command line at that spot without any error**★
-///   (measured) — codex comes up with the following arguments gone entirely. That outcome is not 「no priming」 but
-///   「no MCP attachment and no hook registration」, so the silent cut is the most expensive failure mode of this value.
-/// ★Replacing it with two characters is the measured choice★ — the model read this form as a newline as is (same measurement).
-///   A TOML literal string has no escapes, so these two characters pass the parser and arrive **literally**.
+/// ★If one real LF remains, `cmd` **cuts the command line there without any error**★ (measured) — codex comes up with the following arguments gone, i.e. 「no MCP attachment and no hook registration」,
+///   the most expensive failure of this value.
+/// The model reads this two-character form as a newline (same measurement); a TOML literal string has no escapes, so it arrives **literally**.
 // ADR-0215
 const NEWLINE_REPLACEMENT: &str = "\\n";
 
 /// The total command-line length `cmd.exe` accepts (UTF-16 code units).
 ///
-/// ★This budget is not ours alone★ — the policy flags · pass-through · the two overrides share the same line.
-///   So the decision is not a fixed-constant comparison but **the remainder after counting the already-assembled arguments**
-///   ([`command_line_cost`]).
+/// ★Not ours alone★ — the policy flags · pass-through · the two overrides share the line, so the decision is **the remainder after counting the already-assembled arguments**
+///   ([`command_line_cost`]), not a fixed-constant comparison.
 // ADR-0215
 const CMD_LINE_LIMIT_UTF16: usize = 8191;
 
@@ -295,14 +224,10 @@ const CMD_WRAPPER_COST: usize = "cmd.exe /c ".len() + CODEX_PROGRAM.len();
 
 /// A **conservative** estimate of the command-line length the already-assembled arguments used (UTF-16 code units).
 ///
-/// ★It deliberately counts generously instead of reproducing the quoting rules★ — for every argument it unconditionally adds one space and two
-///   enclosing quotes. Counting exactly would require reimplementing **both** portable-pty's quoting rules and `cmd`'s re-parsing, and that
-///   reimplementation quietly goes stale when upstream changes. Over-counting and skipping the priming is cheaper than under-counting and having
-///   the command line cut — a cut erases the trailing arguments without an error.
-/// ★The wrapping share is added regardless of platform★ — the cap applies only on Windows, but if the decision were split
-///   by platform, the same brief would be carried on some machines and not on others. It is brought down to one value.
-/// ★Counting in UTF-16 is intended★ — the Windows command line is UTF-16 and the cap is in that unit too. Counting bytes
-///   overestimates for a non-ASCII brief, and counting `chars()` underestimates for characters outside the BMP.
+/// ★Deliberately generous instead of reproducing the quoting rules★ — every argument adds one space and two enclosing quotes. Exact counting would reimplement portable-pty's quoting **and** `cmd`'s
+///   re-parsing and go stale with upstream; over-counting (skipping priming) is cheaper than under-counting (a cut erases trailing arguments without an error).
+/// ★The wrapping share is added regardless of platform★ — the cap applies only on Windows, but a platform split would carry the same brief on some machines and not others.
+/// ★UTF-16 is intended★: the Windows command line and its cap are in that unit; bytes overestimate non-ASCII, `chars()` underestimates characters outside the BMP.
 // ADR-0215
 fn command_line_cost(args: &[String]) -> usize {
     CMD_WRAPPER_COST
@@ -314,13 +239,10 @@ fn command_line_cost(args: &[String]) -> usize {
 
 /// The **content** of the priming brief to carry on this spawn. `None` = nothing to carry (path absent · read failure · empty file).
 ///
-/// ★A read failure is fail-open★ — only a warning is left and `None` is returned. Priming is nice to have and
-///   the spawn is required (ADR-0216 inherited as a general rule 「never fail the spawn on any branch」).
-/// ★That **this crate** reads the content is where it splits from the claude branch★ — that side passes a path and claude
-///   reads it directly (ADR-0092). codex has no key that takes a path ([`DEVELOPER_INSTRUCTIONS_KEY`]), so that
-///   option does not exist. That this read is inside the backend folder is the point of ADR-0004 — the daemon's priming
-///   provider still handles **only the path**.
-/// ★An empty file is `None` too★ — carrying empty instructions only spends command line and teaches nothing.
+/// ★A read failure is fail-open★ — warn and return `None`; priming is nice to have, the spawn is required (ADR-0216: never fail the spawn on any branch).
+/// ★This crate reads the content — where it splits from claude★: that side passes a path and claude reads it (ADR-0092); codex has no path key ([`DEVELOPER_INSTRUCTIONS_KEY`]). That the read is
+///   inside the backend folder is ADR-0004 — the daemon's priming provider still handles **only the path**.
+/// An empty file is `None` too — empty instructions only spend command line.
 // ADR-0004
 // ADR-0092
 // ADR-0215
@@ -346,24 +268,16 @@ fn priming_text(control: Option<&ControlEndpoint>) -> Option<String> {
     }
 }
 
-/// The `-c developer_instructions='…'` value to carry on a terminal-mode spawn. `None` = not carried — ★only a warning is left and
-/// the spawn goes ahead★ (the same discipline as ADR-0216's 「never fail the spawn on any branch」).
+/// The `-c developer_instructions='…'` value to carry on a terminal-mode spawn. `None` = not carried — ★only a warning is left and the spawn goes ahead★ (ADR-0216).
 ///
-/// `args_so_far` = the arguments already assembled before this value. Used only for the command-line budget decision.
+/// `args_so_far` = the arguments already assembled; used only for the command-line budget decision.
 ///
-/// ★Wrapped as a TOML literal string (single quotes)★ — there are no escapes, so the value crosses byte for byte, and that combination
-///   was measured to survive the two layers `cmd.exe /c` + the `.cmd` shim (ADR-0210). In exchange, a single quote itself cannot
-///   be held.
-/// ★On meeting a character that cannot be carried, it skips instead of pushing it in with an invented escape★ — the four characters each break a different layer:
-///   the single quote breaks the TOML literal; the double quote and backslash break the **command-line quoting** outside it (portable-pty
-///   escapes as `\"`, but `cmd` does not know that rule and only counts quotes); `%` breaks cmd's environment variable
-///   substitution (**expanded even inside quotes** — the same-named limit comment of `build_spec` is the source of truth).
-/// ★Do not remove this guard because it never trips today★ — the current brief has zero of those four, but this document is
-///   markdown people edit, and one English contraction (`don't`) brings in a single quote.
-/// ★Control characters including tab are cut too★ — only the newline is replaced with [`NEWLINE_REPLACEMENT`] above; for the rest, we have never verified
-///   `cmd`'s token splitting and quoting layers. The symptoms are all 「a silently skewed command line」, so we choose not to
-///   carry it.
-/// ★The guard looks at **the original before replacement**★ — doing it after would make the backslashes we inserted trip our own guard.
+/// ★Wrapped as a TOML literal string (single quotes)★ — no escapes, so the value crosses byte for byte; measured to survive `cmd.exe /c` + the `.cmd` shim (ADR-0210). A single quote itself cannot be held.
+/// ★A character that cannot be carried makes it skip instead of inventing an escape★ — each breaks a different layer: the single quote breaks the TOML literal; the double quote and backslash break the
+///   **command-line quoting** outside it (portable-pty escapes `\"`, `cmd` does not know that and only counts quotes); `%` breaks cmd's variable substitution (**expanded even inside quotes** —
+///   `build_spec`'s same-named limit comment is the source of truth). ★Do not remove the guard because it never trips today★: the brief is markdown people edit and one contraction (`don't`) brings in a single quote.
+/// ★Control characters including tab are cut too★ — only the newline is replaced with [`NEWLINE_REPLACEMENT`]; `cmd`'s token splitting is unverified for the rest, and all symptoms are 「a silently skewed command line」.
+/// ★The guard looks at the original **before** replacement★ — after it, our inserted backslashes would trip our own guard.
 // ADR-0215
 // ADR-0216
 fn developer_instructions_override(text: &str, args_so_far: &[String]) -> Option<String> {
@@ -392,51 +306,31 @@ fn developer_instructions_override(text: &str, args_so_far: &[String]) -> Option
     Some(value)
 }
 
-/// The **single decision** of whether to attach the daemon MCP server to this spawn. [`AgentBackend::build_spec`] (the actual attachment) and
-/// [`AgentBackend::precheck_control_endpoint`] (the fail-closed gate) read **this same value**.
-///
-/// ★If the two places each decided, the gate would become hollow★ — a spawn the gate passed as 「can attach」 could
-///   come up without an attachment in the assembly with no signal. So there is only one decision, [`mcp_attachment`], and this
-///   enum carries its result to the two reading places in the same shape.
+/// The **single decision** of whether to attach the daemon MCP server to this spawn; [`AgentBackend::build_spec`] (the attachment) and [`AgentBackend::precheck_control_endpoint`] (the fail-closed gate) read **this
+/// same value**. ★If each decided, the gate would go hollow★ — a spawn it passed as 「can attach」 could come up unattached with no signal. The one decision is [`mcp_attachment`].
 enum McpAttachment {
     /// Attach — the value to carry on `-c`.
     Attach(String),
-    /// Do not attach, and **that is the normal state**. Two branches fall here — a spawn with no control channel at all
-    /// (outside the mail plane), and a spawn for which the daemon has **not authorized** the MCP send entrance (the operator turned off MCP
-    /// mail — [`ControlEndpoint::grants_mcp_send`]). Neither blocks the spawn.
+    /// Do not attach — **the normal state**. Two branches: a spawn with no control channel (outside the mail plane), and one for which the daemon has **not authorized** the MCP send entrance
+    /// (the operator turned off MCP mail — [`ControlEndpoint::grants_mcp_send`]). Neither blocks the spawn.
     NotWanted,
-    /// Should attach but **cannot build it** (reason). ★Only this value produces fail-closed★ — if it simply came up in this state,
-    /// the agent would sit on the receiving roster (`reads_messages`) with zero send entrances (MCP is not attached and the CLI
-    /// mirror is closed by `mail_allowed=false`), and every delivered request would become a contract nobody can answer.
+    /// Should attach but **cannot build it** (reason). ★Only this value produces fail-closed★ — otherwise the agent would sit on the receiving roster (`reads_messages`) with zero send entrances
+    /// (MCP unattached, CLI mirror closed by `mail_allowed=false`) and every delivered request would be a contract nobody can answer.
     Unrepresentable(String),
 }
 
 /// The only place that makes the decision above.
 ///
-/// ★Environment variables are not read again here (ADR-0004)★: the owner of the knobs that turn off MCP mail (`ENGRAM_DISALLOW_MCP_SEND` ·
-///   the harness's `ENGRAM_FORCE_CLI_ONLY_SEND`) is **the daemon**, and that decision arrives already digested
-///   via [`ControlEndpoint::grants_mcp_send`]. If the backend read the same variables again there would be two authorities,
-///   and on the day they split, 「claude is off but only codex is on」 would happen silently (that is the finding that
-///   created this branch).
+/// ★Environment variables are not read again here (ADR-0004)★: the owner of the knobs that turn off MCP mail (`ENGRAM_DISALLOW_MCP_SEND` · the harness's `ENGRAM_FORCE_CLI_ONLY_SEND`) is **the daemon**, and the
+///   decision arrives digested via [`ControlEndpoint::grants_mcp_send`]. A second reader would make two authorities and 「claude off, codex on」 would happen silently.
 ///
-/// ★This branch has no plaintext token file — but this function is not what guarantees it★: that the token
-///
-/// ★This branch has no plaintext token file — but this function is not what guarantees it★: that the token
-///   is not embedded in argv here is kept by [`MCP_BEARER_ENV_KEY`] above, and that it **is not written to disk either** is
-///   kept by [`AgentBackend::writes_mcp_config_file`] being false (the daemon's `control::provision` decides
-///   `mcp_config::write_config`/`write_settings` by that one field — the content and lifetime of that file are in
-///   `control/mcp_config.rs`). ★This spot once said 「this branch has no such file in the first place」, and that was
-///   false★ — back then the daemon looked at `accepts_mcp_config` and actually wrote that file on every codex spawn.
-///   That this function does not create a file and that no file appears for that spawn are different statements.
-/// ★A TOML literal string (single quotes) is used★ — there are no escapes, so the value crosses **byte for byte**, and that
-///   combination was already measured to survive the two layers `cmd.exe /c` + the `.cmd` shim (ADR-0210). In exchange, a single quote
-///   itself cannot be held.
-/// ★On meeting a character that cannot be carried, it stops instead of pushing it in with an invented escape★ — a single quote · whitespace ·
-///   control characters break the value or the TOML line itself, and `%` is expanded by cmd as an environment variable on the command line **even inside
-///   quotes** (the same-named limit comment of `build_spec` below is the source of truth), making it point to a different address. All three have one
-///   symptom, 「mail silently does not work」, so we make noise here.
-///   ★It is normal that this check never trips today★ — this url is `http://127.0.0.1:<port>/mcp` authored by the daemon,
-///   not user input. The check is for the day that form changes.
+/// ★This branch has no plaintext token file — but this function is not what guarantees it★: the token stays out of argv via [`MCP_BEARER_ENV_KEY`], and out of disk because
+///   [`AgentBackend::writes_mcp_config_file`] is false (the daemon's `control::provision` picks `mcp_config::write_config`/`write_settings` by that one field; the file's content and lifetime:
+///   `control/mcp_config.rs`). That this function creates no file and that no file appears for that spawn are different statements.
+/// ★TOML literal string (single quotes)★ — no escapes, byte for byte, measured to survive `cmd.exe /c` + the `.cmd` shim (ADR-0210); a single quote itself cannot be held.
+/// ★A character that cannot be carried stops it instead of inventing an escape★ — a single quote · whitespace · control characters break the value or the TOML line, and `%` is expanded by cmd **even inside
+///   quotes** (`build_spec`'s same-named limit comment), pointing at a different address. All share one symptom, 「mail silently does not work」, so we make noise.
+///   It never trips today (the url is daemon-authored `http://127.0.0.1:<port>/mcp`); the check is for the day that form changes.
 // ADR-0004
 // ADR-0128
 // ADR-0209
@@ -444,9 +338,8 @@ fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
     let Some(endpoint) = control else {
         return McpAttachment::NotWanted;
     };
-    // ★This one line is all that makes 「the operator turned off MCP mail」 reach this backend★ — previously it looked only at the
-    //   **existence** of the control channel and attached unconditionally, so an operator who turned on the knob got a state where claude was off and codex
-    //   stayed on (`eg_send` still callable with automatic approval).
+    // ★This one line is all that makes 「the operator turned off MCP mail」 reach this backend★ — looking only at the control channel's existence would attach unconditionally and leave claude off and
+    //   codex on (`eg_send` still callable with automatic approval).
     if !endpoint.grants_mcp_send() {
         return McpAttachment::NotWanted;
     }
@@ -464,23 +357,17 @@ fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
     ))
 }
 
-/// The subcommand that launches it as a resident JSON server, and its transport choice (measured 0.154.0 — `--stdio` is the same as `--listen stdio://`
-/// and it is the default. We state it explicitly instead of relying on the default: this link does not hold unless it is stdio,
-/// and the default can be changed by upstream, and if it changes our argv stays silently the same).
+/// The subcommand that launches it as a resident JSON server, and its transport (measured 0.154.0: `--stdio` equals `--listen stdio://` and is the default). Stated explicitly: this link
+/// holds only on stdio, and an upstream default change would silently change our argv.
 const APP_SERVER_SUBCOMMAND: &str = "app-server";
 const APP_SERVER_STDIO_FLAG: &str = "--stdio";
 
-/// Does the caller pass-through set **the same config key as ours**? `true` = our override overrides it (because it is carried
-/// later) — so that a value the user set on purpose is not silently erased, a warning is given at that spot.
+/// Does the caller pass-through set **the same config key as ours**? `true` = our override wins (carried later), and a warning is given so a deliberately set value is not silently erased.
 ///
-/// ★Only one shape is caught = the form where the **next slot** after `-c` starts with `key`★ (`-c developer_instructions=…`).
-/// ★What it does not catch — a known hole★: the form with `-c` and the value joined in one word · the same flag under a long name
-///   instead of `-c` · a higher key that overrides a whole table (`-c tui=…` · `-c mcp_servers=…`) · another key that **only starts**
-///   with that key. Do not try to make it 「certain」 by growing this list — it becomes a reimplementation of the codex override syntax, and that reimplementation
-///   quietly goes stale every time upstream changes. What is lost by missing one is **only the warning, not behaviour** — that ours wins
-///   is guaranteed separately by the order in `build_spec` below.
-/// ★Taking the key as an argument is intended★ — there are several overrides (MCP server attachment · the brief), and duplicating the decision per key
-///   leads to only one side getting fixed and the warning becoming half.
+/// ★Catches one shape only: the **next slot** after `-c` starts with `key`★ (`-c developer_instructions=…`).
+/// ★Known holes★: `-c` with the value joined in one word · the long-name flag · a higher key overriding a whole table (`-c tui=…` · `-c mcp_servers=…`) · another key that only starts with that key.
+///   Do not grow the list toward 「certain」 — it becomes a reimplementation of codex's override syntax that goes stale. A miss loses **only the warning**; that ours wins is guaranteed by the order in `build_spec`.
+/// Taking the key as an argument is intended: several overrides exist (MCP attachment · the brief) and per-key duplication leaves the warning half-fixed.
 fn passthrough_overrides_key(extra_args: &[String], key: &str) -> bool {
     extra_args
         .windows(2)
@@ -489,21 +376,14 @@ fn passthrough_overrides_key(extra_args: &[String], key: &str) -> bool {
 
 /// The string if it has a shape that can be carried as the positional argument of `codex resume`, otherwise `None`.
 ///
-/// ★Why the gate is needed — this argument **does not fail even when wrong**★ (measured 2026-09-21): when codex receives a string
-///   that cannot be read as a thread id, it reinterprets it as a **session name**, **quietly creates a new session**,
-///   ends with exit code `0`, and the turn is billed. That is, the price of a wrong value is not 「an error」 but 「a new conversation
-///   the user believes they resumed」. The failure mode ADR-0218 set is 「not received」, not 「the wrong conversation」,
-///   so for a value that cannot be carried, the subcommand itself is not emitted (it falls to new-conversation argv, and that regression
-///   is reported by `opens_a_new_conversation` at the assembly point).
-/// ★Can that reinterpretation path be reached today — the type already blocks half★: this field is `Uuid`, so a non-uuid
-///   string cannot get this far, and profile deserialization refuses it before that too. So what this function actually
-///   filters is one thing, **nil** (all zeros) — a value coming from a hand-edited profile or an initialization mistake, and that value
-///   has the uuid shape, so it passes the type gate.
-/// ★Do not merge it with claude★ — that side does not have this failure mode (`--resume` fails on an unknown value).
-///   Lifting it to a shared place would make one backend's upstream bug an assembly rule for everyone (ADR-0004).
-/// ★This function is **not** only for argv assembly — the session id recovery gate also looks at it★
-///   (the terminal branch of [`AgentBackend::open_spawn`] · [`thread_lock::plan_capture`]). Fixing only one side
-///   creates the combination 「argv is a new conversation but recovery is off」, and that incarnation's id is never written.
+/// ★The gate is needed because this argument **does not fail even when wrong**★ (measured 2026-09-21): a string codex cannot read as a thread id is reinterpreted as a **session name**,
+///   **a new session is quietly created**, exit code `0`, and the turn is billed — 「a new conversation the user believes they resumed」. ADR-0218's failure mode is 「not received」, not 「the wrong
+///   conversation」, so for an uncarriable value the subcommand is not emitted (falls to new-conversation argv; `opens_a_new_conversation` at the assembly point reports that regression).
+/// ★Reachable today only for **nil**★: the field is `Uuid`, so a non-uuid string never gets here (profile deserialization refuses it earlier); nil (all zeros — hand-edited profile or init mistake)
+///   has the uuid shape and passes the type gate.
+/// ★Do not merge it with claude★ — `--resume` fails on an unknown value there; sharing would make one backend's upstream bug everyone's assembly rule (ADR-0004).
+/// ★Not only for argv assembly — the session id recovery gate looks at it too★ (the terminal branch of [`AgentBackend::open_spawn`] · [`thread_lock::plan_capture`]); fixing only one side
+///   yields 「argv is a new conversation but recovery is off」 and that incarnation's id is never written.
 // ADR-0218
 fn resume_argument(thread_id: Uuid) -> Option<String> {
     (!thread_id.is_nil()).then(|| thread_id.hyphenated().to_string())
@@ -511,17 +391,12 @@ fn resume_argument(thread_id: Uuid) -> Option<String> {
 
 /// The **diagnostic** marker left in the session record this incarnation creates (the value of [`ORIGINATOR_ENV`]).
 ///
-/// ★There is no reader — do not write the contract 「recompute the same value and compare」 here again★ (ADR-0218
-///   decision 8): recovery is carried by the lock holder ([`thread_lock`]) and does not lean on this marker. Writing a comparison contract
-///   makes a promise that cannot be kept — the marker contains the incarnation marker, so **the next incarnation computes a different value**,
-///   and searching old records with that value yields 0 hits without an error.
-/// Properties:
-/// - Invariant within one incarnation, and a different value when the incarnation changes (that distinction is `epoch`'s job).
-/// - The returned string is only `[a-z0-9-]` — any other character is replaced with one `-` per character.
+/// ★There is no reader — do not write the contract 「recompute the same value and compare」★ (ADR-0218 decision 8): recovery is carried by the lock holder ([`thread_lock`]). The marker contains the
+///   incarnation marker, so **the next incarnation computes a different value** and searching old records with it yields 0 hits without an error.
+/// - Invariant within one incarnation; different when the incarnation changes (`epoch`'s job).
+/// - Only `[a-z0-9-]`: any other character becomes one `-` per character.
 ///
-/// ★Today `agent_id` is a uuid, so it is normal that the substitution never runs — still, do not remove it★: this value
-///   remains outside our process (the vendor record), and which characters that field accepts is upstream's business. The substitution closes that
-///   unknown on our side.
+/// ★Today `agent_id` is a uuid so the substitution never runs — do not remove it★: the value stays outside our process (the vendor record) and which characters that field accepts is upstream's business.
 // ADR-0217
 // ADR-0218
 pub(crate) fn originator_marker(agent_id: AgentId, epoch: u32) -> String {
@@ -546,56 +421,37 @@ fn sanitise_marker(raw: &str) -> String {
 pub struct CodexBackend;
 
 impl AgentBackend for CodexBackend {
-    /// ★The caller cannot decide the session id (measured)★ — codex has no `--session-id`-like flag and the id is
-    /// issued by codex itself. If set to true, the manager issues our uuid and **persists it in the profile**, but codex
-    /// never once uses that value — after that, the resume decision stands on that fake value and believes an incarnation that is actually
-    /// a new conversation was resumed.
-    /// ★Do not turn it on for app-server mode — both shapes are false★: the issuer of that mode's identifier (thread id) is
-    ///   codex too. Whether that id **can be resumed** is answered by the separate axis below.
+    /// ★The caller cannot decide the session id (measured)★ — codex has no `--session-id`-like flag and issues the id itself. If true, the manager would issue our uuid and **persist it in the profile**,
+    /// codex would never use it, and the resume decision would stand on that fake value, believing a new conversation was resumed.
+    /// ★Do not turn it on for app-server mode — both shapes are false★: that mode's identifier (thread id) is also issued by codex; whether it **can be resumed** is the separate axis below.
     // ADR-0185
     fn assigns_session_id(&self, _command: &AgentCommand) -> bool {
         false
     }
 
-    /// ★Both modes resume — only the means differ★: app-server emits `thread/resume` with the stored thread id
-    /// ([`AgentBackend::open_spawn`] picks it), and terminal mode launches carrying the same id as a subcommand + positional argument
-    /// ([`RESUME_SUBCOMMAND`] · the terminal branch of [`AgentBackend::build_spec`]).
-    /// ★So this field does not look at [`is_app_server`] — do not revert it★: what this predicate asks is
-    ///   **whether it can resume with the stored sid**, not through which link it resumes. Splitting by link would make codex launched in terminal
-    ///   mode get launched as Fresh by the activation entrance even with a handle in the registry, and the id that was recovered and recorded
-    ///   ([`crate::profile::ProfileRegistry::observe_session_id`]) would never be used (ADR-0217).
-    /// ★When there is **no** handle, this field does not answer★ — that decision is made by [`crate::backend::can_resume_profile`],
-    ///   which looks at it together with the existence of a stored sid, and a spawn that still comes in as Resume is
-    ///   dropped to new-conversation argv by [`AgentBackend::build_spec`] (the doc at that spot).
-    /// ★Turn it on **together with the same predicate as `session.resume` of [`AgentBackend::capabilities`] below — do not touch
-    ///   only one side**★: turning either on alone reports a new thread that was never resumed as 「resumed」,
-    ///   and turning it off alone reports a spawn that actually resumes as 「new conversation」.
+    /// ★Both modes resume — only the means differ★: app-server emits `thread/resume` with the stored thread id ([`AgentBackend::open_spawn`]); terminal mode launches carrying the same id as
+    /// subcommand + positional argument ([`RESUME_SUBCOMMAND`] · the terminal branch of [`AgentBackend::build_spec`]).
+    /// ★Do not make this look at [`is_app_server`]★: the question is **whether it can resume with the stored sid**, not through which link. Splitting by link would make terminal-mode codex launch as Fresh
+    ///   even with a handle in the registry, and the recovered id ([`crate::profile::ProfileRegistry::observe_session_id`]) would never be used (ADR-0217).
+    /// ★With **no** handle this field does not answer★ — [`crate::backend::can_resume_profile`] decides that together with the stored sid, and a spawn that still comes in as Resume is dropped to
+    ///   new-conversation argv by [`AgentBackend::build_spec`].
+    /// ★Turn it on **together with** the same predicate as `session.resume` of [`AgentBackend::capabilities`]★: either alone reports a never-resumed thread as 「resumed」 or a real resume as 「new conversation」.
     // ADR-0185
     // ADR-0208/ADR-0210
     fn can_resume_stored_session(&self, _command: &AgentCommand) -> bool {
         true
     }
 
-    /// ★It is true but [`AgentBackend::accepts_mcp_config`] is false — the two axes are separate (ADR-0133)★: what this field
-    /// asks is **does it consume the control channel**, and the means of that consumption is not only MCP but also the CLI entrance (credential env).
-    /// What the field below asks is only one of them: **can the mcp-config file be fed**.
-    /// ★Reverting it to false makes `ENGRAM_TOKEN` · `ENGRAM_CONTROL_URL` disappear entirely from the env of codex spawns★
-    ///   — the assembly point looks at this field and skips provisioning itself (that spot of [`crate::manager::AgentManager`]),
-    ///   so the endpoint comes as `None`, and not a single line of the injection in `build_spec` below runs.
-    /// ★Once, the consumers of this env included **our hook process** — today there is none★ (ADR-0216 removed the registration).
-    ///   What was measured then stays: codex **overlaid none** of its own env on the hook process (pure inheritance —
-    ///   measured 2026-09-18, 0.155.0). The living consumers are the shell tools codex launches and MCP mail, and the condition the shared
-    ///   injection wrote as 「it is also the credential of helper processes」 is carried by the [`inject_cli_entrance`] doc.
-    /// ★This field **does not open mail — and that was not free**★: the old daemon derived whether mail is allowed
-    ///   from `!accepts_mcp_config` alone, so just turning this field on **also opened send authorization**
-    ///   for this backend (with receiving closed by [`AgentBackend::reads_messages`]). To remove that asymmetry, the send axis
-    ///   was pulled out as a separate declaration — that is [`AgentBackend::uses_mail`] below, and the daemon derives one value from the two
-    ///   axes. ★Removing that field or reverting it to the default brings this side effect straight back★.
-    ///   (Today that field is on — but it is on **by declaration**, not as a side effect.)
-    /// ★Even in an install without the `engram` executable, this backend's spawn **is not cut**★ — that fail-closed
-    ///   guards the pair violation 「CLI mail was taught but there is no executable to call」, and a spawn outside the mail plane
-    ///   has no such pair (source of truth for that decision = the daemon's `control::provision`). Losing the control verbs remains, but
-    ///   that side is fail-open + warn.
+    /// ★True while [`AgentBackend::accepts_mcp_config`] is false — the two axes are separate (ADR-0133)★: this one asks **does it consume the control channel** (by MCP or the CLI entrance / credential env);
+    /// the field below asks only **can the mcp-config file be fed**.
+    /// ★Reverting it to false makes `ENGRAM_TOKEN` · `ENGRAM_CONTROL_URL` vanish from codex spawn env★ — the assembly point (see [`crate::manager::AgentManager`]) skips provisioning, the endpoint comes as
+    ///   `None`, and none of `build_spec`'s injection runs. Today's live consumers are the shell tools codex launches and MCP mail (the [`inject_cli_entrance`] doc has the credential condition); our hook
+    ///   process is gone (ADR-0216), and codex overlaid none of its own env on it (0.155.0).
+    /// ★This field **does not open mail**★: the daemon once derived mail-allowed from `!accepts_mcp_config` alone, so turning this on also opened send authorization (receiving closed by
+    ///   [`AgentBackend::reads_messages`]). The send axis is now the separate [`AgentBackend::uses_mail`] and the daemon derives one value from both. ★Removing that field or reverting it to the default
+    ///   brings the side effect back★ (it is on today **by declaration**).
+    /// ★Without the `engram` executable the spawn **is not cut**★ — that fail-closed guards the pair 「CLI mail taught but no executable to call」, and a spawn outside the mail plane has no such pair (the daemon's
+    ///   `control::provision` decides). Losing the control verbs remains, fail-open + warn.
     // ADR-0086
     // ADR-0132
     // ADR-0133
@@ -605,23 +461,13 @@ impl AgentBackend for CodexBackend {
         true
     }
 
-    /// ★The **name of this field and its meaning today disagree — turned on knowingly**★: what the name and the [`crate::types::ControlChannelNeeds`]
-    /// doc ask is 「can the mcp-config **file** we made be fed」, and codex's answer is still
-    /// **no** (there is no flag to point to that file — measured 0.155.0). But the daemon derives even the **mail
-    /// channel decision** from this one field (`mail_allowed = uses_mail && !accepts_mcp_config`), so if this backend, which uses MCP for mail,
-    /// kept false, **the CLI mirror would stay open** — the exact opposite of what ADR-0209 nailed down as 「MCP is the official one, CLI is
-    /// the mirror」.
-    /// ★Once, turning this field on **brought a file along too, and that cost was paid off**★: looking at this one field, the daemon actually wrote the mcp-config
-    ///   JSON (plaintext Bearer token) and the session settings fragment, and codex reads neither, so on every spawn
-    ///   a secret file nobody opens appeared — moreover that write is fail-closed, so **a codex spawn could be cut because of a file
-    ///   that is not read**. It was resolved by splitting the daemon's derived axis in two: whether to write the file is now decided by
-    ///   [`AgentBackend::writes_mcp_config_file`] below alone, and this field drives only the mail channel decision.
-    ///   ★Removing that field or deriving it from the value here brings that cost straight back★.
-    /// ★The actual means of attachment is [`mcp_server_override`]★ — the single value `-c mcp_servers.engram={…}`. That value was seen to actually
-    ///   set up the server (measured 2026-09-19 · 0.155.0: `mcpServerStatus/list` returned `engram` together with that
-    ///   server's two tools, and the stub server received `Authorization: Bearer …`).
-    ///   ★The names shown that day were `send_message` · `messages`, and `1b84045` renamed them to `eg_send` · `eg_messages`★
-    ///   — the same measured item in this file's header is the source of truth for the reason.
+    /// ★Name and meaning disagree — turned on knowingly★: the name and the [`crate::types::ControlChannelNeeds`] doc ask 「can the mcp-config **file** we made be fed」, and codex's answer is **no** (no flag
+    /// points to that file — measured 0.155.0). But the daemon derives the **mail channel decision** from this field (`mail_allowed = uses_mail && !accepts_mcp_config`), so false here, for a backend using MCP for
+    /// mail, would **leave the CLI mirror open** — the opposite of ADR-0209's 「MCP is the official one, CLI is the mirror」.
+    /// ★Turning it on once brought a file along — paid off★: the daemon wrote the mcp-config JSON (plaintext Bearer token) and the session settings fragment, neither read by codex, and that write is fail-closed,
+    ///   so **a codex spawn could be cut over an unread file**. The derived axis was split: whether to write the file is decided by [`AgentBackend::writes_mcp_config_file`] alone; this field drives only
+    ///   the mail channel decision. ★Removing that field or deriving it from this one brings the cost back★.
+    /// ★The actual means of attachment is [`mcp_server_override`]★ — the single `-c mcp_servers.engram={…}` (measured 0.155.0, see the header).
     // ADR-0099
     // ADR-0128
     // ADR-0209
@@ -629,15 +475,10 @@ impl AgentBackend for CodexBackend {
         true
     }
 
-    /// ★The field above is true but this field is false — that split is why this field exists★: codex has **no** flag to point to a file we wrote
-    /// (measured 0.155.0 — there is neither `--mcp-config` nor `--settings`, nor a `--config <file>` that points to a settings
-    /// file). MCP attachment is the single value `-c mcp_servers.engram={…}` of [`mcp_server_override`] alone,
-    /// and the token goes to the env that value points to by name ([`MCP_BEARER_ENV_KEY`]) — there is no place at all to make
-    /// a copy on disk.
-    /// ★Keeping it false is a security decision — do not derive it from the field above★: if reverted to true, the daemon
-    ///   writes a plaintext Bearer token JSON with the default ACL to the data directory on every spawn (nobody opens it), and that
-    ///   write failure is **fail-closed**, so the codex spawn is cut because of that file. That was the actual state before this field
-    ///   was split off.
+    /// ★True above, false here — that split is why this field exists★: codex has **no** flag to point to a file we wrote (0.155.0: neither `--mcp-config` nor `--settings` nor a `--config <file>` for settings).
+    /// MCP attachment is only the single `-c mcp_servers.engram={…}` of [`mcp_server_override`] and the token goes to the env it names ([`MCP_BEARER_ENV_KEY`]) — nothing is copied to disk.
+    /// ★False is a security decision — do not derive it from the field above★: true makes the daemon write a plaintext Bearer token JSON with the default ACL to the data directory on every spawn (nobody
+    ///   opens it), and that write is **fail-closed**, cutting the codex spawn over that file.
     // ADR-0086
     // ADR-0099
     // ADR-0209
@@ -645,75 +486,47 @@ impl AgentBackend for CodexBackend {
         false
     }
 
-    /// ★It was once false — leave that reason and the reason it was dropped **together** (do not remove)★: the basis of the old value was
-    /// 「this method does not receive `command`, so it cannot tell the two modes apart」. app-server mode emits turn signals
-    /// — the link reads `turn/completed` (`turn/started` is **deliberately** not read; the source of truth for the reason is that
-    /// link's `TURN_COMPLETED` doc), the translator carries that notification over as a turn boundary, and [`classify_turn`] below emits
-    /// `Ended`. But terminal mode has no decoder, so only `TerminalBytes` flow and the signal is 0, so
-    /// returning true here **opens that mode too** — so it was kept closed.
-    /// ★That reason is no ground for blocking — terminal claude **sits in exactly the same place and already receives**★:
-    ///   claude without structured output also has zero turn signals but is on the receiver roster. The policy source of truth is **ADR-0116
-    ///   decision 7**, and that sentence is 「no turn signal → inject immediately without a gate」 (that CLI's own input queue is
-    ///   the gate, so there is no reason for us to observe idle). The rejected alternative of the same ADR **explicitly** killed 「it cannot be observed,
-    ///   so it cannot be delivered」 — do not go back to that premise.
-    /// ★So the cost is accepted **knowingly**★: terminal mode has no busy gate, so an envelope can land in the middle of a
-    ///   turn, and if the TUI is in a modal state (approval prompt · menu · plan confirmation), that widget can eat the envelope.
-    ///   ADR-0116 decision 7 already explicitly accepted that cost (narrow it when the problem is actually observed).
-    /// ★Do not open it like shell★ — that side's false is not the observation axis but the axis 「**input is executed as a command**」, so
-    ///   it stays as is regardless of this change (that paragraph of the default implementation's doc).
+    /// ★Once false — keep the reason it was dropped★: the old basis was 「this method does not receive `command`, so it cannot tell the two modes apart」. app-server mode emits turn signals (the link reads
+    /// `turn/completed`; `turn/started` is **deliberately** not read — see that link's `TURN_COMPLETED` doc) and [`classify_turn`] emits `Ended`; terminal mode has no decoder, so the signal is 0 and
+    /// true would **open that mode too**.
+    /// ★That is no ground for blocking — terminal claude **already receives from exactly the same place**★ (zero turn signals, on the receiver roster). The policy is **ADR-0116 decision 7**: 「no turn signal →
+    ///   inject immediately without a gate」 (the CLI's own input queue is the gate). Its rejected alternative killed 「it cannot be observed, so it cannot be delivered」 — do not go back to that premise.
+    /// ★The cost is accepted knowingly★: with no busy gate an envelope can land mid-turn, and a TUI modal (approval prompt · menu · plan confirmation) can eat it (ADR-0116 decision 7; narrow it when observed).
+    /// ★Do not open it like shell★ — shell's false is the axis 「**input is executed as a command**」, unaffected by this (the default implementation's doc).
     // ADR-0116
     // ADR-0209
     fn reads_messages(&self) -> bool {
         true
     }
 
-    /// ★Write precisely **what this field buys**★: the daemon's `build_grants` **short-circuits without emitting a single line** if this value is
-    /// false (send entrance grants 0), and the priming variant choice is also cut by `needs.uses_mail.then_some(…)`.
-    /// That is, if only `accepts_mcp_config` above is turned on with this field closed, the agent ends up **holding the MCP tools
-    /// with nobody telling it they exist**.
-    /// ★It is separate from the control verbs★ — what this field opens is mail; the CLI entrance (token · address) and the control routes are opened by
-    ///   `supports_control_channel` above.
-    /// ★This spot once said 「unresolved — only sending was opened」. It is resolved★: the first of the two grounds that paragraph
-    ///   demanded (the receiving axis is opened) now stands — [`AgentBackend::reads_messages`] is true, so this backend is on the
-    ///   delivery roster of the daemon's `messaging_host`, and the reply to a `request` this agent sent has somewhere to
-    ///   come back to. So the 「receive first」 order of ADR-0209 decision 4 is no longer violated.
-    ///   ★The rule for reverting stays the same★ — closing the receiving axis while leaving only this field open revives that asymmetry.
+    /// ★What this field buys★: the daemon's `build_grants` **short-circuits without emitting a line** if false (send entrance grants 0), and the priming variant choice is cut by `needs.uses_mail.then_some(…)`.
+    /// So with only `accepts_mcp_config` on and this closed, the agent **holds the MCP tools with nobody telling it they exist**.
+    /// ★Separate from the control verbs★ — this opens mail; the CLI entrance (token · address) and control routes are opened by `supports_control_channel` above.
+    /// The receiving axis is open ([`AgentBackend::reads_messages`] is true: on the `messaging_host` delivery roster, so a `request`'s reply has somewhere to return), so ADR-0209 decision 4's 「receive first」 order holds.
+    ///   ★Closing the receiving axis while leaving only this open revives the asymmetry.★
     // ADR-0133
     // ADR-0209
     fn uses_mail(&self) -> bool {
         true
     }
 
-    /// ★Only app-server mode has a connection to set up★ — `turn/start` is allowed only after the handshake round trip finishes.
-    /// Terminal mode is a PTY, usable from the moment the process comes up, so it has no such axis (same as claude · shell).
-    /// ★This declaration and the actual delivery **must not disagree**★ — if true but not called, the supervisor waits until the backstop,
-    ///   and if false but called, nobody receives that delivery. The test bench measures that pair.
+    /// ★Only app-server mode has a connection to set up★ — `turn/start` is allowed only after the handshake round trip; terminal mode is a PTY usable from process start (same as claude · shell).
+    /// ★This declaration and the actual delivery **must not disagree**★ — true but not called: the supervisor waits until the backstop; false but called: nobody receives it. The test bench measures that pair.
     // ADR-0004
     fn declares_link(&self, command: &AgentCommand) -> bool {
         is_app_server(command)
     }
 
-    /// Why did the resume fail — ★this backend's evidence comes as **the link's connection reason**★.
+    /// Why did the resume fail — ★this backend's evidence is **the link's connection reason**★.
     ///
-    /// ★That the reason is in neither of the two tails is why this implementation exists★: a resume refusal is a JSON-RPC error on
-    ///   stdout, so the console tail (`terminal_tail`) does not exist on this link at all, and the diagnostic tail
-    ///   (`diagnostic_tail`) holds only stderr. So the decision is
-    ///   passes the `reason` of [`crate::transport::LinkState::Down`] as evidence — without the declaration, even if that string
-    ///   comes the classification falls to `None`, and the **wrong context default** 「early exit right after resume」 is stamped
-    ///   (this branch has no early exit. The process was alive and well).
-    ///
-    /// ★**Do not tell apart by error code — `-32600` does not have one meaning**★ (measured 0.154.0): an unknown thread,
-    ///   a second `initialize`, a config error, and **an attempt to resume a child thread directly** all come with that code.
-    ///   Deriving 「unknown thread」 from the code would give a sound handle the wrong classification on an unrelated failure.
-    ///   So only the **message** is looked at.
-    /// ★The declared wording is **the one that was measured**★ — `no rollout found for thread id`
-    ///   (`docs/reference/backend-capabilities.md` §1 「when given an unknown id」). For the other reasons we do not have the actual response
-    ///   wording, so **we do not invent it** — it falls to `None` and the caller uses the context
-    ///   default, and the human-readable reason goes out in the outcome as the `reason` string anyway.
-    ///   ★In particular the 「a child thread must resume its parent first」 branch has unknown wording★ — putting in a string guessed before
-    ///   measuring the real thing leaves a non-matching match quietly as dead code.
-    /// ★It is called on a live session too (the trait doc's condition)★ — the wording above is emitted by the peer **only when refusing a request**,
-    ///   not words that can mix into the conversation body, so it satisfies that condition.
+    /// ★Neither tail holds the reason★: a resume refusal is a JSON-RPC error on stdout, so the console tail (`terminal_tail`) does not exist on this link and the diagnostic tail (`diagnostic_tail`) holds only
+    ///   stderr. So the decision takes the `reason` of [`crate::transport::LinkState::Down`] as evidence — without this declaration the classification falls to `None` and the **wrong context default** 「early exit right after
+    ///   resume」 is stamped (this branch has no early exit; the process was alive).
+    /// ★Do not tell apart by error code — `-32600` does not have one meaning★ (0.154.0): an unknown thread, a second `initialize`, a config error and **resuming a child thread directly** all carry it. Only the **message** is looked at.
+    /// ★The declared wording is the one that was measured★ — `no rollout found for thread id` (`docs/reference/backend-capabilities.md` §1). For other reasons we have no real wording and **do not invent it** — it falls
+    ///   to `None`, the caller uses the context default, and the human-readable reason goes out as the outcome's `reason` string anyway. The 「a child thread must resume its parent first」 wording is unknown too;
+    ///   a guessed string would sit as dead code.
+    /// ★Called on a live session too (the trait doc's condition)★ — the wording is emitted by the peer **only when refusing a request**, so it cannot mix into the conversation body.
     // ADR-0004
     // ADR-0082
     // ADR-0172
@@ -724,19 +537,13 @@ impl AgentBackend for CodexBackend {
         None
     }
 
-    /// ★Fail-closed is set up in the same place as claude★ — on that side the daemon's `?` (mcp-config write failure)
-    /// cuts it, but this backend does not write the file (`writes_mcp_config_file` = false), so the daemon has nothing
-    /// to cut with. Failing to build the attachment value in assembly is visible **only here**.
+    /// ★Fail-closed is set up in the same place as claude★ — there the daemon's `?` (mcp-config write failure) cuts it, but this backend writes no file (`writes_mcp_config_file` = false), so a failure to build the
+    /// attachment value is visible **only here**.
     ///
-    /// ★The cut condition is [`McpAttachment::Unrepresentable`] alone — do not widen it★: the state at that time is
-    ///   「on the delivery roster (`reads_messages` = true) but zero send entrances」. MCP is not attached, and
-    ///   the daemon closed the CLI mirror with `mail_allowed=false` (this backend has `accepts_mcp_config`
-    ///   true, so that derivation always falls that way) — then every delivered `request` becomes **a contract nobody can
-    ///   answer**, and the symptom is not an error but eternal silence.
-    /// ★The two branches left open (both are normal states)★: ① a spawn with no control channel at all — a codex coming up without mail is
-    ///   legitimate ② a spawn for which the daemon did not authorize the MCP send entrance — it means the operator turned off MCP mail,
-    ///   and that spawn does not expect mail in the first place. Cutting both would kill codex spawns entirely in installs running without `engram`
-    ///   and in harnesses with the knob on.
+    /// ★The cut condition is [`McpAttachment::Unrepresentable`] alone — do not widen it★: that state is 「on the delivery roster (`reads_messages`) but zero send entrances」 (MCP unattached, CLI mirror closed by
+    ///   `mail_allowed=false` — always, since this backend has `accepts_mcp_config` true), so every delivered `request` becomes **a contract nobody can answer** and the symptom is eternal silence, not an error.
+    /// ★Left open (both normal)★: ① no control channel — codex without mail is legitimate; ② the daemon did not authorize the MCP send entrance (operator turned MCP mail off) — that spawn expects no mail. Cutting both would
+    ///   kill codex spawns in installs without `engram` and in harnesses with the knob on.
     // ADR-0004
     // ADR-0209
     fn precheck_control_endpoint(
@@ -753,23 +560,15 @@ impl AgentBackend for CodexBackend {
         }
     }
 
-    /// ★`session_id` is **still** not assembled — do not revive it★: `--session-id` does not exist
-    /// ([`AgentBackend::assigns_session_id`] is false, so this field is always `None`), and carrying that value in argv
-    /// would push a uuid codex never once uses onto the command line.
-    /// ★What is resumed is not that field but `resume_session_id` — do not fold the two fields★: resume is not a flag
-    ///   but **a subcommand + positional argument** ([`RESUME_SUBCOMMAND`]), so the assembly shape differs from the start. Folding them
-    ///   makes the meaning of `assigns_session_id() == false` false.
-    /// ★Only terminal mode is assembled★ — app-server mode's resume is not argv but the second handshake request
-    ///   (`thread/resume`), and the place that picks it is [`AgentBackend::open_spawn`]. The same value goes out by different means in the two
-    ///   modes, not twice.
-    /// ★If it is Resume but there is no handle, **it falls to new-conversation argv**★ — emitting `codex resume` without an id
-    ///   brings up the **TUI picker** (measured 0.155.0 `--help`: "picker by default"), and that screen ties the agent attached to the PTY
-    ///   to the first screen forever. So here the subcommand itself is dropped and argv **byte-identical** to Fresh
-    ///   is emitted.
-    ///   ★That regression is not passed over silently — but the place that reports it is not here★:
-    ///   `resume_no_fallback` of [`crate::manager::AgentManager`] decides the same condition before spawn
-    ///   (`opens_a_new_conversation`), leaves a warning, and emits the outcome as `Started` instead of `Resumed`.
-    ///   Reporting it here again would write the same fact from two sources diverging — this place only builds arguments.
+    /// ★`session_id` is **still** not assembled — do not revive it★: `--session-id` does not exist ([`AgentBackend::assigns_session_id`] is false, so this field is always `None`); carrying it would push a
+    /// uuid codex never uses onto the command line.
+    /// ★What is resumed is `resume_session_id` — do not fold the two fields★: resume is **a subcommand + positional argument** ([`RESUME_SUBCOMMAND`]), a different assembly shape; folding makes
+    ///   `assigns_session_id() == false` false.
+    /// ★Only terminal mode is assembled★ — app-server's resume is the second handshake request (`thread/resume`, picked by [`AgentBackend::open_spawn`]): the same value by different means, not twice.
+    /// ★Resume without a handle **falls to new-conversation argv**★ — `codex resume` without an id brings up the **TUI picker** (0.155.0 `--help`: "picker by default"), pinning the PTY-attached agent to the first
+    ///   screen forever. So the subcommand is dropped and argv is **byte-identical** to Fresh.
+    ///   ★That regression is reported elsewhere, not here★: `resume_no_fallback` of [`crate::manager::AgentManager`] decides the same condition before spawn (`opens_a_new_conversation`), warns, and emits
+    ///   `Started` instead of `Resumed`; reporting here too would write one fact from two diverging sources.
     // ADR-0004
     // ADR-0185
     // ADR-0208/ADR-0210
@@ -791,11 +590,8 @@ impl AgentBackend for CodexBackend {
                 let mut args = Vec::with_capacity(8 + extra_args.len());
                 match output_format {
                     AgentOutputFormat::Terminal => {
-                        // ★The subcommand and its positional argument must be **at the very front**★ — pushed back, clap reads
-                        //   `resume` not as a subcommand but as the root's `[PROMPT]` (the same constraint of the app-server branch
-                        //   is nailed down by `app_server_extra_args_come_last`).
-                        // ★The two are a pair — do not emit only one★: `codex resume` without an id is the TUI picker, so
-                        //   the agent stops on the first screen (that branch of the doc above).
+                        // ★The subcommand and its positional argument must be **at the very front**★ — pushed back, clap reads `resume` as the root's `[PROMPT]` (the app-server branch's same constraint is
+                        //   pinned by `app_server_extra_args_come_last`). ★Emit them as a pair★: `codex resume` without an id is the TUI picker (the doc above).
                         if let (SpawnMode::Resume, Some(thread_id)) = (mode, resume_session_id) {
                             match resume_argument(thread_id) {
                                 Some(arg) => {
@@ -814,66 +610,38 @@ impl AgentBackend for CodexBackend {
                         args.push(APPROVAL_FLAG.to_string());
                         args.push(APPROVAL_ON_REQUEST.to_string());
                     }
-                    // ★That the policies and working folder are not carried here is intended★ — app-server takes those three as
-                    //   `thread/start` parameters (`cwd` · `sandbox` · `approvalPolicy`) (measured 0.154.0).
-                    //   The place that builds those values is [`AgentBackend::open_spawn`] below, and the process cwd
-                    //   stays as `CommandSpec.cwd` — the two receive the same value but are not the same field.
+                    // ★Not carrying the policies and working folder here is intended★ — app-server takes them as `thread/start` parameters (`cwd` · `sandbox` · `approvalPolicy`, measured 0.154.0), built in
+                    //   [`AgentBackend::open_spawn`]; the process cwd stays `CommandSpec.cwd` (same value, different field).
                     AgentOutputFormat::StreamJson => {
                         args.push(APP_SERVER_SUBCOMMAND.to_string());
                         args.push(APP_SERVER_STDIO_FLAG.to_string());
                     }
                 }
-                // Our arguments are used up first and the caller pass-through follows — the three of terminal mode all take a single
-                //   value, so they do not absorb the following arguments (unlike claude's variadic `--allowedTools`).
-                // ★The pass-through does not tell modes apart — and the option sets of the two modes differ (measured 0.154.0:
-                //   `codex --help` and `codex app-server --help` each have flags the other lacks)★. That is, arguments written by looking at the interactive
-                //   CLI may be refused by app-server. Still, they are not filtered per mode:
-                //   what is valid is changed by upstream per version, so a list we hold goes stale, and a stale list quietly erases sound
-                //   arguments.
+                // Our arguments come first and the caller pass-through follows — terminal mode's three flags each take a single value, so they do not absorb following arguments (unlike claude's variadic `--allowedTools`).
+                // ★The pass-through does not tell modes apart, though the two modes' option sets differ★ (0.154.0: `codex --help` and `codex app-server --help` each have flags the other lacks), so an
+                //   argument written for the interactive CLI may be refused by app-server. Still not filtered per mode: upstream changes what is valid per version, and a stale list quietly erases sound arguments.
                 args.extend(extra_args.iter().cloned());
-                // ★Known limit — a path containing `%VAR%` gets substituted while passing the shim (2026-09-08, decided not to
-                //   fix)★. `console_command` below wraps it in `cmd.exe /c` on Windows, and cmd expands
-                //   `%NAME%` on the command line as an environment variable **even inside quotes**. So when a real folder whose name contains `%…%`
-                //   (`C:\x\%USERNAME%\y`) is received, codex sees **a different folder** as its workspace.
-                //   In terminal mode the `CD_FLAG` value above and `extra_args`, and in app-server mode
-                //   only `extra_args`, take that path (that mode's working folder goes not on the command line but as a `thread/start`
-                //   parameter, so it does not pass cmd).
-                //   ★Why it is not fixed★ — ① the shim cannot be removed (user decision · TRD §6-H: `codex` is launched by its name
-                //   as is. `codex` on PATH is a `.cmd`, so `CreateProcessW` cannot launch it directly)
-                //   ② the known fix is **not an ordinary escape**: the trick rust std uses when launching a `.bat` is
-                //   inserting `%%cd:~,%` (a no-op substitution) at every `%`, and it presumes the form `cmd /e:ON` + `/c "one string"`
-                //   (the RUSTSEC-2024-0006 response). Our path is not that form (portable-pty assembles the argument array
-                //   directly and hands it to `CreateProcessW` — 0 lines of `%` handling), and moving that trick outside its
-                //   premise is an unverified port ③ that port touches `console_command`, **shared with claude**,
-                //   so if it is wrong, every spawn running today dies.
-                //   ★What fixing it needs★: a measurement that overturns the three above (do claude and
-                //   codex both come up under a `cmd` wrapped in that form). Until then this limit is left knowingly.
+                // ★Known limit — a path containing `%VAR%` is substituted while passing the shim (decided not to fix)★. `console_command` wraps it in `cmd.exe /c` on Windows and cmd expands `%NAME%` on the command
+                //   line **even inside quotes**, so a real folder like `C:\x\%USERNAME%\y` makes codex see **a different folder** as its workspace. Terminal mode: the `CD_FLAG` value and `extra_args`; app-server
+                //   mode: only `extra_args` (the working folder goes as a `thread/start` parameter, not through cmd).
+                //   ★Why not fixed★: ① the shim cannot be removed (TRD §6-H: `codex` on PATH is a `.cmd`, which `CreateProcessW` cannot launch directly); ② the known fix is **not an ordinary escape** — rust std's
+                //   `.bat` trick (`%%cd:~,%` at every `%`) presumes `cmd /e:ON` + `/c "one string"` (the RUSTSEC-2024-0006 response), while portable-pty hands an argument array to `CreateProcessW` with no `%`
+                //   handling, so moving it is an unverified port; ③ that port touches `console_command`, **shared with claude**, and a mistake kills every running spawn.
+                //   ★To fix it★: measure that claude and codex both come up under a `cmd` wrapped in that form.
                 // ADR-0004
 
-                // ★★The overrides are all **after** the pass-through — this place is the source of truth for that discipline★★ (sibling blocks
-                //   point here). Measured (codex-cli 0.155.0 · 2026-09-19): passing the same config key twice with `-c`
-                //   **the last one wins** — no merge and no duplicate-key error. So if placed in front,
-                //   one line of user arguments erases our value entirely, and that outcome leaves no signal on screen or in the
-                //   log. ★So do not move these blocks back into the terminal branch above in the name of 「tidying the argument assembly」★.
-                // ★★If we override a user value, **we say so — silent overriding is forbidden**★★ (ADR-0216 decision 1).
-                //   ★Still, it is not filtered★: erasing the pass-through would be us censoring user
-                //   arguments. Only the fact that ours won is left (this place is also the source of truth for the sibling blocks).
-                // ★MCP server attachment **does not tell modes apart**★: the mail entrance is needed in both modes. What tells modes
-                //   apart is the axis where the peer **already provides the same value by other means** (session id · priming), and
-                //   mail is not in that axis.
-                // ★This one value is the **only physical wiring** of codex mail★ — claude reads the mcp-config file but
-                //   codex takes only this override (measured 0.155.0). Without it there is no `eg_send` tool at all, and
-                //   the daemon decides 「it uses MCP for mail」 (`mail_allowed=false`) and closes even the CLI mirror, so
-                //   **send entrances become 0**. That outcome is not an error but silence.
-                // ★That ours is carried later is obtained by order★ — passing the same key twice with `-c`, the last one
-                //   wins (measured · ADR-0216 inherited 「override after passthrough · warn if overriding」).
+                // ★The overrides are all **after** the pass-through — this place is the source of truth for that discipline★★ (sibling blocks point here). Measured (0.155.0): passing the same config key twice with `-c`,
+                //   **the last one wins** — no merge, no duplicate-key error. In front, one line of user arguments would erase our value with no signal. ★Do not move these blocks back into the terminal branch
+                //   in the name of 「tidying argument assembly」★.
+                // ★If we override a user value, **we say so — silent overriding is forbidden**★ (ADR-0216 decision 1). Still not filtered (that would be us censoring user arguments); only the fact that ours won is left
+                //   (also the source of truth for the sibling blocks).
+                // ★MCP server attachment does not tell modes apart★: the mail entrance is needed in both. What tells modes apart is where the peer **already provides the same value by other means** (session id · priming).
+                // ★This one value is the **only physical wiring** of codex mail★ — claude reads the mcp-config file, codex takes only this override (0.155.0). Without it there is no `eg_send` tool, and the daemon
+                //   (`mail_allowed=false`) closes even the CLI mirror, so **send entrances become 0** — silence, not an error.
                 // ADR-0128
                 // ADR-0209
-                // ★The two branches of 「do not attach」 are **not told apart** here★ — whether a legitimate absence
-                //   ([`McpAttachment::NotWanted`]) or a failure to build ([`McpAttachment::Unrepresentable`]),
-                //   what this place does is the same (it does not carry the argument). The place that cuts the failure-to-build side as a spawn abort is
-                //   [`AgentBackend::precheck_control_endpoint`], and this function only builds arguments (the same discipline as the
-                //   brief block below deferring the reporting place to the assembly point).
+                // ★The two 「do not attach」 branches are **not told apart** here★ — [`McpAttachment::NotWanted`] and [`McpAttachment::Unrepresentable`] both mean the argument is not carried; cutting the
+                //   failure-to-build side as a spawn abort is [`AgentBackend::precheck_control_endpoint`]'s job, this function only builds arguments.
                 match mcp_attachment(control.as_ref()) {
                     McpAttachment::Attach(value) => {
                         if passthrough_overrides_key(
@@ -890,28 +658,16 @@ impl AgentBackend for CodexBackend {
                     McpAttachment::NotWanted | McpAttachment::Unrepresentable(_) => {}
                 }
 
-                // ★Do not revive the `SessionStart` hook here (ADR-0216/ADR-0218)★ — the recovery path is the name of the writer lock this child
-                //   holds ([`thread_lock`]), and the hook machinery was removed from the repository. Not because the hook
-                //   **was broken** (it ran — measured
-                //   0.155.0): the one rejection reason is that codex hashes the hook **command string** and requires human approval,
-                //   and that string has our exe's absolute path embedded in it. Releases unpack into a folder named after the tag,
-                //   so the path changes every release, so the approval screen comes up again every release, and
-                //   **while that screen is up, terminal codex does not come up at all.**
+                // ★Do not revive the `SessionStart` hook here (ADR-0216/ADR-0218)★ — recovery is the writer-lock name this child holds ([`thread_lock`]) and the hook machinery was removed. Not because the hook was broken
+                //   (it ran, 0.155.0): codex hashes the hook **command string** and requires human approval, and that string embeds our exe's absolute path, which changes every release (folder named after the tag),
+                //   so the approval screen returns every release and **while it is up, terminal codex does not come up at all.**
 
-                // ★Priming injection — only terminal mode is assembled here★: app-server mode carries the same content not on the command line
-                //   but in the handshake JSON (`developerInstructions` of `thread/start`)
-                //   ([`AgentBackend::open_spawn`]). The same value goes out by different means in the two modes,
-                //   not twice — the same shape as resume (`resume`) splitting into argv and
-                //   handshake.
-                // ★Why modes are told apart — unlike the hook, not 「because it is a duplicate」★: this command line has an 8191-character cap,
-                //   and the brief can eat that whole budget. The JSON body has no such cap (measured to accept
-                //   up to 8 MB), so the value can be sent untouched. Carrying it on the command line in both modes would make
-                //   the app-server side bear that cap and the `%` · newline risks for no reason.
-                // ★It is **after** the pass-through★ — passing the same key twice with `-c`, the last one wins. The source of truth for the reason is
-                //   the order comment of the MCP attachment block above, and it is not repeated here.
-                // ★Never fail the spawn on any branch★ — even if the file cannot be read, even if there is a character that cannot be carried,
-                //   even if it exceeds the budget, only a warning is left and the argument is not carried (the discipline ADR-0216 inherited). Priming is
-                //   nice to have and the spawn is required.
+                // ★Priming injection — only terminal mode is assembled here★: app-server carries the same content in the handshake JSON (`developerInstructions` of `thread/start`, [`AgentBackend::open_spawn`]) —
+                //   same value, different means per mode, like resume.
+                // ★Why modes are told apart★: this command line has an 8191-character cap the brief can eat whole; the JSON body has no cap (measured up to 8 MB), so carrying it on the command line in both modes
+                //   would burden app-server with the cap and the `%` · newline risks for nothing.
+                // ★It is **after** the pass-through★ (last `-c` wins; reason: the MCP attachment block above).
+                // ★Never fail the spawn on any branch★ — unreadable file, uncarriable character, over budget: warn and do not carry (ADR-0216). Priming is nice to have, the spawn is required.
                 // ADR-0004
                 // ADR-0092
                 // ADR-0215
@@ -930,44 +686,24 @@ impl AgentBackend for CodexBackend {
                     }
                 }
 
-                // ADR-0086 step 2 (CLI entrance) — ★does not tell modes apart★: what is planted is only three env values, and what
-                //   reads those values is not codex but **the children codex launches** (shell tools · the user's own hooks).
-                //   Both modes launch children, so there is no axis to split on.
-                // ★`config_path` · `settings_file` **do not come — and that is the declared result**★: both are
-                //   **files claude reads by path**, and codex has no such flag (measured 0.155.0:
-                //   there is neither `--mcp-config` nor `--settings`, nor a `--config <file>` that points to a settings file),
-                //   so this folder declares [`AgentBackend::writes_mcp_config_file`] false, and the daemon decides the write
-                //   by that one field. This backend's MCP attachment is the single `-c` value above alone.
-                //   ★Before that field was split off, **a plaintext token file nobody reads appeared** on every spawn★ —
-                //   because the daemon's derived axis served both 「does it use MCP for mail」 and 「does it take our mcp-config file」 in one field.
-                //   Reviving that dual role (= removing that field or deriving it from `accepts_mcp_config`)
-                //   brings back both the waste and the risk of a fail-closed spawn abort.
-                //   ★Still, the injection below ignores the two fields even if they come as `Some` — do not remove that defence★:
-                //   the control channel is not used by this backend alone, and copying claude's flags with 「it is Some, so let's
-                //   use something」 kills the launch (that assertion = `the_daemon_written_files_are_still_not_translated_into_argv`).
-                // ★`grants` is not used either★ — that list is **pre-approval** of permission prompts, not a tool allow list
-                //   (ADR-0094), and translating it into codex config's `enabled_tools` changes the meaning from 「approved in advance」 to
-                //   「only these exist」. A value of a different meaning is not called the same value.
-                // ★`priming_file` **is used — but its content, not its path**★: the only instruction key that takes a path is
-                //   `model_instructions_file`, and that one **replaces** rather than appends, so hanging it there makes codex's
-                //   own operating instructions disappear, and `developer_instructions_file` does not exist as a key (measured
-                //   0.155.0). So this backend **reads** that file and carries it as [`DEVELOPER_INSTRUCTIONS_KEY`] above
-                //   (terminal) or as `developerInstructions` of `thread/start` (app-server).
-                //   ★Do not revert it with 「reading the content goes against ADR-0092」★ — the role that ADR gave the consuming
-                //   program is **path resolution**, and that role is still borne by the daemon's provider alone
-                //   (this folder only reads the path carried in and does not choose which file). That the reading place is the
-                //   backend folder is ADR-0004 as is — 「under which key and in what shape to carry it」 has nowhere else
-                //   to go.
+                // ADR-0086 step 2 (CLI entrance) — ★does not tell modes apart★: only three env values are planted, and what reads them is **the children codex launches** (shell tools · the user's own hooks) — both modes launch children.
+                // ★`config_path` · `settings_file` **do not come — the declared result**★: both are **files claude reads by path**, and codex has no such flag (0.155.0: no `--mcp-config`, no `--settings`, no `--config <file>`
+                //   for settings), so this folder declares [`AgentBackend::writes_mcp_config_file`] false and the daemon decides the write by that one field. MCP attachment is the single `-c` value above.
+                //   ★Before that field was split off, **a plaintext token file nobody reads appeared** on every spawn★ (the derived axis served both 「uses MCP for mail」 and 「takes our mcp-config file」); reviving that
+                //   dual role (removing the field or deriving it from `accepts_mcp_config`) brings back the waste and the fail-closed abort risk.
+                //   ★The injection below ignores the two fields even if they come as `Some` — keep that defence★: the control channel is not used by this backend alone, and copying claude's flags because 「it is Some」
+                //   kills the launch (`the_daemon_written_files_are_still_not_translated_into_argv`).
+                // ★`grants` is not used either★ — it is **pre-approval** of permission prompts, not a tool allow list (ADR-0094); translating it into `enabled_tools` changes 「approved in advance」 into 「only these exist」.
+                // ★`priming_file` **is used — its content, not its path**★: the only path-taking instruction key (`model_instructions_file`) **replaces** codex's own instructions and `developer_instructions_file` does not
+                //   exist (0.155.0). So this backend **reads** the file and carries it as [`DEVELOPER_INSTRUCTIONS_KEY`] (terminal) or `developerInstructions` of `thread/start` (app-server).
+                //   ★Do not revert it with 「reading content goes against ADR-0092」★ — that ADR gave the consuming program **path resolution**, still borne by the daemon's provider alone (this folder reads the path carried in and
+                //   does not choose the file); 「under which key and in what shape」 has nowhere else to go (ADR-0004).
                 // ADR-0086 / ADR-0092 / ADR-0133 / ADR-0209
                 //
-                // ★The incarnation marker is inside the same door too — do not take it outside★: a spawn with no endpoint has nothing to do with our
-                //   control plane, and if it were outside, our marker would remain in the session records of such spawns too
-                //   (that assertion = `without_an_endpoint_nothing_is_injected`). That the material,
-                //   `(agent_id, epoch)`, lives in the endpoint is the concrete form of that condition.
-                // ★It does not tell modes apart★ — where the marker sits is not argv but the session record codex writes,
-                //   and both modes create that record.
-                // ★It is only planted — there is **no reader, and none is planned**★ (ADR-0218 decision 8): recovery is carried by the lock
-                //   holder, so this marker remains only for diagnostics and later comparison.
+                // ★The incarnation marker is inside the same door — do not take it outside★: a spawn with no endpoint has nothing to do with our control plane, and outside the door our marker would remain in such
+                //   spawns' session records (`without_an_endpoint_nothing_is_injected`). The material `(agent_id, epoch)` lives in the endpoint.
+                // ★It does not tell modes apart★ — it sits in the session record codex writes, which both modes create.
+                // ★Only planted — **no reader, none planned**★ (ADR-0218 decision 8): recovery is the lock holder; the marker is for diagnostics and later comparison.
                 // ADR-0217
                 // ADR-0218
                 if let Some(endpoint) = &control {
@@ -991,16 +727,11 @@ impl AgentBackend for CodexBackend {
         }
     }
 
-    /// The basis for `session.resume` being on is ★independent of the issuer★ — restore depends **solely** on the backend sid stored in the profile,
-    /// and who issues that sid is decided by the backend. codex is the side that receives and uses it
-    /// (app-server via the `thread/start` response, terminal mode via the name of the writer lock its child holds —
-    /// [`thread_lock`] · ADR-0218), and with that value both modes resume.
-    /// ★So this field does not tell modes apart either — it is **the same predicate as [`AgentBackend::can_resume_stored_session`] above.
-    ///   Do not touch only one side**★: that axis is where the activation entrance asks 「launch as Resume?」, and
-    ///   this field is where that result is reported to consumers, so if they split, a new thread is reported as 「resumed」 (or that
-    ///   other way round).
-    /// `model.select` is false even though codex has `-m` — this field reports not **what the program can do** but
-    /// **what this spawn uses**. We do not expose that field, so we do not report it.
+    /// `session.resume` is ★independent of the issuer★ — restore depends **solely** on the backend sid stored in the profile; codex receives and uses it (app-server via the `thread/start` response, terminal mode via
+    /// the writer-lock name its child holds — [`thread_lock`] · ADR-0218), so both modes resume.
+    /// ★**The same predicate as [`AgentBackend::can_resume_stored_session`] above — do not touch only one side**★: that axis is where the activation entrance asks 「launch as Resume?」 and this field reports the
+    /// result to consumers; a split reports a new thread as 「resumed」 or the reverse.
+    /// `model.select` is false even though codex has `-m` — this field reports **what this spawn uses**, and we do not expose that field.
     // ADR-0185
     // ADR-0208/ADR-0210
     fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
@@ -1020,8 +751,7 @@ impl AgentBackend for CodexBackend {
 
     /// app-server mode requires a pipe through which envelopes flow **both ways** — the peer asks us too.
     ///
-    /// ★It is only the reported value, and the real thing is built by [`AgentBackend::open_spawn`] below★ — both look at [`is_app_server`],
-    ///   so fixing only one side makes the report and the real thing disagree.
+    /// ★Only the reported value; the real thing is built by [`AgentBackend::open_spawn`]★ — both look at [`is_app_server`], so fixing one side makes them disagree.
     fn transport_shape(&self, command: &AgentCommand) -> TransportShape {
         if is_app_server(command) {
             TransportShape::StdioBidiJson
@@ -1032,28 +762,16 @@ impl AgentBackend for CodexBackend {
 
     /// app-server mode builds a bidirectional JSON link, terminal mode builds a PTY.
     ///
-    /// ★The decision is [`is_app_server`] alone — do not read back the `transport_shape` report and match on it (ADR-0191)★:
-    ///   doing so creates a second switch that splits on the shape value.
-    /// ★This is the place that injects `structured: true` and the `thread/start` policies (ADR-0044/0030)★: the link knows neither what the bytes
-    ///   it carries are, nor which folder to open with which sandbox. The side that knows is this
-    ///   backend, which picked the mode and the policies.
-    /// ★`sid_sink` is **used by both branches — only the means differ**★. app-server **receives** the identifier in the `thread/start` response
-    ///   and the link hands it over as is (it goes out before anything is sent with that session —
-    ///   the ordering contract of [`AgentBackend::open_spawn`]). The terminal branch has no response, so it polls the writer
-    ///   lock the child holds and puts that file name into the same verb ([`thread_lock`] · ADR-0218).
-    ///   ★Do not revive a constructor that reads the PTY screen here (ADR-0217)★ — recovery is decided by ownership, not by
-    ///   the screen.
-    ///   ★Do not create a second write path★ — the assembly point tied the incarnation guard to this verb, so adding one more
-    ///   branch that touches the profile directly bypasses that guard (ADR-0218 decision 6).
-    /// ★The place that picks `thread/start` or `thread/resume` is also here★ — it splits by the single
-    ///   `resume_session_id` the assembly point passed ([`thread_open`]). ★The link is not asked again★: if the link decided by looking at its own
-    ///   state, there would be two deciding places.
-    /// ★`resume_session_id` is not used in the terminal branch — but the reason is **not** 「because there is no
-    ///   handle」★: that mode's resume already went out in argv (the terminal branch of [`AgentBackend::build_spec`]).
-    ///   Using the same value here again would make one spawn try to resume by two means.
-    /// ★`control` is also **read only in the app-server branch, by the same discipline**★ — what is taken out here is one thing, the priming content
-    ///   ([`priming_text`]), and the terminal branch already sent it as `-c developer_instructions=…`.
-    ///   So this field does not reach the PTY-side constructor.
+    /// ★The decision is [`is_app_server`] alone — do not read back the `transport_shape` report and match on it (ADR-0191)★ (that makes a second switch on the shape value).
+    /// ★This is where `structured: true` and the `thread/start` policies are injected (ADR-0044/0030)★: the link knows neither what its bytes are nor which folder to open with which sandbox; this backend, which picked the
+    ///   mode and policies, does.
+    /// ★`sid_sink` is used by both branches — only the means differ★: app-server **receives** the identifier in the `thread/start` response and the link hands it over as is (before anything is sent with that session —
+    ///   [`AgentBackend::open_spawn`]'s ordering contract); the terminal branch has no response, so it polls the child's writer lock and puts that file name into the same verb ([`thread_lock`] · ADR-0218).
+    ///   ★Do not revive a constructor that reads the PTY screen (ADR-0217)★ — recovery is decided by ownership. ★Do not create a second write path★ — the assembly point tied the incarnation guard to this verb, and
+    ///   another branch touching the profile directly bypasses it (ADR-0218 decision 6).
+    /// ★`thread/start` vs `thread/resume` is also picked here★ by the single `resume_session_id` the assembly point passed ([`thread_open`]); the link is not asked again (two deciding places otherwise).
+    /// ★`resume_session_id` is unused in the terminal branch — **not** because there is no handle★: that mode's resume already went out in argv ([`AgentBackend::build_spec`]); using it here would resume by two means.
+    /// ★`control` is likewise read only in the app-server branch★ — what is taken is the priming content ([`priming_text`]), which the terminal branch already sent as `-c developer_instructions=…`.
     // ADR-0185
     // ADR-0191
     // ADR-0215
@@ -1088,9 +806,8 @@ impl AgentBackend for CodexBackend {
                 sid_sink,
                 link_sink,
             )?;
-            // ★`TransportOwned` and the first-turn port are a pair — do not keep only one★: that mode's session does not count submissions,
-            //   so if the port is not plugged into the link, no incarnation can persist the thread id (no error).
-            // ADR-0226 · ADR-0231: user decision — the id is persisted when it became real (the peer's first user message echo).
+            // ★`TransportOwned` and the first-turn port are a pair — keep both★: that mode's session does not count submissions, so without the port no incarnation can persist the thread id (no error).
+            // ADR-0226 · ADR-0231: the id is persisted when it became real (the peer's first user message echo).
             let t = t.with_first_turn(first_turn_sink);
             // ADR-0231: the link carries classification · handover · cancellation. Whether receipt is possible is **the very**
             //   Arc that the link's floor decision fills — making a separate one would have the session and the link see different values.
@@ -1101,16 +818,13 @@ impl AgentBackend for CodexBackend {
             // ★The first-turn port is dropped too★ — in this mode the session counts submissions (ADR-0226 decision 11 — the later of recovery and submission).
             drop(first_turn_sink);
             let (t, pid) = PtyTransport::open(spec, cols, rows)?;
-            // ★Session id recovery starts **from here** — the lock appears only once the child is already up★
-            //   (ADR-0218). Whether to run it and its material are all decided by [`thread_lock::plan_capture`]
-            //   (source of truth for the conditions = that doc), so all this place does is hand over the child's two identity fields and **our side's** default
-            //   lock folder — if the child received a different home, that one wins.
+            // ★Session id recovery starts **from here** — the lock appears only once the child is up★ (ADR-0218). Whether to run it and its material are decided by [`thread_lock::plan_capture`] (the conditions' source of truth);
+            //   this place only hands over the child's two identity fields and **our side's** default lock folder (a different home the child received wins).
             // ADR-0218
             let child_start =
                 pid.and_then(engram_dashboard_platform::process::process_creation_time);
-            // ★The fact the gate looks at = 「did the resume argv actually go out」★ — not the **existence** of the
-            //   handle. For a value that cannot be carried, `build_spec` above emitted new-conversation argv, and that incarnation is
-            //   a recovery target. The two places look at the same predicate ([`resume_argument`]).
+            // ★The gate looks at 「did the resume argv actually go out」, not the **existence** of the handle★: for an uncarriable value `build_spec` emitted new-conversation argv and that incarnation is a recovery target
+            //   (same predicate: [`resume_argument`]).
             let resumes_by_argv = resume_session_id.and_then(resume_argument).is_some();
             if let Some(plan) = thread_lock::plan_capture(
                 &spec.env,
@@ -1155,17 +869,11 @@ impl AgentBackend for CodexBackend {
         classify_turn
     }
 
-    // ★No synthetic input echo is declared — do not revive it★: this backend echoes user messages itself as
-    //   `userMessage` items of `item/*` (measured), and the translator marks them as 「what we sent」
-    //   and lets them through. In app-server mode the idle input bubble is emitted **by the link** — only the link knows whether it is idle or mid-turn
-    //   (text mid-turn goes into the list and has no bubble), and that bubble's uuid is our id, so it folds into one copy with the echo's
-    //   `clientId`. The session-layer echo does not know that split, so this mode's session does not emit an echo
-    //   (the link-turn verb branch of `AgentSession`).
-    //   ★A link below the floor does not emit the bubble★ — the `uuid` of the echo bubble is `clientId` first, and the codex
-    //   item id only when that is absent (the translator's echo duplicate memory always counts by item id — the user message translation of `decoder`). The echo below the floor
-    //   has no `clientId`, so that `uuid` becomes the item id, and if the link emitted a bubble with our id, the frontend's
-    //   `uuid` dedup could not fold the two and the same question would remain twice. That overlap is exactly what the 「rejected alternative」 of ADR-0193 dismissed
-    //   based on measurement. In terminal mode the PTY echoes on its own.
+    // ★No synthetic input echo is declared — do not revive it★: this backend echoes user messages itself as `userMessage` items of `item/*` (measured), and the translator lets them through as 「what we sent」.
+    //   In app-server mode the idle input bubble is emitted **by the link** (only it knows idle vs mid-turn; mid-turn text goes into the list with no bubble) and the bubble's uuid is our id, folding into one copy with
+    //   the echo's `clientId`. The session-layer echo does not know that split, so it emits none (the link-turn verb branch of `AgentSession`).
+    //   ★A link below the floor does not emit the bubble★: the echo bubble's `uuid` is `clientId` first and the codex item id only when absent; the echo below the floor has no `clientId`, so a bubble with our id
+    //   could not be folded by the frontend's `uuid` dedup and the question would show twice (what ADR-0193's 「rejected alternative」 dismissed on measurement). In terminal mode the PTY echoes on its own.
     // ADR-0193
     // ADR-0231
 
@@ -1181,39 +889,24 @@ impl AgentBackend for CodexBackend {
 
 /// codex output event → turn signal (ADR-0113).
 ///
-/// ★This backend's end signal is [`OutputEvent::TurnEnd`]★ — the translator does not emit `MessageDone`.
-///   Still, that branch is written as `Ended`: if two words with the same meaning were split here, the end would quietly disappear
-///   on the day this backend came to emit it.
-/// ★Counting `Structured` as progress is load-bearing in this backend★: the only thing that comes in through this branch is
-///   the echoed user message (the `userMessage` item translation) — unknown notifications are dropped (this folder's
-///   `decoder` header), so there is nothing else — and it is the first observation of 「this turn has started」.
-/// ★Still, 「from the moment we wrote `turn/start` until that first notification arrives」 is unobserved★ — that window is
-///   not filled with a synthetic echo (ADR-0193 rejected that alternative). For queue release, 「can it send now」 is answered by the link
-///   implementation from its own state, and the unobserved part on the mail gate side is absorbed as fail-open (ADR-0104's choice).
-/// ★Why `Usage`/`Error` are not ends★: `Usage` (`thread/tokenUsage/updated`) comes mid-turn, and
-///   `Error` (the `error` notification) is a retryable stream error, not a turn boundary. A failed turn is also closed by the `TurnEnd` that
-///   `turn/completed` emits — the failure reason is carried **inside** that event.
-/// ★Give-up paths where `turn/completed` **never comes** are also closed by `TurnEnd`★ (write failure · response decode failure
-///   · error response · deadline expiry — the link's `end_turn_if`). Back when `Error` was written at that spot, this table could not count the end,
-///   so **an idle agent remained observed as mid-turn** and mail was blocked until the 30-minute fail-open valve
-///   (ADR-0127). So rather than promoting `Error` to an end in this mapping, that side uses the boundary vocabulary.
-/// ★Why it can be shared with terminal mode (no per-mode branching needed)★: that mode has no decoder, so only `TerminalBytes`
-///   flow, and using this mapping as is yields no signal at all.
-/// ★It is safe even with no `Progress` before `Ended` (code basis)★: the table only writes `Ended` as `in_turn = false`,
-///   so an unpaired end does not turn on mid-turn (`crate::turn::TurnObservations::observe_at`), and `in_turn_snapshot` carries
-///   only those that are `in_turn`. So there is no reason to invent and fill in a 「start signal」. ★An unpaired error end is not the state right after
-///   registration★ — it sets `last_end_failed`: the `turn/start` exit is intended (a request-stage failure is also an abnormal end — user decision
-///   N11), and the boundary of an incarnation whose connection could not stand is erased by `forget` as that incarnation soon ends.
-/// ★Error end = a `TurnEnd{Failed}` attributed to this incarnation's turn★ — a translated `turn/completed(failed)` (including the early-end release) and
-///   the link's give-up path (`end_turn_if`). The turn table folds it into `last_end_failed` and the kernel holds mail (ADR-0231 — the same trigger as the link's
-///   `halted`, but the one that uses that field is this classifier alone). ★Someone else's turn end blocked by the attribution gate and the display-only
-///   boundary after a late receipt (`emit_without_turn_observation`) do not pass here★ — they neither set nor clear the halt.
-/// ★Registry events up to `Delivered` are all `None` (unlike claude)★: this backend's `Delivered` comes **even after** the turn end
-///   (a late echo of text returned to the held place at turn end · revival). If that turned 「mid-turn」 on again, that incarnation's mail would be blocked until the 30-minute
-///   fail-open valve. The observation of turn start is already carried by the echoed user message (`Structured`).
-/// ★A tool end result (`ToolResult`) is `None` whatever its outcome★: an interrupted command keeps running and closes **after the turn end** (measured
-///   fixture `interrupt_fail_b5`) — counted as progress, an idle incarnation would revive as 「mid-turn」 and mail would be blocked until the 30-minute fail-open.
-///   And a tool failure is an ordinary step of the agent, so counting it as an error would make one failed command set the halt-after-error.
+/// ★This backend's end signal is [`OutputEvent::TurnEnd`]★ — the translator does not emit `MessageDone`, yet that branch is also written as `Ended` so the end does not vanish if this backend ever emits it.
+/// ★`Structured` counts as progress — load-bearing★: the only thing entering this branch is the echoed user message (`userMessage` item translation; unknown notifications are dropped — `decoder` header), the first
+///   observation of 「this turn has started」. ★The window from our `turn/start` write to that first notification is unobserved★ — not filled with a synthetic echo (ADR-0193); queue release asks the link
+///   implementation, and the mail gate absorbs the gap as fail-open (ADR-0104).
+/// ★`Usage`/`Error` are not ends★: `Usage` (`thread/tokenUsage/updated`) comes mid-turn; `Error` is a retryable stream error. A failed turn is closed by the `TurnEnd` that `turn/completed` emits (the reason is **inside** it).
+/// ★Give-up paths where `turn/completed` never comes also close with `TurnEnd`★ (write failure · response decode failure · error response · deadline expiry — the link's `end_turn_if`). Writing `Error` there left
+///   **an idle agent observed as mid-turn** and mail blocked until the 30-minute fail-open valve (ADR-0127), so that side uses the boundary vocabulary instead of promoting `Error` here.
+/// ★Shared with terminal mode★: that mode has no decoder, only `TerminalBytes`, so this mapping yields no signal.
+/// ★Safe with no `Progress` before `Ended`★: `Ended` only writes `in_turn = false`, so an unpaired end does not turn on mid-turn (`crate::turn::TurnObservations::observe_at`), and `in_turn_snapshot` carries only `in_turn` ones;
+///   no 「start signal」 is invented. ★An unpaired error end is not the state right after registration★ — it sets `last_end_failed` (the `turn/start` exit is intended: a request-stage failure is also an abnormal end), and a
+///   never-established incarnation's boundary is erased by `forget`.
+/// ★Error end = a `TurnEnd{Failed}` attributed to this incarnation's turn★ — a translated `turn/completed(failed)` (incl. the early-end release) and the link's give-up path (`end_turn_if`); the turn table folds it into
+///   `last_end_failed` and the kernel holds mail (ADR-0231, same trigger as the link's `halted`, which only this classifier uses). ★Someone else's turn end blocked by the attribution gate and the display-only boundary
+///   after a late receipt (`emit_without_turn_observation`) do not pass here★ — they neither set nor clear the halt.
+/// ★Registry events up to `Delivered` are all `None` (unlike claude)★: `Delivered` comes **even after** the turn end (a late echo of text returned to the held place · revival); turning 「mid-turn」 on again would block that
+///   incarnation's mail until the 30-minute valve. Turn start is already carried by the echoed user message (`Structured`).
+/// ★`ToolResult` is `None` whatever its outcome★: an interrupted command keeps running and closes **after the turn end** (fixture `interrupt_fail_b5`) — counted as progress an idle incarnation would revive as 「mid-turn」;
+///   and a tool failure is an ordinary agent step, not an error that sets the halt-after-error.
 // ADR-0113
 // ADR-0004
 // ADR-0231
@@ -1241,16 +934,9 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
 
 #[cfg(test)]
 mod tests {
-    /// Polls until the condition holds — ★past the deadline, it dies **saying what it was waiting for**★.
-    ///
-    /// ★Why this function exists★: the deadline used to be a **silent fallthrough**. Past it, it just fell through and the assertion
-    ///   below died with 「the value is wrong」, and when it actually blew up that way in CI, **the panic body was empty, so
-    ///   「timeout」 and 「value error」 could not be told apart** (2026-09-23 · two tests of this file failed that way in the v0.3.1 tag run,
-    ///   and the same tree was green in the branch run just before). Only by splitting them here
-    ///   does the next failure say by itself which one it is.
-    /// ★The cap is a safety net, not an assertion — do not shrink it to 「fail fast」★: the normal path holds within 1 second
-    ///   (measured locally 0.5 s). A congested runner ran the same suite **6.7× slower** (measured: local
-    ///   4.87 s ↔ CI 32.71 s). What the cap measures is 「did it happen」, not 「how fast it happened」.
+    /// Polls until the condition holds — ★past the deadline it dies **saying what it was waiting for**★: a silent fallthrough once left an empty panic body that could not tell 「timeout」 from 「value error」 (v0.3.1 tag run).
+    /// ★The cap is a safety net, not an assertion — do not shrink it to 「fail fast」★: the normal path holds within 1 s, a congested CI runner ran the suite **6.7× slower** (local 4.87 s ↔ CI 32.71 s); it measures
+    /// 「did it happen」, not 「how fast」.
     fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while !cond() {
@@ -1317,12 +1003,9 @@ mod tests {
         }
     }
 
-    /// ★This value must **always be `None`** — both the hook registration and its builder were removed (ADR-0216)★. The one remaining use
-    /// is measuring that it **has not come back**.
-    /// ★Writing the key as a literal is intended★ — the current invariant is that production code has not a single character of this string,
-    ///   so reviving the constant and referencing it would blur that fact.
-    /// ★Do not count anything by the **existence** of `-c`★ — today two things carry that flag (MCP attachment ·
-    ///   the brief). The old form that counted only the flag became a false positive every time a second one came in.
+    /// ★This value must **always be `None`** — the hook registration and its builder were removed (ADR-0216)★; the test only measures that it has not come back.
+    /// ★The key is a literal on purpose★ — production code must hold none of this string, and a revived constant would blur that.
+    /// ★Do not count by the **existence** of `-c`★ — two things carry it today (MCP attachment · the brief); a flag-only count turned false-positive with each new one.
     fn hook_override_value(argv: &[String]) -> Option<String> {
         argv.windows(2)
             .find(|p| p[0] == CONFIG_OVERRIDE_FLAG && p[1].starts_with("hooks.SessionStart"))
@@ -1375,9 +1058,8 @@ mod tests {
         assert_eq!(spec(&codex_app_server(vec![]), "C:/workspace").cwd, cwd);
     }
 
-    /// ★Not 「at the very end」 but 「**after** our default arguments」 — the old name (`extra_args_come_last`) was a fact from before our
-    /// overrides existed★. That the overrides must stand after the pass-through is a separate
-    /// axis, and that one is measured by the `…_follows_the_passthrough` items.
+    /// ★「After our default arguments」, not 「at the very end」★ — the old name (`extra_args_come_last`) predates our overrides; that the overrides stand after the pass-through is the separate axis measured by the
+    /// `…_follows_the_passthrough` items.
     #[test]
     fn extra_args_follow_our_base_args() {
         let s = spec(&codex(vec!["-m", "gpt-5"]), "C:/workspace");
@@ -1422,11 +1104,9 @@ mod tests {
 
     // ── ADR-0208: terminal-mode resume (`codex resume <id>`) ──────────────────────
 
-    /// A spec drawn with the resume field filled — the issued field (`session_id`) is left empty as is.
+    /// A spec drawn with the resume field filled — the issued field (`session_id`) is left empty.
     ///
-    /// ★Passing the two fields **separately** is the point of this helper★ — folded into one, the value we issued could be carried
-    /// in the argv of a backend whose [`AgentBackend::assigns_session_id`] is false, and the items below
-    /// cannot see that folding.
+    /// ★The two fields are passed **separately** on purpose★ — folded into one, the value we issued could be carried in the argv of a backend whose [`AgentBackend::assigns_session_id`] is false, and the items below cannot see that.
     fn spec_resuming(
         command: &AgentCommand,
         mode: SpawnMode,
@@ -1444,10 +1124,8 @@ mod tests {
         )
     }
 
-    /// ★The subcommand and positional argument must go out **attached at the very front**★ — if `resume` is pushed back, clap reads it as
-    /// the root's `[PROMPT]` and the resume quietly becomes a new conversation, and if the id separates from the subcommand it
-    /// misses the `[SESSION_ID]` slot.
-    /// The three policies are carried after it **as is** — `resume` also takes those three as its own options (measured 0.155.0).
+    /// ★The subcommand and positional argument go out **attached at the very front**★ — if `resume` is pushed back clap reads it as the root's `[PROMPT]` and the resume quietly becomes a new conversation; if the id separates from the
+    /// subcommand it misses `[SESSION_ID]`. The three policies follow **as is** (`resume` takes them as its own options too, 0.155.0).
     #[test]
     fn resuming_with_a_stored_handle_emits_the_subcommand_and_the_positional_id() {
         let thread_id = Uuid::new_v4();
@@ -1472,9 +1150,8 @@ mod tests {
         );
     }
 
-    /// ★Without a handle, it must be argv **byte-identical to Fresh**★ — `codex resume` without an id is the TUI
-    /// picker (measured 0.155.0 `--help`: "picker by default"), and an agent attached to that screen stops on the first screen
-    /// forever. So a half assembly that emits only the subcommand is forbidden.
+    /// ★Without a handle, argv must be **byte-identical to Fresh**★ — `codex resume` without an id is the TUI picker (0.155.0 `--help`: "picker by default") and the agent stops on the first screen forever; a half assembly
+    /// emitting only the subcommand is forbidden.
     #[test]
     fn resuming_without_a_stored_handle_falls_back_to_the_fresh_argv() {
         let fresh = codex_argv(&spec(&codex(vec![]), "C:/workspace"));
@@ -1494,13 +1171,9 @@ mod tests {
         );
     }
 
-    /// ★The **reporting** of that regression is not done by this file — the assembly point does it★:
-    /// `resume_no_fallback` of [`crate::manager::AgentManager`] decides `opens_a_new_conversation` as the product of two terms (the resume
-    /// axis ∧ no handle in the registry), hands it to the new-conversation path, and emits the outcome as `Started` instead of `Resumed`
-    /// (ADR-0226). Of those, **the resume axis is this file's declaration**, so it is nailed down here.
-    /// ★An execution assertion does not catch this regression★ — if that axis flips, even if a request without a handle comes up on the resume path,
-    ///   the argv falls cleanly to a new conversation per the item above, and what becomes false is **only the report** (the new conversation
-    ///   goes out as 「resumed」).
+    /// ★The **reporting** of that regression is the assembly point's, not this file's★: `resume_no_fallback` of [`crate::manager::AgentManager`] decides `opens_a_new_conversation` as (resume axis ∧ no handle in the registry) and
+    /// emits `Started` instead of `Resumed` (ADR-0226). **The resume axis is this file's declaration**, so it is pinned here.
+    /// ★An execution assertion does not catch this regression★ — if the axis flips, a handle-less request on the resume path still falls cleanly to new-conversation argv; only **the report** turns false.
     // ADR-0208
     #[test]
     fn a_handleless_resume_still_trips_the_new_conversation_notice() {
@@ -1512,9 +1185,8 @@ mod tests {
         );
     }
 
-    /// ★Fresh does not resume even with a handle★ — the assembly point passing this field empty on Fresh is the discipline
-    /// (`AgentManager::spawn_agent`), but if this file leaned on that discipline the decision would be in two places. A request to open
-    /// a new conversation with a dead incarnation's thread is exactly that combination.
+    /// ★Fresh does not resume even with a handle★ — the assembly point passes this field empty on Fresh (`AgentManager::spawn_agent`), but leaning on that would put the decision in two places. A request to open a new
+    /// conversation with a dead incarnation's thread is exactly that combination.
     #[test]
     fn a_fresh_spawn_ignores_a_stored_handle() {
         let s = spec_resuming(
@@ -1529,9 +1201,7 @@ mod tests {
         );
     }
 
-    /// ★app-server mode does not emit resume as argv★ — that mode's means is the second handshake request
-    /// (`thread/resume`), and [`AgentBackend::open_spawn`] picks it. If carried here, the `app-server` subcommand
-    /// receives an unknown argument and the launch fails.
+    /// ★app-server mode does not emit resume as argv★ — its means is the second handshake request (`thread/resume`, [`AgentBackend::open_spawn`]); carried here, the `app-server` subcommand gets an unknown argument and the launch fails.
     #[test]
     fn the_app_server_argv_is_unchanged_by_a_stored_handle() {
         let s = spec_resuming(
@@ -1543,9 +1213,7 @@ mod tests {
         assert_eq!(codex_argv(&s), vec!["app-server", "--stdio"]);
     }
 
-    /// The pass-through is **after** the subcommand · policies on the resume branch too — coming in front, it separates the subcommand and its positional argument.
-    /// (Our overrides are even further after that pass-through — the `…_follows_the_passthrough` items
-    /// measure that axis.)
+    /// The pass-through is **after** the subcommand · policies on the resume branch too — in front it separates the subcommand and its positional argument (our overrides come even later: `…_follows_the_passthrough`).
     #[test]
     fn resume_argv_still_puts_the_passthrough_after_our_base_args() {
         let s = spec_resuming(
@@ -1575,25 +1243,16 @@ mod tests {
             epoch: 1,
             url: "http://127.0.0.1:7777/mcp".to_string(),
             token: "deadbeef".to_string(),
-            // ★In production this field comes as `None` — the `Some` here is a worst-case value put in **on purpose**★:
-            //   `writes_mcp_config_file()` is false, so the daemon writes no file for this backend and sends the two fields
-            //   empty. The fixture still carries `Some` because what the test below measures is 「if a path comes, does it
-            //   leak into argv」 — putting `None` makes that assertion hollow, and on the day the daemon-side gate
-            //   collapses, nobody would catch the regression of this backend taking that path and using it as is.
+            // ★In production this field is `None` — the `Some` is a worst-case value on purpose★: `writes_mcp_config_file()` is false so the daemon sends both fields empty, but the test below measures 「if a path comes,
+            //   does it leak into argv」; `None` would make that hollow and a collapsed daemon-side gate would go uncaught.
             config_path: Some(std::path::PathBuf::from("C:/engram/mcp-config.json")),
             send_exe: Some(std::path::PathBuf::from("C:/engram/bin/engram.exe")),
-            // ★This path is **a file that does not exist**, and that is intended★: this backend now reads the brief's **content** and
-            //   carries it (ADR-0215), and pointing at a real file would attach one more priming override to the argv of every test using this fixture,
-            //   shaking the assertions that measure adjacency · order. A read failure is fail-open, so
-            //   here it lands as 「not carried」. The items that measure the injection bake a real file with [`bake_priming`].
+            // ★This path is **a file that does not exist**, intended★: this backend reads the brief's **content** (ADR-0215), and a real file would add a priming override to every test using this fixture and shake the adjacency · order
+            //   assertions. A read failure is fail-open (lands as 「not carried」); the injection items bake a real file with [`bake_priming`].
             priming_file: Some(std::path::PathBuf::from("C:/engram/priming.md")),
-            // ★This field is the concrete form of 「the daemon authorized the MCP send entrance for this spawn」 — do not leave it empty★:
-            //   an empty list is the state where the operator **turned off** MCP mail (that fixture is
-            //   [`endpoint_without_mcp_send`] below), and building the default fixture with that value would make every test measuring MCP attachment
-            //   measure the 「not attaching is correct」 side, becoming hollow as a whole.
-            //   ★Pinning the tool names here is not retyping★ — the decision looks **only at the server name**
-            //   (`ControlEndpoint::grants_mcp_send`). The source of truth for tool names is the daemon side, and this crate
-            //   only carries them as data.
+            // ★This field is the concrete form of 「the daemon authorized the MCP send entrance for this spawn」 — do not leave it empty★: an empty list is the operator-**turned-off** state ([`endpoint_without_mcp_send`]), and every
+            //   MCP-attachment test would measure the 「not attaching is correct」 side and go hollow.
+            //   Pinning tool names here is not retyping — the decision looks **only at the server name** (`ControlEndpoint::grants_mcp_send`); the tool names' source of truth is the daemon side.
             grants: vec![ToolGrant::Mcp {
                 server: MCP_SERVER_NAME.to_string(),
                 tool: "eg_send".to_string(),
@@ -1605,13 +1264,10 @@ mod tests {
         }
     }
 
-    /// The endpoint of a spawn whose operator **turned off** MCP mail. Even then the daemon issues the control channel itself (the control verbs are
-    /// open to all — ADR-0132 decision 5) and only leaves out the send entrance grant — the result is this shape.
+    /// The endpoint of a spawn whose operator **turned off** MCP mail. The daemon still issues the control channel (control verbs are open to all — ADR-0132 decision 5) and only leaves out the send entrance grant.
     ///
-    /// ★Why both `ENGRAM_DISALLOW_MCP_SEND` and `ENGRAM_FORCE_CLI_ONLY_SEND` are represented by this one fixture
-    ///   even though they touch different places★: the former removes the MCP grant in `build_grants`, and the latter
-    ///   flips `accepts_mcp_config` so the grant goes to the CLI side — **both land on 「there is no MCP send
-    ///   grant for our server」.** What the backend looks at is that one landing point.
+    /// ★One fixture represents both `ENGRAM_DISALLOW_MCP_SEND` and `ENGRAM_FORCE_CLI_ONLY_SEND`★: the former removes the MCP grant in `build_grants`, the latter flips `accepts_mcp_config` so the grant goes to the CLI side —
+    /// **both land on 「no MCP send grant for our server」**, the one point the backend looks at.
     fn endpoint_without_mcp_send() -> ControlEndpoint {
         ControlEndpoint {
             grants: vec![],
@@ -1699,10 +1355,8 @@ mod tests {
 
     // ── ADR-0217: the status-line channel was removed · the incarnation marker is planted via env ──────────────
 
-    /// ★argv must have not a single `tui.` setting★ — this absence is half of ADR-0217 (the other half =
-    /// the marker below). If it came back, we would return to giving up one screen line for the whole session in exchange for one recovery.
-    /// ★It runs over all of endpoint presence · mode★ — the old value was carried without looking at the endpoint, so measuring only the side with one
-    ///   would catch only half of a revival.
+    /// ★argv must have not a single `tui.` setting★ — half of ADR-0217 (the other half: the marker below); a return would again give up one screen line for the whole session in exchange for one recovery.
+    /// ★Runs over all of endpoint presence · mode★ — the old value was carried without looking at the endpoint, so measuring only the with-endpoint side would catch half of a revival.
     #[test]
     fn no_spawn_turns_on_a_status_line() {
         for control in [None, Some(endpoint())] {
@@ -1716,10 +1370,8 @@ mod tests {
         }
     }
 
-    /// ★For a handle that cannot be carried, the subcommand itself is not emitted★ — when codex receives a value it cannot read as a thread id, it
-    /// reinterprets it as a **session name**, quietly creates a new session, and ends with exit code 0 (measured 2026-09-21).
-    /// Then the user gets a new conversation they believe they resumed — a different kind of fault from the failure mode ADR-0218 set (「not received」).
-    /// Source of truth for the reason = [`resume_argument`].
+    /// ★An uncarriable handle emits no subcommand★ — codex reinterprets a value it cannot read as a thread id as a **session name**, quietly creates a new session and exits 0 (measured 2026-09-21): a new conversation the user believes
+    /// they resumed, a different fault from ADR-0218's 「not received」. Reason: [`resume_argument`].
     #[test]
     fn a_degenerate_handle_never_reaches_the_resume_subcommand() {
         assert_eq!(resume_argument(Uuid::nil()), None);
@@ -1746,12 +1398,8 @@ mod tests {
         );
     }
 
-    /// ★A handle that cannot be carried is not 「a resume」 but 「a new conversation」 — so **recovery must run**★.
-    ///
-    /// This field was a real defect (found 2026-09-21): the argv side refused that value with the G7 guard and came up as a new conversation,
-    /// but the recovery gate looked only at 「is there a handle」 and was off. The result was **a session where nobody writes
-    /// that incarnation's thread id**, and the next activation goes with the old handle (or none). It was closed by making the two decisions look at the same predicate
-    /// ([`resume_argument`]).
+    /// ★An uncarriable handle is 「a new conversation」, not 「a resume」 — so **recovery must run**★. A real defect (2026-09-21): the argv side refused the value (G7 guard) and came up as a new conversation, but the recovery gate
+    /// looked only at 「is there a handle」 and was off — **nobody wrote that incarnation's thread id**. Closed by making both decisions look at [`resume_argument`].
     #[test]
     fn a_handle_we_refuse_to_resume_with_is_still_captured() {
         let s = CodexBackend.build_spec(
@@ -1784,17 +1432,11 @@ mod tests {
         );
     }
 
-    /// ★Resume argv and lock recovery: **exactly one** stands★ — if both stand, the already resumed id is found and written
-    /// again, and if neither stands, **nobody writes** that incarnation's id. The latter was a real defect (found
-    /// 2026-09-21): while the recovery gate looked at 「is there a handle」, the argv side refused a handle that cannot be carried
-    /// and came up as a new conversation, but recovery was off.
+    /// ★Resume argv and lock recovery: **exactly one** stands★ — both: the already resumed id is found and written again; neither: **nobody writes** that incarnation's id (the real defect above, 2026-09-21).
     ///
-    /// So what is measured is not 「both do not stand」 but **equivalence** — `argv_resumes == !plans_capture`.
-    /// ★The combination of `Fresh` with a handle carried in is not built here★: the only place that can build that combination is
-    ///   the assembly point, and `manager::resume_handle_for` blocks it there (that side's test =
-    ///   `manager::tests::fresh_never_carries_a_resume_handle`). Here that invariant is reproduced as is and
-    ///   only **the six cells that can actually occur** are run — putting an assertion on a combination that does not exist makes it
-    ///   impossible to know what that assertion guards.
+    /// So what is measured is **equivalence** — `argv_resumes == !plans_capture`.
+    /// ★`Fresh` with a handle carried in is not built here★: only the assembly point can build it and `manager::resume_handle_for` blocks it (`manager::tests::fresh_never_carries_a_resume_handle`); only
+    ///   **the six cells that can actually occur** run — an assertion on a nonexistent combination leaves unclear what it guards.
     #[test]
     fn exactly_one_of_the_resume_argv_and_the_capture_plan_fires() {
         let sink: crate::backend::SessionIdSink = std::sync::Arc::new(|_: &str| {});
@@ -1838,9 +1480,8 @@ mod tests {
         }
     }
 
-    /// ★The value is pinned byte for byte — measuring together that the marker is actually carried in the spawn env and its shape★.
-    /// ★Do not revert to 「the reader compares」★ — there is no comparing place, and none is planned (ADR-0218
-    ///   decision 8). The value is pinned here because diagnostics lean on that shape, not because a decision does.
+    /// ★The value is pinned byte for byte — measuring that the marker is carried in the spawn env, and its shape★. ★Do not revert to 「the reader compares」★ — no comparing place exists or is planned (ADR-0218 decision 8);
+    /// diagnostics lean on the shape.
     #[test]
     fn the_spawn_env_carries_the_incarnation_marker() {
         let id = Uuid::parse_str("2f1c9c0e-1111-4222-8333-444455556666").expect("fixed uuid");
@@ -1901,9 +1542,7 @@ mod tests {
 
     // ── ADR-0216: the hook registration was removed ───────────────────────────────────────────────
     //
-    // ★The order · conflict-warning axis is measured on the side of the living overrides★ — `the_priming_override_follows_the_passthrough`
-    //   and `a_conflicting_mcp_passthrough_loses_to_ours_and_is_not_filtered` are those places.
-    //   The two hook versions that were here lost what they measured (the hook value carried in argv) and were succeeded by those.
+    // ★The order · conflict-warning axis is measured on the living overrides★ — `the_priming_override_follows_the_passthrough` and `a_conflicting_mcp_passthrough_loses_to_ours_and_is_not_filtered`.
 
     /// ★Terminal spawns no longer carry the hook★ — this one line nails down ADR-0216's replacement of the recovery path.
     /// If carried, codex's trust review screen comes back and **the agent does not come up until approval.**
@@ -1944,10 +1583,7 @@ mod tests {
         );
     }
 
-    /// Passing another key with `-c` is not a conflict — if warnings are spammed, nobody reads them.
-    ///
-    /// ★The key is measured **on the living side** (the brief)★ — measuring with a removed key would not tread the same axis as the warning
-    ///   this helper actually drives.
+    /// Passing another key with `-c` is not a conflict — spammed warnings go unread. ★Measured on the **living** key (the brief)★: a removed key would not tread the axis this helper drives.
     #[test]
     fn an_unrelated_config_passthrough_is_not_a_conflict() {
         assert!(!passthrough_overrides_key(
@@ -1963,10 +1599,9 @@ mod tests {
         ));
     }
 
-    /// On the resume branch too, the subcommand is at the very front and our overrides are after the pass-through — the two do not push each other out.
+    /// On the resume branch too, the subcommand is at the very front and our overrides are after the pass-through.
     ///
-    /// ★「At the very end」 is not pinned★ — that slot is taken by the sibling override (the brief) when there is a priming file,
-    ///   and that is not a regression. The actual invariant is only **after the pass-through**.
+    /// ★「At the very end」 is not pinned★ — the sibling override (the brief) takes that slot when a priming file exists; the invariant is only **after the pass-through**.
     #[test]
     fn a_resuming_spawn_still_carries_our_override_after_the_passthrough() {
         let s = CodexBackend.build_spec(
@@ -2026,15 +1661,12 @@ mod tests {
         assert_eq!(enc.encode(body, Uuid::new_v4()), body.to_vec());
     }
 
-    /// ★Do not revive it★ — in terminal mode the PTY echoes input on its own (the session's synthetic echo is a device that imitates the json
-    /// mode that lacks it — ADR-0044). The session layer holds an [`InputEncoder`], not the backend, and goes through the dispatch
-    /// table, so looking only at the declaration and not at that table lets a revived echo pass while green.
+    /// ★Do not revive it★ — in terminal mode the PTY echoes input itself (the session's synthetic echo imitates the json mode that lacks it — ADR-0044). The session layer holds an [`InputEncoder`] and goes through the dispatch
+    /// table, so looking only at the declaration would let a revived echo pass green.
     ///
-    /// app-server mode's bubble is emitted by the link, not by this table (ADR-0231 — the session does not emit an echo in the link-turn verb branch,
-    /// and a link below the floor does not emit the bubble — ADR-0193 「rejected alternative」). ★That the bubble does not break **the order of the screen
-    /// restore** is thanks to the link's idle condition (ADR-0203)★: history is received **after** the handshake and raised before the gate
-    /// (`Link::Ready`), but the synthetic bubble stands only at `Ready`, so text typed in that window goes into the list without a bubble.
-    /// Lifting that condition would draw the user's new words above the restored old conversation.
+    /// app-server's bubble is emitted by the link, not this table (ADR-0231; below-floor links emit none — ADR-0193 「rejected alternative」). ★The bubble does not break **the screen-restore order** thanks to the link's idle
+    /// condition (ADR-0203)★: history is received **after** the handshake and raised before the gate (`Link::Ready`), but the synthetic bubble stands only at `Ready`, so text typed in that window goes into the list without a
+    /// bubble. Lifting the condition would draw the user's new words above the restored old conversation.
     #[test]
     fn the_terminal_mode_makes_no_synthetic_input_echo() {
         let enc = CodexBackend.input_encoder(&codex(vec![]));
@@ -2045,10 +1677,8 @@ mod tests {
         );
     }
 
-    /// Only app-server mode hands the list to the link, and whether receipt is possible is **the very** Arc the link's floor decision fills.
-    /// The link comes out wrapped as `dyn`, so it is measured by owner count — one share for the assembly point + one for the link's decision field (that this field
-    /// is what `delivery_ack()` hands out is measured by the link-side test
-    /// `the_transport_hands_out_the_very_ack_its_verdict_fills`). A separately made Arc would be 1.
+    /// Only app-server mode hands the list to the link, and whether receipt is possible is **the very** Arc the link's floor decision fills. The link comes out as `dyn`, so it is measured by owner count — one share for the
+    /// assembly point + one for the link's decision field (`the_transport_hands_out_the_very_ack_its_verdict_fills` measures that it is what `delivery_ack()` hands out). A separately made Arc would be 1.
     #[cfg(windows)]
     #[test]
     fn only_the_app_server_spawn_hands_the_list_to_the_transport_with_the_transport_s_own_ack() {
@@ -2139,8 +1769,7 @@ mod tests {
         );
     }
 
-    /// This backend's `Delivered` comes even after the turn end (late echo · revival) — none of the registry events is a turn
-    /// signal.
+    /// This backend's `Delivered` comes even after the turn end (late echo · revival) — none of the registry events is a turn signal.
     // ADR-0231
     #[test]
     fn no_queued_input_event_is_a_turn_signal() {
@@ -2205,9 +1834,8 @@ mod tests {
         }
     }
 
-    /// ★Measured (codex-cli 0.156.1 · fixture `interrupt_fail_b5`): the `failed` end of an interrupted command comes **after** the turn end★ — the translator
-    /// emits that end as `ToolResult{Failed}` after `TurnEnd{Interrupted}`, and even when that event is fed to the turn table, an idle incarnation does not revive
-    /// as 「mid-turn」 and no halt-after-error is set (counted as progress, mail would be blocked until the 30-minute fail-open).
+    /// ★Measured (codex-cli 0.156.1 · fixture `interrupt_fail_b5`): the `failed` end of an interrupted command comes **after** the turn end★ — it is emitted as `ToolResult{Failed}` after `TurnEnd{Interrupted}`, and fed to the turn
+    /// table it neither revives an idle incarnation as 「mid-turn」 nor sets halt-after-error.
     // ADR-0241
     #[test]
     fn a_late_tool_failure_after_an_interrupted_turn_does_not_reopen_the_turn() {
@@ -2287,16 +1915,11 @@ mod tests {
             .is_some());
     }
 
-    /// Why the three declarations are in one item = they are **a pair that must be looked at together**. The issuing axis is off in both modes
-    /// (the issuer is codex, so there is no value for us to plant), and the two resume fields are on in both modes —
-    /// what splits is only **the means** (argv ↔ `thread/resume`), and these four fields do not ask about the means.
+    /// The three declarations are one item because they are **a pair to look at together**: the issuing axis is off in both modes (codex issues the id) and the two resume fields are on in both — only **the means** (argv ↔
+    /// `thread/resume`) splits, which these four fields do not ask about.
     ///
-    /// ★Writing all four fields is the point★ — if **only one side** of the resume axis and the caps report field splits, a new thread that was never
-    ///   resumed is reported as 「resumed」 or the opposite, and measuring only one field per mode would leave that
-    ///   mismatch invisible in this file.
-    /// ★To revert the two fields of terminal mode to `false`, the argv assembly must be removed too★ — turning off only the declaration
-    ///   makes the activation entrance launch as Fresh while [`AgentBackend::build_spec`] is still prepared to resume,
-    ///   so that wiring becomes dead code that is never called.
+    /// ★Writing all four is the point★ — if only one side of the resume axis and the caps report splits, a never-resumed thread is reported as 「resumed」 or the reverse, and measuring one field per mode would hide it.
+    /// ★Reverting terminal mode's two fields to `false` requires removing the argv assembly too★ — otherwise the activation entrance launches as Fresh while [`AgentBackend::build_spec`] stays prepared to resume: dead code.
     #[test]
     fn both_modes_declare_resume_and_neither_claims_to_issue_the_id() {
         for c in [codex(vec![]), codex_app_server(vec![])] {
@@ -2315,12 +1938,10 @@ mod tests {
         }
     }
 
-    /// ★The declaration and the real thing must be a pair★ — `declares_link()` decides at the assembly point whether to **lay** the delivery port,
-    /// so if true but the link does not call it, the supervisor waits until the backstop, and if false but it calls, nobody receives
-    /// that delivery.
+    /// ★The declaration and the real thing must be a pair★ — `declares_link()` decides at the assembly point whether to **lay** the delivery port; true but uncalled: the supervisor waits until the backstop; false but called:
+    /// nobody receives it.
     ///
-    /// What is measured here is the declaration side, and the real side (the app-server link actually delivers) is
-    /// measured with a real link by `a_rejected_resume_does_not_fall_back_and_ends_the_session`.
+    /// This measures the declaration side; the real side (the app-server link delivers) is measured by `a_rejected_resume_does_not_fall_back_and_ends_the_session`.
     #[test]
     fn only_app_server_declares_a_link() {
         assert!(
@@ -2333,9 +1954,7 @@ mod tests {
         );
     }
 
-    /// ★What decides this value is not whether there are turn signals but ADR-0116 decision 7★ — the fact that terminal mode has no signal
-    /// is no reason to emit false here (terminal claude already receives in the same place). To revert it,
-    /// overturn that decision first.
+    /// ★This value is decided by ADR-0116 decision 7, not by whether turn signals exist★ — terminal mode having none is no reason for false (terminal claude already receives in the same place); overturn that decision first.
     // ADR-0116
     #[test]
     fn reads_messages_is_true() {
@@ -2344,12 +1963,9 @@ mod tests {
 
     // ── ADR-0185: the received thread id actually reaches the assembly point's record verb ──────────────────
 
-    /// Removes one file of the fake app-server — `true` if removed. ★The shape that tries once and gives up left scripts in `%TEMP%`★:
-    /// even after `shutdown()` returns, the child holds that file handle a little longer, so the first
-    /// `remove_file` fails. The marker file goes through the same door — the fake writes it and closes it right away, but a third party that briefly
-    /// opens new files (antivirus · indexer) can make a single attempt flaky (never observed).
-    /// ★Why it returns the result = `eprintln!` is swallowed by libtest in **passing** items★ — written there,
-    /// the fact that it could not remove leaves no trace anywhere and only leftovers pile up. The caller raises it as an assertion.
+    /// Removes one file of the fake app-server — `true` if removed. ★A try-once-and-give-up shape left scripts in `%TEMP%`★: the child holds the file handle a little longer even after `shutdown()` returns, so the first `remove_file`
+    /// fails; the marker file goes through the same door (a third party that briefly opens new files — antivirus · indexer — can make one attempt flaky; never observed).
+    /// ★It returns the result because `eprintln!` is swallowed by libtest in **passing** items★ — the failure would leave no trace and leftovers would pile up; the caller raises it as an assertion.
     #[cfg(windows)]
     #[must_use = "dropping the fact that it could not remove quietly piles up leftovers — raise it as an assertion"]
     fn remove_fake_file(path: &std::path::Path) -> bool {
@@ -2367,18 +1983,13 @@ mod tests {
     enum FakeResume {
         /// Returns the received `threadId` with a prefix — the point is that it becomes a value **different** from the one we sent.
         EchoesTheThreadId,
-        /// Refuses with `-32600`. ★That this code is not exclusive to 「unknown thread」 is the reason for ADR-0082's codex-side
-        /// addendum★ — an unknown method, a duplicate `initialize` and a config error all come with the same code (measured
-        /// 0.154.0 — the source of truth is this folder's `protocol` and the link test bench), so splitting by code and falling back to a new thread would overwrite a still
-        /// sound handle on an unrelated failure.
+        /// Refuses with `-32600`. ★That code is not exclusive to 「unknown thread」 (ADR-0082's codex-side addendum)★ — an unknown method, a duplicate `initialize` and a config error come with it too (0.154.0; this folder's `protocol` and the link
+        /// test bench), so splitting by code and falling back to a new thread would overwrite a still sound handle on an unrelated failure.
         Rejects,
     }
 
-    /// The refusal wording [`FakeResume::Rejects`] carries — items find it in the delivered reason to tell 「the refusal actually
-    /// made the round trip」.
-    /// ★The wording is the measured one★ — the purpose of this fake imitating 「unknown thread」 is to drive it all the way to classification,
-    /// and with invented wording `resume_failure_kind` would not recognize it, and that wiring would simply pass the test bench
-    /// (`docs/reference/backend-capabilities.md` §1 「when given an unknown id」).
+    /// The refusal wording [`FakeResume::Rejects`] carries — items find it in the delivered reason to tell 「the refusal made the round trip」. ★The measured wording★ (`docs/reference/backend-capabilities.md` §1): with invented
+    /// wording `resume_failure_kind` would not recognize it and the wiring would pass the bench unclassified.
     #[cfg(windows)]
     const FAKE_RESUME_REJECTION: &str = "no rollout found for thread id";
 
@@ -2388,8 +1999,7 @@ mod tests {
 
     /// One baked fake app-server.
     ///
-    /// ★Holding the two paths together is a contract★ — each item must remove them with [`FakeAppServer::remove`], and must raise the fact
-    /// that it could not remove as an assertion.
+    /// ★Holding the two paths together is a contract★ — each item must remove them with [`FakeAppServer::remove`] and raise a failure to remove as an assertion.
     #[cfg(windows)]
     struct FakeAppServer {
         spec: CommandSpec,
@@ -2409,10 +2019,8 @@ mod tests {
                 .collect()
         }
 
-        /// One **PowerShell** line to run this fake by hand (it does not run as is in cmd · bash).
-        /// ★The marker path variable is written together★ — without it the script dies right at the line that writes the marker
-        /// (`$ErrorActionPreference = 'Stop'`) and the failure is not reproduced.
-        /// All values are wrapped in single quotes and an inner `'` is doubled — so that spaces · `$` in the path are not interpreted.
+        /// One **PowerShell** line to run this fake by hand (not cmd · bash). ★The marker path variable is written together★ — without it the script dies at the marker-writing line (`$ErrorActionPreference = 'Stop'`) and the failure does
+        /// not reproduce. All values are single-quoted with inner `'` doubled, so spaces · `$` in paths are not interpreted.
         fn hand_run(&self) -> String {
             let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
             let args: Vec<String> = self.spec.args.iter().map(|a| quote(a)).collect();
@@ -2467,16 +2075,11 @@ mod tests {
 
     /// Waits until the fake enters its read loop — ★call it right before `start()`★.
     ///
-    /// The clock of the handshake budget (`transport::HANDSHAKE_BUDGET`) is started by the writer `start()` launches, but the fake
-    /// is already up before that, in `open_spawn`. The powershell startup in between is not what the items using this fake
-    /// measure. In CI run 35447034272 attempt 1, these four items failed together with an `initialize` deadline expiry (attempt 2 of the same
-    /// run was green). ★That the time went into powershell startup is the most plausible reading, not a certainty★
-    /// — all the log left is one deadline-expiry line, and what backs it is that a delay injection inserting 12 seconds before startup reproduces the same
-    /// failure. Startup is moved out of the budget, and only the round trip is measured **with the production budget as is**.
-    /// ★The budget is not raised to fit★ — that value is production behaviour (that constant's doc). There is no handle in the `start()` path
-    /// to inject a test-bench budget, and providing one would need a new seam in production code (ADR-0012 — user decision).
-    /// ★What the marker guarantees reaches only 「the script started running」★ — the cost of the per-request response path (regex · write) running for the first
-    /// time is still inside the budget. On a slow runner that value is unmeasured, and if large the symptom is the same deadline expiry.
+    /// The handshake budget's clock (`transport::HANDSHAKE_BUDGET`) starts in the writer `start()` launches, but the fake is already up before that, in `open_spawn`; the powershell startup in between is not what these items measure.
+    /// CI run 35447034272 attempt 1 failed four items together with an `initialize` deadline expiry (attempt 2 green). ★Powershell startup is the most plausible cause, not a certainty★ [unverified]: the log has one deadline line,
+    /// and a 12-second delay injected before startup reproduces it. Startup is moved out of the budget and only the round trip is measured **with the production budget**.
+    /// ★The budget is not raised to fit★ — that value is production behaviour; `start()` has no handle to inject a bench budget and adding one needs a new production seam (ADR-0012).
+    /// ★The marker guarantees only 「the script started running」★ — the first-run cost of the per-request response path (regex · write) is still inside the budget and unmeasured on a slow runner; if large, the symptom is the same deadline expiry.
     #[cfg(windows)]
     fn wait_for_the_fake_to_listen(fake: &FakeAppServer) {
         wait_until(
@@ -2505,14 +2108,11 @@ mod tests {
         (sink, delivered)
     }
 
-    /// Waits until the record verb is called — ★if a connection outcome is delivered before that, it stops waiting and dies saying, with that outcome, what
-    /// went wrong★.
+    /// Waits until the record verb is called — ★if a connection outcome is delivered first, it stops and dies saying, with that outcome, what went wrong★.
     ///
-    /// The record verb is called **only after** the handshake round trip stands, and the outcome is delivered **only after** passing that point. So
-    /// an outcome that came without a record is one of two — if `Failed`, the round trip fell over, and if `Ready`, **the record port did not reach
-    /// the link** (without a port, the link skips the record and sets up the connection — `record_session_id`). The latter is
-    /// the wiring regression [`tests::an_app_server_spawn_hands_the_thread_id_to_the_sink`] is meant to catch. Either way,
-    /// waiting only for the record spins until the deadline and leaves only 「it did not happen」 — the reason is carried only in the outcome.
+    /// The record verb is called **only after** the handshake round trip stands, and the outcome is delivered **only after** that point, so an outcome without a record is either `Failed` (the round trip fell over) or `Ready` (**the record
+    /// port did not reach the link** — without a port the link skips the record and sets up the connection: `record_session_id`), the wiring regression [`tests::an_app_server_spawn_hands_the_thread_id_to_the_sink`] catches.
+    /// Waiting only for the record would spin to the deadline and leave 「it did not happen」; the reason is only in the outcome.
     #[cfg(windows)]
     fn wait_for_recording(
         recorded: impl Fn() -> bool,
@@ -2541,26 +2141,17 @@ mod tests {
         }
     }
 
-    /// A minimal app-server that answers only the two handshake requests. ★Not the real codex★ — what is measured is one thing, 「does the thread id the peer
-    /// gave reach the verb handed to [`AgentBackend::open_spawn`]」, and the real CLI is irrelevant to that answer
-    /// (ADR-0012 isolation).
-    /// ★Baked into a file, not passed as an argument★ — the script contains JSON, so `"` is required, and that character
-    /// gets chewed twice going through Rust `Command`'s argument escaping and powershell's command-line parsing.
-    /// ★stdout is written as raw bytes★ — `Write-Output` drags encoding · BOM along with the host settings, and one BOM
-    /// byte makes the first line not JSON.
+    /// A minimal app-server that answers only the two handshake requests. ★Not the real codex★ — what is measured is 「does the thread id the peer gave reach the verb handed to [`AgentBackend::open_spawn`]」, irrelevant to the real CLI (ADR-0012).
+    /// ★Baked into a file, not passed as an argument★ — the script contains JSON `"`, which is chewed twice by Rust `Command` escaping and powershell command-line parsing.
+    /// ★stdout is written as raw bytes★ — `Write-Output` drags encoding · BOM along with host settings, and one BOM byte makes the first line not JSON.
     ///
-    /// ★The answer of the `thread/resume` branch is filled in by [`FakeResume`]★ — what goes in that place is not a JSON fragment
-    /// but **a powershell expression**, so an answer that appends the received `threadId` can be written too.
+    /// ★The `thread/resume` answer is filled in by [`FakeResume`]★ — a **powershell expression**, so an answer that appends the received `threadId` can be written.
     ///
-    /// ★**This fake does not die after answering and keeps reading stdin — that property is the premise of one item**★.
-    /// What [`tests::a_recording_failure_ends_the_session`] measures is 「if the record fails, we close stdin and
-    /// as a result the session ends」, but if this fake ended on its own, EOF would come **regardless of the close**, and that
-    /// item would measure none of the wiring and go green. That this is not actually so was confirmed by mutation — removing the close
-    /// makes **not a single** state transition observed in that item. ★So changing the while loop below into 「exit after
+    /// ★**This fake keeps reading stdin after answering — that is the premise of one item**★: [`tests::a_recording_failure_ends_the_session`] measures 「if the record fails we close stdin and the session ends」; a fake that ended on its own would
+    /// give EOF **regardless of the close**, measure none of the wiring and go green (confirmed by mutation: removing the close made **no** state transition observed in that item). ★Turning the while loop into 「exit after
     /// responding」 quietly disarms that item★.
     ///
-    /// ★The marker file is created **right before** the read loop★ — [`wait_for_the_fake_to_listen`] reads it as 「ready to
-    /// answer」. Moving it before the definitions used for answering (`$so` · `Send`) would make that meaning false.
+    /// ★The marker file is created **right before** the read loop★ — [`wait_for_the_fake_to_listen`] reads it as 「ready to answer」; moving it before the definitions used for answering (`$so` · `Send`) would falsify that.
     #[cfg(windows)]
     const FAKE_APP_SERVER_PS1: &str = r#"
 $ErrorActionPreference = 'Stop'
@@ -2636,9 +2227,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             TurnWiring::detached(),
         )));
 
-        // ★Failures are written split four ways★ — the fake did not come up (the wait above) · the round trip fell over (the reason of the failure outcome) ·
-        //   the connection stood without a record (wiring regression) · the fake came up but there is neither a record nor an outcome (deadline). Whichever branch, it dies before the
-        //   removing line, so the script remains.
+        // ★Failures are split four ways★: the fake did not come up (the wait above) · the round trip fell over (the failure outcome's reason) · the connection stood without a record (wiring regression) · the fake came up but there is neither a record nor an
+        //   outcome (deadline). Each dies before the removing line, so the script remains.
         wait_for_recording(|| !seen.lock().unwrap().is_empty(), &delivered, &fake);
         let got = seen.lock().unwrap().clone();
 
@@ -2656,18 +2246,15 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
     }
 
-    /// ★If the assembly point gives a value to resume, the second request splits into `thread/resume` — and what is recorded is
-    /// **the id the peer answered**★.
+    /// ★If the assembly point gives a value to resume, the second request splits into `thread/resume` — and what is recorded is **the id the peer answered**★.
     ///
-    /// One assertion tells three things apart (because the fake's answer is `resumed-<the threadId we sent>`):
-    ///   1. What went out is not `thread/start` — had it been, the fake would return `start_only`.
-    ///   2. The `threadId` field carried the value we passed as is (including the camelCase spelling).
-    ///   3. What the record verb receives is **the value the peer gave**. Had the implementation rewritten the value we sent, the original without the prefix
-    ///      would come up and split here — that branch matters because on the day the peer gives a different id, that value is
-    ///      the thread this incarnation actually talks in.
+    /// One assertion tells three things apart (the fake answers `resumed-<the threadId we sent>`):
+    ///   1. What went out is not `thread/start` (the fake would return `start_only`).
+    ///   2. The `threadId` field carried our value as is (including the camelCase spelling).
+    ///   3. The record verb receives **the value the peer gave** — had the implementation rewritten our value, the un-prefixed original would show; it matters because the day the peer gives a different id, that is the thread this
+    ///      incarnation actually talks in.
     ///
-    /// ★`send_input` is never called★ — what is measured is only the handshake section, and sending here would mix in another branch where
-    ///   the queue fills up to the cap.
+    /// ★`send_input` is never called★ — only the handshake section is measured, and sending would mix in the branch where the queue fills to the cap.
     #[cfg(windows)]
     #[test]
     fn a_resume_target_makes_the_handshake_issue_thread_resume() {
@@ -2725,15 +2312,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             vec![format!("resumed-{resume_target}")],
             "the id of the resume response was not recorded — `start_only` means `thread/start` went out, and an original without the prefix means the value we sent was rewritten instead of the peer's answer"
         );
-        // ★The value this fake gives is **not a uuid** — that fact is pinned here★.
-        //   The assembly point's record verb (`manager::session_id_sink`) **quietly drops** a value that fails `Uuid::parse_str`,
-        //   so what actually happens on this branch is not 「recorded」 but **a split**: the link holds this
-        //   string as `thread_id` and sends every later turn with it, but the `backend_session_id` on disk
-        //   stays **the old value as is**. So the next resume opens a place that is not the thread this incarnation actually
-        //   talked in.
-        //   ★The partner that measures that split is `a_non_uuid_thread_id_leaves_the_stored_one_diverged` on the `manager.rs` side,
-        //   and what is measured here is one thing, 「this test bench actually creates that condition」★ — without this assertion
-        //   the `assert_eq!` above would be misread as 「it got as far as being recorded」.
+        // ★The value this fake gives is **not a uuid** — pinned here★. The record verb (`manager::session_id_sink`) **quietly drops** a value failing `Uuid::parse_str`, so this branch is not 「recorded」 but **a split**: the link keeps this
+        //   string as `thread_id` and sends every later turn with it while the on-disk `backend_session_id` stays **old**, and the next resume opens a thread this incarnation never talked in.
+        //   ★The partner measuring the split is `a_non_uuid_thread_id_leaves_the_stored_one_diverged` in `manager.rs`; this only measures that the bench creates that condition★ — otherwise the `assert_eq!` above would read as 「it got recorded」.
         assert!(
             Uuid::parse_str(&got[0]).is_err(),
             "the fake's answer reads as a uuid — the premise of this item (the assembly point drops this value) is stale: {got:?}"
@@ -2744,26 +2325,16 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
     }
 
-    /// ★A refused resume **does not fall back to a new thread** (ADR-0082)★ — and it does not touch the handle stored
-    /// in the profile.
+    /// ★A refused resume **does not fall back to a new thread** (ADR-0082)★ and does not touch the handle stored in the profile.
     ///
-    /// The decisive evidence is that **the record verb is never called**: this fake answers `thread/start` too
-    /// (`start_only`), so had the link seen the refusal and opened a new thread, that id would come up to the record verb. That absence
-    /// is the absence of a second spawn, and with no record, the stored sid stays as is.
-    /// ★Absence is not measured by deadline alone★ — absence is asserted **after waiting** for the failure boundary that shows on screen.
-    ///   Only then are 「it just has not ended yet」 and 「there is no fallback」 told apart.
+    /// Decisive evidence: **the record verb is never called** — this fake also answers `thread/start` (`start_only`), so had the link opened a new thread that id would reach the record verb; no record means no second spawn and the stored sid
+    /// stays. ★Absence is not measured by deadline alone★: it is asserted **after waiting** for the failure boundary that shows on screen, telling 「not ended yet」 from 「no fallback」.
     ///
-    /// ★And **it is measured here until the session reaches its end state**★ — this is the second axis of this item, and without it
-    ///   the whole item is **green on top of a broken implementation**. This fake does not die after answering the refusal and keeps reading
-    ///   stdin (that constant's doc), so if the link does not let go of our stdin, the child · reader · writer stay alive,
-    ///   the reader never sees EOF, and [`crate::output_core::OutputCore::finish`] never runs. Then the message to the reaper
-    ///   is never created at all (its sole consumer — ADR-0019), and the manager's activation decision sees only `Running` for the whole 3 seconds,
-    ///   **stamps it 「resume succeeded」 and erases even the last failure record**.
-    ///   ★This spot once said 「the end state is the manager's · reaper's job, and its regression net is `tests/activation.rs`」
-    ///   — that net **does not exist** (that file has only one codex item, the profile wiring, and it does not measure the refusal
-    ///   branch). So the only place that measures this link letting go of stdin is here.★
-    /// ★Waiting before `shutdown()` is the point★ — if we kill it and then measure 「it ended」, we ourselves drove the causality this item meant to
-    ///   measure (precedent = [`tests::a_recording_failure_ends_the_session`]).
+    /// ★And **it is measured until the session reaches its end state**★ — the item's second axis; without it the item is **green on a broken implementation**. The fake keeps reading stdin after the refusal (that constant's doc), so if the link
+    /// does not let go of our stdin the child · reader · writer stay alive, the reader never sees EOF, [`crate::output_core::OutputCore::finish`] never runs, no message reaches the reaper (its sole consumer — ADR-0019), and the manager's
+    /// activation decision sees only `Running` for 3 seconds, **stamps 「resume succeeded」 and erases even the last failure record**. ★No other net exists★ — `tests/activation.rs` has one codex item (profile wiring) and does not measure the refusal
+    /// branch, so this is the only place measuring the link letting go of stdin.
+    /// ★Waiting before `shutdown()` is the point★ — killing first would drive the causality this item measures (precedent: [`tests::a_recording_failure_ends_the_session`]).
     #[cfg(windows)]
     #[test]
     fn a_rejected_resume_does_not_fall_back_and_ends_the_session() {
@@ -2855,10 +2426,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             "the failure boundary (TurnEnd Failed) showing up",
         );
         let got = recorded.lock().unwrap().clone();
-        // ★Does the link actually report 「connection could not stand + reason」 — the only place measuring it on the real thing is here★:
-        //   the manager-side items measure only the decision logic with a stand-in link, so if the real link does not fill that axis, that wiring
-        //   breaks while both sides are green. ★It is caught **before** reaching the end state★ — after that there is no reason for this value
-        //   to remain.
+        // ★Does the link report 「connection could not stand + reason」 — the only real-thing measurement is here★: the manager-side items use a stand-in link, so if the real link does not fill that axis the wiring breaks with both sides green.
+        //   ★Caught **before** the end state★ — afterwards the value has no reason to remain.
         let link_when_failed = match delivered.lock().unwrap().first() {
             Some(crate::transport::LinkResolution::Failed { reason }) => reason.clone(),
             other => panic!(
@@ -2866,9 +2435,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                  to receive (delivered: {other:?})"
             ),
         };
-        // ★Before anything below, first tell whether that reason is **the fake's refusal**★ — if not, this whole item (no fallback ·
-        //   end state · classification) ran without a refusal, and the classification assertion would report an unrelated reason as 「could not classify」.
-        //   It is even before the end-state wait so that this reason is quoted also on the branch where that wait does not finish.
+        // ★First tell whether that reason is **the fake's refusal**★ — otherwise the whole item (no fallback · end state · classification) ran without a refusal and the classification assertion would blame an unrelated reason. It is before the
+        //   end-state wait so the reason is quoted even when that wait does not finish.
         assert!(
             link_when_failed.contains(FAKE_RESUME_REJECTION),
             "the delivered reason is not the fake's refusal — this item could not measure the refusal branch. If the reason is a deadline \
@@ -2901,15 +2469,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
         let reached_terminal = terminal();
         let seen_statuses = statuses.lock().expect("status poisoned").clone();
-        // ★Neither `!is_live()` nor `Exited { .. }` is **enough**★ (review finding — the old assertion was hollow):
-        //   when the reader sees EOF, `Exited { code: None }` stands regardless of the child's liveness, so an assertion looking only at the kind
-        //   **could not be false** when `reached_terminal` above was true — that is, it measured nothing.
-        // ★A code being carried is the only evidence that the child was actually reaped★ — `Some(_)` means `try_wait`
-        //   succeeded, and that succeeds only when the process has ended (so that value is not lost to a race,
-        //   `reader_loop` looks again, bounded — the comment at that spot is the source of truth).
-        // ★Which path it ended by is not told apart here★ — whether the peer saw EOF and ended on its own, or the link ended it directly
-        //   past the grace period, both are legitimate outcomes, and telling them apart would require timing, which flakes.
-        //   What this item prevents is **no outcome at all**.
+        // ★Neither `!is_live()` nor `Exited { .. }` is **enough**★ (the old assertion was hollow): when the reader sees EOF, `Exited { code: None }` stands regardless of child liveness, so a kind-only assertion **could not be false** once
+        //   `reached_terminal` was true.
+        // ★A carried code is the only evidence the child was reaped★ — `Some(_)` means `try_wait` succeeded, which only happens when the process has ended (`reader_loop` looks again, bounded — the comment there is the source of truth).
+        // ★Which path it ended by is not told apart★ — the peer seeing EOF or the link ending it past the grace period are both legitimate, and telling them apart needs timing, which flakes. What this prevents is **no outcome at all**.
         let ended_with_a_reaped_child = seen_statuses
             .iter()
             .any(|s| matches!(s, AgentStatus::Exited { code: Some(_) }));
@@ -2941,15 +2504,12 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
     /// ★If the record panics, the session **ends** — it neither stops silently nor stays up forever★.
     ///
-    /// This item measures three things, and ★the third is the core★:
-    ///   1. The record verb was actually called (= the handshake stood. Otherwise the two below spin idle).
+    /// Three measurements, ★the third is the core★:
+    ///   1. The record verb was called (= the handshake stood; otherwise the two below spin idle).
     ///   2. Input is refused — not the shape where the link stopped at `Connecting` and only the queue filled (ADR-0190).
-    ///   3. ★The session **reaches an end state**★. The old shape that measured only 2 **could not be told apart from a stuck session** —
-    ///      a state where refusal works but the child · reader · writer remain, the pump never ends and nothing is reaped
-    ///      passes 2 as is. The only thing that splits that branch is the end transition.
-    /// ★「Record」 goes only as far as **handing it** to the port (ADR-0226)★ — behind the production port is the first-submission latch, so persistence is tied to
-    ///   submission. A test that carries 「persist before the first turn」 exists separately (in `transport`'s
-    ///   `the_session_id_is_recorded_before_the_gate_opens` doc).
+    ///   3. ★The session **reaches an end state**★. Measuring only 2 **could not be told apart from a stuck session** (refusal works but child · reader · writer remain, the pump never ends, nothing is reaped); only the end transition splits that.
+    /// ★「Record」 goes only as far as **handing it** to the port (ADR-0226)★ — behind the production port is the first-submission latch, tying persistence to submission; 「persist before the first turn」 is measured separately
+    /// (`transport`'s `the_session_id_is_recorded_before_the_gate_opens` doc).
     #[cfg(windows)]
     #[test]
     fn a_recording_failure_ends_the_session() {
@@ -2969,9 +2529,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
         let fake = bake_fake_app_server(&Uuid::new_v4().to_string(), FakeResume::EchoesTheThreadId);
 
-        // It blows up leaving only the fact that it was called — because 「a panic happened」 and 「it was never called」 must be told apart.
-        // ★It stands until released before blowing up★ — only then can the quiet-hook span be set only at the moment of the panic (the span
-        //   comment below). If the sender disappears (the test dies first), the wait is released and it blows up as is, so it never stands forever.
+        // It blows up leaving only the fact that it was called — 「a panic happened」 and 「it was never called」 must be told apart.
+        // ★It stands until released before blowing up★ — so the quiet-hook span covers only the moment of the panic (the span comment below). If the sender disappears (the test dies first) the wait is released and it blows up, never standing forever.
         let reached = Arc::new(AtomicBool::new(false));
         let (release, released) = std::sync::mpsc::channel::<()>();
         let sink: SessionIdSink = {
@@ -3018,27 +2577,20 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             TurnWiring::detached(),
         )));
 
-        // ★First wait until the record verb is called **without sending anything**★ — `send_input` before the handshake
-        //   normally queues (ADR-0190), so sending here would fill the cap (32), raise
-        //   **a queue-full error**, and make this item green for the wrong reason.
+        // ★First wait until the record verb is called **without sending anything**★ — `send_input` before the handshake queues (ADR-0190); sending here would fill the cap (32), raise **a queue-full error** and make this item green for the wrong reason.
         wait_for_recording(|| reached.load(Ordering::SeqCst), &delivered, &fake);
 
-        // ★The hook is not swapped bare-handed★ — it is global, so other items in the same binary would lose their own panic output, and
-        //   if nested, the quiet hook would remain forever. A helper that prevents both is used.
-        // ★The quiet-hook span covers **only the moment of the panic**★ — that hook is process-global, so the longer the span, the more an **unrelated**
-        //   item that blew up in that window loses its own panic message and location, and other panicking items line up before the helper's static mutex.
-        //   So the handshake · end wait are kept outside the span, and only releasing the writer to blow it up and
-        //   watching its result (connection outcome · input refusal) are inside — the outcome is delivered **after** the writer catches that panic,
-        //   so waiting for it makes the panic happen inside the span for sure.
+        // ★The hook is not swapped bare-handed★ — it is global: other items in the binary would lose their panic output, and nesting would leave the quiet hook forever. A helper prevents both.
+        // ★The quiet-hook span covers **only the moment of the panic**★ — the hook is process-global, so a longer span makes an **unrelated** item that blew up in the window lose its panic message and location, and other panicking items queue behind
+        //   the helper's static mutex. The handshake · end wait stay outside; only releasing the writer to blow up and watching its result (connection outcome · input refusal) are inside — the outcome is delivered **after** the writer catches the
+        //   panic, so waiting for it puts the panic inside the span.
         let refusal = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
             release
                 .send(())
                 .expect("the record port must still be alive");
 
-            // ★Send **only once** after the outcome is delivered★ — the link delivers the failure outcome **after** setting `Link::Down`
-            //   (the failure branch of `writer_loop`), so input after that is certain to be refused. Trying with a fixed count · interval
-            //   would require the writer waking up, catching the panic and taking the link down to fall inside that window, so on a slow
-            //   runner it falsely fails with 「input keeps being accepted」.
+            // ★Send **only once** after the outcome is delivered★ — the link delivers the failure outcome **after** setting `Link::Down` (the failure branch of `writer_loop`), so input afterwards is certainly refused. A fixed count · interval would need the
+            //   writer to wake, catch the panic and take the link down inside that window, falsely failing with 「input keeps being accepted」 on a slow runner.
             wait_until(
                 || !delivered.lock().unwrap().is_empty(),
                 "the connection outcome being delivered after the record failure — if it does not come, the link did not emit the record failure as an outcome \
@@ -3050,18 +2602,13 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 .err()
         });
 
-        // Wait for the peer to end on its own after we let go of stdin (measured 41–51ms) and for that EOF to end the pump.
-        //   ★Waiting without calling `shutdown()` is the point★ — if we kill it and then measure 「it ended」, we ourselves drove the causality
-        //   this item meant to measure.
+        // Wait for the peer to end on its own after we let go of stdin (measured 41–51ms) and for that EOF to end the pump. ★Wait without calling `shutdown()`★ — killing first would drive the causality this item measures.
         wait_until(|| terminal(), "the session going to its end state");
 
         let reached_terminal = terminal();
         let seen = statuses.lock().expect("status poisoned").clone();
-        // ★Neither `!is_live()` nor `Exited { .. }` is **enough**★ — when the reader sees EOF, `Exited { code: None }` stands regardless of the child's
-        //   liveness, so an assertion looking only at the kind could not be false when `reached_terminal` above was true
-        //   (the old shape was hollow — review finding. A copy of it was in the neighbouring item too and was fixed together).
-        // ★A code being carried is the only evidence that the child was actually reaped★ — the source of truth for the reason is
-        //   the same spot in `a_rejected_resume_does_not_fall_back_and_ends_the_session`.
+        // ★Neither `!is_live()` nor `Exited { .. }` is **enough**★ — `Exited { code: None }` stands on reader EOF regardless of child liveness (the neighbouring item had a copy of the hollow shape, fixed together).
+        // ★A carried code is the only evidence the child was reaped★ — reason: the same spot in `a_rejected_resume_does_not_fall_back_and_ends_the_session`.
         let ended_with_a_reaped_child = seen
             .iter()
             .any(|s| matches!(s, AgentStatus::Exited { code: Some(_) }));
@@ -3075,9 +2622,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let PtyError::WriteFailed(reason) = &refusal else {
             panic!("unexpected error kind: {refusal:?}");
         };
-        // ★Only queue-full is excluded★ — only that one means 「refused although the failure path did not run」. The two remaining reasons
-        //   (the link taken down by the record failure · the link that ended after closing stdin) are **both evidence that this path ran**, and
-        //   which one is caught even after seeing the outcome is a race with the reader's EOF, so pinning it to one would itself be a flake.
+        // ★Only queue-full is excluded★ — only it means 「refused although the failure path did not run」. The other two reasons (link taken down by the record failure · link ended after closing stdin) are **both evidence this path ran**, and which one
+        //   is caught after the outcome is a race with the reader's EOF, so pinning one would itself flake.
         assert!(
             !reason.contains("the cap"),
             "the refusal reason is queue-full — it did not measure that the failure path ran: {reason}"
@@ -3099,12 +2645,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
     }
 
-    /// ★The pair for the mode where the link carries turns — the first-turn port is plugged all the way into the real link, and it is called not at the handshake but at the echo of the peer's user
-    /// message (ADR-0226 amendment · user decision 2026-09-26)★.
+    /// ★The pair for the mode where the link carries turns — the first-turn port is plugged into the real link and called not at the handshake but at the echo of the peer's user message (ADR-0226 amendment)★.
     ///
-    /// The record port was called at the handshake but the first-turn port not yet → handing over one turn makes the fake answer `turn/start`
-    ///   and echo the user message → the first-turn port is called once. The fake's edition is below the floor, so the echo has
-    ///   no `clientId` — it still counts. That the session does not count in that mode is measured by the `session.rs` test.
+    /// The record port was called at the handshake, the first-turn port not yet → one turn makes the fake answer `turn/start` and echo the user message → the first-turn port is called once. The fake's edition is below the floor, so the echo has
+    /// no `clientId` — it still counts. That the session does not count in that mode is measured by the `session.rs` test.
     #[cfg(windows)]
     #[test]
     fn an_app_server_spawn_counts_the_first_turn_at_the_echo_not_at_the_handshake() {
@@ -3213,9 +2757,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             .collect()
     }
 
-    /// ★The generated value is pinned **literally**★ — this string is a wire contract the codex config parser reads, and
-    /// if even one character is off during assembly, the symptom is not an error but 「mail silently does not work」. This shape was confirmed
-    /// with the real codex (2026-09-19 · 0.155.0: passes `--strict-config` + registered in `mcpServerStatus/list`).
+    /// ★The generated value is pinned **literally**★ — a wire contract the codex config parser reads; one wrong character yields not an error but 「mail silently does not work」. Confirmed with the real codex (0.155.0: passes `--strict-config` +
+    /// registered in `mcpServerStatus/list`).
     #[test]
     fn the_mcp_override_value_is_pinned_byte_for_byte() {
         let s = spec_with_control(&codex(vec![]), Some(endpoint()));
@@ -3280,14 +2823,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
     }
 
-    /// ★If the operator turns off MCP mail, it must be off **in codex too** (found 2026-09-20)★: the old gate looked only at the **existence**
-    /// of the control channel — so an operator who set `ENGRAM_DISALLOW_MCP_SEND=1` got a state where only the claude-side send entrance
-    /// was lost and the codex side stayed open. Moreover that attachment
-    /// carries `default_tools_approval_mode='approve'`, so it remains **auto-approved**.
-    /// ★Measuring the on row **together** is the point★ — measuring only the off side stays green even if the attachment is erased entirely, and at that moment
-    ///   the only physical wiring of codex mail disappears (the symptom is silence, not an error).
-    /// ★It also measures that the control plane itself is not cut★ — turning off mail and cutting the control verbs are
-    ///   different things (ADR-0132 decision 5), and if the credentials disappeared here too, the children codex launches would lose them.
+    /// ★If the operator turns off MCP mail it must be off **in codex too**★ (2026-09-20): the old gate looked only at the control channel's **existence**, so `ENGRAM_DISALLOW_MCP_SEND=1` lost only claude's send entrance and codex's stayed open — and that
+    /// attachment carries `default_tools_approval_mode='approve'`, i.e. **auto-approved**.
+    /// ★Measuring the on row **together** is the point★ — an off-only test stays green even if the attachment is erased entirely, removing the only physical wiring of codex mail (silence, not an error).
+    /// ★It also measures that the control plane is not cut★ — turning off mail and cutting control verbs differ (ADR-0132 decision 5); losing credentials would strip them from the children codex launches.
     #[test]
     fn turning_mcp_send_off_takes_the_override_off_codex_too() {
         for command in [codex(vec![]), codex_app_server(vec![])] {
@@ -3316,14 +2855,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
     }
 
-    /// ★A spawn 「on the delivery roster but with zero send entrances」 is cut before it comes up★: this backend has
-    /// `reads_messages` true so it is on the delivery roster, and `accepts_mcp_config` true so the daemon
-    /// carries `mail_allowed=false` and closes the CLI mirror — in that state, if the MCP attachment is missing too, every arriving
-    /// `request` becomes **a contract nobody can answer**. That outcome is not an error but eternal silence, so it
-    /// leaves no trace anywhere.
-    /// ★For claude, this spot is guarded by the daemon's `?` (mcp-config write failure) — this backend writes no file, so
-    ///   the daemon has nothing to cut with★. This gate fills that asymmetry.
-    /// ★It is called through the public dispatch★ — hanging it only on the impl would miss the path the assembly point calls.
+    /// ★A spawn 「on the delivery roster with zero send entrances」 is cut before it comes up★: `reads_messages` true puts this backend on the roster and `accepts_mcp_config` true makes the daemon carry `mail_allowed=false` and close the CLI mirror, so without
+    /// the MCP attachment every arriving `request` is **a contract nobody can answer** — eternal silence, no trace.
+    /// ★For claude the daemon's `?` (mcp-config write failure) guards this; this backend writes no file, so the daemon has nothing to cut with★ — this gate fills the asymmetry.
+    /// ★Called through the public dispatch★ — hanging it on the impl only would miss the path the assembly point calls.
     #[test]
     fn an_unbuildable_attachment_fails_the_spawn_closed() {
         let bad = "http://127.0.0.1:1/it's/mcp";
@@ -3350,9 +2885,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
     }
 
-    /// ★The three legitimate absences are pinned **together** — without them the gate above grows toward killing even sound spawns★.
-    /// ② in particular is load-bearing: a spawn whose operator turned off MCP mail has no intent to attach in the first place, so whatever
-    /// the address, there is no reason to cut it.
+    /// ★The three legitimate absences are pinned **together** — without them the gate grows toward killing sound spawns★. ② is load-bearing: a spawn whose operator turned off MCP mail has no intent to attach, so whatever the address there is no reason to cut it.
     #[test]
     fn the_legitimate_absences_still_spawn() {
         let bad = "http://127.0.0.1:1/it's/mcp";
@@ -3438,13 +2971,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
     }
 
-    /// ★Even if the file fields come as `Some`, they do not reach argv★ — in production they now come as `None`
-    /// (`writes_mcp_config_file()` = false → the daemon does not write), but this test **deliberately** feeds the state where that gate collapsed
-    /// to measure the second wall. codex has no flag to point to those two, so copying claude's flags with 「it is Some,
-    /// so let's use something」 kills the launch.
-    /// ★The third field (`priming_file`) being here together now means something else★ — that file **is read and carried**
-    ///   (ADR-0215). Still, a **path** must not reach argv, so it stays in this comparison (the partner measuring the same fact
-    ///   with a real file = `the_priming_path_never_reaches_the_command_line`).
+    /// ★Even if the file fields come as `Some`, they do not reach argv★ — in production they come as `None` (`writes_mcp_config_file()` = false), but this test **deliberately** feeds the collapsed-gate state to measure the second wall. codex has no flag for those two,
+    /// so copying claude's flags because 「it is Some」 kills the launch.
+    /// ★The third field (`priming_file`) is here for a different reason★: that file **is read and carried** (ADR-0215), but a **path** must not reach argv (partner with a real file: `the_priming_path_never_reaches_the_command_line`).
     #[test]
     fn the_daemon_written_files_are_still_not_translated_into_argv() {
         let ep = endpoint();
@@ -3470,9 +2999,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
     /// Bakes a brief file into a temp folder and returns an endpoint pointing to it.
     ///
-    /// ★Returning the path too is a contract★ — each item must remove it. The default fixture's
-    /// `C:/engram/priming.md` is **a file that does not exist**, so it falls to the read-failure branch (so the argv of other tests
-    /// does not grow by this injection). To measure the injection, a real file is needed.
+    /// ★Returning the path too is a contract★ — each item must remove it. The default fixture's `C:/engram/priming.md` **does not exist** and falls to the read-failure branch (so other tests' argv does not grow); measuring the injection needs a real file.
     fn bake_priming(text: &str) -> (ControlEndpoint, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!("engram-priming-{}.md", Uuid::new_v4()));
         std::fs::write(&path, text).expect("write the priming file");
@@ -3500,10 +3027,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             .find(|v| v.starts_with(&prefix))
     }
 
-    /// Did the skipped branch **really change nothing** — is the argv byte-identical to a spawn without priming?
+    /// Did the skipped branch **really change nothing** — argv byte-identical to a spawn without priming?
     ///
-    /// ★Measuring only 「there is no injection」 is not enough★: even if the branch that could not build the value pushes in half an argument or shakes the order,
-    ///   that assertion passes. This comparison is the concrete form of 「the spawn goes ahead as is」.
+    /// ★「No injection」 alone is not enough★: a branch that could not build the value could still push in half an argument or shake the order and pass that assertion; this comparison is the concrete form of 「the spawn goes ahead as is」.
     fn assert_argv_matches_a_spawn_without_priming(argv: &[String]) {
         let bare = spec_with_control(&codex(vec![]), Some(endpoint_without_priming()));
         assert_eq!(
@@ -3632,9 +3158,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         std::fs::remove_file(&path).expect("remove the temp brief");
     }
 
-    /// ★The app-server branch uses not a single character of the command line — and **does not touch** the value★: neither newlines
-    /// nor the `'` · `%` the terminal branch cuts out can break anything in the JSON body. Moving that side's conversion here
-    /// would block no risk and only break the document the agent reads.
+    /// ★The app-server branch does not touch the value★ — it uses none of the command line, so neither newlines nor the `'` · `%` the terminal branch cuts can break the JSON body; moving that conversion here would only break the document the agent reads.
     #[test]
     fn the_app_server_handshake_carries_the_document_unmodified() {
         let text = "line one\nyou can't skip 50% of it\n";
@@ -3658,9 +3182,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         std::fs::remove_file(&path).expect("remove the temp brief");
     }
 
-    /// ★A resumed app-server thread gets no priming — a decision, not a regression★
-    /// (`ThreadResumeParams`'s doc is the source of truth for the reason). On the day that field is confirmed by measurement and added, this item
-    /// goes red and is fixed together with it.
+    /// ★A resumed app-server thread gets no priming — a decision, not a regression★ (reason: `ThreadResumeParams`'s doc). When that field is confirmed by measurement and added, this item goes red and is fixed together.
     #[test]
     fn a_resuming_app_server_handshake_carries_no_instructions_field() {
         let (ep, path) = bake_priming("teach the reply contract");
@@ -3762,12 +3284,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
 // ── ADR-0218: session id recovery wiring of the terminal branch (real process) ────────────────────────────
 //
-// ★What is measured here = one line: 「a terminal spawn flows the recovered id to **the sink it was handed**」★ — this wiring alone
-//   could be cut while all the matcher unit tests were green (found 2026-09-21: the comparison target was caught as the wrapper
-//   PID so a match never happened), and that defect leaves neither an error nor a log.
-// ★The same shape and the same worth as the app-server-side partner (`a_resume_target_makes_the_handshake_issue_thread_resume`)★
-//   — that one launches a fake app-server and measures that the id received at the handshake reaches the sink, and this one sets up a real
-//   process tree and measures that the id found via the lock holder reaches the same sink.
+// ★Measured: 「a terminal spawn flows the recovered id to **the sink it was handed**」★ — this wiring alone could be cut with all matcher unit tests green (2026-09-21: the comparison target was caught as the wrapper PID so a match never
+//   happened), leaving no error or log.
+// ★Same shape and worth as the app-server partner (`a_resume_target_makes_the_handshake_issue_thread_resume`)★ — that one measures that the id received at the handshake reaches the sink; this sets up a real process tree and measures that the id
+//   found via the lock holder reaches the same sink.
 #[cfg(all(test, windows))]
 mod terminal_capture_wiring {
     use super::*;
@@ -3775,28 +3295,21 @@ mod terminal_capture_wiring {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    /// The process holding the lock must be a **grandchild** — the PID we hold is the `cmd.exe` wrapper.
-    /// `cmd.exe /c powershell …` builds that shape for real (powershell opens the file and holds it).
+    /// The process holding the lock must be a **grandchild** — the PID we hold is the `cmd.exe` wrapper; `cmd.exe /c powershell …` builds that shape (powershell opens the file and holds it).
     ///
-    /// ★This value comes from the polling schedule — do not shrink it arbitrarily★: recovery scans at 0.5 · 1.5 · 3.5 · 7.5 · 15.5 ·
-    ///   **30.5** seconds (that geometric series is `FIRST_DELAY` · `MAX_DELAY` of `thread_lock`). On a 4-way runner, if the first
-    ///   hit misses 15.5 seconds the next chance is 30.5 seconds, and if the holder has already left by then the test goes red **depending on
-    ///   load**. So it must hold until **after** 30.5 seconds.
+    /// ★Do not shrink this value arbitrarily — it comes from the polling schedule★: recovery scans at 0.5 · 1.5 · 3.5 · 7.5 · 15.5 · **30.5** seconds (`FIRST_DELAY` · `MAX_DELAY` of `thread_lock`). On a 4-way runner a missed first hit at 15.5 s
+    ///   leaves 30.5 s as the next chance, and a holder that has left by then turns the test red **depending on load**; it must hold until **after** 30.5 s.
     const HOLD_SECONDS: u32 = 45;
     /// A generous upper bound for the time it takes for the holder to come up and the first polling round to run — not a deadline but **the test's give-up line**.
     /// It must include the 30.5-second round above, so it is larger than that.
     const WAIT_LIMIT: Duration = Duration::from_secs(50);
     const LOCK_PATH_ENV: &str = "ENGRAM_TEST_LOCK_PATH";
 
-    /// Waits until some process is in the state of **currently holding** that lock — `false` if not.
+    /// Waits until some process **currently holds** that lock — `false` if not.
     ///
-    /// ★Do not measure by file existence (`exists()`) — the test then becomes **vainly green**★: even if the helper
-    ///   creates the file and ends right away, the file remains, so 「recovery did not run」 passes without ever
-    ///   setting up 「the holder is standing」. A dead lock and a live lock are told apart only by the holder lookup (that split is
-    ///   measured for real by the tests of the platform crate's `file_holders`).
-    /// ★That the measuring means overlaps with the test subject is intended★ — what is used here is **only one thing**, the holder lookup,
-    ///   and none of the decisions (which is ours · is the name an id · where to write it) are used. So even if this premise
-    ///   holds, the main assertion can still break independently.
+    /// ★Do not measure by file existence (`exists()`) — the test turns **vainly green**★: a helper that creates the file and ends leaves it behind, so 「recovery did not run」 passes without 「the holder is standing」. A dead and a live lock are told apart only
+    ///   by the holder lookup (measured for real by the platform crate's `file_holders` tests).
+    /// ★The measuring means overlapping the test subject is intended★ — only the holder lookup is used here, none of the decisions (which is ours · is the name an id · where to write it), so the main assertion can still break independently.
     fn wait_for_live_holder(lock_path: &std::path::Path) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
@@ -3912,17 +3425,12 @@ mod terminal_capture_wiring {
         );
     }
 
-    /// ★A resume incarnation **does not start recovery at all**★ — it goes through the same wiring with the same real thing once more, but
-    /// fills only `resume_session_id` (ADR-0218 decision 5).
+    /// ★A resume incarnation **does not start recovery at all**★ — the same wiring and real thing once more, filling only `resume_session_id` (ADR-0218 decision 5).
     ///
-    /// ★**First write what this item cannot measure**★: what is launched here is not the real codex but a command assembled by hand
-    ///   to create a grandchild that holds the lock, so **the argv of that spec has no `resume <id>`.**
-    ///   Launching the real codex with resume argv needs a live thread id and an installed codex at the same time,
-    ///   and this test bench has neither (the same reason the sibling `production_spec` lane is `#[ignore]`).
-    /// ★So the two halves are **tied with the same value inside one item**★ — below, with the same handle,
-    ///   `build_spec(Resume, Some(id))` is called to first measure that the argv side actually emits `resume <id>`,
-    ///   and then that the `open_spawn` side **does not run** recovery from that handle. That the two halves see the same value
-    ///   is guaranteed by the assembly point (`manager::resume_handle_for`).
+    /// ★**What this item cannot measure**★: it launches a hand-assembled command that creates a lock-holding grandchild, so **that spec's argv has no `resume <id>`** (launching the real codex with resume argv needs a live thread id and an installed
+    ///   codex, which this bench lacks — why the sibling `production_spec` lane is `#[ignore]`).
+    /// ★So the two halves are **tied with the same value in one item**★: with the same handle, `build_spec(Resume, Some(id))` first measures that argv emits `resume <id>`, then that `open_spawn` **does not run** recovery from that handle. That both halves
+    ///   see the same value is guaranteed by the assembly point (`manager::resume_handle_for`).
     #[test]
     fn a_resume_terminal_spawn_captures_nothing() {
         let thread_id = Uuid::new_v4();

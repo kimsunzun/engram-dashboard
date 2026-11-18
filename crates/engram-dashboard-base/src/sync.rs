@@ -1,20 +1,20 @@
 //! Lock poison recovery — returns the guard as is even from a poisoned lock. It emits no warning.
 //!
 //! Three contracts:
-//! 1. **It does not clear the poison mark** (it does not call `clear_poison`) — it does not erase the signal that neighbors using the same lock
-//!    with `.expect` · `try_lock` see. A site that must clear the mark does not use this module and keeps its own
-//!    helper (ADR-0231 · ADR-0275).
-//! 2. **No logging · other locks · outside calls** — it adds no behavior, so even when a site of a lock bound by the 「no log · IO · outside call while holding」 discipline calls this, that discipline stays as it is. What is taken and when is up to the
-//!    caller.
-//! 3. **In production processes (daemon · shell), the only poison that reaches this branch is what a panic inside a contained unit left** — a panic outside the 「containing」
-//!    mark ends the process in the hook before unwinding, so no poison arises. If a contained unit (the daemon's three agent pumps ·
-//!    input writer — bus command execution and the shell are not contained · ADR-0293) panics while holding a lock, that lock stays poisoned
-//!    and the process keeps running (the reason line of that panic is left by the hook regardless of the mark). A caller that then takes it here gets the value from just before
-//!    the panic — it may be half-fixed, and whether that is acceptable is the caller's call. In a test build without the hook,
-//!    poison from anywhere comes to this branch.
+//! 1. **It does not clear the poison mark** (no `clear_poison`) — neighbors using the same lock with `.expect` · `try_lock` still see the
+//!   signal. A site that must clear the mark keeps its own helper (ADR-0231 · ADR-0275).
+//! 2. **No logging · other locks · outside calls** — it adds no behavior, so a site of a lock bound by the "no log · IO · outside call
+//!   while holding" discipline stays within it when calling this. What is taken and when is the caller's.
+//! 3. **In production processes (daemon · shell), the only poison reaching this branch is what a panic inside a contained unit left** — a
+//!   panic outside the "containing" mark ends the process in the hook before unwinding.
+//!    If a contained unit (the daemon's three agent pumps · input writer — bus command execution and the shell are not contained ·
+//!   ADR-0293) panics while holding a lock, it stays poisoned and the process keeps running
+//!    (the hook leaves that panic's reason line regardless of the mark). A caller taking it here gets the value from just before the panic
+//!   — maybe half-fixed; whether that is acceptable is the caller's call.
+//!    In a test build without the hook, poison from anywhere comes here.
 //!
-//! ★Do not add a warning★ — a warning is printed while holding the guard, so 2 breaks. To add one, the whole of the calling sites'
-//! 「no logging while holding」 audit would have to be redone from scratch (ADR-0275).
+//! ★Do not add a warning★ — it would be printed while holding the guard, breaking 2; adding one means redoing the whole "no logging while
+//!   holding" audit of the calling sites (ADR-0275).
 // ADR-0269
 // ADR-0275
 // ADR-0292

@@ -1,15 +1,14 @@
 //! The real query spawner — implements [`ProbeSpawner`] with an OS process (ADR-0249).
 //!
-//! ★This module does not know the OS★: spawning as a tree root · tree kill · the 「program missing」 decision for a failed shell is done by the OS layer
-//!   ([`prepare_tree_root`] · [`TreeRoot`] · [`MissingProgramCheck`]), and here we move its answer into the query's error · exit
-//!   info and print it.
+//! ★This module does not know the OS★: spawning as a tree root · tree kill · the 「program missing」 decision for a failed shell are done by
+//!   the OS layer ([`prepare_tree_root`] · [`TreeRoot`] · [`MissingProgramCheck`]); here its answer is moved into the query's error · exit info.
 //!
 //! Three threads back one child — no one joins them, so a drop takes no longer than [`KILL_WAIT`]:
-//!   - stdin writer: ends when stdin is closed · when the child value is dropped (when the sending end disappears) or when a write fails.
-//!     If blocked on an OS write, the tree kill breaks the pipe and frees it.
-//!   - stdout line reader: ends at EOF (every process holding the write end has ended) or at the first delivery after the receiving side has gone.
+//!   - stdin writer: ends when stdin is closed · the child value is dropped (sending end gone) · a write fails. Blocked on an OS write,
+//!   the tree kill breaks the pipe and frees it.
+//!   - stdout line reader: ends at EOF (every holder of the write end ended) or at the first delivery after the receiving side has gone.
 //!     ★If a process that escaped the tree kill holds stdout, this thread stays until it ends★.
-//!   - stderr drain: ends at EOF. It discards the content and keeps only the last few masked lines (only the line count goes to logs).
+//!   - stderr drain: ends at EOF. Discards the content and keeps only the last few masked lines (only the line count goes to logs).
 // ADR-0230
 
 use std::collections::VecDeque;
@@ -29,7 +28,7 @@ use engram_dashboard_platform::spawn::{
 
 use super::{ExitInfo, ProbeChild, ProbeCommand, ProbeError, ProbeSpawner};
 
-/// Upper bound on waiting after kill for the child (on Windows, everything in the Job) to end. It is the share that waits for file locks to be
+/// Upper bound on waiting after kill for the child (on Windows, everything in the Job) to end — the share that waits for file locks to be
 /// released before the scratch folder is deleted (Windows cannot delete open files · a working folder).
 pub const KILL_WAIT: Duration = Duration::from_secs(2);
 
@@ -44,7 +43,6 @@ const STDERR_READ_MAX: usize = 4096;
 const STDERR_TAIL_LINES: usize = 8;
 const STDERR_TAIL_CHARS: usize = 240;
 
-/// A spawner that spawns real OS processes.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OsProbeSpawner;
 
@@ -69,8 +67,8 @@ enum LineEnd {
     Cut,
 }
 
-/// Puts one line (including the trailing `\n`; a last piece ending without a newline is also a line) into `out` up to `cap` bytes.
-/// If the bound is hit, it is `Cut` right away without waiting for the rest — it returns soon even for output pouring in without newlines.
+/// Puts one line (including the trailing `\n`; a last piece ending without a newline is also a line) into `out` up to `cap` bytes. Hitting
+/// the bound is `Cut` right away without waiting for the rest — it returns soon even for output pouring in without newlines.
 fn read_capped_line(
     reader: &mut impl BufRead,
     cap: usize,
@@ -107,7 +105,8 @@ fn read_capped_line(
                     let end = if found_newline {
                         Some(LineEnd::Complete)
                     } else if out.len() >= cap {
-                        // Exactly filled the bound without a newline — waiting for the next byte would block until the deadline in front of a stalled child.
+                        // Exactly filled the bound without a newline — waiting for the next byte would block until the deadline in front
+                        //   of a stalled child.
                         Some(LineEnd::Cut)
                     } else {
                         None
@@ -123,7 +122,6 @@ fn read_capped_line(
     }
 }
 
-/// Reads and discards the remaining bytes of the line up to the newline (inclusive) or EOF — does not hold them in memory.
 fn skip_rest_of_line(reader: &mut impl BufRead) -> io::Result<()> {
     loop {
         let (used, done) = {
@@ -157,11 +155,11 @@ fn line_text(mut raw: Vec<u8>) -> String {
     String::from_utf8(raw).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-/// Shape one stderr line for the tail — ★masking comes before truncating★ (if truncated first and masked after, a token straddling the boundary
-/// is cut below the pattern length and slips through).
+/// Shape one stderr line for the tail — ★masking comes before truncating★ (truncated first, a token straddling the boundary is cut below
+///   the pattern length and slips through).
 ///
-/// A line cut at the read bound is used only up to before the last whitespace — a masked token shape has no whitespace, so a token piece straddling that boundary
-/// cannot slip through the masking. If there is no whitespace, the line is dropped whole.
+/// A line cut at the read bound is used only up to before the last whitespace — a masked token shape has no whitespace, so a token piece
+/// straddling that boundary cannot slip through. With no whitespace, the line is dropped whole.
 fn tail_line(raw: &[u8], cut_at_read: bool) -> String {
     let raw = if cut_at_read {
         match raw.iter().rposition(|b| b.is_ascii_whitespace()) {
@@ -194,8 +192,8 @@ fn pump_stdin(mut stdin: ChildStdin, lines: Receiver<Vec<u8>>, acks: Sender<io::
     }
 }
 
-/// A line that hit the bound without a newline (a line over the bound · a piece that exactly fills the bound without a newline) sends `Io` the moment it hits, and the
-/// rest of that line is read and discarded before moving to the next line.
+/// A line that hit the bound without a newline (over the bound · exactly filling it) sends `Io` the moment it hits; the rest of that line
+/// is read and discarded before the next line.
 fn pump_stdout(stdout: impl Read, lines: SyncSender<Result<String, ProbeError>>) {
     let mut reader = BufReader::new(stdout);
     loop {
@@ -277,7 +275,6 @@ struct OsProbeChild {
     stdout_eof: bool,
     stderr_tail: Arc<Mutex<StderrTail>>,
     exit: Option<ExitInfo>,
-    /// Cut by the deadline — every later action is immediately `Timeout`.
     cut: bool,
 }
 
@@ -410,7 +407,6 @@ impl OsProbeChild {
         matches!(self.child.try_wait(), Ok(Some(_))) && self.tree.members_gone()
     }
 
-    /// Exit code of the directly spawned process — the decision is the caller's share ([`ProbeChild::wait_exit`]).
     fn wait_status(&mut self, deadline: Instant) -> Result<Option<i32>, ProbeError> {
         if remaining(deadline).is_none() {
             return Err(self.cut_at_deadline("wait"));
@@ -469,7 +465,8 @@ fn reap_within(child: &mut Child, budget: Duration) -> bool {
     }
 }
 
-/// Whether we warned that a decision was left as 「unknown」 because it was blocked by a running search — the warning is once per process and after that it is debug.
+/// Whether we warned that a decision was left as 「unknown」 because it was blocked by a running search — the warning is once per process
+///   and after that it is debug.
 static STUCK_LOOKUP_WARNED: AtomicBool = AtomicBool::new(false);
 
 fn judged_not_installed(check: &MissingProgramCheck, code: Option<i32>, deadline: Instant) -> bool {
@@ -650,7 +647,6 @@ mod tests {
         }
     }
 
-    /// A child that waits on stdin and never ends.
     fn waits_for_stdin(cwd: &Path) -> ProbeCommand {
         shell("set /p L=", "read l", cwd)
     }
@@ -719,8 +715,8 @@ mod tests {
         }
     }
 
-    /// ★The moment it hits the bound it is `Io`★ — it does not wait until a newline comes (= until the deadline if it never comes). A line that fills the bound exactly
-    ///   without a newline and stops is the same (it does not wait for the next byte).
+    /// ★The moment it hits the bound it is `Io`★ — it does not wait for a newline (= the deadline if none comes). A line that fills the
+    ///   bound exactly without a newline and stops is the same.
     #[test]
     fn an_over_long_line_is_reported_before_its_newline_arrives() {
         for len in [STDOUT_LINE_MAX + 1, STDOUT_LINE_MAX] {
@@ -771,7 +767,6 @@ mod tests {
         );
     }
 
-    /// An exit status received after the end is also `Timeout` once cut by the deadline — every action after being cut is `Timeout`.
     #[test]
     fn a_cut_after_the_exit_turns_wait_exit_into_a_timeout() {
         let root = TempRoot::new("probe-cut-after-exit");
@@ -832,7 +827,6 @@ mod tests {
         );
         eventually("child exit after the deadline kill", || child.has_exited());
 
-        // After being cut, anything is immediately Timeout.
         assert_eq!(child.write_line("x", far()), Err(ProbeError::Timeout));
         assert_eq!(child.read_line(far()), Err(ProbeError::Timeout));
         assert_eq!(child.wait_exit(far()), Err(ProbeError::Timeout));
@@ -853,7 +847,6 @@ mod tests {
     fn a_child_that_never_reads_stdin_blocks_the_write_until_the_deadline() {
         let root = TempRoot::new("probe-write-blocks");
         let mut child = OsProbeChild::spawn(&ignores_stdin(root.path()), far()).expect("start");
-        // Far larger than the pipe buffer — it surely blocks in front of a child that does not read.
         let huge = "x".repeat(1024 * 1024);
 
         let started = Instant::now();
@@ -916,7 +909,6 @@ mod tests {
         };
         let mut child = OsProbeChild::spawn(&cmd, far()).expect("start");
 
-        // The test harness's header line may come first — drain to EOF.
         read_to_eof(&mut child);
         let started = Instant::now();
         let result = child.wait_exit(Instant::now() + Duration::from_millis(500));
@@ -932,8 +924,8 @@ mod tests {
         eventually("child exit after the deadline kill", || child.has_exited());
     }
 
-    /// ★The whole tree ends★ — down to the shell's children (grandchild `ping` · console host). It is spawned suspended, put into the tree, and then woken, so even a
-    ///   grandchild spawned right away does not leave the tree, and drop returns after all of it has ended.
+    /// ★The whole tree ends★ — down to the shell's children (grandchild `ping` · console host). It is spawned suspended, put into the
+    ///   tree, then woken, so even a grandchild spawned right away does not leave the tree, and drop returns after all of it has ended.
     #[cfg(windows)]
     #[test]
     fn drop_kills_the_whole_tree() {
@@ -988,8 +980,8 @@ mod tests {
         }
     }
 
-    /// `cmd.exe /c <missing name>` does start — the exit status after the failure carries 「missing」 (the exit code is 1 on this PC, so
-    /// the code alone cannot tell).
+    /// `cmd.exe /c <missing name>` does start — the exit status after the failure carries 「missing」 (the exit code is 1 on this PC, so the
+    ///   code alone cannot tell).
     #[cfg(windows)]
     #[test]
     fn cmd_with_a_missing_target_spawns_and_its_exit_says_not_installed() {
@@ -1013,7 +1005,8 @@ mod tests {
         let mut child = OsProbeChild::spawn(&cmd_c(&target, root.path()), far()).expect("start");
         read_to_eof(&mut child);
         assert_eq!(child.wait_exit_code(far()).expect("exit"), Some(1));
-        // The target disappears in the meantime — if the wait for exit had decided and kept it, it would harden to 「exists」 and the later decision would be false.
+        // The target disappears in the meantime — if the wait for exit had decided and kept it, it would harden to 「exists」 and the later
+        //   decision would be false.
         std::fs::remove_file(&shim).expect("remove the target");
         assert!(child.wait_exit(far()).expect("exit").looks_not_installed());
     }
@@ -1044,7 +1037,6 @@ mod tests {
         let exit = child.wait_exit(far()).expect("exit");
         assert_eq!(exit.code(), Some(3));
         assert!(!exit.looks_not_installed());
-        // Writing to the stdin of an ended child fails without hanging.
         assert!(matches!(
             child.write_line("late", far()),
             Err(ProbeError::Io(_))
@@ -1064,7 +1056,6 @@ mod tests {
     #[test]
     fn env_set_and_env_remove_reach_the_child() {
         let root = TempRoot::new("probe-env");
-        // Strips the variable that the parent always has.
         #[cfg(windows)]
         let inherited = "WINDIR";
         #[cfg(unix)]

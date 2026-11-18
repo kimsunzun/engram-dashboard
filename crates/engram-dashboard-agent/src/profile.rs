@@ -1,10 +1,8 @@
 //! Agent profiles — the single source of truth for restart and session restore.
 //!
-//! This module is intentionally transport- and claude-neutral. claude-only argument assembly
-//! (`--session-id` / `--resume`) is handled by `backend/claude/`, and here only neutral data about "what to run and
-//! which session to resume" is kept.
-//!
-//! zero tauri imports — the isolation rule is kept.
+//! Transport- and claude-neutral: claude-only argument assembly (`--session-id` / `--resume`) lives in `backend/claude/`; here only
+//!   neutral data about
+//! "what to run and which session to resume". Zero tauri imports.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,9 +17,9 @@ use crate::types::AgentId;
 
 // ── Neutral run command ─────────────────────────────────────────────────────────────
 
-/// Agent output mode — the profile axis that goes into per-backend transport and codec choice (ADR-0044).
-/// `Terminal` = PTY interactive. `StreamJson` = a JSON-based non-terminal mode, and the concrete exchange
-/// shape is decided by the backend.
+/// Agent output mode — the profile axis for per-backend transport and codec choice (ADR-0044). `Terminal` = PTY interactive; `StreamJson`
+///   = JSON-based
+/// non-terminal mode, concrete exchange shape decided by the backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AgentOutputFormat {
     #[default]
@@ -31,9 +29,9 @@ pub enum AgentOutputFormat {
 
 /// Here only the branch tag and the user's extra arguments are kept.
 ///
-/// ★Name collision★ — `protocol::AgentCommand` means something different (the wire command sent to the daemon).
-/// The wire mirror of this type is `protocol::AgentSpawnCommand`, and the frontend mirror is the type of the same name in
-/// `src/api/types.ts`. Saying "AgentCommand" without the crate leaves the meaning undecided.
+/// ★Name collision★ — `protocol::AgentCommand` is a different thing (the wire command sent to the daemon). Wire mirror =
+///   `protocol::AgentSpawnCommand`;
+/// frontend mirror = the same-named type in `src/api/types.ts`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum AgentCommand {
@@ -48,14 +46,14 @@ pub enum AgentCommand {
         program: String,
         args: Vec<String>,
     },
-    /// codex CLI. `extra_args` are the user's extra arguments excluding the arguments the backend assembles
-    /// (`--cd`·`-s`·`-a`). Stored JSON without `output_format` deserializes as `Terminal`.
+    /// codex CLI. `extra_args` = the user's extra arguments excluding those the backend assembles (`--cd`·`-s`·`-a`). Stored JSON without
+    ///   `output_format`
+    /// deserializes as `Terminal`.
     ///
-    /// ★Do not grow the fields carelessly★: this enum is `#[serde(tag = "kind")]`, so the shape written here sits
-    /// in `agents.json` as is — it is a contract baked onto disk, so **the less frozen, the cheaper**. Values such as the sandbox or approval mode
-    /// are still at the grade of `--help` text (TRD §2), and fixing them as types now would freeze them at that grade.
-    /// Having only the one field `extra_args` was also a decision for that reason (user decision 2026-09-07), and adding the mode axis,
-    /// ADR-0194 updated only that place — the reason still lives.
+    /// ★Do not grow the fields carelessly★: this enum is `#[serde(tag = "kind")]`, so its shape sits in `agents.json` as is — a contract
+    ///   baked onto disk, so the less
+    /// frozen the cheaper. Sandbox / approval values are still at `--help` grade (TRD §2); typing them now would freeze them at that grade
+    ///   (ADR-0194).
     Codex {
         extra_args: Vec<String>,
         #[serde(default)]
@@ -71,12 +69,11 @@ pub enum SpawnMode {
     Resume,
 }
 
-/// Auto-restart policy. **Reserved — not a dead field.** The behavior is unimplemented (gated), but it is the seam for a future feature
-/// that ADR-0016 states as "boot restore, guard counter and Failed persistence remain valid (to be revisited later)".
-/// Keeping the field in advance saves later schema/wire migration costs (H-3).
-/// ※Do not remove: it spans agent→protocol wire (domain.rs)→ts-rs bindings→daemon conversion→frontend,
-/// would cause a PROTOCOL_VERSION bump, and conflicts with the "to be revisited later" intent of ADR-0016.
-/// Only the "runtime auto-restart" interpretation is discarded (ADR-0019) — boot restore/guard/Failed remain valid.
+/// Auto-restart policy. **Reserved — not a dead field.** Behavior is unimplemented (gated), but it is the seam for what ADR-0016 calls
+///   "boot restore, guard counter
+/// and Failed persistence remain valid (to be revisited later)".
+/// ※Do not remove: it spans agent→protocol wire (domain.rs)→ts-rs bindings→daemon conversion→frontend, so removal bumps PROTOCOL_VERSION.
+/// Only the "runtime auto-restart" interpretation is discarded (ADR-0019).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RestartPolicy {
     Never,
@@ -98,7 +95,6 @@ pub struct RestoreReport {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum RestoreOutcome {
-    /// `--resume` succeeded — the existing conversation resumed as is.
     Resumed,
     /// Started a new session rather than a resume target (shell, or claude without a sid). Not a resume (fable Mn-2).
     Started,
@@ -110,9 +106,13 @@ pub enum RestoreOutcome {
         reason: String,
     },
     /// Skipped because it is not a restore target, e.g. `auto_restore=false`.
-    Blocked { reason: String },
+    Blocked {
+        reason: String,
+    },
     /// Even fresh failed → stop. A terminal point without recursive retry (H-1.7).
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 // ── Persistent profiles ────────────────────────────────────────────────────────────────
@@ -124,80 +124,72 @@ pub struct AgentProfile {
     pub id: AgentId,
     pub name: String,
 
-    /// User-set display name override (ADR-0061 enrichment — tree rename). **A separate axis from the existing `name`**: `name` is
-    /// the name passed at CreateProfile (claude profiles) or the cwd string of an ad-hoc spawn, so it is not "a clean display
-    /// name". `Some` → shown as is, `None` → derived from the cwd basename.
-    /// `#[serde(default)]`, so an old agents.json without this field is absorbed as `None` (no migration needed).
+    /// User-set display name override (ADR-0061 enrichment — tree rename), **separate from `name`** (the CreateProfile name or an ad-hoc
+    ///   spawn's cwd string, not a clean
+    /// display name). `Some` → shown as is, `None` → derived from the cwd basename. `#[serde(default)]`: an old agents.json without it
+    ///   reads as `None`.
     #[serde(default)]
     pub display_name: Option<String>,
 
-    /// The parent profile id in the tree hierarchy. `Some(pid)` → this profile is
-    /// a child of pid (indented under pid in the tree), `None` → top level (root). **Only one level of nesting is allowed**: a child cannot become
-    /// a parent again (a simplification to prevent cycles), and the parent must be a root — validation is in `ProfileRegistry::try_reparent`.
-    /// `#[serde(default)]`, so an old agents.json without this field is absorbed as `None` (root) (no migration needed).
+    /// Parent profile id in the tree. `Some(pid)` → child of pid, `None` → root. **One level only**: a child cannot become a parent, and
+    ///   the parent must be a root
+    /// (validation: `ProfileRegistry::try_reparent`). `#[serde(default)]`: an old agents.json without it reads as `None`.
     // ADR-0072
     #[serde(default)]
     pub parent_id: Option<AgentId>,
 
     pub command: AgentCommand,
 
-    /// ★The stored value is **raw** — it is not normalized (review fix N3 · load-bearing)★: no code canonicalizes this field.
-    /// So `"."`·`".."`, symlinks and Windows paths with different case can sit as is,
-    /// and normalization is done by each side that uses this value (spawn's `session.cwd`, `canonical_name_when_live`).
+    /// ★The stored value is **raw**, not normalized (load-bearing)★: `"."`·`".."`, symlinks and differently-cased Windows paths sit as is;
+    ///   each user of the value
+    /// normalizes (spawn's `session.cwd`, `canonical_name_when_live`).
     pub cwd: PathBuf,
 
     /// ※No credentials. On persist, `*_KEY`/`*_TOKEN` patterns are warned about (persistence).
     pub env: Vec<(String, String)>,
 
-    /// The current backend session id. **Mutable** — written right before the incarnation's first user turn goes out (ADR-0226), and when it changes via `/clear`
-    /// etc. the session_tracker watcher updates it. None means there is no conversation to resume.
+    /// The current backend session id. **Mutable** — written right before the incarnation's first user turn goes out (ADR-0226), and
+    ///   updated by the session_tracker
+    /// watcher on `/clear` etc. `None` = no conversation to resume.
     ///
-    /// ★The name being neutral is intended★ — **it does not say who draws the id.** claude receives the id we chose
-    /// through `--session-id`, and codex tells us the id it drew itself. Either way,
-    /// the meaning 「an id in that backend's session namespace」 is the same.
-    /// ※Until 2026-09-07 this field was named `claude_session_id` (including disk and wire).
-    ///   The grounds for having no backward-compatibility shim = `docs/tracking.md` T-33 · S21 TRD §6-1.
+    /// ★The neutral name is intended★ — it does not say who draws the id: claude receives the id we chose via `--session-id`, codex tells
+    ///   us the id it drew.
+    /// Either way it is 「an id in that backend's session namespace」. No backward-compat shim for the old `claude_session_id` name
+    ///   (`docs/tracking.md` T-33 · S21 TRD §6-1).
     pub backend_session_id: Option<Uuid>,
 
     /// History of past session ids discarded by fallback or clear (for audit and debugging).
     pub old_session_ids: Vec<Uuid>,
 
-    /// ★**An opaque marker** pointing at one incarnation★ — its order has no meaning. The only question to ask is
-    /// "is the output stream being read now the same as that earlier stream", and the answer is only same/different. So
-    /// comparison uses **only match/mismatch** — do not derive "newer" from the ordering of two values (the value is a random number drawn anew
-    /// per incarnation, so that derivation does not hold — `ProfileRegistry::epoch_for_spawn`).
+    /// ★**An opaque marker** of one incarnation★ — order has no meaning; the only question is "is the stream being read the same as that
+    ///   earlier one". Compare by **match/mismatch only**, never derive "newer"
+    /// (random per incarnation: `ProfileRegistry::epoch_for_spawn`).
     ///
-    /// ★Skipping the read is part of the meaning★: an incarnation cannot outlive this daemon process, so its marker
-    ///   is not revived from disk. Reviving it would have a restarted daemon put **the old marker** back on restored agents,
-    ///   and an attached client would mistake it for "the same stream" and keep its old progress cursor — the new session's frames
-    ///   are numbered again from 0, so they are dropped wholesale by dedup and that slot stays empty until the app is relaunched.
-    ///   An old `agents.json` without the value and an `agents.json` carrying the old counter are both read as is
-    ///   (the read is skipped, so that value is ignored — no migration needed).
-    /// ★But the write is not skipped — the key is sent as `0`★: the previous release's struct declared this field
-    ///   as **required**, so reading a file without the key breaks parsing with `missing field`. Then that
-    ///   release's persistence moves the file aside to `.corrupt-<ts>` and starts with an empty list, and the next save overwrites with that empty
-    ///   list, making the profiles, session ids and tree parents disappear wholesale (this actually holds on the path of running this build once and then
-    ///   reverting or reinstalling). Why `0` = it is the old counter's "never respawned" state, so an old
-    ///   binary trusting it as is is harmless — sending a live random number would make it sit in the counter's place.
-    /// This value is not put into the frontend subscription deps — the reattach trigger is not the incarnation marker but observation of the authoritative
-    /// roster (ADR-0164 decision 8).
+    /// ★Skipping the read is part of the meaning★: an incarnation cannot outlive the daemon, and a revived marker would make an attached
+    ///   client keep its old cursor so the new frames (numbered from 0) are dropped by dedup
+    ///   (empty slot). Old files without the value, or carrying an old counter, are read as is (value ignored).
+    /// ★The write is not skipped — the key is sent as `0`★: the previous release declared this field **required**, so a file without the
+    ///   key fails with `missing field`, that release moves it to `.corrupt-<ts>`
+    ///   and the next save overwrites it with an empty list (profiles, session ids, tree parents vanish; reachable by running this build
+    ///   once, then reverting). `0` = the old counter's "never respawned" state, harmless to an
+    ///   old binary.
+    /// Not in the frontend subscription deps — the reattach trigger is the authoritative roster (ADR-0164 decision 8).
     // ADR-0007, ADR-0163, ADR-0164
     #[serde(skip_deserializing, serialize_with = "serialize_zero_placeholder")]
     pub epoch: u32,
 
-    /// ★The kind of the last activation failure of this entry★ — `None` = no failure record. Not a pre-decision result but
-    /// **a fact observed at the place it was attempted** (ADR-0172 decision 1), and an axis separate from the current state (`AgentStatus`).
+    /// ★Kind of the last activation failure of this entry★ — `None` = no record. **A fact observed where it was attempted** (ADR-0172
+    ///   decision 1), separate from the
+    /// current state (`AgentStatus`).
     ///
-    /// ★`#[serde(skip)]` is part of the meaning (in the same vein as the read skip of `epoch` above, on different grounds)★: when the daemon is brought down,
-    ///   those sessions die with it, so there is no reason to hold old failures on disk — this skip pins the lifetime
-    ///   to **the daemon's lifetime** (ADR-0171 layer 3). It also exempts file format changes and backward-compatibility handling.
-    /// ★The type has no serde derive at all★ — so a change deleting this skip fails to compile
-    ///   (the `failure::AgentFailureKind` comment).
-    /// ★There is only one writing point★: `manager::AgentManager::note_activation_result` (activation success = clear /
-    ///   failure = record). That function's comment is the canonical source of 「why activation success」. Adding callers splits the causality —
-    ///   the same reason as ADR-0127 pinning the turn observation cleanup points to two.
-    /// ★A snapshot cannot revert it★: `upsert_preserving_hierarchy` keeps the live value (the same causality as the incarnation marker
-    ///   `epoch` — the old copy the spawn caller passes must not overwrite a failure or clear recorded in between).
+    /// ★`#[serde(skip)]` is part of the meaning★: sessions die with the daemon, so old failures are not held on disk — this pins the
+    ///   lifetime to **the daemon's lifetime**
+    ///   (ADR-0171 layer 3) and exempts file-format compatibility. The type has no serde derive, so deleting this skip fails to compile
+    ///   (`failure::AgentFailureKind`).
+    /// ★One writing point★: `manager::AgentManager::note_activation_result` (success = clear / failure = record) — its comment is the
+    ///   canonical 「why」. More callers
+    ///   would split the causality (cf. ADR-0127).
+    /// ★A snapshot cannot revert it★: `upsert_preserving_hierarchy` keeps the live value.
     // ADR-0172
     #[serde(skip)]
     pub last_failure: Option<AgentFailureKind>,
@@ -257,27 +249,21 @@ impl AgentProfile {
         }
     }
 
-    /// ★The **canonical name this profile will have when it comes up again** (load-bearing)★ — it must be **literally the same** as the live canonical
-    /// name the restored session has (if they diverge, asleep parking keyed by this value cannot find its owner).
+    /// ★The **canonical name this profile will have when it comes up again** (load-bearing)★ — must be **literally the same** as the live
+    ///   canonical name of the restored session, or asleep parking keyed by it
+    /// cannot find its owner.
     ///
-    /// ★The same rule as a live session = `canonical_name_or_id_fallback` (+ the canonicalized cwd)★:
-    ///   - It is the function `manager::resolve_canonical_name` uses for live sessions. `name::resolve_display_name` is
-    ///     **not** it — that one uses an empty/whitespace-only override as the name as is and does not degrade to the id when the basename is
-    ///     the placeholder (no path), so it diverges from the live name on two edges.
-    ///   - The cwd must also be in the same notation as the live session: spawn uses the value of `dunce::canonicalize(profile.cwd)` as
-    ///     session.cwd, while the profile-side `cwd` can hold a raw value (`.`·`..`, symlinks, Windows paths with different case).
-    ///     So **the same normalization** is done here too, and if it fails (the path is already gone), it
-    ///     degrades to the original just like spawn.
-    /// ★There is fs access **only when there is no override** (not pure)★: canonicalize looks at the real file system —
-    ///   so this verb is on the profile side, not in the pure name-derivation core (`name.rs`).
-    /// ★The override shortcut is not an optimization — do not delete it★: when `display_name` is non-blank, the canonical name
-    ///   **does not depend on the file system at all** (the live session rule also uses the override as is). So in that case
-    ///   no syscall is made at all. Deleting it would ① make the name of a profile whose cwd directory vanished degrade to raw and
-    ///   diverge from the name derived at asleep time, and ② if the cwd is a dead network share (SMB), one canonicalize blocks for tens of seconds
-    ///   and that delay attaches to the caller's path.
-    /// ★The remaining gap (known and accepted)★: a profile **without an override whose cwd vanished** still degrades to raw, so it can diverge from the asleep-time
-    ///   name. Preventing it would require redesigning name-keyed parking itself (a new decision's concern), so it is not changed
-    ///   secretly here.
+    /// ★Same rule as a live session = `canonical_name_or_id_fallback` (+ the canonicalized cwd)★ — what `manager::resolve_canonical_name`
+    ///   uses. `name::resolve_display_name` is **not** it (it takes an empty/whitespace
+    /// override as the name and does not degrade to the id on a placeholder basename). The cwd must have the live notation: spawn uses
+    ///   `dunce::canonicalize(profile.cwd)`, so the same normalization is done
+    /// here, degrading to the original on failure like spawn.
+    /// ★fs access only when there is no override (not pure)★ — hence on the profile side, not in `name.rs`.
+    /// ★The override shortcut is not an optimization — do not delete it★: with a non-blank `display_name` the name is independent of the
+    ///   file system. Deleting it would ① degrade the name of a profile whose cwd
+    ///   vanished and diverge from the asleep-time name, ② block one canonicalize for tens of seconds on a dead SMB share.
+    /// ★Known and accepted gap★: a profile **without an override whose cwd vanished** still degrades to raw and can diverge; fixing it
+    ///   means redesigning name-keyed parking.
     // ADR-0101 (WYSIWYA) / ADR-0116 (decision 1 — the asleep parking key)
     pub fn canonical_name_when_live(&self) -> String {
         // **Literally the same** as the first branch of the live session rule (`canonical_name_or_id_fallback`) (if non-blank, no trim
@@ -324,8 +310,9 @@ impl std::fmt::Display for Refusal {
 
 /// Failure of [`ProfileStore::save`] · [`crate::preset::PresetStore::save`].
 ///
-/// ★A refusal has two variants by where it came from★ — what the caller should do differs: a load refusal clears only when the daemon is restarted, and a re-decision
-/// refusal is decided again by the next save (unreadable is usually a briefly held lock, so retrying a little later works).
+/// ★A refusal has two variants by origin★ — the caller's handling differs: a load refusal clears only on daemon restart; a re-decision
+///   refusal is decided again by the
+/// next save (unreadable is usually a briefly held lock, so a later retry works).
 // ADR-0291 R17
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -336,7 +323,6 @@ pub enum StoreError {
     /// [`StoreStatus::Refusing`]).
     #[error("save refused (re-decision right before writing) — {0}")]
     Refused(Refusal),
-    /// The write (including the copy-aside before overwriting · the write cap) failed — the file is left as is.
     #[error("save failed — {0}")]
     Io(std::io::Error),
 }
@@ -347,13 +333,11 @@ pub enum StoreError {
 pub enum StoreStatus {
     #[default]
     Writable,
-    /// The load decision refused — it does not save for this whole run. Restarting the daemon clears it.
     ReadOnly(Refusal),
     /// Loaded, but the re-decision of the last save refused — the next save decides again and clears it on success.
     Refusing(Refusal),
 }
 
-/// Implemented by the persistence module. Trait injection lets headless tests plug in an in-memory store.
 pub trait ProfileStore: Send + Sync + 'static {
     /// Saves the whole snapshot atomically. The implementation logs the failure — the caller only branches the flow on `Err`.
     fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError>;
@@ -367,15 +351,15 @@ pub trait ProfileStore: Send + Sync + 'static {
 
 // ── Hierarchy normalization (ADR-0072) ────────────────────────────────────────────────────────
 
-/// Forcibly restores the whole map to the "valid one-level forest" invariant — called while holding the lock **right before saving and committing a change**
+/// Forcibly restores the whole map to the "valid one-level forest" invariant — called under the lock **right before saving and committing
+///   a change**
 /// (`mutate` · `mutate_if` · `try_mutate` · `try_mutate_if`).
 ///
-/// ★Why at the boundary and not per path★: reparent has its own validation, but upsert/update_with accept arbitrary
-/// parent_ids (cycle · dangling), and spawn reinserts a stale snapshot, reviving a parent deleted in between.
-/// Keeping validation only in reparent would let these paths bypass it and persist cycles and dangling references.
+/// ★Why at the boundary, not per path★: reparent validates, but upsert/update_with accept arbitrary parent_ids (cycle · dangling) and
+///   spawn reinserts a stale snapshot,
+/// reviving a parent deleted in between; validating only in reparent would let these paths persist cycles and dangling references.
 ///
-/// **idempotent**: an already-valid one-level forest (the result of a normal reparent) trips none of the rules and survives
-/// as is — running it twice gives the same result.
+/// **Idempotent**: an already-valid forest trips no rule; running it twice gives the same result.
 fn normalize_hierarchy(map: &mut HashMap<AgentId, AgentProfile>) {
     // The decision is based on the pre-change snapshot (so a clear within the same pass does not pollute the decision of other nodes).
     // Mixing has_own_parent (= a child) and is_a_parent (= a node that has children) would misdetect normal children.
@@ -409,35 +393,29 @@ fn normalize_hierarchy(map: &mut HashMap<AgentId, AgentProfile>) {
 
 // ── ProfileRegistry ────────────────────────────────────────────────────────────
 
-/// The in-memory **single owner** of profiles. All CRUD and session id updates go through here and
-/// are persisted to the store immediately on change. The responsibility for creating and updating session ids is also here (not spawn_agent — H-1.4).
+/// The in-memory **single owner** of profiles. All CRUD and session id updates go through here and persist to the store immediately;
+///   creating and updating session ids lives here too (H-1.4).
 ///
-/// **There are two change entries — split by who receives the save's `Err`:**
-/// - Verbs starting with `try_` = **changes with a caller** (bus · WS · launches those two called). Applied to a copy → hierarchy
-///   normalization → save → committed only on success. On `Err` (either refusal or write failure), memory is left as is and the error returned
-///   — so a change believed to be 「changed」 does not vanish on restart. Do not change it into the shape of asking about the save first and then applying — a write failure
-///   between asking and saving (disk full · rename lock budget exceeded) would again create 「only memory changed」.
-/// - Other change verbs = **changes without a caller** (first-submission latch · file watcher · reaper · raising `auto_restore` after launching
-///   · boot restore). They commit on any save `Err` and set dirty — there is no request to receive the result and revert,
-///   and dropping them would lose the reaper's `auto_restore=false`, reviving dead agents at the next boot restore, and lose the latch's session
-///   id. Not writing a dirty registry over a newer-edition or unreadable file is guarded by the re-decision of every save (the store).
+/// **Two change entries — split by who receives the save's `Err`:**
+/// - `try_` verbs = **changes with a caller** (bus · WS · launches): applied to a copy → hierarchy normalization → save → committed only
+///   on success. On `Err` memory is left as is and the error returned,
+///   so a change believed 「changed」 does not vanish on restart. Do not ask the save first and then apply — a write failure in between
+///   would recreate 「only memory changed」.
+/// - Other verbs = **changes without a caller** (first-submission latch · file watcher · reaper · `auto_restore` after launch · boot
+///   restore): they commit on any save `Err` and set dirty — nobody can
+///   revert, and dropping them would lose the reaper's `auto_restore=false` (reviving dead agents at boot) and the latch's session id. A
+///   dirty registry is not written over a newer-edition or unreadable
+///   file because every save re-decides (the store).
 ///
 /// Invariant = in-memory registry = the last successful save + (if dirty) the changes committed after it.
 ///
-/// Lock discipline: disk IO (`store.save`) happens **while holding** the profiles lock.
-/// ★Do not move save outside the lock (§5 concurrency consistency > lock-hold time)★: taking only a snapshot inside the lock and saving
-/// after releasing it would, when two mutations overlap in the order "A snapshot → unlock → B snapshot → unlock → B save → A save",
-/// leave the in-memory state and broadcast at the latest (B) while the disk stays stale (A), loading the old value on restart
-/// (persisted ≠ observed). Under §5, when an LLM/orchestrator calls rename/create/delete
-/// **programmatically, concurrently and in succession**, it actually hits this window that a human cannot open.
-/// **No deadlock (unrelated to ADR-0006):** `store.save` takes only the store-state field (a leaf lock — it does no IO while held) and
-/// does not re-enter the registry → the lock order is `profiles (including dirty) → store-state field` one-way, no cycle. The profiles lock is
-/// also separate from the session (sessions/core/status) lock domain, so it does not tangle with that order. IO while holding the lock is usually one small file
-/// read (the re-decision right before saving) + a write, and only while that file is locked does retrying make it longer, about 0.4 seconds at worst
-/// (ADR-0291 · D4).
-/// ★**Reopening 「let us reduce lock-hold anyway」 was closed by ADR-0207**★ — the place that *accepted* that cost is
-/// ADR-0071:27 (not this comment — here only the IO cost is discussed), and 0207 reconfirmed the status quo on the grounds that ① what would be reduced has never been
-/// measured and ② this save runs only on lifetime events. The conditions for reopening are there too.
+/// Lock discipline: `store.save` runs **while holding** the profiles lock. ★Do not move save outside the lock (§5 concurrency consistency
+///   > lock-hold time)★: snapshot → unlock → save lets two
+/// overlapping mutations leave memory/broadcast at B while the disk keeps A (persisted ≠ observed). No deadlock: `store.save` takes only
+///   the store-state leaf lock and never re-enters the registry
+/// (order `profiles → store-state`, separate from the session lock domain); in-lock IO is one small read + write, ~0.4 s worst case while
+///   the file is locked (ADR-0291 · D4).
+/// ★Reopening 「reduce lock-hold anyway」 was closed by ADR-0207★ (accepting place ADR-0071:27; reopen conditions there).
 // ADR-0291 R17 (D2 · E1)
 pub struct ProfileRegistry {
     profiles: Mutex<Profiles>,
@@ -449,9 +427,10 @@ type ProfileMap = HashMap<AgentId, AgentProfile>;
 /// The registry and its save state — kept under one lock (every place that sets and clears them is inside a change path holding that lock).
 struct Profiles {
     map: ProfileMap,
-    /// The save of a committed change failed — memory may be ahead of the disk. The next successful save (from any entry — a save
-    /// always writes the whole map) carries it and clears this. The `Err` of a change with a caller does not clear it (that memory is left as is).
-    /// ★What remains at exit is lost — no last save is added to the exit path (current behavior as is)★.
+    /// The save of a committed change failed — memory may be ahead of the disk. The next successful save (any entry; a save writes the
+    ///   whole map) carries it and clears this.
+    /// The `Err` of a change with a caller does not clear it (that memory is left as is). ★What remains at exit is lost — no last save on
+    ///   the exit path★.
     // ADR-0291 (D2 · E1)
     dirty: bool,
 }
@@ -470,7 +449,8 @@ impl ProfileRegistry {
         self.profiles.lock().expect("profiles poisoned")
     }
 
-    /// The common path of changes without a caller — the closure commit and save are one critical section, and it commits regardless of the save result.
+    /// The common path of changes without a caller — the closure commit and save are one critical section, and it commits regardless of
+    ///   the save result.
     fn mutate<R>(&self, f: impl FnOnce(&mut ProfileMap) -> R) -> R {
         let mut guard = self.lock();
         let result = f(&mut guard.map);
@@ -480,9 +460,9 @@ impl ProfileRegistry {
         result
     }
 
-    /// The conditional variant of `mutate` — saves only when the closure returns `true` (there was an actual change) or when dirty.
-    /// ★While dirty, even calls without a change do disk IO (re-decision read + write) while holding the profiles lock★ — the price of carrying
-    /// the pending change (the in-lock time of ADR-0291 D4 becomes that much more frequent).
+    /// The conditional variant of `mutate` — saves only when the closure returns `true` (an actual change) or when dirty.
+    /// ★While dirty, even calls without a change do disk IO (re-decision read + write) under the profiles lock★ — the price of carrying
+    ///   the pending change (ADR-0291 D4).
     fn mutate_if(&self, f: impl FnOnce(&mut ProfileMap) -> bool) -> bool {
         let mut guard = self.lock();
         let changed = f(&mut guard.map);
@@ -497,7 +477,6 @@ impl ProfileRegistry {
         changed
     }
 
-    /// Saves the committed map — on failure the memory change is kept and dirty is set. The store logs the failure.
     fn persist(&self, profiles: &mut Profiles) {
         match self.store.save(&snapshot(&profiles.map)) {
             Ok(()) => profiles.dirty = false,
@@ -508,7 +487,6 @@ impl ProfileRegistry {
         }
     }
 
-    /// The common path of changes with a caller — applies to a copy and commits only if the save succeeds.
     // ADR-0291 R17
     fn try_mutate<R>(&self, f: impl FnOnce(&mut ProfileMap) -> R) -> Result<R, StoreError> {
         let mut guard = self.lock();
@@ -519,7 +497,8 @@ impl ProfileRegistry {
     }
 
     /// The conditional variant of `try_mutate` — if the closure returns `false`, this request changed nothing and it is `Ok(false)`.
-    /// ★While dirty, even that request without a change saves the pending change while holding the profiles lock (disk IO)★ — the same as `mutate_if`.
+    /// ★While dirty, even that request without a change saves the pending change while holding the profiles lock (disk IO)★ — the same as
+    ///   `mutate_if`.
     fn try_mutate_if(&self, f: impl FnOnce(&mut ProfileMap) -> bool) -> Result<bool, StoreError> {
         let mut guard = self.lock();
         let mut draft = guard.map.clone();
@@ -534,7 +513,6 @@ impl ProfileRegistry {
         Ok(true)
     }
 
-    /// The copy was taken from the committed map (including pending dirty changes), so a successful save carries those too.
     fn commit_if_saved(
         &self,
         profiles: &mut Profiles,
@@ -576,9 +554,9 @@ impl ProfileRegistry {
             .collect()
     }
 
-    /// Inserts into the registry or replaces wholesale — the internal entry (commits + dirty on any save `Err`). ★There is no caller on the
-    ///   production path★ — only tests and the harness seam (`AgentManager::seed_agent_bypassing_uniqueness`) use it to plant the registry. Production
-    ///   registration is [`ProfileRegistry::try_upsert`].
+    /// Inserts into the registry or replaces wholesale — the internal entry (commits + dirty on any save `Err`). ★No caller on the
+    ///   production path★ — only tests and the
+    /// harness seam (`AgentManager::seed_agent_bypassing_uniqueness`); production registration is [`ProfileRegistry::try_upsert`].
     // ADR-0291 R17
     #[cfg(any(test, feature = "test-harness"))]
     pub(crate) fn upsert(&self, profile: AgentProfile) {
@@ -595,23 +573,17 @@ impl ProfileRegistry {
         })
     }
 
-    /// Spawn-only upsert — inserts the snapshot but **keeps the values of the live entry already in the map for fields
-    /// whose author is the runtime**. For an id that did not exist (ad-hoc spawn), the snapshot as is.
+    /// Spawn-only upsert — inserts the snapshot but **keeps the live entry's values for fields whose author is the runtime**. An id that
+    ///   did not exist (ad-hoc spawn) takes the snapshot as is.
     ///
-    /// ★The canonical preservation list is the body below — do not count them in this paragraph★ (the counted 「those two fields」 actually
-    /// fell behind twice). There is one splitting rule: **who writes that field.** For every field whose author is not the copy the caller took,
-    /// live wins, and only fields the spawn actually settles (cwd · command · env etc.) reflect the snapshot.
+    /// ★The canonical preservation list is the body below.★ One rule: **who writes that field** — fields whose author is not the caller's
+    ///   copy: live wins; only fields spawn settles (cwd · command · env etc.) take the snapshot.
     ///
-    /// ★Why the spawn snapshot is not used as is (sealing lost updates)★: the incoming profile is a **snapshot** taken at call
-    /// time, so if another connection committed a reparent/rename in between, the old `parent_id`/`display_name`
-    /// would overwrite the latest value and the concurrent edit would be lost (lost update). Those two are pure tree metadata unrelated to process startup,
-    /// so there is no reason for spawn to author them, and the live entry's values are kept if it exists.
-    ///
-    /// ★The incarnation marker (epoch) is also kept live (ADR-0084)★: that value is pure runtime metadata unrelated to process startup,
-    ///   and the **snapshot** spawn passes must not author it. Spawn newly settles the registry marker with `epoch_for_spawn` **right after** this upsert,
-    ///   and inserting the old snapshot value as is here would revert the earlier settlement
-    ///   (lost update), making the live session use the dead session's marker → the frontend misses the resubscription (empty slot) + turn observation and the control
-    ///   token cannot tell the two generations apart. So, the same as parent_id/display_name, the live value is kept.
+    /// ★Why not the snapshot as is (lost updates)★: a reparent/rename committed by another connection in between would be overwritten by
+    ///   the snapshot's old `parent_id`/`display_name` (tree metadata unrelated to startup).
+    /// ★The incarnation marker (epoch) is also kept live (ADR-0084)★: spawn settles it with `epoch_for_spawn` **right after** this upsert;
+    ///   inserting the old snapshot value would revert that, so the live session would use the
+    /// dead session's marker (missed resubscription, polluted turn observation, indistinguishable control tokens).
     // ADR-0070 ADR-0072 ADR-0084
     pub fn upsert_preserving_hierarchy(&self, profile: AgentProfile) {
         self.mutate(|m| {
@@ -619,24 +591,22 @@ impl ProfileRegistry {
         });
     }
 
-    /// The entry with a caller — the same as [`ProfileRegistry::upsert_preserving_hierarchy`] and commits only if the save succeeds.
+    /// The entry with a caller (commits only if the save succeeds).
     pub fn try_upsert_preserving_hierarchy(&self, profile: AgentProfile) -> Result<(), StoreError> {
         self.try_mutate(|m| {
             merge_preserving_live(m, profile);
         })
     }
 
-    /// Does the same merge but **does not create a missing id** — if present, updates it and `true`; if absent, a no-op and `false`.
+    /// Same merge but **does not create a missing id** — if present, updates and `true`; if absent, no-op and `false`.
     ///
-    /// ★Why it exists = to prevent the **resurrection** of a deleted profile★: spawn registration branches on 「does it already exist」,
-    ///   and if that lookup and the write are separate, a deletion slipping in between is ignored — after the deletion is reported as successful, that profile
-    ///   **comes back to life and even its child process launches with it.** Putting the decision and the write into one critical section is the
-    ///   only way to close that window, and it is the same shape as this store's other TOCTOU seals (`reparent` · `epoch_for_spawn`).
-    /// ★Do not swallow `false`★ — the caller must read it as 「deleted in the meantime」 and cut the spawn.
-    ///   Letting it pass would put a session without a profile onto the roster.
-    /// ★**This does not close every resurrection path**★ — when the deletion finished **before registration started**, the lookup is
-    ///   `None` in the first place, so it goes to the new-registration (ad-hoc spawn) branch. Telling those two apart would require the caller to bring
-    ///   「this is an entry that existed」, and that signal is not in the signature of `spawn_agent` now.
+    /// ★Prevents **resurrection** of a deleted profile★: with lookup and write separate, a deletion slipping in between is ignored and the
+    ///   profile returns and even launches its child process. One critical section
+    /// closes it (same shape as `reparent` · `epoch_for_spawn`). ★Do not swallow `false`★ — the caller must read it as 「deleted in the
+    ///   meantime」 and cut the spawn.
+    /// ★Not every resurrection path is closed★ — a deletion finished **before registration started** gives a `None` lookup and goes to the
+    ///   new-registration branch; telling them apart needs a 「this existed」 signal
+    /// `spawn_agent`'s signature lacks.
     pub fn update_preserving_hierarchy(&self, profile: AgentProfile) -> bool {
         self.mutate_if(|m| merge_if_present(m, profile))
     }
@@ -659,37 +629,27 @@ fn merge_if_present(m: &mut ProfileMap, profile: AgentProfile) -> bool {
     true
 }
 
-/// The merge body of the `upsert_preserving_hierarchy` family — if there is a live entry, it guards **the fields whose author is the runtime**.
+/// The merge body of the `upsert_preserving_hierarchy` family — with a live entry, guards **the fields whose author is the runtime**.
 ///
-/// ★This function is the canonical preservation list★ — the splitting rule is 「who writes that field」, and for every field whose author is not
-/// the copy the caller took, live wins. The grounds are next to each line.
+/// ★This function is the canonical preservation list★ (rule: who writes that field; the grounds sit next to each line).
 fn merge_preserving_live(m: &mut HashMap<AgentId, AgentProfile>, mut profile: AgentProfile) {
     if let Some(live) = m.get(&profile.id) {
         profile.parent_id = live.parent_id;
         profile.display_name = live.display_name.clone();
         profile.epoch = live.epoch;
-        // The last failure also has live win for the same reason — the only place writing that fact is activation observation,
-        //   and if the old copy spawn passes reverted it, an already-cleared failure would come back on screen.
+        // The last failure: the only writer is activation observation; reverting to the old copy would bring back an already-cleared failure.
         // ADR-0172
         profile.last_failure = live.last_failure;
-        // ★The backend session handle and its history also have live win (user decision)★ — **the same reason** as the four above:
-        //   what writes this field is the runtime, not the spawn snapshot. For any backend, that incarnation's first-submission
-        //   latch writes it **after this upsert** (ADR-0226), and the claude file watcher also writes it separately. Either way,
-        //   the copy the caller took is not the author of that value.
-        // ★What it prevents★: a handle that arrived after the copy was taken would be overwritten here and **persisted to disk as is**.
-        //   Then the way back to that conversation would vanish — it is a loss with no way to undo, so of overwriting and
-        //   keeping, the cheaper one when wrong is chosen (keeping). What remains is carrying a stale value one more time,
-        //   and the next observation fixes that.
-        // ★The history is kept too — the two are one lump★: the record verbs
-        //   push the old value into `old_session_ids` and update them as a pair, so keeping only the new value while reverting the history
-        //   to the snapshot would make handles pushed out in between vanish from the list.
-        // ★A Fresh spawn does not reuse the old conversation because of this★ — spawn pushes the old
-        //   value into the history and empties the field **after** this upsert, and hands a new uuid to an issuing backend (ADR-0076).
-        // ★**Behavior changes for claude too — do not read this as 「something only for recording backends」**★: the Resume of an issuing-axis
-        //   backend also reads this field **from the registry**, and previously the registration right before
-        //   overwrote it with the snapshot so a stale value was read. Now the drift sid observed and put in by `SessionTracker`
-        //   is read (that observer writes unconditionally without the incarnation axis — `observe_session_id(id, None, ..)` —
-        //   and attaches only to issuing-axis backends). The direction is an improvement, but **it is not no change**.
+        // ★The backend session handle and its history also keep the live value★ — the writer is the runtime (the first-submission latch
+        //   writes it **after** this upsert, ADR-0226; the claude file watcher too), not the
+        //   snapshot. ★Prevents★ a handle that arrived after the copy was taken being overwritten and **persisted** (the way back to that
+        //   conversation lost with no undo, so keep; worst case is carrying a stale value until the
+        //   next observation). ★The history is one lump with it★: record verbs push the old value into `old_session_ids` as a pair.
+        // ★A Fresh spawn does not reuse the old conversation because of this★: spawn pushes the old value into the history and empties the
+        //   field **after** this upsert, then hands a new uuid to an issuing backend (ADR-0076).
+        // ★Behavior changes for claude too★: Resume of an issuing-axis backend reads this field from the registry and now sees the drift
+        //   sid `SessionTracker` put in (`observe_session_id(id, None, ..)`), where the registration
+        //   right before used to overwrite it with the snapshot.
         profile.backend_session_id = live.backend_session_id;
         profile.old_session_ids = live.old_session_ids.clone();
     }
@@ -697,10 +657,10 @@ fn merge_preserving_live(m: &mut HashMap<AgentId, AgentProfile>, mut profile: Ag
 }
 
 impl ProfileRegistry {
-    /// **Promoting children to root on parent deletion (orphan-to-root):**
-    /// The `parent_id` of children that pointed at the deletion target as their parent is cleared to `None` **in the same critical section** —
-    /// no orphan reference pointing at a nonexistent parent (dangling parent) is left (tree render and restore invariant).
-    /// It is promotion, not cascade deletion, so the children's data is preserved (user decision — prevents losing a whole group by mistake).
+    /// **Promote children to root on parent deletion (orphan-to-root):** children whose `parent_id` pointed at the target are set to
+    ///   `None` **in the same critical
+    /// section** — no dangling parent reference (tree render and restore invariant). Promotion, not cascade, so children's data is
+    ///   preserved (prevents losing a whole group by mistake).
     ///
     /// The entry with a caller — applied to a copy and committed only if the save succeeds. A save is attempted even for a missing id.
     // ADR-0072
@@ -709,11 +669,13 @@ impl ProfileRegistry {
         self.try_mutate(|m| remove_promoting_children(m, id))
     }
 
-    /// Sets/clears the display name override (ADR-0061 enrichment — tree rename). `Some(name)` → save the override, `None` →
-    /// clear (back to deriving from the cwd basename). If it exists, persists after the change and true; for a missing id, no-op and false.
-    /// ★Normalization is the responsibility of the save gate (`AgentManager::try_rename_agent`)★: trimming both ends and the decision "if only whitespace remains, no override"
-    /// finish there **before** the name uniqueness decision (`normalize_display_name`) — trimming again here would make
-    /// the value the decision saw and the value saved diverge. Only an already-normalized value or an explicit None comes here.
+    /// Sets/clears the display name override (ADR-0061 enrichment — tree rename). `Some(name)` saves the override, `None` clears it (back
+    ///   to the cwd basename). Persists
+    /// after a change and `true`; a missing id is a no-op and `false`.
+    /// ★Normalization belongs to the save gate (`AgentManager::try_rename_agent`)★: trimming and 「whitespace-only → no override」 finish
+    ///   there **before** the uniqueness decision
+    /// (`normalize_display_name`); trimming again here would diverge the decided value from the saved one. Only normalized values or an
+    ///   explicit `None` come here.
     ///
     /// The entry with a caller — applied to a copy and committed only if the save succeeds.
     // ADR-0291 R17
@@ -725,21 +687,19 @@ impl ProfileRegistry {
         self.try_update_with(id, |p| p.display_name = display_name)
     }
 
-    /// Sets/clears the tree parent (ADR-0072 — hierarchy reparent). `Some(pid)` → makes child_id a child of pid,
-    /// `None` → promotes to root. Does all validation inside **one critical section (try_mutate)** and only on success persists and returns true;
-    /// on a violation, no-op and false (a bool return of the same shape as try_rename/try_update_with).
+    /// Sets/clears the tree parent (ADR-0072 — reparent). `Some(pid)` makes child_id a child of pid, `None` promotes to root. All
+    ///   validation inside **one critical
+    /// section (try_mutate)**; persists and returns `true` only on success, otherwise no-op and `false`.
     ///
-    /// **One-level nesting rule (cycle prevention):**
-    /// - child must exist (false if not).
-    /// - `Some(pid)`: ① the pid profile must exist ② `pid != child_id` (no self-parent) ③ child must not currently
-    ///   be anyone's parent (a node with children cannot become a child — one-level cap) ④ the target parent pid
-    ///   must itself be a root (`parent_id == None` — no two levels where a parent has a parent). false if any is violated.
-    /// - `None`: always allowed if child exists (promotion to root).
+    /// **One-level nesting rule (cycle prevention):** child must exist. `Some(pid)`: ① pid exists ② `pid != child_id` ③ child is not
+    ///   currently anyone's parent ④ pid is itself
+    /// a root (`parent_id == None`). `None`: always allowed if child exists.
     ///
-    /// ★Validation inside the lock★: the existence/parenthood decision and the write are one critical section, closing the window where cycles and orphans leak
-    /// through TOCTOU (state changes between check and change) with concurrent reparent/delete (via the ADR-0071 lock discipline).
+    /// ★Validation inside the lock★: the existence/parenthood decision and the write are one critical section, closing the TOCTOU window
+    ///   where concurrent reparent/delete would
+    /// leak cycles and orphans (ADR-0071 lock discipline).
     ///
-    /// The entry with a caller — applied to a copy and committed only if the save succeeds. A save is attempted even on a rule violation (`Ok(false)`).
+    /// The entry with a caller — a save is attempted even on a rule violation (`Ok(false)`).
     // ADR-0072
     // ADR-0291 R17
     pub fn try_reparent(
@@ -750,12 +710,11 @@ impl ProfileRegistry {
         self.try_mutate(|m| reparent_one_level(m, child_id, parent_id))
     }
 
-    /// If it exists, applies the closure and persists; otherwise false.
     pub fn update_with(&self, id: AgentId, f: impl FnOnce(&mut AgentProfile)) -> bool {
         self.mutate(|m| update_present(m, id, f))
     }
 
-    /// The entry with a caller — the same as [`ProfileRegistry::update_with`] and commits only if the save succeeds.
+    /// The entry with a caller (commits only if the save succeeds).
     pub fn try_update_with(
         &self,
         id: AgentId,
@@ -764,28 +723,22 @@ impl ProfileRegistry {
         self.try_mutate(|m| update_present(m, id, f))
     }
 
-    /// Records/clears 「the last failure」. `true` if the value actually changed, `false` for a missing id · epoch mismatch · same value.
+    /// Records/clears 「the last failure」. `true` if the value actually changed; `false` for a missing id · epoch mismatch · same value.
     ///
-    /// `incarnation`:
-    /// - `Some(epoch)` — this observation is about **that incarnation**. Written only when it equals the profile's current epoch.
-    /// - `None` — it failed before the incarnation was made (reservation refusal · PTY open failure). There is nothing to compare against.
+    /// `incarnation`: `Some(epoch)` — about **that incarnation**, written only when it equals the profile's current epoch. `None` — failed
+    ///   before the incarnation was made (reservation refusal · PTY open
+    /// failure), nothing to compare.
     ///
-    /// ★What the epoch comparison prevents (load-bearing)★: the resume observation writes **late**, by the early-exit window (currently 3s). If in between
-    ///   the reaper collects that session and another connection successfully activates the same profile (epoch +1 · clear done),
-    ///   the old observation waking up late **stamps the dead incarnation's failure on the live new incarnation**. It is the same shape as this store's other late-write
-    ///   defenses (the session removal guard of `reaper` · `TurnObservations::forget`).
-    /// ★The decision and the write must be one critical section★ — so the comparison is not left to the caller but done inside this lock
-    ///   (the same reason as `epoch_for_spawn`).
-    /// ★The residual of the `None` branch (known and accepted)★: there is no incarnation and so no axis to compare, so it writes unconditionally. A write of this branch
-    ///   happens **right after** the observation (no wait), so the window is a few commands wide, and the direction is not the safe side either — that is, it is a hole that remains
-    ///   in theory. Closing it would require failed spawns to carry their own generation too, which is a change to `spawn_agent`'s error type
-    ///   and a separate matter.
-    /// ★There is only one caller★: `AgentManager::note_activation_result`. Narrowing it to `pub(crate)` lets **the compiler** prevent a second write path
-    ///   from appearing in the daemon or shell (within the crate, convention and review guard it —
-    ///   no more than that is claimed).
-    /// ★It does not write to disk — a write that does not take `mutate` (same shape = `epoch_for_spawn`)★: this field is `#[serde(skip)]`, so
-    ///   saving would not change a single byte of the file content. Taking `mutate` would only add the pure cost of rewriting the whole `agents.json`
-    ///   on every activation.
+    /// ★What the epoch comparison prevents (load-bearing)★: the resume observation writes **late** (early-exit window, currently 3 s); if
+    ///   the reaper collects the session and another connection activates the
+    ///   same profile meanwhile (epoch +1 · clear done), the late observation would **stamp the dead incarnation's failure on the live
+    ///   one**. Compare inside this lock, not in the caller (as `epoch_for_spawn`).
+    /// ★Known and accepted residual of `None`★: no axis to compare, so it writes unconditionally, right after the observation (a few
+    ///   commands wide). Closing it needs failed spawns to carry a generation
+    ///   (a `spawn_agent` error-type change, separate).
+    /// ★One caller★: `AgentManager::note_activation_result`; `pub(crate)` lets **the compiler** keep a second write path out of the
+    ///   daemon/shell.
+    /// ★No disk write — does not take `mutate` (as `epoch_for_spawn`)★: the field is `#[serde(skip)]`, so saving changes no byte.
     // ADR-0172
     pub(crate) fn set_last_failure(
         &self,
@@ -804,26 +757,21 @@ impl ProfileRegistry {
         }
     }
 
-    /// Called where the session id is observed — moves the old sid into the history and replaces it with the new value,
-    /// persisting immediately on change (1-b: prevents stale restore on a crash before clear→observe→persist).
-    /// A call with the same value is a no-op (avoids unnecessary disk writes).
+    /// Called where the session id is observed — moves the old sid into the history, replaces it, persists on change. A same-value call is
+    ///   a no-op (no disk write).
     ///
-    /// `incarnation`:
-    /// - `Some(epoch)` — this observation belongs to **that incarnation**. Written only when it equals the profile's current epoch.
-    /// - `None` — the caller has no incarnation axis to compare. Written unconditionally.
+    /// `incarnation`: `Some(epoch)` — written only when it equals the profile's current epoch. `None` — no incarnation axis; written
+    ///   unconditionally.
     ///
-    /// ★The `None` branch is a residual (known and accepted — precedent [`ProfileRegistry::set_last_failure`])★: what comes into that branch today
-    ///   is only the file watcher ([`crate::session_tracker::SessionTracker`]), and that observer
-    ///   does not carry the incarnation marker. Closing it would require widening `SessionTracker::on_change`·`WatchEntry` and fixing all their creation
-    ///   points — there is **only one** production call site (the daemon assembly point) and the rest are all test rigs and
-    ///   experimental bins — and **not one thing about today's claude behavior changes** with it.
-    /// ★Comparison is match/mismatch only★ — "newer" is not derived from the marker (ADR-0007/0163).
-    /// ★What this guard prevents is only 「a newer incarnation already stands」 — do not widen it to 「it blocks late writes」★:
-    ///   none of the exit paths touches `epoch` (the reaper writes only `auto_restore`, and the link's
-    ///   teardown does not touch the profile), so the marker of a session that **only ended and did not come up again** is the same as that of the live session.
-    ///   An observation arriving through that window passes as is and is written to the dead session's profile.
-    /// ★What `bool` means is 「the in-memory map changed」 — not 「it stayed on disk」★:
-    ///   even if [`ProfileStore::save`] fails or refuses, the memory change remains (dirty — the next successful save carries it).
+    /// ★The `None` branch is a known and accepted residual (precedent [`ProfileRegistry::set_last_failure`])★: today only the file watcher
+    ///   ([`crate::session_tracker::SessionTracker`]) comes in, and it
+    ///   carries no marker; closing it would widen `SessionTracker::on_change`·`WatchEntry` and all creation points for no change in
+    ///   today's claude behavior.
+    /// ★Match/mismatch only★ — never "newer" (ADR-0007/0163).
+    /// ★The guard prevents only 「a newer incarnation already stands」, not 「late writes」★: no exit path touches `epoch`, so a session that
+    ///   **only ended** has the live marker and its late observation is written
+    ///   to the dead session's profile.
+    /// ★`bool` = 「the in-memory map changed」, not 「it stayed on disk」★ — a failing [`ProfileStore::save`] leaves the memory change (dirty).
     // ADR-0007
     // ADR-0163
     // ADR-0185
@@ -836,20 +784,21 @@ impl ProfileRegistry {
 
     /// The compare-and-swap verb by which this incarnation's **first submission** persists the session id.
     ///
-    /// Looked at in order inside the profile mutex:
-    /// - the incarnation marker differs from `incarnation` → `false`
-    /// - the field is already `Some(new)` → `false` — nothing to write (no disk write)
-    /// - the field is `expected` → push the old value into the history, write `new` and persist, `true`
-    /// - otherwise → `false` — another writer changed the field first
+    /// Checked in order inside the profile mutex:
+    /// - incarnation marker differs from `incarnation` → `false`
+    /// - field already `Some(new)` → `false` (nothing to write, no disk write)
+    /// - field is `expected` → push the old value into the history, write `new`, persist, `true`
+    /// - otherwise → `false` (another writer changed the field first)
     ///
-    /// `expected` = **the value of the field this incarnation saw when it started** (Fresh = `None`, since the field was emptied · Resume = the stored value).
+    /// `expected` = **the field value this incarnation saw at start** (Fresh = `None` since the field was emptied · Resume = the stored value).
     ///
-    /// ★Do not change it into an overwrite ([`ProfileRegistry::observe_session_id`])★: if another writer changed the field **before** the first submission,
-    ///   an overwrite would rewind that value to the value at spawn. That writer exists — the claude file
-    ///   watcher writes without comparison.
-    /// ★It is not 「write only into an empty field」 (the rule ADR-0216 rejected)★: `expected` is not the empty field but the value seen at the start,
-    ///   so if the resume of a resuming incarnation yields an id different from the stored value, it is replaced as is.
-    /// ★`bool` is in terms of the in-memory map★ — even if [`ProfileStore::save`] fails or refuses, the memory change remains (dirty).
+    /// ★Do not change it into an overwrite ([`ProfileRegistry::observe_session_id`])★: a writer that changed the field **before** the
+    ///   first submission (the claude file watcher
+    ///   writes without comparison) would be rewound to the spawn-time value.
+    /// ★Not 「write only into an empty field」 (the rule ADR-0216 rejected)★: `expected` is the value seen at start, so a resuming
+    ///   incarnation whose resume yields an id different
+    ///   from the stored one replaces it.
+    /// ★`bool` is in terms of the in-memory map★ — a failing or refusing [`ProfileStore::save`] leaves the memory change (dirty).
     // ADR-0226
     // ADR-0216
     // ADR-0217
@@ -881,22 +830,23 @@ impl ProfileRegistry {
 
     /// Draws a new session id — ★does not touch the registry (does not persist)★.
     ///
-    /// Kept here to leave the single issuing point in the registry. It is a new uuid every time, so the Fresh seal 「always a new sid」
-    /// (ADR-0076 — 「Session ID already in use」) stays as is. Persistence is done at the first submission by
-    /// [`ProfileRegistry::commit_session_id`].
+    /// Kept here to leave the single issuing point in the registry. A new uuid every time keeps the Fresh seal 「always a new sid」
+    ///   (ADR-0076 — 「Session ID already in use」).
+    /// Persisted at the first submission by [`ProfileRegistry::commit_session_id`].
     // ADR-0226
     // ADR-0076
     pub fn mint_session_id() -> Uuid {
         Uuid::new_v4()
     }
 
-    /// The verb with which a Fresh spawn starts by emptying the field — pushes the old value into the history and persists the empty field.
+    /// The verb by which a Fresh spawn starts by emptying the field — pushes the old value into the history and persists the empty field.
     ///
-    /// `None` = no profile (deleted in the meantime) · `Some(true)` = pushed · `Some(false)` = the field was already empty.
-    /// ★Why `None` is told apart from 「there was nothing to push」★ — spawn must cut off when it sees the profile vanished.
-    /// ★Fresh only — calling it on Resume erases the handle to resume★. The canonical call condition is `manager`'s
-    ///   `fresh_spawn_release_session_id` (a crate-internal item, so written by name rather than as a link). It pushes into the history, so
-    ///   it is not the destruction ADR-0202 forbids.
+    /// `None` = no profile (deleted in the meantime) · `Some(true)` = pushed · `Some(false)` = the field was already empty. `None` is told
+    ///   apart from 「nothing to push」
+    /// because spawn must cut off on a vanished profile.
+    /// ★Fresh only — on Resume it erases the handle to resume★. The canonical call condition is `manager`'s
+    ///   `fresh_spawn_release_session_id` (crate-internal, so named, not linked).
+    /// It pushes into the history, so it is not the destruction ADR-0202 forbids.
     // ADR-0226
     // ADR-0185
     pub fn release_session_id(&self, id: AgentId) -> Option<bool> {
@@ -908,7 +858,7 @@ impl ProfileRegistry {
         outcome
     }
 
-    /// The entry with a caller — the same as [`ProfileRegistry::release_session_id`] and commits only if the save succeeds.
+    /// The entry with a caller (commits only if the save succeeds).
     pub fn try_release_session_id(&self, id: AgentId) -> Result<Option<bool>, StoreError> {
         let mut outcome = None;
         self.try_mutate_if(|m| {
@@ -920,29 +870,22 @@ impl ProfileRegistry {
 
     /// ★Settles in one critical section the **incarnation marker** spawn will use (ADR-0007)★ — a random number drawn anew per incarnation.
     ///
-    /// `None` = the profile vanished in the meantime (concurrent deletion) → **the caller must abort the spawn**.
+    /// `None` = the profile vanished (concurrent deletion) → **the caller must abort the spawn**.
     ///
-    /// ★Why not an ordered counter★: the only question this value must answer is "is it the same stream", and order is
-    ///   not needed for that. Implementing it as a counter instead raises the problem of **where that counter lives** — leaving it on disk
-    ///   puts the old marker back on a new incarnation (that field's comment), and not leaving it has a restarted daemon count again from 0, so
-    ///   **restored agents deterministically inherit the value of a dead incarnation**. A random number removes that determinism.
-    /// ★But "different if it is a new process" is **not** a guarantee (stated honestly)★: this field is not read from disk
-    ///   (`skip_deserializing`), so after a restart the comparison target of a restored profile is 0, and the value the dead daemon used remains
-    ///   nowhere, so **the comparison itself does not happen**. What is actually guaranteed here is only **the adjacency guarantee** —
-    ///   it differs from the immediately previous incarnation within the same process (the while loop below). A collision across processes remains at 2^-32, and
-    ///   if hit, that one agent's incarnation guards are disabled for one incarnation (observation pollution · token collision · missed resubscription).
-    /// ★It always differs from the immediately previous value★: every consumer guard tells two incarnations apart by match/mismatch alone (reap
-    ///   epoch-guard ADR-0084 · control channel token ADR-0086 · turn observation table ADR-0113), so if the value overlapped with the
-    ///   previous incarnation being drained, those guards would be disabled entirely. The probability is 2^-32, but it closes for free, so it is closed.
-    /// ★Why the decision and the commit must be in one lock (load-bearing)★: split in two, a `remove` slipping in between would
-    ///   plant a marker on a vanished profile, or the comparison with the previous value would be made against an old map.
-    /// ★The current production call site is **only** `AgentManager::spawn_agent`★ — regardless of mode (Fresh/Resume),
-    ///   only that point passes here. Scattering it per call site makes a new call site miss it again (measured: WS `Spawn` and boot restore
-    ///   missed it that way), so keep the single entry point here. Not dead code (do not delete it by mistake — deleting it makes incarnation
-    ///   replacement reuse the marker, causing missed frontend resubscription, observation pollution and token collisions all at once).
-    /// ★It does not write to disk — it only takes the lock and replaces the marker (the same shape as `set_last_failure`)★: this field skips reads
-    ///   and writes a `0` placeholder (`AgentProfile::epoch`), so saving does not change a single byte of the file.
-    ///   So this verb has no save refusal or failure, and does not distinguish entries (with a caller · internal).
+    /// ★Why not an ordered counter★: only "same stream" is asked; a counter on disk puts the old marker back on a new incarnation, off
+    ///   disk a restarted daemon counts from 0 and **restored agents
+    ///   deterministically inherit a dead incarnation's value**. A random number removes the determinism.
+    /// ★"Different for a new process" is **not** guaranteed★: the field is not read from disk (`skip_deserializing`), so a restored
+    ///   profile compares against 0 and the comparison does not happen. Guaranteed:
+    ///   **adjacency** — different from the immediately previous incarnation in the same process (the while loop below; every consumer
+    ///   guard — ADR-0084 · ADR-0086 · ADR-0113 — compares by match/mismatch
+    ///   alone). A cross-process collision remains at 2^-32 and disables that agent's incarnation guards for one incarnation.
+    /// ★Decision and commit in one lock (load-bearing)★: split, a `remove` slipping in would plant a marker on a vanished profile.
+    /// ★The only production call site is `AgentManager::spawn_agent`★ (Fresh/Resume). Scattering it made WS `Spawn` and boot restore miss
+    ///   it (measured). Not dead code — deleting it makes replacement reuse
+    ///   the marker (missed resubscription, observation pollution, token collisions).
+    /// ★No disk write (same as `set_last_failure`)★: the field skips reads and writes a `0` placeholder (`AgentProfile::epoch`), so saving
+    ///   changes no byte; no save refusal or failure, no entry distinction.
     // ADR-0084
     // ADR-0007
     // ADR-0291 (D8)
@@ -968,7 +911,6 @@ fn remove_promoting_children(m: &mut ProfileMap, id: AgentId) {
     }
 }
 
-/// Rules = the [`ProfileRegistry::try_reparent`] doc.
 fn reparent_one_level(m: &mut ProfileMap, child_id: AgentId, parent_id: Option<AgentId>) -> bool {
     if !m.contains_key(&child_id) {
         return false;
@@ -1008,14 +950,16 @@ fn snapshot(map: &ProfileMap) -> Vec<AgentProfile> {
     map.values().cloned().collect()
 }
 
-/// The **common body** of the two session id record verbs that apply the incarnation guard ([`ProfileRegistry::observe_session_id`] ·
-/// [`ProfileRegistry::commit_session_id`]) — the incarnation guard and history push of those two exist only here, once.
-/// The unguarded clear ([`ProfileRegistry::release_session_id`]) also uses the same `retire_session_id` for the history push.
+/// The **common body** of the two incarnation-guarded session id record verbs ([`ProfileRegistry::observe_session_id`] ·
+///   [`ProfileRegistry::commit_session_id`]) — their
+/// guard and history push exist only here. The unguarded clear ([`ProfileRegistry::release_session_id`]) shares `retire_session_id` for
+///   the history push.
 ///
-/// ★A new record verb must not write the guard separately without going through this helper★ — with two copies, only one gets fixed and the guards
-///   diverge. That is 「making a new bypass」, which ADR-0217 decision 6 (inherited by ADR-0218 decision 6) forbids.
+/// ★A new record verb must go through this helper★ — a separately written guard diverges from the other copy; that is the 「new bypass」
+///   ADR-0217 decision 6 (inherited by
+///   ADR-0218 decision 6) forbids.
 ///
-/// `admits` is called **only after passing** the guard and the 「already the same value」 check (argument = the current value of the field).
+/// `admits` is called **only after passing** the guard and the 「already the same value」 check (argument = the field's current value).
 // ADR-0217
 // ADR-0226
 fn replace_session_id(
@@ -1036,7 +980,6 @@ fn replace_session_id(
     true
 }
 
-/// Pushes the field's value into the history (`old_session_ids`) and empties the field. `true` if there was something pushed.
 fn retire_session_id(p: &mut AgentProfile) -> bool {
     match p.backend_session_id.take() {
         Some(old) => {
@@ -1082,7 +1025,8 @@ pub(crate) mod scripted_store {
         Outcome::Refuses(Refusal::Newer { found: 2 }),
     ];
 
-    /// Uses the queued results once each from the front and is `then` once they run out (with `cycle`, used results are queued again at the end and it loops forever).
+    /// Uses the queued results once each from the front and is `then` once they run out (with `cycle`, used results are queued again at
+    ///   the end and it loops forever).
     /// Only successful saves remain in `disk`.
     pub(crate) struct ScriptedStore {
         queue: Mutex<VecDeque<Outcome>>,
@@ -1127,7 +1071,6 @@ pub(crate) mod scripted_store {
                 .cloned()
         }
 
-        /// The whole of the last successful save.
         pub(crate) fn disk_all(&self) -> Vec<AgentProfile> {
             self.disk.lock().unwrap().clone()
         }
@@ -1200,9 +1143,9 @@ mod tests {
 
     #[test]
     fn canonical_name_when_live_mirrors_the_live_session_rule() {
-        // ★The relative path is the core of this test★: `PathBuf::from(".")` is raw, so its basename becomes `"."`, but the live
-        //   session uses the basename of the canonicalized absolute path. This pins down that the two values must be the same
-        //   (drawing it with `resolve_display_name(None, ".")` gives `"."` and silently diverges).
+        // ★The relative path is the core★: `PathBuf::from(".")` is raw (basename `"."`) while a live session uses the basename of the
+        //   canonicalized absolute path — the two must match
+        //   (`resolve_display_name(None, ".")` gives `"."` and silently diverges).
         let p = sample(); // cwd = "."
         let expected = {
             let abs = dunce::canonicalize(".").expect("the cwd exists");
@@ -1229,7 +1172,7 @@ mod tests {
 
     #[test]
     fn canonical_name_when_live_survives_a_vanished_cwd_when_an_override_exists() {
-        // ★Review fix (D3)★: with an override, the name must not depend on fs at all.
+        // With an override the name must not depend on fs at all.
         let vanished = PathBuf::from("C:/engram-does-not-exist-9f1c/never/created");
         assert!(
             dunce::canonicalize(&vanished).is_err(),
@@ -1302,7 +1245,8 @@ mod tests {
 
     // ── Incarnation guard (ADR-0007/0163 · ADR-0185) ──
 
-    /// ★A dead incarnation's late observation cannot overwrite the live incarnation's value★ — if overwritten, that profile believes another conversation is
+    /// ★A dead incarnation's late observation cannot overwrite the live incarnation's value★ — if overwritten, that profile believes
+    ///   another conversation is
     /// its own, and resume opens someone else's thread.
     #[test]
     fn observe_session_id_rejects_a_stale_incarnation() {
@@ -1360,7 +1304,6 @@ mod tests {
 
     // ── First-submission persistence — compare-and-swap (ADR-0226) ──
 
-    /// Puts in one profile and settles its incarnation marker — the common starting point of the entries below.
     fn registry_with_live_incarnation() -> (ProfileRegistry, Arc<MemStore>, AgentId, u32) {
         let store = Arc::new(MemStore::default());
         let reg = ProfileRegistry::new(store.clone());
@@ -1394,9 +1337,10 @@ mod tests {
         );
     }
 
-    /// ★The pair measuring that it is not 「write only into an empty field」, which ADR-0216 rejected★ — if a resuming incarnation's first offer is an id
-    ///   different from the stored value (the resume returned a new id), field == `expected` == stored value, so **it is replaced**. Under a rule
-    ///   writing only into empty fields, it would be refused here and the handle would go stale.
+    /// ★Pins that it is not 「write only into an empty field」 (rejected by ADR-0216)★: a resuming incarnation whose first offer differs
+    ///   from the stored value (resume returned a
+    ///   new id) has field == `expected` == stored value, so **it is replaced**; an empty-field-only rule would refuse and leave the
+    ///   handle stale.
     #[test]
     fn a_resumed_incarnations_first_offer_with_a_different_id_replaces_the_stored_one() {
         let (reg, store, id, live) = registry_with_live_incarnation();
@@ -1414,7 +1358,6 @@ mod tests {
         assert_eq!(store.load()[0].backend_session_id, Some(resumed_as));
     }
 
-    /// If a resuming incarnation's offer is the stored value as is, there is nothing to write — the disk is not touched.
     #[test]
     fn commit_session_id_with_the_value_already_in_the_slot_does_not_write() {
         let (reg, store, id, live) = registry_with_live_incarnation();
@@ -1436,8 +1379,9 @@ mod tests {
         );
     }
 
-    /// ★commit does not rewind the value the tracker wrote **before** the first submission★ — the tracker (claude file watcher)
-    ///   writes without comparison. With an overwrite, it would be rewound here to the value at spawn and the tracker value pushed into the history.
+    /// ★commit does not rewind the value the tracker wrote **before** the first submission★ — the tracker (claude file watcher) writes
+    ///   without comparison; an overwrite would
+    ///   rewind it to the spawn-time value and push the tracker's into the history.
     #[test]
     fn commit_session_id_does_not_rewind_a_value_the_tracker_wrote_before_the_first_submission() {
         // Resuming incarnation: saw the stored value S at the start, but before the first submission the tracker wrote Y.
@@ -1465,7 +1409,8 @@ mod tests {
         );
     }
 
-    /// The paired direction — with a different marker it does not write even if the field is `expected`. Without this, the entries above are green even without the guard.
+    /// The paired direction — with a different marker it does not write even if the field is `expected`. Without this, the entries above
+    ///   are green even without the guard.
     #[test]
     fn commit_session_id_rejects_a_stale_incarnation() {
         let (reg, store, id, live) = registry_with_live_incarnation();
@@ -1482,8 +1427,8 @@ mod tests {
         assert!(!reg.commit_session_id(AgentId::new_v4(), 0, None, Uuid::new_v4()));
     }
 
-    /// ★The two record verbs go through **one** guard helper★ — a new verb writing the guard separately would be the bypass ADR-0217 decision 6
-    ///   forbids. Running shows only 「the same result」, not 「the same code」, so it is measured in the source.
+    /// ★The two record verbs go through **one** guard helper★ (ADR-0217 decision 6) — running shows only 「the same result」, not 「the same
+    ///   code」, so it is measured in the source.
     #[test]
     fn the_two_session_id_writers_share_one_guard_helper() {
         let src = include_str!("profile.rs");
@@ -1561,7 +1506,6 @@ mod tests {
         assert_eq!(reg.release_session_id(AgentId::new_v4()), None);
     }
 
-    /// Drawing does not touch the registry — persistence is the first submission's job.
     #[test]
     fn mint_session_id_touches_nothing_and_never_repeats() {
         let (reg, store, id, _live) = registry_with_live_incarnation();
@@ -1588,7 +1532,8 @@ mod tests {
         reg.upsert(p);
 
         // Adjacency guarantee = the only thing the while loop actually guards. Every consumer guard tells two
-        //   incarnations apart by match/mismatch alone, so if the value overlapped with the previous incarnation being drained, those guards would be disabled entirely.
+        //   incarnations apart by match/mismatch alone, so if the value overlapped with the previous incarnation being drained, those
+        //   guards would be disabled entirely.
         let mut seen = Vec::new();
         for _ in 0..64 {
             let tag = reg.epoch_for_spawn(id).expect("profile exists");
@@ -1611,13 +1556,13 @@ mod tests {
         );
     }
 
-    // ★What this test targets = the issuing is **not deterministic**★. The adjacency guarantee (test above) alone does not catch a counter
-    //   regression — a counter, whether incrementing or decrementing, also always differs from the immediately previous value. The point where they differ is **a new process's
-    //   first issue**: a counter hands out the same value every time (one step from 0), so a restarted daemon puts a dead
-    //   incarnation's marker back as is on restored agents (the outcome = an attached client mistakes it for "the same stream"
-    //   → keeps the old cursor → new frames dropped wholesale by dedup = empty slot). Only a random number lacks that determinism.
-    // ★But this is a probabilistic assertion★: drawing 64 from a 32-bit space with fewer than half distinct is an event of ~1e-7 or less,
-    //   effectively 0, but honestly it is a probability, not "guaranteed by construction" (the `epoch_for_spawn` paragraph is canonical for it).
+    // ★Targets that issuing is **not deterministic**★. The adjacency test above cannot catch a counter regression (a counter also differs
+    //   from the previous value). They differ at
+    //   **a new process's first issue**: a counter repeats the same value, so a restarted daemon puts a dead incarnation's marker back on
+    //   restored agents (stale cursor → new frames
+    //   dropped by dedup → empty slot). Only a random number lacks that determinism.
+    // ★Probabilistic★: 64 draws from a 32-bit space with under half distinct is ~1e-7 — effectively 0, not "guaranteed by construction"
+    //   (`epoch_for_spawn` is canonical).
     #[test]
     fn a_fresh_registry_does_not_hand_out_the_same_first_tag_every_time() {
         let first_tags: Vec<u32> = (0..64)
@@ -1719,12 +1664,13 @@ mod tests {
         );
     }
 
-    /// ★Late-write guard★: the resume observation writes late, by the early-exit window (3s). If in between another connection
-    /// successfully activates the same profile (a new incarnation marker), the late old observation stamps the dead incarnation's failure on **the live new incarnation**.
+    /// ★Late-write guard★: the resume observation writes late (early-exit window, 3 s). If another connection activates the same profile
+    ///   in between (new incarnation marker),
+    /// the late old observation would stamp the dead incarnation's failure on **the live new incarnation**.
     ///
-    /// ★Markers are not written as constants★: incarnation markers are random numbers drawn anew per incarnation (ADR-0163), so there is no order
-    ///   like `0 → 1`. So the old and new values are **issued and held** for the comparison, and the guard also stands on
-    ///   match/mismatch only, not ordering.
+    /// ★Markers are not constants★: they are random per incarnation (ADR-0163), with no `0 → 1` order, so the old and new values are
+    ///   **issued and held**; the guard also stands on
+    ///   match/mismatch only.
     #[test]
     fn a_late_write_from_an_older_incarnation_is_rejected() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -1760,7 +1706,8 @@ mod tests {
             "the current incarnation clears it"
         );
 
-        // A failure that ended before the incarnation has no generation to compare, so it writes unconditionally (the `None` branch of the contract).
+        // A failure that ended before the incarnation has no generation to compare, so it writes unconditionally (the `None` branch of the
+        //   contract).
         assert!(reg.set_last_failure(id, None, Some(AgentFailureKind::SpawnFailed)));
         assert_eq!(
             reg.get(id).unwrap().last_failure,
@@ -1973,10 +1920,10 @@ mod tests {
 
     // ── Write-boundary normalization (ADR-0072) ────────────────────────────────────────────────
 
-    /// ★Reproduction path★: bring in by load as is a state where the store already has a cyclic pair (a damaged/hand-edited agents.json, or a legacy write
-    /// bypassing reparent validation) (load does not normalize), then trigger any one write, and
-    /// boundary normalization heals the cycle. **It fails without normalize_hierarchy** — both parent_ids stay
-    /// and the cycle persists in memory and on disk.
+    /// ★Reproduction★: load a store that already holds a cyclic pair (a damaged/hand-edited agents.json or a legacy write bypassing
+    ///   reparent validation; load does not normalize),
+    /// then trigger any write — boundary normalization heals the cycle. **Fails without normalize_hierarchy** (both parent_ids stay, in
+    ///   memory and on disk).
     #[test]
     fn cycle_in_map_is_normalized_at_write_boundary() {
         let mut a = sample();
@@ -2064,7 +2011,6 @@ mod tests {
     fn concurrent_reparent_vs_remove_no_dangling() {
         use std::thread;
 
-        // Repeats to shake the interleaving widely (raises the race reproduction probability).
         for _ in 0..200 {
             let store = Arc::new(MemStore::default());
             let reg = Arc::new(ProfileRegistry::new(store.clone()));
@@ -2139,10 +2085,10 @@ mod tests {
 
     /// ★A deleted profile is **not revived** by spawn registration★.
     ///
-    /// This merge races with deletion: if 「is it there」 and 「write」 are separate, a deletion slipping in between is ignored, and after the deletion
-    /// is reported as successful the entry comes back to the list and even its child process launches with it. Putting the decision inside the lock is
-    /// the only way to close that window, and `false` is the signal for the caller to cut the spawn.
-    /// ★When present, it merges as usual★ — splitting only when absent is all this verb does, so that half is measured too.
+    /// With 「is it there」 and 「write」 separate, a deletion slipping in between is ignored: the entry returns to the list and its child
+    ///   process launches. The decision inside the
+    /// lock is the only fix, and `false` is the caller's signal to cut the spawn. ★When present, it merges as usual★ — that half is
+    ///   measured too.
     #[test]
     fn update_preserving_hierarchy_never_resurrects_a_removed_profile() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -2167,14 +2113,12 @@ mod tests {
         );
     }
 
-    /// ★A backend handle arriving **after** the copy was taken is not overwritten by spawn registration (user decision)★.
+    /// ★A backend handle arriving **after** the copy was taken is not overwritten by spawn registration★.
     ///
-    /// What writes this field is the runtime — for any backend, that incarnation's first-submission latch writes it **after** this upsert.
-    /// The copy the caller holds is not the author.
-    /// ★If overwritten, it is not just a stale value but **an irreversible loss**★ — this upsert is `mutate`, so it is persisted to disk
-    ///   as is, and no handle to return to that conversation remains anywhere.
-    /// ★Measuring the history together is the point★ — keeping only the new value while reverting `old_session_ids` to the snapshot would make
-    ///   handles pushed out in between vanish from the list, preventing only half the loss.
+    /// The runtime writes this field (the first-submission latch writes it **after** this upsert); the caller's copy is not the author.
+    /// ★Overwriting is an **irreversible loss**, not a stale value★ — this upsert is `mutate`, so it persists and no handle back to that
+    ///   conversation remains.
+    /// ★The history is measured too★ — reverting `old_session_ids` to the snapshot would drop handles pushed out in between (half the loss).
     #[test]
     fn spawn_preserving_upsert_does_not_revert_a_handle_recorded_after_the_snapshot() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -2378,10 +2322,10 @@ mod tests {
         assert_eq!(p.parent_id, None);
     }
 
-    /// ★A **live** incarnation marker must not be carried on disk★: if it were, a restarted daemon would put the old marker back
-    /// on restored agents, and a surviving client would mistake it for "the same stream" and keep its old progress cursor — the new incarnation's
-    /// frames are numbered again from 0, so they are dropped wholesale by dedup and that slot stays empty.
-    /// (The key itself is carried — a `0` placeholder for previous-release readers. The grounds are in the forward-compat test below.)
+    /// ★A **live** incarnation marker must not be carried on disk★: a restarted daemon would put the old marker back on restored agents, a
+    ///   surviving client would keep its old
+    /// cursor, and the new frames (numbered from 0) would be dropped by dedup and leave the slot empty. (The key itself is carried as a
+    ///   `0` placeholder; see the forward-compat test below.)
     #[test]
     fn the_live_incarnation_tag_never_reaches_disk() {
         let mut p = sample();
@@ -2398,9 +2342,9 @@ mod tests {
         );
     }
 
-    /// ★Even if an old counter is carried, the in-memory value does not come from the file★ — an `agents.json` a previous release left
-    /// (the path of upgrading to this build, reverting and upgrading again) holds a nonzero counter. If that value
-    /// were restored, the same outcome as what the test above prevents would happen (old cursor kept → new frames dropped wholesale by dedup).
+    /// ★Even if an old counter is carried, the in-memory value does not come from the file★ — an `agents.json` left by a previous release
+    ///   (upgrade → revert → upgrade) holds a
+    /// nonzero counter; restoring it would cause what the test above prevents.
     #[test]
     fn a_persisted_non_zero_tag_is_never_restored_into_memory() {
         let mut v: serde_json::Value =
@@ -2414,12 +2358,12 @@ mod tests {
         );
     }
 
-    /// ★The key stays and only the value is pinned to 0★ — the struct of a binary reverted to the previous release declares `epoch`
-    /// as a **required** field, so an `agents.json` with no key at all breaks parsing with `missing field`.
-    /// Then that release's persistence moves the file aside to `.corrupt-<ts>` and starts with an empty list, and the next save
-    /// overwrites with that empty list, making the profiles, session ids and tree parents disappear wholesale.
-    /// Why the value sent is **0, not the live marker**: 0 is the old counter's "never respawned" state, so
-    /// an old binary trusting it as is is harmless — sending a random number would make it sit in the counter's place.
+    /// ★The key stays and only the value is pinned to 0★ — a binary reverted to the previous release declares `epoch` **required**, so a
+    ///   file with no key fails with
+    /// `missing field`; that release then moves it to `.corrupt-<ts>` and the next save overwrites with an empty list (profiles, session
+    ///   ids and tree parents vanish).
+    /// **0, not the live marker**: 0 is the old counter's "never respawned" state, harmless to an old binary; a random number would sit in
+    ///   the counter's place.
     #[test]
     fn the_persisted_incarnation_tag_is_a_fixed_zero_so_older_readers_still_parse() {
         let mut p = sample();
@@ -2437,7 +2381,6 @@ mod tests {
     // ── ADR-0044: output_format serde backward compatibility ─────────────────────────────────
     #[test]
     fn claude_command_without_output_format_defaults_terminal() {
-        // Old wire/agents.json has no output_format field → #[serde(default)] = Terminal.
         let legacy = r#"{ "kind": "Claude", "extra_args": ["--foo"] }"#;
         let cmd: AgentCommand =
             serde_json::from_str(legacy).expect("legacy claude cmd deserialize");
@@ -2491,7 +2434,6 @@ mod tests {
 
     use super::scripted_store::{Outcome, ScriptedStore, FAILURES};
 
-    /// A registry with one profile saved.
     fn scripted() -> (ProfileRegistry, Arc<ScriptedStore>, AgentId) {
         let store = ScriptedStore::new();
         let reg = ProfileRegistry::new(store.clone());
@@ -2501,7 +2443,8 @@ mod tests {
         (reg, store, id)
     }
 
-    /// Looks at both the `mutate` path (the reaper's lowering) and the `mutate_if` path (first-submission latch · boot restore's session id clearing).
+    /// Looks at both the `mutate` path (the reaper's lowering) and the `mutate_if` path (first-submission latch · boot restore's session
+    ///   id clearing).
     #[test]
     fn an_internal_change_commits_and_marks_dirty_on_any_save_error() {
         for failure in FAILURES {
@@ -2561,7 +2504,6 @@ mod tests {
             "during the refusal the dirty registry does not touch the newer-edition file"
         );
 
-        // Someone put a usable file back and the refusal cleared.
         std::fs::write(&path, r#"{"schema_version":1,"profiles":[]}"#).unwrap();
         assert!(reg
             .try_rename(id, Some("next change".into()))
@@ -2755,9 +2697,11 @@ mod tests {
         assert!(store.disk(fresh_id).is_some());
     }
 
-    /// ★A change with a caller saves and commits while holding the lock it took the copy under — looked at deterministically★: inside the closure running on the copy
-    ///   it starts an internal change on another thread. Within one lock, the internal change is pushed behind that commit and remains, and if it regressed to taking
-    ///   the copy outside the lock, the internal change would commit first and then vanish, overwritten by the old copy.
+    /// ★A change with a caller saves and commits under the lock it took the copy under — checked deterministically★: from the closure
+    ///   running on the copy, start an internal change
+    ///   on another thread. Under one lock the internal change is pushed behind that commit and survives; if the copy were taken outside
+    ///   the lock, the internal change would commit first
+    ///   and be overwritten by the old copy.
     #[test]
     fn a_caller_change_copies_saves_and_commits_under_one_lock() {
         let (reg, _store, id) = scripted();
@@ -2790,11 +2734,12 @@ mod tests {
         assert_eq!(reg.get(id).unwrap().display_name.as_deref(), Some("caller"));
     }
 
-    /// ★Even when the two entries overlap, no internal change is lost, and if not dirty, disk = memory★ — this holds only if the caller entry's
-    ///   copy → save → commit is within one lock. Taking the copy outside the lock would let the following caller commit overwrite with the old copy
-    ///   an internal change committed in between. Save results alternate between success and failure to mix the branches of the two entries.
-    /// ★A probabilistic regression net★ — it cannot force the overlap, so even if it regresses into that shape it does not turn red every time (it caught the shape of taking the copy
-    ///   outside the lock 2 out of 5 measured runs). The deterministic pair = `a_caller_change_copies_saves_and_commits_under_one_lock`.
+    /// ★With the two entries overlapping, no internal change is lost, and if not dirty, disk = memory★ — holds only if the caller entry's
+    ///   copy → save → commit is one lock. Save results
+    ///   alternate success/failure to mix both entries' branches.
+    /// ★A probabilistic regression net★ — it cannot force the overlap (it caught the copy-outside-the-lock shape in 2 of 5 runs). The
+    ///   deterministic pair =
+    ///   `a_caller_change_copies_saves_and_commits_under_one_lock`.
     #[test]
     fn racing_caller_and_internal_changes_never_lose_an_internal_commit() {
         const ROUNDS: usize = 200;

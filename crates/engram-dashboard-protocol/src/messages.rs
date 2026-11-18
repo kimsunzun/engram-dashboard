@@ -12,32 +12,27 @@ use crate::ids::{AgentId, OwnerToken, PresetId, ProfileId, RequestId};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
-// ★There is no `Auth` variant here (ADR-0129 0-4)★: the auth frame used only as the first frame after connecting is a separate type,
-//   `handshake::AuthFrame` — token auth is the decision "should this socket live", so the network layer that makes that decision
-//   must be able to decode that frame without knowing the agent vocabulary (this enum) as a type (ADR-0129 decision 1). The frame is
-//   `{"Auth":{"token":"…","protocol_version":N}}`, and the canonical test of that shape is the golden JSON of that module.
-//   ★Do not put it back here★: if two definitions coexist they silently diverge. That is also why the frontend binding (`bindings/AgentCommand.ts`)
-//   has no `Auth` (the frontend `wsTransport` builds it as an object literal without a type in the first place).
+// ★There is no `Auth` variant here (ADR-0129 0-4)★: the first-frame auth frame is the separate type `handshake::AuthFrame` — token auth
+//   decides whether the socket lives, so the
+//   network layer must decode it without knowing this enum (ADR-0129 decision 1). Shape and canonical golden: that module. ★Do not put it
+//   back here★: two definitions silently
+//   diverge (hence `bindings/AgentCommand.ts` has no `Auth`).
 //
-// ★Name collision★ — agent `profile::AgentCommand` means something different (the program a profile launches).
-//   Its wire mirror is not this enum but `AgentSpawnCommand`. Calling it
-//   "AgentCommand" without the crate leaves the meaning undetermined.
-// ★★The **call contract** of the activation set (`Spawn`·`SpawnByCwd`·`SpawnProfile`) — what the client must keep★★
-//   The daemon **takes these three off** that connection's arrival-order lane and runs them **as separate tasks** (activation is a branch
-//   that waits until its outcome, so keeping it in the lane delays every other command of that connection meanwhile — the daemon crate's
-//   `connection_core::dispatch_order`). This contract is the price:
-//   ① **Do not send anything addressed to that agent id before receiving the activation's answer (`Spawned`/`Error`).**
-//      If `WriteStdin(X)` is sent right after `SpawnProfile(X)` on the same socket, the latter runs first and
-//      fails with 「agent not found」. The answer carries the request's `request_id` as is, so the client can
-//      establish the correlation.
-//   ② **Do not send the activation of the same id again before receiving the answer.** The two requests enter the daemon's check/register window
-//      together. That window was not created by this batch but pre-existed (the daemon's `SpawnReservation` guard narrows it but
-//      does not close it); what this batch changed is only that **a single connection alone can now reach that window**.
-//   ★This repository's frontend already runs per this contract★ — `src/api/protocolClient.ts` holds the activation Promise
-//   with a `request_id` correlation table, and the call site uses the returned `agent.id` after `await`ing it.
-//   ★Why it was not reverted to ordering★: the branch 「queue commands addressed to the same id behind that id's activation」 turns
-//   that wait into a stall of the whole connection (activation is typically 2s · backstop 15s), so it would conditionally revive
-//   the symptom this batch set out to remove.
+// ★Name collision★ — agent `profile::AgentCommand` is the program a profile launches; its wire mirror is `AgentSpawnCommand`, not this enum.
+// ★★Call contract of the activation set (`Spawn`·`SpawnByCwd`·`SpawnProfile`) — what the client must keep★★
+//   The daemon **takes these three off** that connection's arrival-order lane and runs them **as separate tasks** (activation waits for
+//   its outcome, so keeping it in the lane
+//   would delay every other command of that connection — daemon `connection_core::dispatch_order`). The price:
+//   ① **Send nothing addressed to that agent id before receiving the activation's answer (`Spawned`/`Error`).** `WriteStdin(X)` right
+//   after `SpawnProfile(X)` on the same socket
+//      runs first and fails with "agent not found". The answer carries the request's `request_id`, so the client can correlate.
+//   ② **Do not send the activation of the same id again before the answer.** Both requests enter the daemon's check/register window
+//   together (it pre-existed;
+//      `SpawnReservation` narrows but does not close it — what changed is that a single connection alone can now reach it).
+//   ★The frontend already follows this★ — `src/api/protocolClient.ts` holds the activation Promise in a `request_id` correlation table and
+//   uses the returned `agent.id` after `await`.
+//   ★Do not revert to ordering★: queuing commands for the same id behind its activation turns that wait into a stall of the whole
+//   connection (activation typically 2s · backstop 15s).
 pub enum AgentCommand {
     /// Activate by profile id. ★Contract of waiting for the answer = 「the call contract of the activation set」 at the head of this enum★.
     Spawn {
@@ -251,13 +246,14 @@ pub enum AgentCommand {
 
     // ── Command bus registration wire (ADR-0155/0156 · TRD §3-7) ───────────────────────────────
     // The daemon dispatch reflects these three into the owner registry and answers with [`AgentEvent::CommandList`]
-    //   (`connection_core.rs`). The sender of the two registrations is the shell — the full `RegisterCommands` per connection
-    //   (`daemon_client/connection.rs`), `UpdateCommands` when the webview screen list changes (`commands/view_bus.rs`).
+    //   (`connection_core.rs`). The senders are the shell: the full
+    //   `RegisterCommands` per connection (`daemon_client/connection.rs`), `UpdateCommands` when the webview screen list changes
+    //   (`commands/view_bus.rs`).
     //
-    // ★Do not put `#[serde(default)]` on `request_id`★ — this crate's [`RequestId::default`]
-    //   **mints a new v4** (`ids.rs`). If a default were allowed, a packet missing that field would get, instead of refusal, **a new correlation key
-    //   that pairs with nothing**, and the reply would never attach (the same-named type on the tool crate side has no `Default`
-    //   at all, the exact opposite — the tool crate's `envelope.rs` records why).
+    // ★Do not put `#[serde(default)]` on `request_id`★ — [`RequestId::default`] **mints a new v4** (`ids.rs`), so a packet missing the
+    //   field would get a **correlation key that pairs
+    //   with nothing** instead of refusal, and the reply would never attach (the tool crate's same-named type has no `Default` — see its
+    //   `envelope.rs`).
     /// The owner puts its full set of declarations **at the moment it attaches**, in one shot (TRD §3-7 clause 1). No round trip per name;
     /// the full set is resent on every reconnect.
     ///
@@ -778,10 +774,9 @@ pub enum StructuredEvent {
         turn_id: Option<String>,
         message_id: Option<String>,
         /// The tool's neutral category. ★If the field is absent (old daemon), the frontend consumer reads it as `Other`★ — a new daemon always carries it.
-        // ADR-0239: `PROTOCOL_VERSION` is not bumped for this field — the same judgment as `TurnEnd` (one direction daemon→shell ·
-        //   nothing to misread on the old side).
-        // ts-rs cannot read this serde attribute, so it warns ("failed to parse") and ignores it — the TS field shape is decided by
-        //   `ts(optional)` below.
+        // ADR-0239: `PROTOCOL_VERSION` not bumped for this field (same judgment as `TurnEnd`: one direction daemon→shell, nothing to
+        //   misread on the old side).
+        // ts-rs cannot read this serde attribute ("failed to parse" warning, ignored) — the TS field shape is decided by `ts(optional)` below.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         category: Option<ToolCategory>,
@@ -791,8 +786,7 @@ pub enum StructuredEvent {
     ///
     /// ★No such event ≠ success★ — absence is 「unknown」 (old daemon · pushed out of the ring · the end never came).
     /// ★It also comes **after** the turn end★ — it attaches to a row of the previous turn. Do not read it as 「new content arrived」 and release the waiting indicator.
-    // ADR-0241: `PROTOCOL_VERSION` is not bumped for this variant — the same judgment as `TurnEnd` (one direction daemon→shell ·
-    //   nothing to misread on an old shell · an old daemon just does not send this event).
+    // ADR-0241: `PROTOCOL_VERSION` not bumped for this variant (same judgment as `TurnEnd`; an old daemon just does not send this event).
     ToolResult { id: String, outcome: ToolOutcome },
     Usage {
         #[ts(type = "number")]
@@ -1146,14 +1140,11 @@ mod tests {
         }
     }
 
-    /// ★The frontend reads these characters as is — pin them with a golden★: the outer envelope discriminator is `"type"`,
-    /// the outcome discriminator is `"kind"`. Giving both the same name would make them overlap in one object and the outcome would vanish.
+    /// ★The frontend reads these characters as is — pin them with a golden★: envelope discriminator `"type"`, outcome discriminator `"kind"` (the same name would overlap
+    /// in one object and the outcome would vanish).
     ///
-    /// ★The neutrality this item pins is one thing, the **discriminator set**★ — those four are exactly the axis the frontend branches on,
-    /// and if backend vocabulary comes in there, this turns red. ★`detail` is not that axis — that field carries the sentence the counterpart
-    /// made as is★ (the last assertion below pins that fact explicitly). Do not read it as 「no backend
-    /// vocabulary at all reaches the wire」 — that is false, and once this spot and the type doc were
-    /// written that way.
+    /// ★The neutrality pinned here is the **discriminator set**★ — the four the frontend branches on; backend vocabulary there turns this red. ★`detail` is not that axis★ — it carries
+    /// the counterpart's sentence as is (the last assertion pins it); it is false that no backend vocabulary reaches the wire.
     #[test]
     fn turn_end_wire_shape_is_pinned_and_the_outcome_discriminant_is_neutral() {
         assert_eq!(
@@ -1183,8 +1174,8 @@ mod tests {
             r#"{"type":"TurnEnd","turn_id":null,"outcome":{"kind":"Unknown"}}"#
         );
 
-        // ★The discriminator set is the neutrality★ — if any value other than the four goes out, backend vocabulary has been put on
-        //   the frontend's branching axis. The values are read as `serde_json` emits them (names are not copied by hand).
+        // ★The discriminator set is the neutrality★ — a value outside the four means backend vocabulary on the frontend's branching axis
+        //   (values read as `serde_json` emits them).
         let discriminants: Vec<String> = [
             TurnOutcome::Completed,
             TurnOutcome::Failed { detail: None },
@@ -1204,9 +1195,9 @@ mod tests {
             ["Completed", "Failed", "Interrupted", "Unknown"]
         );
 
-        // ★And `detail` goes **as is** — this is the contract, not a defect★: the failure reason given by the counterpart is
-        //   the only information, so translating it into neutral vocabulary would mean inventing meaning. Consumers only draw this field
-        //   and do not parse · branch on it (type doc). Its grade is the same as `Error{message}`.
+        // ★`detail` goes **as is** — contract, not defect★: the counterpart's failure reason is the only information, so translating it
+        //   would invent meaning;
+        //   consumers only draw it (type doc).
         let raw = "stream error (serverOverloaded) [willRetry]";
         assert_eq!(
             serde_json::to_string(&StructuredEvent::TurnEnd {
@@ -1477,9 +1468,8 @@ mod tests {
     }
 
     // ── Preset wire contract (ADR-0061) — JSON envelope golden + round-trip ─────────────
-    //
-    // Pins that preset CRUD serializes in the same shape as profiles (variant name tag + fields) — if the wire
-    // format changes silently (field rename/omission), the frontend mirror breaks, so a golden string guards against regression.
+    // Pins that preset CRUD serializes in the same shape as profiles (variant name tag + fields); a golden string guards against silent
+    //   wire changes (field rename/omission).
 
     #[test]
     fn create_preset_command_json_golden() {
@@ -1695,16 +1685,16 @@ mod tests {
 
     // ── Command bus registration wire (ADR-0155/0156) ─────────────────────────────────────────
     //
-    // ★The registration item list field is raw JSON (ADR-0272 decision 3)★ — this measures only the packet's outer shape and 「the field bytes cross
-    //   as is」. The item → bytes golden (with · without `agent_args`) and the guard of the hand-written TS field are owned by the shell edge that wraps
-    //   the field (`daemon_client::protocol_state` tests), and unwrapping an old item missing the field into empty `agent_args` is owned by the daemon edge
-    //   that unwraps the field (`connection_core` tests), with the same literals.
+    // ★The registration item list field is raw JSON (ADR-0272 decision 3)★ — this measures only the packet's outer shape and that the
+    //   field bytes cross as is. The item → bytes golden
+    //   (with · without `agent_args`) and the hand-written TS guard live at the shell edge (`daemon_client::protocol_state` tests);
+    //   unwrapping an old item missing `agent_args`
+    //   is the daemon edge's (`connection_core` tests).
 
     const SPAWN_DECLS: &str = r#"[{"name":"agent.spawn","help":"{\"name\":\"agent.spawn\",\"effect\":\"Write\",\"since\":1}"}]"#;
     const MIXED_DECLS: &str = r#"[{"name":"slot.focus","help":"{}","agent_args":["agent","after_tab"]},{"name":"tab.focus","help":"{}"}]"#;
 
-    /// A registration packet round-trips carrying the item list field — `owner` is a bare string, the field crosses **byte for byte** (the item's
-    /// `help` does not change by a single character — the actual form of the contract that relays do not open it).
+    /// A registration packet round-trips carrying the item list field — `owner` is a bare string, the field crosses **byte for byte** (relays do not open an item's `help`).
     #[test]
     fn register_commands_round_trips_declarations() {
         let cmd = AgentCommand::RegisterCommands {
@@ -1754,9 +1744,8 @@ mod tests {
         assert_eq!(json, serde_json::to_string(&back).unwrap());
     }
 
-    /// ★Old items without the agent-reference field (ADR-0308) and new items with it cross through the same raw field★ — when the field is empty it is
-    /// left out on the wire, so the two goldens above (registration without marks) stand as they are. Reading the missing field as an empty list is the daemon edge's
-    /// job (`connection_core`'s `an_old_register_slot_unpacks_to_no_agent_args`).
+    /// ★Old items without the agent-reference field (ADR-0308) and new items with it cross through the same raw field★ — an empty field is left out on the wire, so the goldens above
+    /// stand; reading the missing field as empty is the daemon edge's job (`connection_core`'s `an_old_register_slot_unpacks_to_no_agent_args`).
     #[test]
     fn decl_agent_args_are_optional_on_the_wire() {
         let old_decls = r#"[{"name":"tab.focus","help":"{}"}]"#;
@@ -1821,8 +1810,8 @@ mod tests {
         }
     }
 
-    /// ★The item list field also checks only 「is it valid JSON」★ (ADR-0272 decisions 3 · 6) — a list with the wrong shape must still decode as a packet
-    /// for the edge to handle that branch (daemon = refuse with that packet's `request_id` · webview path = invoke failure).
+    /// ★The item list field also checks only "is it valid JSON"★ (ADR-0272 decisions 3 · 6) — a wrong-shape list must still decode as a packet for the edge
+    /// (daemon = refuse with the packet's `request_id` · webview = invoke failure).
     #[test]
     fn the_decl_slots_take_any_json_but_reject_non_json() {
         let nil = "00000000-0000-0000-0000-000000000000";
@@ -1858,8 +1847,7 @@ mod tests {
         );
     }
 
-    /// Query round trip. Baking `available=false` in too is intended for now — the daemon does not emit that value
-    /// (ADR-0150 decision 3), but the contract carries both values, and this golden holds that field from silently disappearing.
+    /// Query round trip; bakes `available=false` in too — the daemon does not emit it (ADR-0150 decision 3), but the contract carries both values and this keeps the field from silently disappearing.
     #[test]
     fn list_commands_and_command_list_round_trip() {
         let req = AgentCommand::ListCommands {
@@ -2022,9 +2010,8 @@ mod tests {
         }
     }
 
-    /// A packet missing `request_id` **must be refused** — this crate's `RequestId::default()` mints a new v4,
-    /// so with `#[serde(default)]` attached, an unpaired correlation key would silently appear (the reply would never attach).
-    /// If that attribute creeps in by mistake, this assertion breaks first.
+    /// A packet missing `request_id` **must be refused**: `RequestId::default()` mints a new v4, so `#[serde(default)]` would silently create an unpaired correlation key (the reply
+    /// would never attach).
     #[test]
     fn registration_variants_reject_missing_request_id() {
         for json in [
@@ -2105,9 +2092,8 @@ mod tests {
         );
     }
 
-    /// ★The half that protects old peers when the vocabulary grows★: if one unknown kind string breaks decoding of the **whole message**
-    /// of `AgentProfile`, that profile disappears from the screen entirely (not just the field going empty). It pairs with the frontend table's
-    /// `table[kind] ?? Other`.
+    /// ★Protects old peers when the vocabulary grows★: one unknown kind string must not break decoding of the **whole** `AgentProfile` message (the profile would vanish
+    /// from the screen). Pairs with the frontend's `table[kind] ?? Other`.
     // ADR-0172
     #[test]
     fn an_unknown_failure_kind_is_absorbed_instead_of_failing_the_whole_profile() {
@@ -2162,14 +2148,10 @@ mod tests {
         }
     }
 
-    /// ★The wire vocabulary and the **generated TS union** must be the same★: the type the frontend receives is made by ts-rs, and the actual
-    /// JSON is made by `as_wire_str`. If the two diverge, the frontend table absorbs every value into `Other` and the messages
-    /// silently squash into one.
+    /// ★The wire vocabulary and the **generated TS union** must be the same★: ts-rs builds the frontend type, `as_wire_str` builds the JSON; if they diverge the frontend table
+    /// absorbs every value into `Other`.
     ///
-    /// ★Do not write the vocabulary again inside the test (then it becomes a test that measures nothing)★: the old form compared hand-written
-    ///   strings in a tuple, and when the variant was changed `Other`→`Unknown` while the arm kept emitting `"Other"`,
-    ///   it still **passed** — exactly the accident this doc says it prevents. Now one side comes from the generated file,
-    ///   the other from the list the macro builds with `stringify!`.
+    /// ★Do not write the vocabulary again inside the test (it would measure nothing)★: one side comes from the generated file, the other from the macro's `stringify!` list.
     // ADR-0172
     #[test]
     fn failure_kind_vocabulary_matches_the_generated_ts_union() {
@@ -2203,9 +2185,8 @@ mod tests {
         }
     }
 
-    /// ★Values containing escapes must decode too★: back when it was received as a borrowed `&str`, a single `"Other"`
-    /// broke the **whole message** of `AgentProfile`, and the src-tauri receiver silently discarded that failure, so the only symptom
-    /// was "the tree never changes".
+    /// ★Values containing escapes must decode too★: a borrowed `&str` broke the **whole** `AgentProfile` message on a single `"Other"`, and the src-tauri receiver silently
+    /// discarded it (symptom: the tree never changes).
     // ADR-0172
     #[test]
     fn an_escaped_failure_kind_string_still_decodes() {
@@ -2235,17 +2216,18 @@ mod tests {
 
     // ── Command bus wire contract (step 2 of ADR-0155 decision 3) ─────────────────────────────────
     //
-    // ★What these goldens guard is the hand-written `#[ts(type = …)]`★ — the envelope types are owned by the tool crate, so
-    //   they have no ts-rs derive (that crate does not take ts-rs), and so this file writes the TS field by hand. Even if the Rust side's
-    //   shape changes, that string silently stays as is, so the actual JSON is pinned here to expose divergence.
+    // ★These goldens guard the hand-written `#[ts(type = …)]`★ — the envelope types belong to the tool crate (no ts-rs derive), so the TS
+    //   field is written by hand and silently stays
+    //   as is when the Rust shape changes; the actual JSON is pinned here.
     //
-    // ★The envelope · reply fields are raw JSON (ADR-0272 decision 3 — the registration item list field follows the same rule, see the registration section above)★ — so the golden of a packet carrying that field is built
-    //   from byte literals, and inside the raw field only 「it crosses byte for byte」 is measured. The golden of envelope · reply struct → bytes (the side that
-    //   stands against the hand-written TS field) is owned by the edge that unwraps that field, with the same literals (shell `daemon_client::protocol_state` · daemon
-    //   `connection_core` tests).
+    // ★The envelope · reply fields are raw JSON (ADR-0272 decision 3; the registration list follows the same rule)★ — packet goldens are
+    //   byte literals and only "crosses byte for byte"
+    //   is measured inside the raw field. Envelope · reply struct → bytes goldens (against the hand-written TS field) live at the
+    //   unwrapping edge with the same literals
+    //   (shell `daemon_client::protocol_state`, daemon `connection_core` tests).
     //
-    // ★One literal being used **together** by the relay leg and the sender leg is intended★ — that the envelope · reply of the two legs have the same fields · same
-    //   shape is the contract (TRD §3-2 symmetry), and having a different literal per leg would hide that divergence.
+    // ★One literal used **together** by the relay leg and the sender leg is intended★ — same fields · same shape in both legs is the
+    //   contract (TRD §3-2 symmetry).
 
     const NIL_ENVELOPE: &str = r#"{"name":"tab.create","request_id":"00000000-0000-0000-0000-000000000000","owner":"shell","proto_ver":1,"args":{"window":"main"}}"#;
     const NIL_FAILED_REPLY: &str = r#"{"request_id":"00000000-0000-0000-0000-000000000000","outcome":{"Err":{"code":"NOT_FOUND","message":"no view 'x'","retry":"never"}}}"#;
@@ -2283,9 +2265,8 @@ mod tests {
         );
     }
 
-    /// ★The packet checks only 「is it valid JSON」 and not the envelope shape★ (ADR-0272 decisions 3 · 6) — an envelope with the wrong shape must still
-    /// decode as a packet for the edge to handle that branch (shell = no request number · daemon = `Error{request_id: None}`).
-    /// Conversely, a field that is not JSON is refused with the whole packet — then it never reaches the edge.
+    /// ★The packet checks only "is it valid JSON", not the envelope shape★ (ADR-0272 decisions 3 · 6): a wrong-shape envelope must still decode for the edge to handle
+    /// (shell = no request number · daemon = `Error{request_id: None}`); a non-JSON field is refused with the whole packet.
     #[test]
     fn the_envelope_slot_takes_any_json_but_rejects_non_json() {
         for envelope in [r#"{"name":1}"#, "[]", "null", r#""tab.create""#] {
@@ -2347,10 +2328,8 @@ mod tests {
         }
     }
 
-    /// ★The reply field also checks only 「is it valid JSON」★ (ADR-0272 decisions 3 · 6) — a reply with the wrong shape must still decode as a packet for the edge
-    /// to handle that branch (shell = no request number · daemon = `Error{request_id: None}`). The tolerance the TS field advertises (three fields
-    /// absent · `null` · fields outside the contract) is measured not by this field but by the edge that unwraps the reply (daemon
-    /// `the_outcome_slot_accepts_everything_its_ts_type_advertises`).
+    /// ★The reply field also checks only "is it valid JSON"★ (ADR-0272 decisions 3 · 6) — a wrong-shape reply must still decode for the edge (shell = no request number ·
+    /// daemon = `Error{request_id: None}`). The tolerance the TS field advertises is measured at the unwrapping edge (daemon `the_outcome_slot_accepts_everything_its_ts_type_advertises`).
     #[test]
     fn the_reply_slot_takes_any_json_but_rejects_non_json() {
         for reply in [

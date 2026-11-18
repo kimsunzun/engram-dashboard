@@ -1,11 +1,11 @@
-//! Tools by which a querier handles upstream strings — cleanup before putting into display fields (plan · model name) and word matching against error messages.
+//! Tools a querier uses on upstream strings — cleanup before display fields (plan · model name) and word matching against error messages.
 //!
-//! ★Tools that move an upstream string into logs · [`super::ProbeError`] messages are not placed here★ — upstream messages may carry
-//!   account information. What goes into a display field is only a short value used as a name. The only path that carries the original text of an error message is
+//! ★No tool moving an upstream string into logs · [`super::ProbeError`] messages is placed here★ — upstream messages may carry account
+//!   information. A display field takes only a short name-like value; the only path carrying an error message's original text is
 //!   [`super::UpstreamText`] (a dedicated field that cannot be printed to logs).
 
-/// External string → display field value. Strips surrounding whitespace, and `None` if empty or if it has a control character · format character · line/paragraph separator,
-/// and truncates to `max_chars` characters (not bytes) if it overflows.
+/// External string → display field value. Strips surrounding whitespace, and `None` if empty or if it has a control character · format
+/// character · line/paragraph separator, and truncates to `max_chars` characters (not bytes) if it overflows.
 pub fn display_text(text: &str, max_chars: usize) -> Option<String> {
     let text = text.trim();
     if text.is_empty() || text.chars().any(is_unprintable) {
@@ -14,15 +14,17 @@ pub fn display_text(text: &str, max_chars: usize) -> Option<String> {
     Some(text.chars().take(max_chars).collect())
 }
 
-/// Characters that must not be shown on screen as is — control characters (including `\n` · `\t` · ESC) + [`is_invisible_format`]. A display field drops the
-/// value if it has any, and the original-text field replaces them with a blank or U+FFFD so it stays traceable (rule = [`super::UpstreamText::new`]).
+/// Characters that must not be shown on screen as is — control characters (including `\n` · `\t` · ESC) + [`is_invisible_format`]. A
+/// display field drops the value if it has any, and the original-text field replaces them with a blank or U+FFFD so it stays traceable
+///   (rule = [`super::UpstreamText::new`]).
 pub(super) fn is_unprintable(c: char) -> bool {
     c.is_control() || is_invisible_format(c)
 }
 
-/// Unicode general category Cf (format — bidirectional overrides · zero-width characters · tags etc.) + line/paragraph separators (U+2028·U+2029).
-/// ★A table carried over by hand because std has no category API★ — the whole of Unicode 16.0's Cf (checked against Python `unicodedata` 16.0.0,
-///   2026-09-27). Characters added to Cf in later versions are not filtered.
+/// Unicode general category Cf (format — bidirectional overrides · zero-width characters · tags etc.) + line/paragraph separators
+///   (U+2028·U+2029).
+/// ★A hand-carried table because std has no category API★ — all of Unicode 16.0's Cf (checked against Python `unicodedata` 16.0.0,
+///   2026-09-27). Characters added to Cf later are not filtered.
 fn is_invisible_format(c: char) -> bool {
     matches!(
         c,
@@ -50,9 +52,9 @@ fn is_invisible_format(c: char) -> bool {
     )
 }
 
-/// Whether `piece` is at the head of a word in `text` (the character right before is not ASCII alphanumeric) — with `whole` the end must also be a
-/// word boundary. So that the same piece inside another word · id (`rate limit` in `moderate limit` · `log in` in `catalog in` · `429` in `req_14290a`)
-/// is not read as a phrase. Case is compared as is — folding is the caller's share.
+/// Whether `piece` is at a word head in `text` (the preceding character is not ASCII alphanumeric); with `whole` the end must be a word
+/// boundary too — so the same piece inside another word · id (`rate limit` in `moderate limit` · `log in` in `catalog in` · `429` in
+/// `req_14290a`) is not read as a phrase. Case is compared as is (folding is the caller's).
 pub fn has_word(text: &str, piece: &str, whole: bool) -> bool {
     text.match_indices(piece).any(|(at, _)| {
         let before = text.get(..at).and_then(|head| head.chars().next_back());

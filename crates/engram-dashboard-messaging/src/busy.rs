@@ -1,44 +1,31 @@
-//! busy — recipient turn-state interpretation + idle gate seam (ADR-0104 decision 3 · ADR-0113 decision 2).
+//! busy — recipient turn-state interpretation + idle gate seam (ADR-0104 decision 3, ADR-0113 decision 2).
 //!
-//! ★Role = **policy** only★: the **fact** "is it mid-turn right now" is held by the host's shared observation layer (ADR-0113
-//!   decision 1), and this module **interprets that fact as a value judgment of mail**. Three pieces:
-//!     ① `TurnFacts` — the port that reads the facts (implemented by the host adapter).
-//!     ② `BusyPolicy` — builds the `BusyGate` answer from those facts + this module's policy (positive-knowledge-only · the `BUSY_MAX_TURN` limit),
-//!        and wakes turns past the limit with a doorbell.
-//!     ③ `BusyGate`/`IdleNotifier` — the door the service asks through, and the flush doorbell exit.
-//!
-//! ★Busy = a user-waiting list exists ∨ stopped after an error ∨ (mid-turn ∧ within the limit) (ADR-0231)★: the first two facts have no
-//!   limit — user input comes first (N6·N8), and mail is not pushed in after a real error (N11). It is an intended exception to
-//!   ADR-0104 「going late is better than not going」.
-//!
-//! ★positive-knowledge-only (load-bearing — spec §5 capability fallback)★: an (id, epoch) with **no** observation is entirely
-//!   **treated as idle** (= inject at once). Reading "unknown" as busy would make delivery **wait forever** for backends that cannot be observed or in the window before
-//!   observation has started. busy is true **only when there is an observed fact**.
-//!
-//! ★The fact layer is **not mutated** (ADR-0113 decision 2 — never violate)★: neither the limit decision nor the sweep removes
-//!   entries from the table. That table is a shared facility used with other consumers (UI input locking etc.), and each consumer has a
-//!   different limit — if one consumer erases an entry as "old", another consumer's fact evaporates. All done here is
-//!   **read and decide by one's own criterion**.
-//!
-//! ★busy observation targets = backends that emit turn signals★: turn events come only from agents that have a backend decoder,
-//!   and the decoder exists under **exactly the same condition** as the structured-output capability.
-//!   That proxy value rides on the roster entry as `LiveAgent::turn_signal` (ADR-0116 decision 7), and the send path
-//!   injects at once for the kind with `turn_signal == false` **without asking this gate at all**. The day the proxy breaks
-//!   (a backend appears that is structured but has no turn events), a real capability field will be added — consistent with the ADR-0104 capability
-//!   principle (unobservable = immediate-injection fallback).
-//!
-//! ★Callback discipline (load-bearing — never violate)★: `IdleNotifier::notify_idle` is also called on **the host's output pump
-//!   thread**. Its implementation must do **only one thing**, a non-blocking notification send — doing injection, taking the messaging
-//!   lock or a blocking write would block the output pump behind delivery work and delay every agent's output stream.
-//!   The actual flush is done by the flush worker that received the notification.
-//!
-//! ★Known unverified (measurement item — spec §7)★: it is unverified whether the `result` line of a nested Task subagent leaks as a **parent turn end**
-//!   signal. If it does, the parent could be misjudged as idle while still mid-turn and injected early
-//!   (no loss, only timing off). It is left unresolved as a real-harness measurement item.
-// ADR-0104
-// ADR-0110
-// ADR-0113
-// ADR-0231
+//! ★Role = **policy** only★: the **fact** "is it mid-turn" is held by the host's shared observation layer (ADR-0113 decision 1); this
+//!   module interprets it as a mail value judgment. ① `TurnFacts` — port reading the
+//! facts (host adapter) ② `BusyPolicy` — builds the `BusyGate` answer from facts + policy (positive-knowledge-only, the `BUSY_MAX_TURN`
+//!   limit) and wakes turns past the limit with a doorbell ③ `BusyGate`/`IdleNotifier` —
+//! the door the service asks through and the flush doorbell exit.
+//! ★Busy = a user-waiting list exists ∨ stopped after an error ∨ (mid-turn ∧ within the limit) (ADR-0231)★: the first two have no limit —
+//!   user input comes first (N6·N8), and mail is not pushed in after a real error (N11);
+//! an intended exception to ADR-0104 "going late is better than not going".
+//! ★positive-knowledge-only (load-bearing — spec §5 capability fallback)★: an (id, epoch) with **no** observation is **treated as idle**
+//!   (inject at once); reading "unknown" as busy would make delivery wait forever for
+//! unobservable backends or before observation starts. Busy is true **only with an observed fact**.
+//! ★The fact layer is not mutated (ADR-0113 decision 2 — never violate)★: neither the limit decision nor the sweep removes table entries;
+//!   the table is shared with other consumers (UI input locking etc.) with different limits,
+//! so one consumer erasing an "old" entry would evaporate another's fact. Here: **read and decide by one's own criterion**.
+//! ★Observation targets = backends that emit turn signals★: turn events come only from agents with a backend decoder, which exists under
+//!   exactly the structured-output capability condition; the proxy rides on the roster entry as
+//! `LiveAgent::turn_signal` (ADR-0116 decision 7), and the send path injects at once for `turn_signal == false` **without asking this
+//!   gate**. If the proxy breaks (a structured backend with no turn events), add a real
+//! capability field (ADR-0104 capability principle).
+//! ★Callback discipline (load-bearing)★: `IdleNotifier::notify_idle` is also called on **the host's output pump thread**; its
+//!   implementation must do **only a non-blocking notification send** — injection, the messaging lock or
+//! a blocking write would stall every agent's output stream behind delivery. The flush worker that receives it does the flush.
+//! ★Known unverified (spec §7)★: whether the `result` line of a nested Task subagent leaks as a **parent turn end** signal; if so the
+//!   parent could be judged idle mid-turn and injected early (no loss, only timing). Left as a
+//! real-harness measurement item.
+// ADR-0104, ADR-0110, ADR-0113, ADR-0231
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -46,41 +33,35 @@ use std::time::{Duration, Instant};
 
 use crate::PeerId;
 
-/// ★busy limit (fail-open safety valve — round-3 finding 4, internal choice: **30 minutes**)★: a "mid-turn" observation older than this
-///   from the last turn signal is judged idle, seen as **wreckage of an abnormally ended turn**.
-///
-/// ★Why a limit is needed★: the turn-end signal is the only in-band release. If a turn ends abnormally (parse failure · decoder
-///   fault · missing end line), every delivery addressed to that recipient is folded at every doorbell and finally expires by TTL
-///   ("not arriving" = the worst failure mode of messaging). Frequency of occurrence is unmeasured (spec §7 item).
-/// ★Why the limit is safe (what is lost)★: the consequence of a misjudgment (seeing idle when it is actually mid-turn) is **injection mid-turn**,
-///   and the claude CLI puts stdin into an internal queue mid-turn and **reads it on the next turn** (measured user-facing behavior — spec §7).
-///   So the worst cost is only that "when it is read" gets blurry, and **there is no loss**. Without the limit, on the other hand, all mail
-///   addressed to that recipient does not arrive until TTL — incomparably worse (ADR-0104 "going late is better than not going").
-/// ★Why 30 minutes★: at human-conversation message rates a 30-minute no-output turn is far outside the normal range (any one of a tool call ·
-///   delta · usage arriving makes the fact layer refresh the time, so 30 minutes means the span "output has completely stopped and there is
-///   no turn-end signal either"). Shorter cuts normal long turns, and longer delays recovery.
-/// ★Applied only to turn observation (`in_turn`)★ — this limit does not release `inputs_pending` or `last_end_failed` (module header).
+/// ★busy limit (fail-open safety valve — round-3 finding 4; **30 minutes**)★: a "mid-turn" observation older than this since the last turn
+///   signal is judged idle, as **wreckage of an abnormally ended turn**.
+/// ★Why a limit★: the turn-end signal is the only in-band release; if a turn ends abnormally (parse failure, decoder fault, missing end
+///   line) every delivery to that recipient is folded at each doorbell and finally expires by TTL
+/// (the worst failure mode of messaging); frequency unmeasured (spec §7). ★Why safe★: a misjudgment means **injection mid-turn**, and the
+///   claude CLI queues stdin mid-turn and reads it next turn (measured — spec §7), so the worst
+/// cost is blurred read time, **no loss**; without the limit all mail waits until TTL (ADR-0104). ★Why 30 min★: at human message rates a
+///   30-minute no-output turn is far outside normal (any tool call, delta or usage refreshes the
+/// fact's time, so it means output stopped completely with no end signal); shorter cuts normal long turns, longer delays recovery.
+///   ★Applies only to turn observation (`in_turn`)★ — not to `inputs_pending` or `last_end_failed`.
 pub const BUSY_MAX_TURN: Duration = Duration::from_secs(30 * 60);
 
-/// ★idle gate lookup seam (ADR-0012)★ — the only door through which MessagingService asks "can this recipient receive mail right now".
-/// The service calls only `busy_reason` (delivery decision = `is_some()`, hint text = that value).
-///
-/// ★Contract★: a pure query — no side effects, no blocking (short locks only). It must be safe to call **while holding** the messaging lock
-///   (current call sites call it outside the lock, but keeping this contract means no deadlock even if future call sites grow).
+/// ★Idle gate lookup seam (ADR-0012)★ — the only door through which MessagingService asks "can this recipient receive mail now"; the
+///   service calls only `busy_reason` (delivery decision = `is_some()`, hint = that value).
+/// ★Contract★: a pure query — no side effects, no blocking (short locks only); safe to call **while holding** the messaging lock (current
+///   sites call outside it, but this keeps future sites deadlock-free).
 pub trait BusyGate: Send + Sync {
     fn is_busy(&self, id: PeerId, epoch: u32) -> bool;
 
-    /// The reason if busy, otherwise `None`. ★The service blocks delivery on the `is_some()` of this value and picks the hint text
-    /// by that value★ — `MessagingService` does not call `is_busy`.
-    /// ★`is_busy` must always equal the `is_some()` of this★: if one of the two is overridden, adjust both
-    /// together so they do not diverge. An implementation that does not know the reason answers with the default (if `is_busy`, mid-turn).
+    /// The reason if busy, else `None`. ★The service blocks delivery on this `is_some()` and picks the hint by the value★ (it does not
+    ///   call `is_busy`). ★`is_busy` must always equal this `is_some()`★ — override both together;
+    /// an implementation not knowing the reason answers the default (mid-turn if `is_busy`).
     // ADR-0231
     fn busy_reason(&self, id: PeerId, epoch: u32) -> Option<BusyReason> {
         self.is_busy(id, epoch).then_some(BusyReason::InTurn)
     }
 }
 
-/// Why the recipient cannot receive mail — for choosing hint text. If two or more overlap, the one written higher wins (`BusyPolicy::busy_reason`).
+/// Why the recipient cannot receive mail — for hint text. If several overlap, the one written higher wins (`BusyPolicy::busy_reason`).
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusyReason {
@@ -115,12 +96,10 @@ pub struct TurnFact {
     pub last_end_failed: bool,
 }
 
-/// ★Turn-fact lookup port (ADR-0110 decision 3 · ADR-0113 decision 1)★ — the door through which the kernel reads the host's shared observation layer **without
-///   knowing it even as a type**. The production implementation is owned by the host adapter.
-///
-/// ★Read-only is the contract★: do not add "erase/mark" to this port (basis = module header).
-/// ★Why the values are returned together★: if asked separately, a signal slips in between the two lookups and the decision is made on an impossible combination like "mid-turn but the time is old" or
-///   "the turn ended but the error is not yet written".
+/// ★Turn-fact lookup port (ADR-0110 decision 3, ADR-0113 decision 1)★ — the door through which the kernel reads the host's shared
+///   observation layer **without knowing it even as a type**; production implementation = host adapter.
+/// ★Read-only is the contract★ (no "erase/mark" — module header). ★Values returned together★: separate lookups let a signal slip in and
+///   yield impossible combinations ("mid-turn but time old", "turn ended but error not written").
 pub trait TurnFacts: Send + Sync {
     /// The observed value of this (id, epoch). `None` = unobserved (no fact at all).
     fn turn_fact(&self, id: PeerId, epoch: u32) -> Option<TurnFact>;
@@ -129,33 +108,29 @@ pub trait TurnFacts: Send + Sync {
     fn in_turn_snapshot(&self) -> Vec<(PeerId, u32, Instant)>;
 }
 
-/// ★Turn-end (idle transition) notification seam★ — the entry where the host reports "this agent's turn has ended", and the exit where the limit sweep
-///   wakes a stopped turn. The production implementation does a non-blocking send to the flush worker channel.
-///
-/// ★Contract (load-bearing)★: **non-blocking and non-reentrant** (basis = module header callback discipline).
-/// ★Idempotency dependence (accepted design)★: a notification goes out on **every turn-end signal** (whether it was a transition or not). Why:
-///   narrowing it to "only when the previous state was busy" would drop the notification for a turn that ends at once with no assistant event, and parking would be
-///   stranded until the next turn — we choose a **redundant notification (harmless)** over a missed delivery (fatal). The cost of a redundant notification is
-///   only an empty-queue drain no-op. The upper bound on channel pressure is the host notification implementation's responsibility.
+/// ★Turn-end (idle transition) notification seam★ — where the host reports "this agent's turn ended" and where the limit sweep wakes a
+///   stopped turn; production = a non-blocking send to the flush worker channel.
+/// ★Contract (load-bearing)★: **non-blocking and non-reentrant** (module header callback discipline). ★Idempotency dependence (accepted)★:
+///   a notification goes out on **every turn-end signal**, transition or not — narrowing to
+/// "only when the previous state was busy" would drop the notification for a turn ending at once with no assistant event, stranding
+///   parking until the next turn; a redundant notification (an empty-queue drain no-op) is chosen over a miss.
+/// Channel pressure bound is the host implementation's responsibility.
 pub trait IdleNotifier: Send + Sync {
     fn notify_idle(&self, id: PeerId);
 }
 
-/// ★BusyPolicy — the gate that puts the mail policy on top of the facts (C2 · ADR-0113 decision 2)★. One is made at daemon boot and
-///   shared by MessagingService (gate lookup) and the sweep task (limit fail-open).
-///
-/// ★The only state is the limit-decision ledger, and that is **policy** state★: all facts are beyond the port. Since the shared table cannot be
-///   erased (module header), the judgment "this signal of this incarnation is seen as wreckage" is written down on this side — that is both the gate's
-///   answer and the "already woken" mark.
-/// ★It does not read the clock (determinism kept)★: the limit comparison happens only inside `sweep_stale_busy`, which takes `now` as an argument,
-///   and the lookup (`is_busy`) just looks at that ledger. So the crate purity discipline (clock injection) holds in this
-///   module too, and the decision time is pinned to the sweep period, making observable behavior deterministic.
-/// ★Lock = this one ledger, notification outside the lock (ADR-0006)★: `notify_idle` is an external call, so it is not called while holding the lock.
+/// ★BusyPolicy — the gate putting mail policy on top of the facts (C2, ADR-0113 decision 2)★: one made at daemon boot, shared by
+///   MessagingService (gate lookup) and the sweep task (limit fail-open).
+/// ★The only state is the limit-decision ledger — **policy** state★: facts are beyond the port; since the shared table cannot be erased,
+///   "this signal of this incarnation is seen as wreckage" is written down here — both the gate's answer and
+/// the "already woken" mark. ★No clock reads★: the limit comparison happens only in `sweep_stale_busy` (takes `now`) and lookup just reads
+///   the ledger, so clock injection holds and decision time is pinned to the sweep period (deterministic).
+/// ★Lock = this one ledger, notify outside the lock (ADR-0006)★: `notify_idle` is an external call.
 pub struct BusyPolicy {
     facts: Arc<dyn TurnFacts>,
     notifier: Arc<dyn IdleNotifier>,
-    /// The incarnation **judged wreckage** by exceeding the limit → the last signal time seen then. If the value changes (a new signal came) the judgment is
-    /// void — so the moment the next signal comes it returns to busy without waiting for the sweep.
+    /// The incarnation **judged wreckage** by exceeding the limit → the last signal time seen then. If the value changes (a new signal)
+    ///   the judgment is void — it returns to busy at once without waiting for the sweep.
     stale: Mutex<HashMap<(PeerId, u32), Instant>>,
 }
 
@@ -168,15 +143,13 @@ impl BusyPolicy {
         }
     }
 
-    /// ★Limit sweep (round-3 finding 4)★ — **judges wreckage** for "mid-turn" observations past `BUSY_MAX_TURN` and **wakes**
-    ///   their owner **with a doorbell** (the waiting parking is delivered then). Called by the daemon's periodic sweep task.
-    ///   Return = the number of ids woken this time.
-    ///
-    /// ★Waking is half of the fix★: flipping only the decision leaves the parking addressed to that recipient sitting there until the **next trigger** (appearance/turn end/new send)
-    ///   — but this situation is by definition one where "that trigger does not come" (turn-end signal lost).
-    /// ★One doorbell per wreckage★: since the fact cannot be erased, the same wreckage is seen again every period — if the last signal
-    ///   time equals the ledger, it is wreckage already handled. If a new signal comes and stops again, that is new wreckage.
-    /// ★The ledger is swapped each time for "what is wreckage now"★: entries of incarnations that revived or were reaped do not pile up.
+    /// ★Limit sweep (round-3 finding 4)★ — **judges wreckage** for "mid-turn" observations past `BUSY_MAX_TURN` and **wakes** the owner
+    ///   with a doorbell (waiting parking is delivered then); called by the daemon's periodic sweep task.
+    /// Returns the number of ids woken. ★Waking is half the fix★: flipping only the decision leaves parking until the next trigger
+    ///   (appearance/turn end/new send) — which by definition does not come here (turn-end signal lost).
+    /// ★One doorbell per wreckage★: the fact cannot be erased and is seen every period; last signal time equal to the ledger = already
+    ///   handled; a new signal that stops again = new wreckage. ★The ledger is swapped each
+    /// time for "what is wreckage now"★: revived/reaped incarnations do not pile up.
     pub fn sweep_stale_busy(&self, now: Instant) -> usize {
         let stale_now: Vec<(PeerId, u32, Instant)> = self
             .facts
@@ -241,7 +214,7 @@ impl BusyGate for BusyPolicy {
     }
 }
 
-/// ★Harness/test-only fact source★ — plants facts by hand instead of the host observation layer to drive the policy deterministically.
+/// ★Harness/test-only fact source★ — plants facts by hand in place of the host observation layer to drive the policy deterministically.
 #[cfg(any(test, feature = "test-harness"))]
 #[derive(Default)]
 pub struct ScriptedTurnFacts {
@@ -254,7 +227,7 @@ impl ScriptedTurnFacts {
         Arc::new(Self::default())
     }
 
-    /// Plants this incarnation as "mid-turn, last signal = `at`" — leaves the already planted waiting-list and stopped slots as they are.
+    /// Plants this incarnation as "mid-turn, last signal = `at`" — leaves already planted waiting-list and stopped slots as they are.
     pub fn set_in_turn(&self, id: PeerId, epoch: u32, at: Instant) {
         self.update(id, epoch, at, |f| {
             f.in_turn = true;
@@ -262,8 +235,7 @@ impl ScriptedTurnFacts {
         });
     }
 
-    /// Plants this incarnation as "turn ended, last signal = `at`" (observed but not mid-turn). Leaves the waiting-list and stopped
-    /// slots as they are.
+    /// Plants this incarnation as "turn ended, last signal = `at`" (observed, not mid-turn); leaves waiting-list and stopped slots as they are.
     pub fn set_idle(&self, id: PeerId, epoch: u32, at: Instant) {
         self.update(id, epoch, at, |f| {
             f.in_turn = false;
@@ -271,13 +243,13 @@ impl ScriptedTurnFacts {
         });
     }
 
-    /// Changes only the waiting-list slot. If there is no fact yet, plants it on top of "not a turn, last signal = `at`".
+    /// Changes only the waiting-list slot; with no fact yet, plants it on "not a turn, last signal = `at`".
     // ADR-0231
     pub fn set_inputs_pending(&self, id: PeerId, epoch: u32, pending: bool, at: Instant) {
         self.update(id, epoch, at, |f| f.inputs_pending = pending);
     }
 
-    /// Changes only the stopped-after-error slot. If there is no fact yet, plants it on top of "not a turn, last signal = `at`".
+    /// Changes only the stopped-after-error slot; with no fact yet, plants it on "not a turn, last signal = `at`".
     // ADR-0231
     pub fn set_last_end_failed(&self, id: PeerId, epoch: u32, failed: bool, at: Instant) {
         self.update(id, epoch, at, |f| f.last_end_failed = failed);

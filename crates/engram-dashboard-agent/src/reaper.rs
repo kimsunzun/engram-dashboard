@@ -1,19 +1,16 @@
 //! Session reaper — the single consumer of the exit classification (ADR-0019).
 //!
-//! A **single supervisor thread** consumes the `ReapMsg` that the pump emits when it is the finish winner, and does the following:
-//! remove from the sessions map (after checking the epoch matches) → profile disposition (auto_restore=false downgrade /
-//! left untouched — auto-delete abolished by ADR-0083) → list notification.
+//! A **single supervisor thread** consumes the `ReapMsg` the pump emits as finish winner: remove from the sessions map (epoch must match)
+//! → profile disposition (auto_restore=false downgrade / untouched — auto-delete abolished by ADR-0083) → list notification.
 //!
 //! Invariants:
-//! - The kill 2 verbs (ADR-0001) and finalize once (ADR-0005) are not touched by the reaper — it only consumes the done
-//!   signal. ReapMsg is emitted once, on the finalize winner path.
-//! - Lock order (ADR-0006): the sessions write-lock section = epoch check + remove only. ProfileRegistry
-//!   mutate (disk IO) and the status_sink notification are outside the lock.
-//! - epoch (ADR-0007/0084): checks the incarnation marker **matches** before reaping → an old done cannot wrongly delete a respawned new session.
-//!   A match, not an ordering — the marker is a random number drawn per incarnation, so order has no meaning (`AgentProfile::epoch`).
-//!   The same epoch-guard is extended up to apply_disposition (ADR-0084) → a stale reap cannot degrade the auto_restore of a live session
-//!   attached by reactivation (a different marker).
-//! - idempotency: only the single sessions.remove() Some winner does disposition and notification (once even if the same done comes twice).
+//! - The kill 2 verbs (ADR-0001) and finalize once (ADR-0005) are untouched — the reaper only consumes the done signal, emitted once on
+//!   the winner path.
+//! - Lock order (ADR-0006): the sessions write-lock section = epoch check + remove only; ProfileRegistry mutate (disk IO) and the
+//!   status_sink are outside it.
+//! - epoch (ADR-0007/0084): the incarnation marker must **match** before reaping, so an old done cannot delete a respawned session. A
+//!   match, not an ordering (random per incarnation; `AgentProfile::epoch`). The same guard extends to apply_disposition (ADR-0084).
+//! - idempotency: only the single sessions.remove() Some winner does disposition and notification.
 //!
 //! tauri import 0.
 
@@ -35,8 +32,7 @@ pub enum ReaperCmd {
     Stop,
 }
 
-/// Shares the AgentManager's field Arcs **as is** — the manager and the reaper see the same
-/// sessions/profiles/status_sink/control (no copies).
+/// Shares the AgentManager's field Arcs **as is** — the manager and the reaper see the same sessions/profiles/status_sink/control.
 pub struct ReaperDeps {
     pub sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     pub profiles: Arc<ProfileRegistry>,
@@ -45,13 +41,12 @@ pub struct ReaperDeps {
 }
 
 impl ReaperDeps {
-    /// Handles one reap (ADR-0019 §reap_one). This function is called only from the reaper thread (or tests).
+    // ADR-0019 §reap_one
     pub fn reap_one(&self, msg: ReapMsg) {
         // 1. Write-lock section = epoch check + remove only (ADR-0006). Released right after the Arc clone.
-        //    ★poison-tolerant★: even if another thread panics while holding the sessions lock and the lock
-        //    is poisoned, the reaper must keep reaping (zombie prevention). The data is just a HashMap and no invariant
-        //    is broken, so it recovers the guard and proceeds (double safety with catch_unwind). The place that holds the write lock is
-        //    outside the containment marker, so in the production process the hook ends that panic first — this is the net for test builds without the hook.
+        //    ★poison-tolerant★: the reaper must keep reaping (zombie prevention) on a poisoned sessions lock — the data is a plain HashMap with
+        //    no invariant to break, so it takes the guard. The lock holder is outside the containment marker: in production the hook ends that
+        //    panic first; this is the net for test builds without the hook.
         // ADR-0292
         let removed = {
             let mut sessions = sync::write(&self.sessions);
@@ -61,24 +56,20 @@ impl ReaperDeps {
             }
         };
 
-        // 2. Only the single remove Some winner proceeds below (idempotency).
         if removed.is_none() {
             return;
         }
-        // Drops Arc<AgentSession>. ★Does not assume it is the "last" reference★: the resume-failure observation
-        //   (`AgentManager::early_activation_verdict`) holds the same Arc during the early-exit window, so on that
-        //   path the actual release is pushed back **until that observer's next poll** (currently every 100ms). Harmless —
-        //   the terminal transition is the pump's alone (ADR-0005), and the drop of the group owner (`GroupOwner`) held by the link runs as is when the last
-        //   reference goes away. Usually the child process is already dead, so only handle reclamation is deferred.
-        // ★The end of a contained pump panic is different (ADR-0292 decision 6)★: the CLI reaches here alive, and this drop (if it is the last reference)
-        //   lets go of the group owner so `KILL_ON_JOB_CLOSE` ends the CLI tree — if the observer above holds it, that much later.
-        //   On non-Windows the group owner is a no-op, so the CLI may remain (unmeasured).
+        // Drops Arc<AgentSession>. ★Does not assume it is the "last" reference★: the resume-failure observer
+        //   (`AgentManager::early_activation_verdict`) holds the same Arc during the early-exit window, so the release can wait until its
+        //   next poll (100ms). Harmless — the terminal transition is the pump's alone (ADR-0005), and the link's `GroupOwner` drops with
+        //   the last reference.
+        // ★A contained pump panic ends differently (ADR-0292 decision 6)★: the CLI arrives alive, and this drop (if last) releases the
+        //   group owner so `KILL_ON_JOB_CLOSE` ends the CLI tree. Non-Windows: the group owner is a no-op, so the CLI may remain (unmeasured).
         drop(removed);
 
-        // 2.5. ★This is the single convergence point of every terminal★ — crash, EOF, normal exit, user kill: whatever the path,
-        //   it passes this point, so no discard is missed. Only the epoch-check winner comes here, so a stale terminal
-        //   does not erase a live token newly attached by reactivation. Overlapping with kill_agent's pre-emptive revoke is harmless.
-        // ADR-0086
+        // 2.5. ★The single convergence point of every terminal★ — crash, EOF, normal exit, user kill: no discard is missed. Only the
+        //   epoch-check winner comes here, so a stale terminal cannot erase a live token newly attached by reactivation. Overlap with
+        // kill_agent's pre-emptive revoke is harmless. ADR-0086
         self.control.revoke(msg.id, msg.epoch);
 
         // 3. Applying the disposition happens outside the lock — ProfileRegistry mutate is disk IO (lock order kept).
@@ -87,7 +78,6 @@ impl ReaperDeps {
             apply_disposition(&self.profiles, msg.id, msg.epoch, disposition);
         }
 
-        // 4. List change notification (outside the lock, external callback). Builds a snapshot equivalent to list_agents.
         let agents = list_agents(&self.sessions, &self.profiles);
         self.status_sink.agent_list_updated(agents);
 
@@ -107,8 +97,8 @@ impl ReaperDeps {
 /// every other exit (user kill, normal exit, crash, EOF, signal)
 ///                                => KeepDisableAutoRestore // keep the corpse + auto_restore=false
 /// ```
-/// Per the user policy (inherited from ADR-0082: "don't delete it, keep it even as a corpse"), every runtime exit only collects the session from the map
-/// and keeps the profile as a corpse (backend_session_id kept → resumed with --resume on reactivation).
+/// Policy (ADR-0082: "don't delete it, keep it as a corpse"): a runtime exit only removes the session from the map and keeps the profile
+/// (backend_session_id kept → `--resume` on reactivation).
 // ADR-0083
 pub fn decide(msg: &ReapMsg) -> Disposition {
     if msg.shutting_down_at_finish {
@@ -118,20 +108,15 @@ pub fn decide(msg: &ReapMsg) -> Disposition {
 }
 
 /// Applies the disposition to the ProfileRegistry (ADR-0019, ADR-0084 epoch-guard).
-/// **downgrade-only**: never raises auto_restore to true — KeepDisableAutoRestore only lowers it
-/// to false (the condition for the hard-kill safety net to hold). KeepAsIs is a no-op.
+/// **downgrade-only**: never raises auto_restore — KeepDisableAutoRestore only lowers it (the hard-kill safety net depends on it).
+///   KeepAsIs is a no-op.
 ///
-/// ★ADR-0084 epoch-guard★: lowers auto_restore **only when** `reaped_epoch` (= ReapMsg.epoch = the profile
-///   epoch the dead session read when spawned; the same value as session.epoch) **matches the current profile epoch**.
-///   If, between sessions.remove and this lock-free disposition, reactivation planted a **new incarnation marker** in the profile via `epoch_for_spawn` (the manager.rs spawn
-///   branch), then `p.epoch != reaped_epoch` → the downgrade is **skipped** (so that a stale reap cannot degrade
-///   a live session newly attached in between). It extends the same principle as the epoch-guard of sessions.remove (ADR-0007)
-///   up to the disposition layer.
-/// ★Lock order (ADR-0006)★: the comparison is made **inside the update_with closure** (while holding the profile lock) —
-///   the sessions lock is never taken here (disposition stays sessions-lock-free). The epoch decision is made
-///   only from the profile's in-memory field, so there is no need to look at the sessions map.
-/// ★This is the registry's internal entry (do not change it to `try_`)★ — even if saving fails or is refused, it lowers it in memory and sets dirty.
-///   If the lowering is dropped, the in-memory `true` is carried by the next save and the dead agent comes back at the next boot restore (crash loop).
+/// ★ADR-0084 epoch-guard★: lowers **only when** `reaped_epoch` (= ReapMsg.epoch = session.epoch) **matches the current profile epoch** — if
+///   reactivation planted a new marker via `epoch_for_spawn` after sessions.remove, the downgrade is **skipped** (ADR-0007; a stale reap must not
+///   degrade a newly attached live session).
+/// ★Lock order (ADR-0006)★: compared inside the update_with closure (profile lock held); the sessions lock is never taken here.
+/// ★Registry's internal entry (do not change to `try_`)★ — on save failure or refusal it still lowers in memory and sets dirty; dropping the
+///   lowering would let the next save carry the in-memory `true` and the dead agent return at boot restore (crash loop).
 // ADR-0291 (E1)
 fn apply_disposition(
     profiles: &ProfileRegistry,
@@ -151,8 +136,8 @@ fn apply_disposition(
     }
 }
 
-/// sessions map snapshot → AgentInfo. Split out so the reaper can build, outside the lock, the same logic as manager.list_agents
-/// (for notification). Releases the sessions read lock first and then assembles — no nesting with the profiles lock (ADR-0006).
+/// sessions map snapshot → AgentInfo, so the reaper can build the same list as manager.list_agents (for notification) outside the lock.
+/// Releases the sessions read lock first, then assembles — no nesting with the profiles lock (ADR-0006).
 fn list_agents(
     sessions: &Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     profiles: &Arc<ProfileRegistry>,
@@ -165,16 +150,13 @@ fn list_agents(
     snapshot.iter().map(|s| session_info(s, profiles)).collect()
 }
 
-/// session → AgentInfo (a **byte-identical** mapping to manager.agent_info). Called only without holding the sessions lock.
+/// session → AgentInfo (**byte-identical** to manager.agent_info). Called without the sessions lock.
 ///
-/// ★ADR-0101 (WYSIWYA): must use the same name chain as manager.agent_info★ — reap_one is the hot path that broadcasts this snapshot
-///   as agent_list_updated on every session exit, so if the old rule (profile.name) were used here,
-///   the tree names would revert to the old full-path labels on any reap. So the canonical name is
-///   derived the same way as agent_info, display_name(override) ?? basename(session.cwd), and the profile-absent
-///   fallback also goes through the same shared core (name::canonical_name_or_id_fallback) (no duplicated logic).
-///
-/// ★cwd source = session.cwd★: the same value as what goes into AgentInfo.cwd (canonical). Deriving from profile.cwd (raw)
-///   diverges from the tree basename — the same reason as agent_info (see manager.rs resolve_canonical_name).
+/// ★ADR-0101 (WYSIWYA): same name chain as manager.agent_info★ — reap_one broadcasts this as agent_list_updated on every exit, so
+///   profile.name would revert tree names to full-path labels. Name = display_name(override) ?? basename(session.cwd); the profile-absent
+///   fallback uses the shared core (name::canonical_name_or_id_fallback).
+/// ★cwd source = session.cwd★ (canonical, as AgentInfo.cwd): profile.cwd (raw) would diverge from the tree basename (manager.rs
+///   resolve_canonical_name).
 // ADR-0101
 fn session_info(session: &Arc<AgentSession>, profiles: &Arc<ProfileRegistry>) -> AgentInfo {
     use std::sync::atomic::Ordering;
@@ -195,7 +177,6 @@ fn session_info(session: &Arc<AgentSession>, profiles: &Arc<ProfileRegistry>) ->
     }
 }
 
-/// Called once by the AgentManager on creation. Launches the supervisor thread that consumes ReapMsg **serially**.
 pub fn spawn_reaper(deps: ReaperDeps) -> (Sender<ReaperCmd>, JoinHandle<()>) {
     let (tx, rx): (Sender<ReaperCmd>, Receiver<ReaperCmd>) = std::sync::mpsc::channel();
     let handle = std::thread::Builder::new()
@@ -203,12 +184,10 @@ pub fn spawn_reaper(deps: ReaperDeps) -> (Sender<ReaperCmd>, JoinHandle<()>) {
         .spawn(move || {
             while let Ok(cmd) = rx.recv() {
                 match cmd {
-                    // ★The reaper is not contained (ADR-0292)★ — in the production process a reap_one panic
-                    //   is ended by the hook, so the catch_unwind below is reached only in test builds without the hook.
-                    //   What it prevents in that build: the reaper is a global single thread, so if one reap_one panic (e.g. lock
-                    //   poison→expect, a panic inside decide/apply) killed the whole thread, **every later session would
-                    //   never be removed from the map and become a zombie**. &deps is reused after unwinding, so
-                    //   it is wrapped in AssertUnwindSafe (deps is not moved here).
+                    // ★The reaper is not contained (ADR-0292)★ — in production a reap_one panic is ended by the hook, so this catch_unwind
+                    //   is reached only in test builds without it. There it prevents the one global reaper thread dying on a panic (lock
+                    //   poison→expect, decide/apply) and **every later session staying in the map as a zombie**. &deps is reused after
+                    //   unwinding → AssertUnwindSafe.
                     ReaperCmd::Reap(msg) => {
                         let deps = &deps;
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(

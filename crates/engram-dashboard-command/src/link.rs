@@ -24,16 +24,16 @@ pub trait InboundCommands: Send + Sync {
 
 /// A one-shot exit that sends one reply back under its `request_id`.
 ///
-/// ★It enforces 「exactly once」 by shape★ — consuming (`fn send(self)`) prevents **two or more**, and [`Drop`]
-/// prevents **zero**. If the owner disappears without producing an answer (a missed path · an early return · a panic unwind), an
-/// error reply goes out right there. Without this, the caller hangs until the deadline, and that means 「exactly one reply per request id」 (TRD §4-⑤) has weakened to **at most once**.
+/// ★Enforces "exactly once" by shape★ — consuming (`fn send(self)`) prevents **two or more**, [`Drop`] prevents **zero**: if the owner
+///   disappears without an answer (missed path · early return · panic unwind), an error reply goes out right there.
+/// Without it the caller hangs until the deadline and "exactly one reply per request id" (TRD §4-⑤) weakens to **at most once**.
 ///
-/// ★There is **only one** delivery call site: [`Drop`]★ — `send` only records the outcome. ★Do not revert to a form that
-/// takes the callback out and calls it inside `send`★: with two call sites, a **zero-reply** path opens — 「the first site panics while calling → the second site sees it as already consumed and just returns」. With one site, that path does not exist at all.
-/// Since `send(self)` consumes self, delivery finishes before `send` returns.
-/// ★Remaining limit (what shape cannot prevent)★: if the callback **itself** panics, we cannot know whether the reply went out — it is `FnOnce`, so
-/// there is no means of calling it again. That panic is swallowed here and not let out of drop (a re-panic during unwind = abort).
-/// How it is actually delivered (oneshot · queue · callback) is decided by the assembly code — this crate knows nothing about transport.
+/// ★**Only one** delivery call site: [`Drop`]★ — `send` only records the outcome. ★Do not revert to taking the callback out and calling it
+///   inside `send`★: two call sites open a **zero-reply** path ("the first site panics while calling → the second sees it as already consumed").
+/// `send(self)` consumes self, so delivery finishes before `send` returns.
+/// ★Remaining limit (shape cannot prevent)★: if the callback **itself** panics we cannot know whether the reply went out (`FnOnce`, no
+///   second call); that panic is swallowed here and not let out of drop (re-panic during unwind = abort).
+/// How it is delivered (oneshot · queue · callback) is the assembly code's — this crate knows nothing about transport.
 pub struct ReplySink {
     request_id: RequestId,
     outcome: Option<Result<serde_json::Value, CommandError>>,
@@ -75,8 +75,8 @@ impl Drop for ReplySink {
             outcome,
         };
         // drop runs even during unwind — if it panics again here, the process aborts.
-        // In the daemon and shell the hook finishes any panic outside the 「containing」 marker first (ADR-0292), so this net only has effect
-        //   when dropped inside the marker and in test builds without the hook.
+        // In the daemon and shell the hook finishes any panic outside the "containing" marker first (ADR-0292), so this net only has
+        //   effect when dropped inside the marker and in test builds without the hook.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| deliver(reply)));
     }
 }
@@ -167,7 +167,8 @@ mod tests {
     }
 
     /// ★A panic of the callback itself cannot get out of drop★ — a re-panic during unwind is abort, so it is swallowed here.
-    /// Whether the reply actually went out is **unknowable** (it is `FnOnce`, so there is no means of calling it again) — a spot shape cannot prevent.
+    /// Whether the reply actually went out is **unknowable** (it is `FnOnce`, so there is no means of calling it again) — a spot shape
+    ///   cannot prevent.
     #[test]
     fn a_panicking_delivery_callback_does_not_escape() {
         let attempts = Arc::new(Mutex::new(0usize));

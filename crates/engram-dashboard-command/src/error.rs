@@ -2,13 +2,11 @@
 
 use std::fmt;
 
-/// Stamps the vocabulary **from one table** — the variant · wire string · [`ErrorCode::ALL`] membership · retry directive come
-/// out together on the same line.
+/// Stamps the vocabulary **from one table** — variant · wire string · [`ErrorCode::ALL`] membership · retry directive come out together.
 ///
-/// ★With two lists, an edit that adds one code fixes only one side★: next to a hand-written `as_str`, the compiler
-/// demands only the new variant's `as_str` arm and not its `ALL` entry, so the asymmetry where a new code **goes out under its own name and
-/// comes back as `INTERNAL`** silently appears (the round-trip test iterates `ALL`, so it cannot see that either).
-/// Here, not writing all three fields fails the rule and **compilation stops.**
+/// ★With two lists, adding a code fixes only one side★: the compiler demands only the new `as_str` arm, not the `ALL` entry, so a new code
+///   **goes out under its own name and comes back as `INTERNAL`**
+/// (the round-trip test iterates `ALL`, so it cannot see it either). Here, omitting any of the three fields **stops compilation.**
 macro_rules! error_codes {
     (
         $(#[$enum_meta:meta])*
@@ -39,11 +37,10 @@ macro_rules! error_codes {
 
             /// The retry directive the code decides.
             ///
-            /// ★Why it is gathered in one place★: 「may it be retried」 is a function of **certainty** (TRD §4-④),
-            /// and attaching it by hand at each call site makes the same code go out with a different directive at each spot — then the caller
-            /// decides whether to retry by luck rather than by code.
-            /// ★Why it is the table's third field★: kept outside, a catch-all arm (`_ => Never`) appears, and then a new code
-            /// goes out with 「no retry」 **without any decision**.
+            /// ★Gathered in one place★: "may it be retried" is a function of **certainty** (TRD §4-④); hand-attached directives would
+            ///   differ per call site for the same code.
+            /// ★The table's third field★: kept outside, a catch-all arm (`_ => Never`) appears and a new code goes out as "no retry"
+            ///   **without any decision**.
             // ADR-0159
             pub const fn default_retry(self) -> RetryMode {
                 match self {
@@ -57,20 +54,20 @@ macro_rules! error_codes {
 error_codes! {
     /// Transport·routing layer + common error codes.
     ///
-    /// ★The wire representation is a string and the decoder **accepts unknown codes**★ — an unknown code is downgraded to [`ErrorCode::Internal`]
-    /// (the deserialization of [`CommandError`] also downgrades `retry` to [`RetryMode::Never`]). Decoding into a closed enum
-    /// would make the additive extension of adding one code break old clients.
-    /// ★Adding codes is additive, changing meaning is forbidden★ (TRD §4-③).
+    /// Transport·routing layer + common error codes.
+    ///
+    /// ★The wire form is a string and the decoder **accepts unknown codes**★ — downgraded to [`ErrorCode::Internal`] (and [`CommandError`]
+    ///   deserialization downgrades `retry` to [`RetryMode::Never`]);
+    /// a closed enum would break old clients on every added code. ★Adding codes is additive, changing meaning is forbidden★ (TRD §4-③).
     // ADR-0155
     pub enum ErrorCode {
         InvalidArgument => "INVALID_ARGUMENT" retry Never,
         UnknownCommand => "UNKNOWN_COMMAND" retry Never,
-        /// ★There is no production path emitting this code now — it remains only in the vocabulary★: a disconnected owner's name
-        /// disappears from the registry ([`crate::Roster::disconnect`] · ADR-0150 decision 3), so delivery answers with
-        /// `UNKNOWN_COMMAND` instead of 「owner absent」.
-        /// Why it was not removed: this vocabulary is a wire string and **unknown codes are downgraded to `INTERNAL`·`retry: never`**
-        /// (header above) — removing it would make the reply of a counterpart that sends this code lose the directive 「retry after
-        /// the condition changes」 and read as a permanent failure. Changing its meaning is forbidden too (TRD §4-③).
+        /// ★No production path emits this code now — it remains only in the vocabulary★: a disconnected owner's name disappears from the
+        ///   registry ([`crate::Roster::disconnect`] · ADR-0150 decision 3),
+        /// so delivery answers `UNKNOWN_COMMAND`. Not removed: unknown codes are downgraded to `INTERNAL`·`retry: never` (header above),
+        ///   so a counterpart still sending it would lose "retry after
+        /// the condition changes"; changing its meaning is forbidden too (TRD §4-③).
         OwnerUnavailable => "OWNER_UNAVAILABLE" retry AfterCondition,
         OutcomeUnknown => "OUTCOME_UNKNOWN" retry SameRequestId,
         Timeout => "TIMEOUT" retry SameRequestId,
@@ -93,8 +90,8 @@ impl fmt::Display for ErrorCode {
 
 /// Retry directive.
 ///
-/// ★`SameRequestId` is not 「safe to re-execute」★ — it means whether it was applied is **unknown**, so it must be asked again
-/// **only with the same id** (retrying with a new id could apply the same operation twice — TRD §4-⑥).
+/// ★`SameRequestId` is not "safe to re-execute"★ — whether it was applied is **unknown**, so ask again **only with the same id** (a new id
+///   could apply the operation twice — TRD §4-⑥).
 // ADR-0159
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RetryMode {
@@ -125,20 +122,19 @@ impl fmt::Display for RetryMode {
     }
 }
 
-/// One failure — code (machine) + message (human) + retry directive.
+/// One failure — code (machine) + message (human) + retry directive. Wire shape = `{"code":"NOT_FOUND","message":"…","retry":"never"}`.
 ///
-/// ★Do not machine-branch on `message`★: the only branching material is `code`. The string pattern matching the CLI does now
-/// arose because this contract did not exist, and that fragility ends here (TRD §4-⑦).
-/// Wire shape = `{"code":"NOT_FOUND","message":"…","retry":"never"}`.
+/// ★Do not machine-branch on `message`★: the only branching material is `code` (the CLI's string matching existed only because this
+///   contract did not; TRD §4-⑦).
 ///
-/// ★Equality is decided by **meaning** — three fields only★: `received` below is a copy for relaying, so it takes no part in comparison.
-/// If it did, 「a value read by downgrading an unknown code」 and 「a value built directly with the same meaning」 would come out different, and the sameness
-/// the contract (the flat three fields of TRD §4-⑦) speaks of would diverge from the sameness the code speaks of.
+/// ★Equality is decided by **meaning** — three fields only★: `received` is a relay copy and takes no part, else a value read by
+///   downgrading an unknown code and a value built directly with the same meaning
+/// would differ, diverging from the contract's sameness (the flat three fields of TRD §4-⑦).
 ///
-/// ★The three fields are private — writes go only through setters★: swapping a field directly on a value holding the raw copy would make reserialization
-/// emit that raw text and **the written value would be silently ignored** (even if a relay hop lowers `retry` to cut a dangerous retry,
-/// the next hop reads the original directive as is — TRD §4-④·§4-⑦). The setters remove that path:
-/// **a written value always goes out as is.**
+/// ★The three fields are private — writes go only through setters★: swapping a field directly on a value holding the raw copy would make
+///   reserialization emit the raw text and **silently ignore the written value**
+/// (a relay hop that lowers `retry` to cut a dangerous retry would be undone at the next hop — TRD §4-④·§4-⑦). **A written value always
+///   goes out as is.**
 #[derive(Debug, Clone)]
 pub struct CommandError {
     code: ErrorCode,
@@ -146,12 +142,13 @@ pub struct CommandError {
     retry: RetryMode,
     /// Only what **the three typed fields cannot carry** out of the received raw text. An error built directly is `None`.
     ///
-    /// ★Accepting must not be destroying★: reading an unknown code downgraded to `INTERNAL` (§4-⑦) and **erasing the raw text when
-    ///   emitting it again** are different things. If a relay hop reserializes with the downgraded value, the final caller never sees the code
-    ///   the owner sent. For the same reason, fields outside the contract are carried along as is.
-    ///   ★But `null` and absence are normalized **together**★ — if one of the three fields arrives as `null`, it is read as absent and
-    ///   not carried on the way out either (both are 「no value」, so decoding again gives the same value). Fields outside the contract
-    ///   do not get that normalization and go out as `null` — they are fields whose meaning is unknown, so there is no basis to fold them.
+    /// ★Accepting must not be destroying★: reading an unknown code downgraded to `INTERNAL` (§4-⑦) must not **erase the raw text on
+    ///   re-emission**, or a relay hop's reserialization hides the owner's code from the final caller.
+    ///   Fields outside the contract are carried as is for the same reason.
+    ///   ★`null` and absence are normalized **together**★ — one of the three fields arriving as `null` is read as absent and not carried
+    ///   out (both mean "no value"; re-decoding gives the same value).
+    ///   Fields outside the contract get no such normalization and go out as `null` — their meaning is unknown, so there is no basis to
+    ///   fold them.
     /// This field is private, so it cannot be built with a struct literal — use the constructors.
     received: Option<Box<ReceivedError>>,
 }
@@ -221,20 +218,19 @@ impl CommandError {
 
     /// Swaps the code — **discards the raw copy.**
     ///
-    /// ★Discarding is the point★: changing only the code while holding the copy would make reserialization emit the raw text on a value that received
-    /// an unknown code, and the written value would be ignored. What is discarded along with it is the fields outside the contract and the received raw `retry`, both **accessories
-    /// of the code before the change**, so keeping them next to the new code would make them disagree.
-    /// Do not call it on a value that is only relayed — it must be left as is for the raw text to reach the final caller.
+    /// ★Discarding is the point★: keeping the copy would make reserialization emit the raw text for a value that received an unknown code,
+    ///   ignoring the written value; the fields outside the contract and the received raw `retry`
+    /// are **accessories of the old code** and would disagree with the new one.
+    /// Do not call it on a value that is only relayed — the raw text must reach the final caller.
     pub fn set_code(&mut self, code: ErrorCode) {
         self.code = code;
         self.received = None;
     }
 
-    /// Swaps the retry directive — **discards the raw copy** (for the same reason as [`CommandError::set_code`]).
+    /// Swaps the retry directive — **discards the raw copy** (same reason as [`CommandError::set_code`]).
     ///
-    /// ★Do not use this if you only want to lower the directive while relaying someone else's error★ —
-    /// [`CommandError::set_retry_for_relay`] is the one for that. Calling this erases the received code and the fields outside the contract
-    /// along with it.
+    /// ★Do not use this to only lower the directive while relaying someone else's error★ — use [`CommandError::set_retry_for_relay`]; this
+    ///   erases the received code and the fields outside the contract.
     pub fn set_retry(&mut self, retry: RetryMode) {
         self.retry = retry;
         self.received = None;
@@ -242,19 +238,18 @@ impl CommandError {
 
     /// Swaps only the retry directive and **keeps the raw copy** — ★relay hops only★.
     ///
-    /// One point where it parts from [`CommandError::set_retry`]: that one discards the copy entirely and **erases the received code and the fields
-    /// outside the contract along with it.** That is right when changing the code (old accessories disagree with the changed code). But
-    /// it is wrong for a hop that **only** lowers the directive — the vocabulary is the same but the field holding it vanishes, so the intent of
-    /// [`CommandError::received`], 「accepting must not be destroying」, breaks right at that hop.
+    /// Where it parts from [`CommandError::set_retry`]: that discards the copy and **erases the received code and the fields outside the
+    ///   contract**, right when changing the code but wrong for a hop that **only** lowers the directive
+    /// (it breaks [`CommandError::received`]'s "accepting must not be destroying" right at that hop).
     ///
-    /// So it overwrites only the copy's `retry` field with the new directive. That field is the source of the value carried on the way out
-    /// ([`CommandError::wire_retry`]), so **the outgoing directive really becomes this value**, and `code` · whether `message` is present ·
-    /// the fields outside the contract reach the final caller as received.
-    /// ★It fills it even if the received error **had no** `retry` field★ — if not filled, it goes out with that field missing, and the receiver
-    /// derives it from the code, voiding the lowered directive.
+    /// It overwrites only the copy's `retry` field — the source of the outgoing value ([`CommandError::wire_retry`]) — so **the outgoing
+    ///   directive really becomes this value** while `code` · message presence · the fields outside the contract
+    /// reach the final caller as received.
+    /// ★It fills it even if the received error **had no** `retry` field★ — otherwise the field goes out missing and the receiver derives
+    ///   it from the code, voiding the lowered directive.
     ///
-    /// ★Where it is used★: a hop that must lower the directive by its own policy but where **someone else made the answer**
-    /// (`command_delivery::send_reply` of `engram-dashboard-daemon` is one).
+    /// ★Where it is used★: a hop that must lower the directive by its own policy while **someone else made the answer**
+    ///   (`command_delivery::send_reply` of `engram-dashboard-daemon`).
     pub fn set_retry_for_relay(&mut self, retry: RetryMode) {
         self.retry = retry;
         if let Some(received) = self.received.as_deref_mut() {
@@ -262,17 +257,15 @@ impl CommandError {
         }
     }
 
-    /// Swaps the message — leaves the copy as is.
-    ///
-    /// Reserialization **always reads** the message **from this field** (no separate raw message is held), so there is no reason to discard the copy.
-    /// So even if a hop appends context, the received code·fields outside the contract survive and reach the final caller.
+    /// Swaps the message — leaves the copy as is: reserialization **always reads** the message from this field (no separate raw message),
+    ///   so a hop appending context keeps the received code·fields outside the contract.
     pub fn set_message(&mut self, message: impl Into<String>) {
         self.message = message.into();
     }
 
-    /// The code string carried on the way out — **as received** if an unknown code was received, and `None` for an error that came **without** a `code` field
-    /// (or with `null`) (that field is absent on the way out too).
-    /// After swapping with [`CommandError::set_code`], that typed value goes out.
+    /// The code string carried on the way out — **as received** if an unknown code was received, `None` for an error that came **without**
+    ///   a `code` field (or `null`; absent on the way out too).
+    /// After [`CommandError::set_code`], the typed value goes out.
     pub fn wire_code(&self) -> Option<&str> {
         match self.received.as_deref().map(|r| &r.code) {
             Some(Some(ReceivedCode::Absent)) => None,
@@ -281,9 +274,9 @@ impl CommandError {
         }
     }
 
-    /// The retry string carried on the way out — **as received** if an unknown directive was received, and `None` for an error that came **without** a `retry` field
-    /// (or with `null`) (that field is absent on the way out too).
-    /// After swapping with [`CommandError::set_retry`], that typed value goes out.
+    /// The retry string carried on the way out — **as received** if an unknown directive was received, `None` for an error that came
+    ///   **without** a `retry` field (or `null`; absent on the way out too).
+    /// After [`CommandError::set_retry`], the typed value goes out.
     pub fn wire_retry(&self) -> Option<&str> {
         match self.received.as_deref() {
             Some(received) => received.retry.as_deref(),
@@ -321,13 +314,14 @@ struct WireError<'a> {
 
 #[derive(serde::Deserialize)]
 struct RawError {
-    /// ★Not made required★ — if one error without a code (or with `null`) failed decoding, the [`crate::CommandReply`] carrying it
-    /// could not be read at all and **even the correlation key would vanish**. Then the caller sees the deadline instead of the outcome,
-    /// although the counterpart already sent the answer (TRD §4-⑤·§4-⑥).
+    /// ★Not made required★ — one error without a code (or `null`) failing decode would make the whole [`crate::CommandReply`] unreadable
+    ///   and **lose even the correlation key**;
+    /// the caller would see the deadline instead of the outcome already sent (TRD §4-⑤·§4-⑥).
     code: Option<String>,
     message: Option<String>,
     retry: Option<String>,
-    /// Collects fields outside the contract instead of discarding them — `deny_unknown_fields` is not attached because it breaks additive extension.
+    /// Collects fields outside the contract instead of discarding them — `deny_unknown_fields` is not attached because it breaks additive
+    ///   extension.
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -367,15 +361,15 @@ impl<'de> serde::Deserialize<'de> for CommandError {
         let raw = RawError::deserialize(d)?;
         let known_code = raw.code.as_deref().and_then(ErrorCode::from_wire);
         let known_retry = raw.retry.as_deref().and_then(RetryMode::from_wire);
-        // Downgraded reading: an unknown code is INTERNAL + never (§4-⑦), an unknown directive is the code's derived value.
-        //   A **missing** code folds into the same spot too — if it is not a known code, its meaning is unknown all the same.
+        // Downgraded reading: an unknown code is INTERNAL + never (§4-⑦), an unknown directive is the code's derived value; a **missing**
+        //   code folds here too (not a known code, meaning unknown).
         let code = known_code.unwrap_or(ErrorCode::Internal);
         let retry = match known_code {
             Some(_) => known_retry.unwrap_or_else(|| code.default_retry()),
             None => RetryMode::Never,
         };
-        // If the three fields can restore what was received as is, no copy is held — holding one when there is no reason would spread the
-        //   「do not swap by hand」 of the doc above even to common values.
+        // If the three fields restore what was received as is, no copy is held — holding one needlessly would spread the "do not swap by
+        //   hand" rule to common values.
         let expressible = known_code.is_some()
             && known_retry.is_some()
             && raw.message.is_some()
@@ -406,12 +400,11 @@ mod tests {
     use super::*;
     use crate::{CommandReply, RequestId};
 
-    /// ★When the vocabulary grows, the outgoing names and the incoming names must grow together★ — if only one side grows, a new code goes out under its own name
-    /// and comes back as `INTERNAL`, and the edit that added the code disarms itself.
+    /// ★When the vocabulary grows, outgoing and incoming names must grow together★ — a code that grows on one side only goes out under its
+    ///   own name and comes back as `INTERNAL`.
     ///
-    /// The list mismatch itself is now prevented by the table (`error_codes!`) — the risk left here is **two variants using the same wire
-    /// string**, and then the later line comes back with the earlier line's name (`from_wire` sweeps the table and returns the first
-    /// match).
+    /// The table (`error_codes!`) now prevents list mismatch; the remaining risk is **two variants sharing one wire string** — `from_wire`
+    ///   returns the first match, so the later line comes back under the earlier name.
     #[test]
     fn every_code_in_the_alphabet_round_trips_through_its_wire_string() {
         for code in ErrorCode::ALL {
@@ -424,8 +417,8 @@ mod tests {
         }
     }
 
-    /// ★The whole reply must read even without a code★ — if decoding fails here, [`CommandReply`] breaks entirely
-    /// and **even loses the correlation key**, and the caller sees the deadline instead of the outcome that already arrived (TRD §4-⑤).
+    /// ★The whole reply must read even without a code★ — a decode failure here breaks [`CommandReply`] entirely and **loses the
+    ///   correlation key** (TRD §4-⑤).
     #[test]
     fn a_reply_whose_code_is_null_still_decodes_and_keeps_its_request_id() {
         let id = RequestId::new();
@@ -474,10 +467,10 @@ mod tests {
         assert_eq!(e.retry(), RetryMode::Never);
     }
 
-    /// ★Accepting must not be destroying★ — if a relay hop erases an unknown code, the final caller cannot see the original.
+    /// ★Accepting must not be destroying★ — a relay hop erasing an unknown code hides the original from the final caller.
     ///
-    /// The byte comparison holds only when the input is already in `code`·`message`·`retry` order — reserialization stamps in that order
-    /// and appends fields outside the contract after, so raw text arriving in a different order goes out as **different bytes with the same meaning**.
+    /// Byte comparison holds only when the input is already in `code`·`message`·`retry` order — reserialization stamps that order and
+    ///   appends fields outside the contract after, so other orders go out as **different bytes, same meaning**.
     #[test]
     fn an_unknown_code_and_its_retry_text_survive_a_relay_hop() {
         let wire = r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever"}"#;
@@ -495,9 +488,8 @@ mod tests {
         assert_eq!(serde_json::to_string(&decoded).expect("reserialize"), wire);
     }
 
-    /// ★Using `OWNER_UNAVAILABLE` as the example is intended for now★ — the production path emitting this code is gone
-    /// (ADR-0150), so this test and [`retry_is_derived_from_code`] below are the only uses holding that code in the vocabulary.
-    /// The reason to keep it is in the variant comment.
+    /// ★`OWNER_UNAVAILABLE` as the example is intended★ — its emitting path is gone (ADR-0150), so this test and
+    ///   [`retry_is_derived_from_code`] are the only uses keeping that code in the vocabulary (reason: the variant comment).
     #[test]
     fn known_code_keeps_wire_retry() {
         let e: CommandError = serde_json::from_str(
@@ -538,8 +530,7 @@ mod tests {
         );
     }
 
-    /// ★No inventing a field that was not there★ — if relaying an error that came without `retry` fills in `""`, the next hop
-    /// receives a value not in the contract, and that value is no directive at all.
+    /// ★No inventing a field that was not there★ — filling `""` for a missing `retry` would hand the next hop a value that is no directive.
     #[test]
     fn an_absent_retry_stays_absent_across_a_relay_hop() {
         let wire = r#"{"code":"TIMEOUT","message":"x"}"#;
@@ -592,8 +583,8 @@ mod tests {
         );
     }
 
-    /// ★A written value goes out as is★ — if the directive of a hop that lowered `retry` to cut a dangerous retry loop reverted to the raw text on
-    /// reserialization, the next hop would not see the directive to cut it and would keep retrying (TRD §4-④).
+    /// ★A written value goes out as is★ — if a hop's lowered `retry` reverted to the raw text on reserialization, the next hop would keep
+    ///   retrying (TRD §4-④).
     #[test]
     fn writing_a_typed_field_is_what_goes_out_even_on_a_relayed_error() {
         let wire =
@@ -618,8 +609,8 @@ mod tests {
         );
     }
 
-    /// ★`null` and absence fold together★ — decoding the folded form again gives the same value, so no meaning is lost.
-    /// Fields outside the contract do not get that normalization (they are fields whose meaning is unknown, so there is no basis to fold them).
+    /// ★`null` and absence fold together★ — re-decoding the folded form gives the same value; fields outside the contract are not folded
+    ///   (meaning unknown).
     #[test]
     fn an_explicit_null_in_a_typed_field_is_canonicalized_to_absence() {
         let decoded: CommandError =
@@ -650,7 +641,8 @@ mod tests {
         assert_eq!(serde_json::to_string(&decoded).expect("reserialize"), wire);
     }
 
-    /// ★Sameness is decided by the three fields★ — if a downgraded value and a value built with the same meaning came out different, the contract (§4-⑦) and
+    /// ★Sameness is decided by the three fields★ — if a downgraded value and a value built with the same meaning came out different, the
+    ///   contract (§4-⑦) and
     /// the code would speak of different sameness.
     #[test]
     fn equality_is_the_three_contract_fields_not_the_relay_copy() {

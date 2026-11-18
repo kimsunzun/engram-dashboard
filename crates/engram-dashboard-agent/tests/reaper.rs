@@ -1,6 +1,6 @@
-//! ③ reaper exit classification integration test — asserts and verifies the ADR-0019 disposition with real shell spawns.
+//! ③ reaper exit classification integration test — asserts the ADR-0019 disposition with real shell spawns.
 //!
-//! The first four tests launching a shell are also single spawns (no named-mutex/global contention), so they are left as default.
+//! The first four shell-launching tests are single spawns (no named-mutex/global contention), left as default.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -178,7 +178,6 @@ fn crash_exit_one_keeps_profile_disables_auto_restore() {
 #[test]
 fn user_kill_keeps_profile_corpse_with_session_id() {
     let (manager, _sink, profiles) = make_manager("userkill");
-    // A long-lived shell (no immediate exit) — so it ends only by kill.
     let profile = AgentProfile::new(
         "reaper-kill".into(),
         AgentCommand::Shell {
@@ -320,10 +319,9 @@ fn make_test_session(
         24,
         intent,
         ShellBackend.capabilities(&shell_cmd),
-        // This test session does not use write_input, but the constructor requires an encoder → a Raw dummy.
         engram_dashboard_agent::backend::InputEncoder::Raw,
-        // ★Do not write it as a literal★: "live session value == backend-derived value" is the premise of the mail eligibility defense, so if the harness
-        //   held the opposite value of the real thing, that premise would break in-tree first. It is derived from the same command.
+        // ★Do not write it as a literal★: "live session value == backend-derived value" is the premise of the mail eligibility defense, so
+        //   a harness holding the opposite of the real thing would break that premise in-tree first. Derived from the same command.
         engram_dashboard_agent::backend::reads_messages(&shell_cmd),
         core,
         Box::new(ApiTransport::new()),
@@ -341,8 +339,8 @@ fn epoch_mismatch_does_not_reap_current_session() {
     let session = make_test_session(id, 1, status_dyn);
     deps.sessions.write().unwrap().insert(id, session);
 
-    // The profile is kept under any disposition, so existence cannot tell them apart — it is set to auto_restore=true
-    //   and decided by whether a wrong downgrade happens.
+    // The profile is kept under any disposition, so existence cannot tell them apart — set auto_restore=true and decide by whether a wrong
+    //   downgrade happens.
     let mut profile = exit_profile(0);
     profile.id = id;
     profile.auto_restore = true;
@@ -350,7 +348,6 @@ fn epoch_mismatch_does_not_reap_current_session() {
 
     let updates_before = sink.list_update_count();
 
-    // A ghost done of the old epoch=0 arriving late.
     let stale = ReapMsg {
         id,
         epoch: 0,
@@ -431,9 +428,9 @@ fn duplicate_reap_processes_exactly_once() {
 
 // ── ADR-0084 apply_disposition epoch-guard ───────────────────────────────────
 //
-// ★Do not call reap_one with the map empty★ — the epoch=0 session must be left in the map to pass sessions.remove
-//   and reach apply_disposition. The remove guard looks at the **session** epoch and the disposition guard at
-//   the **profile** epoch, so the session matches and only the profile is raised to 1 to mismatch only the latter.
+// ★Do not call reap_one with the map empty★ — the epoch=0 session must stay in the map to pass sessions.remove and reach
+//   apply_disposition. The remove guard looks at the **session** epoch and the disposition guard at the **profile** epoch, so the session
+//   matches and only the profile is raised to 1.
 #[test]
 fn stale_disposition_does_not_downgrade_reactivated_live_session() {
     let (profiles, _sink, deps) = make_reaper_deps("disp-epoch-guard");
@@ -450,7 +447,6 @@ fn stale_disposition_does_not_downgrade_reactivated_live_session() {
     profile.auto_restore = true;
     profiles.try_upsert(profile).expect("save succeeds");
 
-    // The old reap (reaped_epoch=0) arrives late.
     let stale = ReapMsg {
         id,
         epoch: 0,

@@ -27,15 +27,12 @@ impl Default for RequestId {
     }
 }
 
-/// The owner mark of registration packets (`RegisterCommands` · `UpdateCommands`) — the wire copy of the same-named type of the command bus tool crate
-/// (ADR-0310 decision 23).
+/// The owner mark of registration packets (`RegisterCommands` · `UpdateCommands`) — the wire copy of the same-named command bus tool crate type (ADR-0310 decision 23).
 ///
-/// - **Serialization = the inner string as is** (`serde(transparent)`) — the wire bytes are the same as the tool crate type.
-/// - Moving it into the tool crate type is done only at the daemon edge (`owner_from_wire` in `connection_core.rs`) —
-///   the shell builds the advertised value with this type from the start. Putting the conversion here would keep protocol from dropping the tool crate dependency.
-/// - ★Do not attach `TS`★ — only while this type has no `TS` does removing the field's `#[ts(type = "string")]` break compilation,
-///   which keeps `owner: string` in `AgentCommand.ts`. If `TS` is attached and that override removed, the generated file
-///   silently changes to `owner: OwnerToken` and its import.
+/// - Serialization = the inner string as is (`serde(transparent)`).
+/// - Conversion into the tool crate type happens only at the daemon edge (`owner_from_wire` in `connection_core.rs`), so protocol does not depend on the tool crate.
+/// - ★Do not attach `TS`★: only while this type has no `TS` does removing the field's `#[ts(type = "string")]` break compilation, which keeps `owner: string` in
+///   `AgentCommand.ts`; with `TS` and no override the generated file silently becomes `owner: OwnerToken`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct OwnerToken(pub String);

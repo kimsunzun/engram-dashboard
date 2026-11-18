@@ -1,12 +1,7 @@
-//! Asks the OS 「which process has this file open right now」.
-//!
-//! ★This file does not know what the answer is used to look for (ADR-0266 decision 3)★ — it takes one path and returns
-//! only a list of holders.
-//!
-//! The means of asking is the **Windows Restart Manager**; no means of asking this question was provided on other OSes —
-//! there the list is always empty, so a decision built on it stays at 「not received」 instead of a false detection (ADR-0218 decision 10).
-//!
-//! Entry point = [`holders_of`]. Failure is returned as a value (no panic).
+//! Asks the OS "which process has this file open right now". ★It does not know what the answer is used for (ADR-0266 decision 3)★ — one
+//!   path in, a list of holders out. The means is the **Windows Restart Manager**; other OSes have none, so
+//! the list is always empty and a decision built on it stays at "not received" instead of a false detection (ADR-0218 decision 10). Entry
+//!   point = [`holders_of`]; failure is returned as a value (no panic).
 
 // ADR-0266
 
@@ -23,32 +18,25 @@ use windows::Win32::System::RestartManager::{
     RM_PROCESS_INFO,
 };
 
-/// One process that has a file open.
-///
-/// ★The two fields are there to be compared **together**★ — the OS reuses PIDs, so matching on PID alone takes
-/// someone else's process for that process (ADR-0218 decision 2).
-/// [`crate::process::ProcessIdentity`] has the same shape but means 「a process under one root」, so the two differ — do not merge them.
+/// One process that has a file open. ★The two fields are compared **together**★ — the OS reuses PIDs, so a PID-only match takes someone
+///   else's process for that one (ADR-0218 decision 2). [`crate::process::ProcessIdentity`] has the same shape
+/// but means "a process under one root" — do not merge them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Holder {
     pub pid: u32,
-    /// The high/low 32 bits of the process creation FILETIME (count of 100-nanosecond intervals since 1601-01-01 UTC) joined into one value —
-    /// the same as what [`crate::process::process_creation_time`] returns for the same PID (the
-    /// measurement in ADR-0218 「Rationale」; this file's test measures that equality).
-    ///
-    /// Whether Restart Manager returns 0 for some entry because it cannot fill this field is unchecked — such an entry
-    /// simply drops out of the comparison (the start time of the other side is not 0).
+    /// The process creation FILETIME (100 ns since 1601-01-01 UTC), high/low 32 bits joined — equal to
+    ///   [`crate::process::process_creation_time`] for the same PID (measurement in ADR-0218 「Rationale」; this file's test measures the
+    ///   equality).
+    /// Whether Restart Manager returns 0 for some entry because it cannot fill this is unchecked — such an entry just drops out of the
+    ///   comparison (the other side's start time is not 0).
     pub start_time: u64,
 }
 
-/// All processes that have `path` open.
-///
-/// - **Empty list = nobody holds it**. It is not an error but the normal look of a dead lock file (ADR-0218 「Rationale」 —
-///   we measured that asking about the same file after killing the owning process gives 0).
-/// - **Error = the query failed** (session create, register or enumerate failed). The only reason to keep this apart from 「no holder」 is so the caller can
-///   log the two differently — for the ownership decision both mean 「not a candidate」.
-/// - Administrator rights are not needed (same measurement).
-/// - ★Pass the full path★ — the measurement and the docs covered only full paths, and what Restart Manager resolves a
-///   relative path against is unchecked. If it goes wrong the symptom is not an error but 「0 holders」.
+/// All processes that have `path` open. **Empty list = nobody holds it** — not an error but the normal look of a dead lock file (ADR-0218
+///   「Rationale」: asking after killing the owner gives 0). **Error = the query failed** (session create,
+/// register or enumerate); kept apart from "no holder" only so the caller can log them differently — for the ownership decision both mean
+///   "not a candidate". No administrator rights needed. ★Pass the full path★ — measurement and docs covered
+/// only full paths; what Restart Manager resolves a relative path against is unchecked, and the symptom would be "0 holders", not an error.
 #[cfg(windows)]
 pub fn holders_of(path: &Path) -> io::Result<Vec<Holder>> {
     use std::os::windows::ffi::OsStrExt;
@@ -64,15 +52,15 @@ pub fn holders_of(path: &Path) -> io::Result<Vec<Holder>> {
 
     let session = RmSession::start()?;
     let files = [PCWSTR(wide.as_ptr())];
-    // SAFETY: a live session handle plus one null-terminated wide path owned by this function. `wide` stays alive
-    // until the call ends, and the registered resource is cleaned up when the session closes.
+    // SAFETY: a live session handle plus one null-terminated wide path owned here; `wide` stays alive until the call ends, and the
+    //   registered resource is cleaned up when the session closes.
     let rc = unsafe { RmRegisterResources(session.handle, Some(&files), None, None) };
     if rc != ERROR_SUCCESS {
         return Err(rm_err("RmRegisterResources", rc));
     }
 
-    // The buffer size is obtained by asking the API (`needed`). ★One round may not be enough★ — if holders grow
-    // between the two calls, the second also fails with ERROR_MORE_DATA, so it asks again a few rounds, and if it does not converge it is an error instead of an infinite loop.
+    // The buffer size is asked from the API (`needed`). ★One round may not be enough★ — if holders grow between the two calls the second
+    //   also fails with ERROR_MORE_DATA, so it asks a few rounds and errors instead of looping forever.
     let mut buf: Vec<RM_PROCESS_INFO> = Vec::new();
     for _ in 0..GET_LIST_ATTEMPTS {
         let mut needed: u32 = 0;
@@ -99,8 +87,7 @@ pub fn holders_of(path: &Path) -> io::Result<Vec<Holder>> {
     )))
 }
 
-/// non-windows: there is no means of asking, so the list is **always empty** — it is passed down in the same shape as 「nobody holds it」
-/// (ADR-0218 decision 10).
+/// non-windows: no means of asking, so the list is **always empty** — the same shape as "nobody holds it" (ADR-0218 decision 10).
 #[cfg(not(windows))]
 pub fn holders_of(_path: &Path) -> io::Result<Vec<Holder>> {
     Ok(Vec::new())
@@ -110,8 +97,8 @@ pub fn holders_of(_path: &Path) -> io::Result<Vec<Holder>> {
 #[cfg(windows)]
 const GET_LIST_ATTEMPTS: u32 = 4;
 
-/// One Restart Manager session. ★`Drop` closing it is all this type does★ — it is held by value so that
-/// leaving midway through a query with `?` does not leave the session behind.
+/// One Restart Manager session. ★`Drop` closing it is all this type does★ — held by value so leaving a query midway with `?` does not
+///   leave the session behind.
 #[cfg(windows)]
 struct RmSession {
     handle: u32,
@@ -134,9 +121,8 @@ impl RmSession {
 
 #[cfg(windows)]
 impl Drop for RmSession {
-    /// ★The failure is not swallowed — a session left unclosed remains, one more with each call to [`holders_of`]★ (the more a
-    /// caller calls it repeatedly, the more pile up). Being in `Drop` there is nowhere to return it, so all that is left is a log, and that
-    /// log is the only place where you can see that sessions are leaking.
+    /// ★The failure is not swallowed — an unclosed session remains, one more per [`holders_of`] call★; `Drop` cannot return it, so a log
+    ///   is all that is left and the only place to see sessions leaking.
     fn drop(&mut self) {
         // SAFETY: closes the handle that start() returned as a success, exactly once.
         let rc = unsafe { RmEndSession(self.handle) };
@@ -169,9 +155,9 @@ mod tests {
     #[cfg(windows)]
     use super::*;
 
-    /// Asks about a file it opened itself and measures whether the PID and start time **both** come back as ours. The
-    /// reference start time comes from the `process` helper in the same crate — that the two paths read the same clock is the premise of ADR-0218 decision 2,
-    /// and this is the place that upholds that premise.
+    /// Asks about a file it opened itself and measures that the PID and start time **both** come back as ours; the reference start time
+    ///   comes from the `process` helper in the same crate — that both read one clock is ADR-0218 decision 2's premise,
+    /// and this upholds it.
     #[cfg(windows)]
     #[test]
     fn a_file_this_process_holds_reports_this_process() {

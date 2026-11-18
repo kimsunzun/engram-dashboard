@@ -4,15 +4,12 @@ use serde::{Deserialize, Serialize};
 
 /// A string that must not appear in logs · errors · `{:?}` — for now the daemon connection token (TRD 3 §5 5).
 ///
-/// - **Serialization = the inner string as is** (`serde(transparent)`) — the wire · daemon.json bytes are the same as before wrapping.
-/// - **`Debug` · `Display` = a fixed placeholder** — neither the value nor the length is emitted. So the
-///   `derive(Debug)` of a struct that has this type as a field cannot print the value either.
-/// - Places that need the value (building frames · comparison) take it out with [`Secret::expose`] — not putting the taken-out `&str`
-///   into logs · errors is the caller's job.
-/// - ★`==` is not constant-time★ — it is for tests · same-value comparison. The auth decision uses a separate constant-time comparison.
-/// - ★This is not the log redaction layer that ADR-0138 rejected★: it does not filter log output; the type itself
-///   hides the value so that the sentences we write cannot print it (the implementation of the adopted discipline 「we do not put credentials in the
-///   sentences we write」). So that rejection stands as is.
+/// - Serialization = the inner string as is (`serde(transparent)`).
+/// - `Debug` · `Display` = a fixed placeholder (neither value nor length), so a struct deriving `Debug` with this field cannot print it either.
+/// - Callers that need the value use [`Secret::expose`] and must keep the `&str` out of logs · errors.
+/// - ★`==` is not constant-time★ — for tests · same-value comparison; the auth decision uses a separate constant-time comparison.
+/// - ★Not the log redaction layer ADR-0138 rejected★: nothing is filtered; the type itself hides the value (the adopted discipline "we do not put credentials in
+///   the sentences we write").
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Secret(String);

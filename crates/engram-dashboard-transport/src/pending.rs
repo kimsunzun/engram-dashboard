@@ -1,10 +1,5 @@
-//! Request/response correlation — ★pure layer★. The pending table · deadlines · rejecting reuse of expired numbers.
-//!
-//! ★This file has no tokio, no socket, and no workspace crate★ — the gate measures that (canonical =
-//! the `lib.rs` header). The waking handle (something like `oneshot::Sender`) is only held as a **generic slot `S`**,
-//! and what actually wakes it is the supervisor task of [`crate::peer`].
-//!
-//! ★The supervisor task owns the table alone (no lock)★.
+//! Request/response correlation — ★pure layer★: the pending table · deadlines · rejecting reuse of expired numbers. ★No tokio, socket or workspace crate★ (gate: `lib.rs` header); the waking handle is only
+//! a **generic slot `S`**, woken by the [`crate::peer`] supervisor. ★The supervisor owns the table alone (no lock)★.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -16,35 +11,28 @@ use crate::machine::{DisconnectCause, Generation};
 /// All the ways a request fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestError {
-    /// The deadline passed. ★No automatic resend★ — no response is not "failure" but **"unknown"**, so if sent again
-    /// an operation the peer had actually processed is applied twice (ADR-0181 decision 3).
-    TimedOut { after: Duration },
-    /// Ended because it was disconnected — either before sending or after sending and before the reply. Which one is told by `sent` (TRD 3 D12).
+    /// The deadline passed. ★No automatic resend★ — no response is "unknown", not "failed"; resending could apply an operation the peer already processed twice (ADR-0181 decision 3).
+    TimedOut {
+        after: Duration,
+    },
+    /// Ended because it was disconnected, before sending or after sending and before the reply; `sent` says which (TRD 3 D12).
     Disconnected {
-        /// The connection this request is bound to — the generation the caller captured ([`crate::Peer::request_in`] · `request` uses the current
-        /// generation at the moment of the call). For a sent request it is the connection it was sent on.
+        /// The connection this request is bound to — the generation the caller captured ([`crate::Peer::request_in`]; `request` uses the current one at the call); for a sent request, the one it was sent on.
         generation: Generation,
-        /// The last known disconnect cause. ★It may not be why `generation` ended★ — if it disconnected again after that, it is the later one.
+        /// The last known disconnect cause. ★It may not be why `generation` ended★ — a later disconnect's if it disconnected again.
         cause: DisconnectCause,
-        /// ★May it have reached the peer★. `false` = it ended before being handed to the channel (not in the operating phase · disconnected while in the queue ·
-        /// the bound generation was not the current one) — it did not reach the peer, so sending again is not applied twice. `true` = it disconnected after
-        /// getting into the pending table (it gets in just before the write) — the peer may have received and processed it so we do not know the result (no blind retry —
-        /// the same position as [`RequestError::TimedOut`]).
-        /// ★`true` can be inflated and `false` is a guarantee★ — it is `true` even if it disconnected with the write never polled after getting into the table,
-        /// and even when the supervisor vanished abnormally (panic · runtime shutdown) and we do not know how far it got.
+        /// ★May it have reached the peer★. `false` = ended before being handed to the channel (not operating · disconnected while queued · bound generation not current) — it did not reach the peer, so
+        /// resending is not applied twice. `true` = disconnected after entering the pending table (just before the write) — the peer may have processed it, result unknown (no blind retry; same position as
+        /// [`RequestError::TimedOut`]). ★`true` can be inflated, `false` is a guarantee★ — `true` even if the write was never polled after entering the table, or the supervisor vanished abnormally.
         sent: bool,
     },
-    /// The outbound queue is full.
     QueueFull,
-    /// An old request with the same number is still waiting for its answer and a new request reused that number — the old waiter wakes with this.
-    /// ★The new request does not inherit the slot and is rejected as [`RequestError::TagRetired`] (both fail)★ — the correlation key is that number
-    /// alone, so the late reply of the request that went out first cannot be told apart from the new request's counterpart (`lib.rs` 「known limits」 ·
-    /// [`Insert::Collided`]).
+    /// An older request with the same number still waits and a new one reused it — the old waiter wakes with this. ★The new request does not inherit the slot and is rejected as
+    /// [`RequestError::TagRetired`] (both fail)★ — the number is the only key, so the first request's late reply cannot be told from the new one's (`lib.rs` 「known limits」 · [`Insert::Collided`]).
     Superseded,
-    /// This command takes no reply ([`crate::Wire::request_tag`] is `None`). It means use `notify`.
+    /// This command takes no reply ([`crate::Wire::request_tag`] is `None`) — use `notify`.
     NotARequest,
-    /// It reused a retired number — either a number retired by deadline expiry, or a new request that overlapped a waiting number (that number is also
-    /// retired then — the counterpart of [`RequestError::Superseded`]).
+    /// It reused a retired number — one retired by deadline expiry, or a new request overlapping a waiting number (also retired then; the counterpart of [`RequestError::Superseded`]).
     TagRetired,
 }
 
@@ -80,11 +68,8 @@ impl fmt::Display for RequestError {
 
 impl std::error::Error for RequestError {}
 
-/// A bounded ring that remembers expired numbers.
-///
-/// ★The real guarantee is not here but in **the side that makes the numbers**★ — in our case a uuid v4. All this ring can do
-/// is reject when a **recent** expired number comes back, and memory cannot be infinite. When it overflows it quietly forgets from the oldest,
-/// and that number becomes reusable. ★Do not read this limit as a guarantee★.
+/// A bounded ring that remembers expired numbers. ★The real guarantee is the side that **makes the numbers**★ (ours: uuid v4); this ring only rejects a **recent** expired number coming back, memory
+/// being finite — on overflow it quietly forgets the oldest, which becomes reusable. ★Not a guarantee★.
 #[derive(Debug)]
 struct RetiredRing<T> {
     order: VecDeque<T>,
@@ -122,20 +107,16 @@ impl<T: Eq + Hash + Clone> RetiredRing<T> {
     }
 }
 
-/// The result of [`Pending::insert`]. On any branch it **does not lose the slot** — a slot that could not be put in is returned as is, so
-/// the caller must wake it.
+/// The result of [`Pending::insert`]. ★No branch loses the slot★ — a slot that could not be put in is returned, and the caller must wake it.
 #[derive(Debug)]
 pub enum Insert<S> {
-    /// Took a place.
     Placed,
-    /// The same number was already **waiting** — retire that number and wake both.
-    ///
-    /// The old waiter gets [`RequestError::Superseded`] (preserving today's behavior), the new request gets
-    /// [`RequestError::TagRetired`]. Why we must not let the new one inherit it: the correlation key is this number
-    /// alone, so **the late reply of the request that went out first would be delivered as the counterpart of the later request.** There is nothing on the wire to
-    /// tell which one a reply belongs to, so rather than deliver wrongly we fail both.
-    Collided { displaced: S, rejected: S },
-    /// Reused a number that had expired.
+    /// The same number was already **waiting** — retire it and wake both: the old waiter gets [`RequestError::Superseded`] (today's behavior), the new request [`RequestError::TagRetired`]. The new one must
+    /// not inherit it: the number is the only key, so **the first request's late reply would be delivered as the later request's counterpart**; nothing on the wire tells them apart, so both fail.
+    Collided {
+        displaced: S,
+        rejected: S,
+    },
     Retired(S),
 }
 
@@ -149,24 +130,13 @@ struct Waiter<S> {
 ///
 /// ## ★Known limit — it cannot **make misdelivery of a late reply impossible**★ (do not try to fix)
 ///
-/// If the consumer picks a type that **reuses** `Tag`, this crate cannot prevent a late reply from being delivered to the wrong request,
-/// and **does not try to.** The mechanism and its limit are as follows:
+/// If the consumer picks a type that **reuses** `Tag`, this crate cannot prevent a late reply reaching the wrong request, and does not try. A number collected by deadline expiry goes into a **FIFO bounded ring**
+/// ([`crate::Policy::retired_tags`], default 256) and is rejected with [`RequestError::TagRetired`] if it returns; after 256 more retire, the oldest is **forgotten**, and ★a late reply for it is then delivered as
+/// the counterpart of a **new request** using the same number★ (the number is the only key). ★Forgetting is half of what the ring does★ — without it a **legitimate** reuse is blocked forever and memory is
+/// unbounded: 「block misdelivery completely」 and 「allow legitimate reuse」 are two ends of one knob.
 ///
-/// - A number collected by deadline expiry is put into a **bounded ring** by [`Pending`], and if it comes again it is rejected with
-///   [`RequestError::TagRetired`]. Ring length = [`crate::Policy::retired_tags`] (default 256).
-/// - The ring is **FIFO**. If 256 more retire after that, the oldest number is **forgotten**.
-/// - ★If a late reply for that number arrives after it is forgotten, it is delivered as the counterpart of a **new request** that used the same number.★
-///   The correlation key is that number alone, so there is nothing on the wire to tell the two replies apart.
-///
-/// ★**Forgetting is not a defect but half of what this ring does**★ — if it did not forget, **legitimately**
-/// reusing that number would be blocked forever too. That is, 「blocking misdelivery completely」 and 「allowing legitimate reuse」 are the two
-/// ends of the same knob, and unbounded memory is impossible from the start (it grows without limit).
-///
-/// ★The two reviewers split here and the split itself is the record★ — one read it as 「no leak; forgetting makes legitimate reuse possible」, the other as 「that forgetting sends the original reply to a new waiter」. Both are
-/// right, and **leaving the bounded ring exactly as it is now is the user's decision** (2026-09-06). Basis: our real
-/// `Tag` is a UUID so **a legitimate collision never occurs in the first place**. The remaining hole needs ★a consumer bug (reusing numbers)★ and
-/// ★a reply that arrives only after more retirements than fill one ring (default 256 times)★ **at the same time**.
-/// The regression net = `the_retired_ring_forgets_its_oldest_when_it_overflows` (it pins that forgetting **as intended**).
+/// ★Two reviewers split here; keeping the bounded ring is the user's decision★: our real `Tag` is a UUID so a legitimate collision never occurs; the remaining hole needs ★a consumer bug (reusing numbers)★ and
+/// ★a reply arriving only after more retirements than one ring (default 256)★ together. Regression net: `the_retired_ring_forgets_its_oldest_when_it_overflows` (pins the forgetting **as intended**).
 #[derive(Debug)]
 pub struct Pending<T, S> {
     waiting: HashMap<T, Waiter<S>>,
@@ -181,7 +151,7 @@ impl<T: Eq + Hash + Clone, S> Pending<T, S> {
         }
     }
 
-    /// Registers a slot. ★Call it **before sending**★ — reverse it and a fast reply cannot find its slot.
+    /// Registers a slot. ★Call it **before sending**★ — reversed, a fast reply cannot find its slot.
     pub fn insert(&mut self, tag: T, slot: S, deadline: Instant) -> Insert<S> {
         if self.retired.contains(&tag) {
             return Insert::Retired(slot);
@@ -197,12 +167,10 @@ impl<T: Eq + Hash + Clone, S> Pending<T, S> {
         Insert::Placed
     }
 
-    /// A reply came. If there is no slot, `None` — ★a reply that arrives late after expiry is quietly dropped that way★.
     pub fn take(&mut self, tag: &T) -> Option<S> {
         self.waiting.remove(tag).map(|w| w.slot)
     }
 
-    /// Collects those whose deadline has passed. A collected number is registered in the ring and later reuse is rejected.
     pub fn expire(&mut self, now: Instant) -> Vec<(T, S)> {
         let due: Vec<T> = self
             .waiting
@@ -219,13 +187,11 @@ impl<T: Eq + Hash + Clone, S> Pending<T, S> {
             .collect()
     }
 
-    /// Disconnected — collects all waiters. ★This side does not register in the ring★: it is not that the number died but that the connection
-    /// died, so it is legitimate for the consumer to request again with the same number.
+    /// Disconnected — collects all waiters. ★Does not register in the ring★: the connection died, not the number, so requesting again with the same number is legitimate.
     pub fn drain(&mut self) -> Vec<(T, S)> {
         self.waiting.drain().map(|(t, w)| (t, w.slot)).collect()
     }
 
-    /// The earliest deadline. `None` means nothing is waiting.
     pub fn next_deadline(&self) -> Option<Instant> {
         self.waiting.values().map(|w| w.deadline).min()
     }
@@ -320,7 +286,6 @@ mod tests {
         assert!(p.is_empty());
     }
 
-    // ── M1: there is only one correlation key, so an overlapping number cannot tell deliveries apart ──
     #[test]
     fn a_colliding_tag_wakes_both_sides_and_retires_the_number() {
         let mut p = table();

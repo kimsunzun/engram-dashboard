@@ -1,7 +1,5 @@
-//! Integration tests for manual activation (activate_profile) — ADR-0082 (fresh-fallback removed, resume only).
-//!
-//! The real claude cannot be launched in CI/unit tests, so it is simulated with a cmd.exe batch profile (isolation). Windows only, hence
-//! #[cfg(windows)]. Single spawn, no global races → default.
+//! Integration tests for manual activation (activate_profile) — ADR-0082 (fresh-fallback removed, resume only). The real claude cannot
+//!   launch in CI, so a cmd.exe batch profile simulates it; Windows only (`#[cfg(windows)]`). Single spawn, no global races.
 
 #![cfg(windows)]
 
@@ -63,7 +61,6 @@ fn make_manager_with_control(
     (manager, sink, profiles)
 }
 
-/// For items that look at what was left on disk — returns the same store as the registry together with it.
 fn make_manager_with_store(
     tag: &str,
     control: Arc<dyn ControlChannel>,
@@ -98,12 +95,10 @@ fn make_manager_with_store(
 
 /// Returns: (profile, batch path, count path).
 ///
-/// ★Why the run-count is the evidence for ADR-0082★: each time this batch runs it leaves one line in count and
-///   exits early (exit 1). If the old fresh-fallback were alive, a second spawn (in the fresh place) would happen and
-///   count would become 2 — "exactly 1" is the decisive evidence that the fresh-fallback is absent.
-///
-/// ★Why a batch file and not an inline compound cmd★: portable-pty CommandBuilder quotes `>`·`&` individually
-///   and breaks them while passing through ConPTY (measured in an old test). A batch is parsed by cmd directly, so it is deterministic.
+/// ★The run-count is the ADR-0082 evidence★: each run appends one line to count and exits early (exit 1); a live old fresh-fallback would
+///   spawn a second time and make count 2 — "exactly 1" proves its absence.
+/// ★A batch file, not an inline compound cmd★: portable-pty `CommandBuilder` quotes `>`·`&` individually and breaks them through ConPTY
+///   (measured); cmd parses a batch directly, deterministically.
 fn always_early_exit_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
     let uniq = Uuid::new_v4();
     let count = std::env::temp_dir().join(format!("engram-activate-count-{tag}-{uniq}.tmp"));
@@ -138,11 +133,10 @@ fn run_count(path: &PathBuf) -> usize {
         .unwrap_or(0)
 }
 
-/// A batch that lives past EARLY_EXIT_WINDOW (3s) — 20 pings keep it alive ≈19s so it is not misjudged as an early exit.
-/// Returns: (profile, batch path, count path).
+/// A batch that outlives EARLY_EXIT_WINDOW (3 s) — 20 pings keep it alive ≈19 s so it is not misjudged as an early exit. Returns:
+///   (profile, batch path, count path).
 ///
-/// ★Why count comes **before** ping★: it must become 1 right after start so the test can read it immediately.
-///   If there were a kill+replace (disguised with the same epoch) regression, count would become 2.
+/// ★count comes **before** ping★ so it is 1 right after start and readable at once; a kill+replace (same epoch) regression would make it 2.
 fn long_lived_profile(tag: &str) -> (AgentProfile, PathBuf, PathBuf) {
     let uniq = Uuid::new_v4();
     let count = std::env::temp_dir().join(format!("engram-activate-live-count-{tag}-{uniq}.tmp"));
@@ -191,7 +185,6 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
         "an early resume exit must be Err (Failed corpse) without fresh-fallback — got Ok: {result:?}"
     );
 
-    // Reaping is asynchronous, so we only wait for it — the reaping itself is not asserted here.
     let _ = wait_until(Duration::from_secs(5), || {
         !manager.list_agents().iter().any(|a| a.id == id)
     });
@@ -338,16 +331,16 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★ADR-0113 wiring guard★ — spawn **registers** its own incarnation in the turn observation table.
+/// ★ADR-0113 wiring guard★ — spawn **registers** its incarnation in the turn observation table.
 ///
-/// This registration coming before that incarnation's first output signal is what makes the table's "drop it if the marker differs" rule safe
-/// (`turn::TurnObservations::register`). If the wiring is missing, while the previous incarnation's entry remains the new incarnation's signals
-/// are all dropped, and that agent answers unobserved (= not in a turn), so mail goes in during a turn.
-/// ★Using a shell is the ground of the discriminating power★: the shell backend emits no turn signal at all (the classifier is silent), so if there is an entry here
-/// it was made only by the registration.
-/// ★What it does not measure (honest scope)★: the ordering itself, that the registration comes **before the first signal**, cannot be measured here — to reverse it
-/// the previous incarnation's `finish` would have to be blocked, and this harness has no handle for that. The ordering is structurally guaranteed by the call site
-/// (before the sessions map insert).
+/// Registering before the incarnation's first output signal makes the table's "drop if the marker differs" rule safe
+///   (`turn::TurnObservations::register`); missing, the previous entry would drop all of the new incarnation's signals and it would answer
+///   unobserved (= not in a turn),
+/// so mail goes in during a turn.
+/// ★A shell gives the discriminating power★: the shell backend emits no turn signal (silent classifier), so any entry here came from the
+///   registration.
+/// ★Not measured (honest)★: that registration comes **before the first signal** — reversing it needs the previous incarnation's `finish`
+///   blocked, and this harness has no handle; the ordering is structural (before the sessions map insert).
 #[test]
 fn spawn_registers_the_incarnation_in_the_turn_table() {
     let (manager, _sink, profiles) = make_manager("turn-register");
@@ -385,11 +378,11 @@ fn spawn_registers_the_incarnation_in_the_turn_table() {
 
 /// ★ADR-0084 regression guard★ — reactivating a corpse in the same slot changes the incarnation marker.
 ///
-/// For the shell both session axes are false, so it does not look as far as assembling the `--resume` flag — that is
-///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid`'s job, and
-///   "reactivation = map replacement = new marker", which this test targets, holds regardless of backend.
-///   ★What it measures is only **difference** — not growth★: the marker is a random number drawn per incarnation, so its magnitude has no meaning
-///   (`ProfileRegistry::epoch_for_spawn`). Tightening the assertion to `assert!(new > old)` turns it red half the time.
+/// A shell has both session axes false, so `--resume` assembly is not reached (that is
+///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid`); "reactivation = map replacement = new marker" holds
+///   for any backend.
+///   ★Measures only **difference**, not growth★: the marker is random per incarnation (`ProfileRegistry::epoch_for_spawn`); `assert!(new >
+///   old)` would be red half the time.
 #[test]
 fn reactivate_after_kill_bumps_epoch() {
     let (manager, _sink, profiles) = make_manager("reactivate-epoch-bump");
@@ -444,11 +437,11 @@ fn reactivate_after_kill_bumps_epoch() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★ADR-0083 regression guard★ — if a user kill deletes the profile, reactivation breaks with "profile not found" (the screen shows "failed").
-/// The old reaper actually did that, deleting it with its backend_session_id via UserKill → DeleteProfile.
+/// ★ADR-0083 regression guard★ — a user kill that deleted the profile would break reactivation with "profile not found" (the old reaper
+///   did exactly that via UserKill → DeleteProfile, taking the backend_session_id).
 ///
-/// What is proven here goes only as far as **the profile lookup path being intact** — the actual `--resume <sid>` assembly
-///   is demonstrated by `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid`.
+/// Proves only that **the profile lookup path is intact**; the `--resume <sid>` assembly is
+///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid`.
 #[test]
 fn user_kill_then_reactivate_finds_profile_and_resumes() {
     let (manager, _sink, profiles) = make_manager("kill-reactivate");
@@ -456,20 +449,15 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
     let (profile, batch, count) = long_lived_profile("kill-reactivate");
     let id = profile.id;
 
-    // ★Pass the seeded profile to all of spawn/activate/kill★ — matching the registry and the argument to one value makes it clear that what this item
-    //   measures is not handle preservation but the **resume wiring**.
-    //   ★The old reason (「otherwise the planted sid is overwritten and lost」) is stale★ — `upsert_preserving_hierarchy`
-    //   now preserves `backend_session_id` and its history from live (user decision). The regression net for that preservation itself is
-    //   `spawn_preserving_upsert_does_not_revert_a_handle_recorded_after_the_snapshot` in `profile.rs`,
-    //   and it is not doubled here.
-    //   ★**That preservation changes behavior for claude too — do not read it as 「claude stays as it was」**★: the sid reactivation
-    //   uses is read by spawn **from the registry**, not by `ensure_position`, and since the registration
-    //   no longer overwrites that field with the snapshot, now **the drift sid observed by `SessionTracker`** is
-    //   read (that observer writes unconditionally with `observe_session_id(id, None, ..)`, and is attached only behind the `assigns_sid` gate,
-    //   so the actual target is claude). That is, even reactivating with a stale snapshot resumes the drifted
-    //   one — an intended improvement, but **not a no-change**. In this item the registry and the argument are the same, so it does not measure that
-    //   difference (which is why it is written down here).
-    //   auto_restore=true is for observing the downgrade of the kill reaping.
+    // ★Pass the seeded profile to spawn/activate/kill alike★ — registry and argument being one value shows this item measures the **resume
+    //   wiring**, not handle preservation (that net: `spawn_preserving_upsert_does_not_revert_a_handle_recorded_after_the_snapshot` in
+    //   `profile.rs`).
+    //   ★That preservation changes claude's behavior too — not 「claude stays as it was」★: reactivation's sid is read by spawn **from the
+    //   registry** (not `ensure_position`), and registration no longer overwrites it with the snapshot, so **the drift sid observed by
+    //   `SessionTracker`**
+    //   (written unconditionally via `observe_session_id(id, None, ..)`, attached only behind the `assigns_sid` gate = claude) is what
+    //   resumes — an intended improvement, **not a no-change**. Here registry = argument, so that difference is not measured.
+    //   auto_restore=true observes the kill reaping's downgrade.
     let sid = Uuid::new_v4();
     let mut seeded = profile.clone();
     seeded.backend_session_id = Some(sid);
@@ -536,9 +524,8 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
 
 /// If a resume fails with an early exit, the kind is attached right there — by observation alone, without a prior decision.
 ///
-/// ★Because it is a shell profile, the kind is 「early exit right after resume」★: the knowledge that recognizes the phrase is only in the claude backend
-///   (its unit test is separate), and the shell is silent, so it falls to the context default — that default being retryable
-///   is the concrete form of fail-open.
+/// ★A shell profile yields 「early exit right after resume」★: the phrase-recognizing knowledge is only in the claude backend (separate unit
+///   test) and the shell is silent, so it falls to the context default — retryable, the concrete form of fail-open.
 #[test]
 fn resume_early_exit_records_a_typed_last_failure() {
     let (manager, _sink, profiles) = make_manager("record-early-exit");
@@ -570,7 +557,7 @@ fn resume_early_exit_records_a_typed_last_failure() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// An activation that could not launch the process at all is recorded too (the Fresh branch — if only resume were covered, this side would leak).
+/// An activation that could not launch the process at all is recorded too (the Fresh branch — covering only resume would leak this side).
 #[test]
 fn an_unspawnable_profile_records_a_spawn_failure() {
     let (manager, _sink, profiles) = make_manager("record-spawn-fail");
@@ -599,17 +586,17 @@ fn an_unspawnable_profile_records_a_spawn_failure() {
     );
 }
 
-/// ★Restoring an agent that is already up again does not stamp a failure★ — and this path is **deterministic**.
+/// ★Restoring an agent that is already up does not stamp a failure★ — and this path is **deterministic**.
 ///
-/// `restore_one` does not pass `activate_profile`'s "already running" pre-filter, so running a restore with a live agent present
-/// runs straight into `spawn_agent`'s double-spawn guard — without waiting for thread interleaving,
-/// that branch (`SpawnOutcome::Moot`) enters the activation record path. The old form raced two threads and expected a winner and a loser,
-/// but if only a deschedule happened behind the pre-filter both passed and the pass condition wavered (intermittent red) — do not revive it.
+/// `restore_one` skips `activate_profile`'s "already running" pre-filter, so a restore with a live agent runs straight into
+///   `spawn_agent`'s double-spawn guard (`SpawnOutcome::Moot`) and enters the activation record path with no thread interleaving. The old
+///   form raced two threads
+/// expecting a winner and a loser; a deschedule behind the pre-filter let both pass (intermittent red) — do not revive it.
 ///
-/// ★"The second process did not launch" is **not measured with a time window**★: counting by file append, the absence assertion
-/// cannot be told apart from "not written yet", so however long the wait, it can pass falsely under contention (that is why the count wait
-/// the other fixtures of this file use is not used here). Instead it looks at the **epoch**: a second spawn always
-/// passes `epoch_for_spawn` and raises the value, so if the value is unchanged the evidence that nothing launched stands immediately and definitively.
+/// ★"The second process did not launch" is **not measured with a time window**★: file-append counting cannot tell absence from "not
+///   written yet", so any wait can pass falsely under contention. Instead the **epoch**: a second spawn always raises it via
+///   `epoch_for_spawn`, so an
+/// unchanged value is immediate, definitive evidence.
 #[test]
 fn restoring_over_a_live_agent_never_stamps_it_as_failed() {
     let (manager, _sink, profiles) = make_manager("restore-over-live");
@@ -665,14 +652,12 @@ fn restoring_over_a_live_agent_never_stamps_it_as_failed() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// ★What the user cut off is not an activation failure★ — even if a kill comes inside the early-exit window, no record is left.
+/// ★What the user cut off is not an activation failure★ — a kill inside the early-exit window leaves no record.
 ///
-/// If recorded, 「exited right after resuming」 would remain in the tree, making an item the user just turned off look broken
-/// (that display is not cleared until the next activation stands). On HEAD this path only produced a transient Err.
-///
-/// ★A shape with no false red★: the assertion is the single 「there is no record」, and it is true in **both** interleavings —
-/// if the kill falls inside the window this branch (records nothing), if it falls past the window the stand branch (clears) produce the same result.
-/// Which one it took is told apart by the activation return value and only reported below.
+/// A record 「exited right after resuming」 would make an item the user just turned off look broken (not cleared until the next activation).
+///   On HEAD this path produced only a transient Err.
+/// ★No false red★: the single assertion 「there is no record」 holds in **both** interleavings — kill inside the window → this branch
+///   (records nothing); past it → the stand branch (clears). Which one ran is told by the activation return value, only reported below.
 #[test]
 fn a_kill_inside_the_resume_window_is_not_recorded_as_a_failure() {
     let (manager, _sink, profiles) = make_manager("kill-in-window");
@@ -718,8 +703,8 @@ fn a_kill_inside_the_resume_window_is_not_recorded_as_a_failure() {
 
 // ── Session id issuing axis (ADR-0185) ─────────────────────────────────────────────────
 
-/// A test-bench device that makes provision fail to cut spawn off **before the link is created**. That stop point is after the sid issuing,
-/// so a spawn with this device actually passes the issuing point without launching a single process.
+/// A test-bench device that makes provision fail, cutting spawn off **before the link is created** — after the sid issuing, so the spawn
+///   passes the issuing point without launching a process.
 struct FailingControl;
 
 impl ControlChannel for FailingControl {
@@ -737,30 +722,23 @@ impl ControlChannel for FailingControl {
     fn revoke(&self, _id: AgentId, _epoch: u32) {}
 }
 
-/// ★What this item claims to **really** measure — two things★:
-///   ① A Fresh spawn **does not persist** the session id for any backend (ADR-0226) — it is neither in the registry nor on disk.
-///      That is also all the codex row measures (registered and empty).
+/// ★What this item **really** measures — two things★:
+///   ① A Fresh spawn **does not persist** the session id for any backend (ADR-0226) — neither in the registry nor on disk (all the codex
+///   row measures: registered and empty).
 ///   ② The old handle of a backend we issue for (claude) is not deleted but goes **into history**.
 ///
-/// ★「ADR-0185」 cannot be
-///   measured here★ — at spawn no backend persists, so even if the issuing decision were split along the resume axis the codex row
-///   stays green. Those guards are `manager`'s `only_a_backend_that_assigns_ids_gets_one_handed_over` (the decision) and
-///   `the_first_submission_latch_is_wired_through_the_spawn_path` (spawn uses that decision).
-/// ★There is no control group for 「we drew it and handed it over」 here either★ — the drawn value is not persisted before the first submission, so it is not
-///   visible through the registry. Its counterparts are `fresh_claude_spec_carries_the_minted_session_id` (it was put in argv) and
-///   `d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission` (persisted only after the first submission).
-/// ★② catches this item idling★ — if spawn dies **before** the clearing, ① stays green, but the old
-///   value does not go into history.
+/// ★「ADR-0185」 cannot be measured here★ — no backend persists at spawn, so a decision split along the resume axis would leave the codex
+///   row green. Those guards: `manager`'s `only_a_backend_that_assigns_ids_gets_one_handed_over` (the decision) and
+///   `the_first_submission_latch_is_wired_through_the_spawn_path` (spawn uses it).
+/// ★No control group for 「we drew it and handed it over」★ — the drawn value is not persisted before the first submission; counterparts:
+///   `fresh_claude_spec_carries_the_minted_session_id` (in argv) and `d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission`.
+/// ★② catches this item idling★ — if spawn dies **before** the clearing, ① stays green but the old value does not enter history.
 ///
-/// ★spawn is driven to fail **without launching a single process** — it still passes the clearing point★:
-///   in the spawn flow the clearing comes **before** the link creation, so even if it is cut off after that, this assertion measures that point as is.
-/// ★The two rows stop at different places★:
-///   - A backend that **uses** the control channel is cut off fail-closed at provision by [`FailingControl`] below.
-///   - A backend that does **not use** the control channel never goes through provision, so a nonexistent cwd makes the link creation
-///     fail.
-/// ★One cwd cannot block both rows (measured 2026-09-14 — do not revive)★: even given a nonexistent cwd,
-///   the ConPTY link launched as is and the real `cmd.exe /c claude` started. So that row needs a separate device on the control-channel
-///   side.
+/// ★spawn is driven to fail **without launching a process** yet still passes the clearing point★ (clearing comes **before** link creation).
+/// ★The rows stop at different places★: a backend that **uses** the control channel is cut at provision fail-closed by [`FailingControl`];
+///   one that does **not** never goes through provision, so a nonexistent cwd makes link creation fail.
+/// ★One cwd cannot block both rows (measured 2026-09-14 — do not revive)★: with a nonexistent cwd the ConPTY link launched anyway and the
+///   real `cmd.exe /c claude` started.
 // ADR-0226
 #[test]
 fn a_fresh_spawn_persists_no_session_id_and_moves_the_old_handle_to_history() {
@@ -803,8 +781,8 @@ fn a_fresh_spawn_persists_no_session_id_and_moves_the_old_handle_to_history() {
         }
     }
 
-    // ★First check that it actually got into the registry★ — `None` below cannot tell 「not persisted」 from 「no profile at all」,
-    //   so without this line it would be green even when it was not even registered.
+    // ★First check that it actually got into the registry★ — `None` below cannot tell 「not persisted」 from 「no profile at all」; without
+    //   this line it is green even when never registered.
     assert!(
         profiles.get(codex.id).is_some() && profiles.get(claude.id).is_some(),
         "the profile is not in the registry — the assertion below would measure absence rather than persistence"
@@ -836,8 +814,8 @@ fn a_fresh_spawn_persists_no_session_id_and_moves_the_old_handle_to_history() {
     );
 }
 
-/// ★Measures reaching the issuing point without persistence★ — the drawn value is not in the registry before the first submission, so 「we drew it and
-/// handed it over」 is visible only in argv. A pure function, so it launches no process.
+/// ★Measures reaching the issuing point without persistence★ — the drawn value is not in the registry before the first submission, so 「we
+///   drew it and handed it over」 shows only in argv. A pure function; no process.
 // ADR-0226
 #[test]
 fn fresh_claude_spec_carries_the_minted_session_id() {
@@ -875,16 +853,15 @@ fn fresh_claude_spec_carries_the_minted_session_id() {
     }
 }
 
-/// ★The handle is read once inside spawn and that read is authoritative (ADR-0226)★ — if it is empty, a backend that resumes with the stored handle
-/// refuses **before launching the process**.
+/// ★The handle is read once inside spawn and that read is authoritative (ADR-0226)★ — empty, a backend that resumes with the stored handle
+///   refuses **before launching the process**.
 ///
-/// Calls `spawn_agent(Resume)`, which does not pass the entry's head decision, directly to reproduce 「the field became empty between the decision and the read」
-/// deterministically.
-/// ★Told apart by the refusal phrase★ — this test bench also cuts off at provision ([`FailingControl`]), so if the refusal disappears, even the same
-///   `Err` changes its phrase to a provision failure. In operation it passes that place and claude launches without a resume flag
-///   and opens a new conversation with an unknown id.
-/// ★shell is the old way★ — it does not resume with the stored handle, so it launches even without a handle (the ADR-0082 regression test bench relies on that
-///   way).
+/// Calls `spawn_agent(Resume)` directly (it skips the entry's head decision) to reproduce 「the field became empty between the decision and
+///   the read」 deterministically.
+/// ★Told apart by the refusal phrase★ — this bench also cuts at provision ([`FailingControl`]), so without the refusal the same `Err`
+///   changes phrase to a provision failure; in operation claude would launch without a resume flag and open a new conversation with an
+///   unknown id.
+/// ★shell is the old way★ — it does not resume with the stored handle and launches without one (the ADR-0082 test bench relies on that).
 // ADR-0226
 #[test]
 fn a_resume_whose_handle_is_gone_is_refused_before_any_process() {
@@ -954,13 +931,13 @@ fn a_resume_whose_handle_is_gone_is_refused_before_any_process() {
 
 /// Makes a folder holding a fake `claude.cmd`. Returns: (that folder, argument record file).
 ///
-/// Putting this folder in front of `PATH` in the profile env makes the backend's `cmd.exe /c claude …` find it — the backend
-/// does not look up an absolute path before launching and passes only the name, so it resolves through the child's `PATH` (the real claude is not launched).
-/// ★It records the arguments it received one line each in the record file★ — the fake's standard output goes to the PTY and the test cannot read it.
-/// ★With `--resume` it prints the real claude's refusal phrase and exits 1, otherwise it lives reading input★ — the former's phrase · exit
-///   code are measured (the doc of that phrase constant in `backend::claude`).
-/// ★The agent cwd must be a place **different** from this folder★ — cmd looks in the current folder before `PATH`, so if they were the same,
-///   whether `PATH` took effect would be hidden.
+/// Putting it in front of `PATH` in the profile env makes the backend's `cmd.exe /c claude …` find it (the backend passes only the name,
+///   resolved through the child's `PATH`; real claude is not launched).
+/// ★Records each received argument line in the record file★ — the fake's stdout goes to the PTY and the test cannot read it.
+/// ★With `--resume` it prints the real claude's refusal phrase and exits 1, otherwise lives reading input★ (phrase · exit code: the phrase
+///   constant's doc in `backend::claude`).
+/// ★The agent cwd must **differ** from this folder★ — cmd looks in the current folder before `PATH`, which would hide whether `PATH` took
+///   effect.
 fn fake_claude_dir(tag: &str) -> (PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!("engram-fake-claude-{tag}-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("fake folder");
@@ -1030,15 +1007,16 @@ fn stored_on_disk(store: &FileProfileStore, id: AgentId) -> Option<Uuid> {
         .and_then(|p| p.backend_session_id)
 }
 
-/// ★Measures D1 with a real process — a 0-turn session leaves no id, and the first submission persists that id (ADR-0226)★.
+/// ★Measures D1 with a real process — a 0-turn session leaves no id, and the first submission persists it (ADR-0226)★.
 ///
-/// Runs two spawns in turn:
-///   1. Resume with an old id without a conversation (garbage) — the fake receives `--resume` and dies with the refusal phrase. With only Phase A
-///      landed it now ends in failure without moving to a new conversation (ADR-0082), and the garbage stays in the registry as is.
-///   2. Fresh on the same profile — the garbage goes into history, and the fake launches with `--session-id <drawn value>` and lives.
-///      The outcome is `Ok`·Running and the failure record of 1 is cleared. The drawn value is in neither the registry nor
-///      on disk **before the first submission (CR)**, and settles in both only after the first input containing CR.
-/// ★First check via the argument record that the fake actually launched★ — if it did not, the 「not persisted」 assertion below idles.
+/// Two spawns in turn:
+///   1. Resume with an old id without a conversation (garbage) — the fake gets `--resume` and dies with the refusal phrase; it now ends in
+///   failure without moving to a new conversation (ADR-0082), the garbage stays in the registry.
+///   2. Fresh on the same profile — the garbage goes into history, the fake launches with `--session-id <drawn value>` and lives:
+///   `Ok`·Running, failure record 1 cleared. The drawn value is in neither registry nor disk **before the first submission (CR)** and
+///   settles in both only after the
+///      first input containing CR.
+/// ★First check via the argument record that the fake launched★ — else the 「not persisted」 assertion idles.
 // ADR-0226
 #[test]
 fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
@@ -1053,7 +1031,6 @@ fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
         .try_upsert(profile.clone())
         .expect("store succeeds");
 
-    // 1. Resume with the garbage id — in Phase A it ends in failure.
     let resumed = manager.activate_profile(&profile, SpawnMode::Resume);
     assert!(
         resumed.is_err(),
@@ -1080,7 +1057,6 @@ fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
         "Phase A's resume failure does not touch the handle"
     );
 
-    // 2. Fresh on the same profile.
     let info = manager
         .activate_profile(&profile, SpawnMode::Fresh)
         .expect("Fresh activation");
@@ -1146,7 +1122,8 @@ fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
         Some(minted),
         "the drawn id is not on disk even after the first submission"
     );
-    // The spawn-time snapshot's Running is always true on a link without a connection axis, so check separately whether the fake is actually alive.
+    // The spawn-time snapshot's Running is always true on a link without a connection axis, so check separately whether the fake is
+    //   actually alive.
     assert!(
         manager
             .list_agents()
@@ -1163,8 +1140,8 @@ fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
 
 /// ★A claude resume request without a handle opens a new conversation — the consequence of user decision D1 (ADR-0226)★.
 ///
-/// The outcome is `Ok`·Running and the fake launches with `--session-id` and no `--resume`. The drawn value is before submission, so it is
-/// not persisted — the old way (if absent, draw and persist it and launch with `--resume <new value>`) left an id without a conversation and died.
+/// `Ok`·Running, the fake launches with `--session-id` and no `--resume`. The drawn value is not persisted before submission — the old way
+///   (draw and persist, launch `--resume <new value>`) left an id without a conversation and died.
 // ADR-0226
 #[test]
 fn a_handleless_claude_resume_opens_a_new_conversation_without_persisting() {

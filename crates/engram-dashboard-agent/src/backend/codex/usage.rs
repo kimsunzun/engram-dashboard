@@ -1,14 +1,14 @@
-//! codex usage limits — interpretation of the app-server `account/rateLimits/updated` notification and the non-default profile decision. The rules that tell
-//! buckets and windows apart ([`DEFAULT_LIMIT_ID`] · [`names_default_bucket`] · [`windows_by_duration`]) are also used by the sibling
-//! `usage_probe` that decodes the query response — both sources tell windows apart by the same rules.
+//! codex usage limits — interpretation of the app-server `account/rateLimits/updated` notification and the non-default profile decision.
+//! The rules that tell buckets and windows apart ([`DEFAULT_LIMIT_ID`] · [`names_default_bucket`] · [`windows_by_duration`]) are shared
+//! with the sibling `usage_probe` (the query response decoder).
 //!
-//! ★The shape has three sources with different confidence★:
+//! ★The shape has three sources of different confidence★:
 //!   - Field names · types = codex-cli 0.156.1's JSON Schema (certain — that struct's doc in `protocol.rs`).
 //!   - `primary`/`secondary` do not mean 5-hour/weekly = `account/rateLimits/read` measurement (certain —
 //!     `docs/research/usage-limit-display-ui-survey-2026-09-26.md` §4-1). Windows are told apart by duration (`windowDurationMins`).
 //!   - Default bucket id = [`DEFAULT_LIMIT_ID`] (likely — that doc).
-//!   Only that this notification arrives during a turn was measured (`docs/process/S21-codex-backend/trd-phase2a.md` L7) — the shape of the carried values
-//!   and the arrival frequency are unmeasured.
+//!   Only that this notification arrives during a turn was measured (`docs/process/S21-codex-backend/trd-phase2a.md` L7); the carried
+//!   values' shape and the arrival frequency are unmeasured.
 
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,39 +29,37 @@ pub const USAGE_VENDOR: UsageVendorKey = UsageVendorKey::new("codex");
 /// The `limitId` of the account default limit bucket.
 ///
 /// ★Not a value we saw in our own measurement★ — grounds = the schema description (`rateLimitsByLimitId`: "keyed by metered `limit_id`
-///   (for example, `codex`)") and the peer t3code picking this value as the default bucket. If wrong, the symptom = pickup emits nothing
-///   (the query fills the value). That symptom is better than the opposite, values of another bucket mixing into the default field.
+///   (for example, `codex`)") and the peer t3code using it as the default bucket. If wrong, pickup emits nothing (the query fills the value) —
+///   better than values of another bucket mixing into the default field.
 pub(super) const DEFAULT_LIMIT_ID: &str = "codex";
 
-/// The length of the 5-hour window (minutes).
 const FIVE_HOUR_WINDOW_MINS: i64 = 5 * 60;
 
-/// The length of the weekly window (minutes).
 const WEEKLY_WINDOW_MINS: i64 = 7 * 24 * 60;
 
-/// Whether an unknown window length has already been written to the log — written only once per process (the same line would repeat on every notification).
+/// Logged once per process — an unknown window length (else one line per notification).
 static UNKNOWN_WINDOW_DURATION_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// Whether a non-default bucket has already been written to the log — once per process, for the same reason as above.
+/// Logged once per process — a non-default bucket.
 static OTHER_BUCKET_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// Whether a window with no fields left has already been written to the log — once per process, for the same reason as above.
+/// Logged once per process — a window with no fields left.
 static EMPTY_WINDOW_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// Whether it has already been written that a notification without `limitId` was read as the default bucket — once per process, for the same reason as above.
+/// Logged once per process — a notification without `limitId` read as the default bucket.
 static MISSING_LIMIT_ID_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// `account/rateLimits/updated` notification → observation. `None` if it is not the default bucket or no window is carried.
 ///
-/// - Windows are told apart **by duration**: 300 min → 5-hour · 10080 min → weekly · anything else (including no duration) is discarded. If two windows have the same
-///   duration, the front slot (`primary`) **among those carrying a value** wins — if the front slot comes without a value (all fields empty or wrong), that
-///   window is filled by the back slot (`secondary`). Two of the same duration is a sign that upstream meaning changed so we do not know which is right,
-///   and the query gives the whole thing soon.
-/// - A non-default bucket (per-model limit) is discarded whole. ★It is not moved into a per-model window★ — one notification
-///   carries only one bucket, but the observation's `model_scoped: Some` is a full replacement of the list, so the moment it is carried it erases the other model windows. If moved into the default window,
-///   that bucket's value would look like the account limit.
-/// - `planType` is not carried over — the plan is carried by the query.
-/// - Usage is already 0–100, reset is epoch seconds. Normalization rules = the tools of [`crate::usage`].
+/// - Windows are told apart **by duration**: 300 min → 5-hour · 10080 min → weekly · anything else (including no duration) is discarded.
+///   If two windows have the same duration, the front slot (`primary`) **among those carrying a value** wins; a front slot with no usable
+///   value is filled by the back slot (`secondary`). Two of the same duration signals that upstream meaning changed, and the query gives
+///   the whole thing soon.
+/// - A non-default bucket (per-model limit) is discarded whole. ★It is not moved into a per-model window★ — one notification carries one
+///   bucket, but the observation's `model_scoped: Some` fully replaces the list, so it would erase the other model windows. Moved into the
+///   default window, that value would look like the account limit.
+/// - `planType` is not carried over — the query carries the plan.
+/// - Usage is already 0–100, reset is epoch seconds. Normalization = the tools of [`crate::usage`].
 pub(super) fn observation_from_rate_limits_updated(
     notification: &AccountRateLimitsUpdatedNotification,
 ) -> Option<UsageObservation> {
@@ -85,9 +83,9 @@ pub(super) fn observation_from_rate_limits_updated(
     })
 }
 
-/// ★Reading a notification without `limitId` as the default bucket is an unmeasured assumption★ (rule = [`names_default_bucket`]) — we have not seen this notification
-///   come without that field. So we write once when using that assumption (if wrong, the symptom = values of a per-model bucket mix into the default
-///   field).
+/// ★Reading a notification without `limitId` as the default bucket is an unmeasured assumption★ (rule = [`names_default_bucket`]) — we
+///   have not seen this notification without that field. So we write once when using the assumption (if wrong, per-model bucket values mix
+///   into the default field).
 fn is_default_bucket(limit_id: Option<&Value>) -> bool {
     if limit_id.is_none() {
         note_missing_limit_id();
@@ -96,8 +94,8 @@ fn is_default_bucket(limit_id: Option<&Value>) -> bool {
 }
 
 /// Does the snapshot's `limitId` point at the default bucket. Compared literally.
-/// ★If absent or `null`, it is read as the default bucket★ — the shape before buckets were split (the schema writes that the query response's `rateLimits` carries that old single-bucket
-///   shape as is) does not carry this field. If the type is wrong we do not know which bucket it is, so `false`.
+/// ★If absent or `null`, it is read as the default bucket★ — the pre-split single-bucket shape (the schema says the query response's
+///   `rateLimits` carries it) has no such field. If the type is wrong we do not know which bucket it is, so `false`.
 pub(super) fn names_default_bucket(limit_id: Option<&Value>) -> bool {
     match limit_id {
         None | Some(Value::Null) => true,
@@ -106,7 +104,6 @@ pub(super) fn names_default_bucket(limit_id: Option<&Value>) -> bool {
     }
 }
 
-/// The snapshot's two slots → `(5 hours, weekly)`. Rule = the first item of [`observation_from_rate_limits_updated`].
 pub(super) fn windows_by_duration(
     snapshot: &RateLimitSnapshot,
 ) -> (Option<WindowObs>, Option<WindowObs>) {
@@ -131,8 +128,8 @@ pub(super) fn windows_by_duration(
     (five_hour, weekly)
 }
 
-/// If both fields are empty, that window is `None` — its meaning is set by the observation's source (pickup = not carried · query = absent —
-/// [`UsageObservation`]). Dropping field by field is quiet, and only when **not one** field is left is it written to the log.
+/// If both fields are empty, that window is `None` — meaning set by the observation's source (pickup = not carried · query = absent —
+/// [`UsageObservation`]). Dropping field by field is quiet; only when **no** field is left is it logged.
 fn carried(window: &RateLimitWindow) -> Option<WindowObs> {
     let obs = WindowObs {
         used_pct: window.used_percent.and_then(used_pct_from_percent),
@@ -183,12 +180,12 @@ fn note_other_bucket() {
     );
 }
 
-/// If the spec sets any one of these differently from the daemon's own value, pickup is skipped for that agent — these are the envs that can bring it up with an
-/// account · credential · endpoint other than the daemon's default login.
+/// If the spec sets any one of these differently from the daemon's own value, pickup is skipped for that agent — these envs can bring it
+/// up on an account · credential · endpoint other than the daemon's default login.
 ///
 /// - [`CODEX_HOME_ENV`] = moves the whole state folder (including the account login).
-/// - The rest = credentials (`OPENAI_API_KEY` · `CODEX_API_KEY`) and an endpoint (`OPENAI_BASE_URL`). Even if the state folder is the same,
-///   if these differ there is no guarantee that agent's limit is that of the default login.
+/// - The rest = credentials (`OPENAI_API_KEY` · `CODEX_API_KEY`) and an endpoint (`OPENAI_BASE_URL`) — with the same state folder, differing
+///   values still give no guarantee the limit is the default login's.
 const ACCOUNT_ENV_KEYS: &[&str] = &[
     CODEX_HOME_ENV,
     "OPENAI_API_KEY",
@@ -196,13 +193,13 @@ const ACCOUNT_ENV_KEYS: &[&str] = &[
     "OPENAI_BASE_URL",
 ];
 
-/// Does the codex launched with this spec run on the **same account** as the daemon — `true` only when not one of [`ACCOUNT_ENV_KEYS`] differs from
-/// the daemon's value. If `false`, pickup for that agent is blocked.
-/// `daemon_env` = key → that env value of the daemon process itself (production = the process env · test = a stand-in). The comparison rule per key and the direction of
-/// erring = [`env_overrides_daemon`].
+/// Does the codex launched with this spec run on the **same account** as the daemon — `true` only when none of [`ACCOUNT_ENV_KEYS`]
+/// differs from the daemon's value; `false` blocks pickup for that agent.
+/// `daemon_env` = key → that env value of the daemon process itself (production = the process env · test = a stand-in). Per-key comparison
+/// rule and the direction of erring = [`env_overrides_daemon`].
 ///
-/// ★Only env is looked at — a hole this decision cannot see★: `-c` (config override) · `--profile` passed as the profile's extra arguments. The observations of an agent
-///   that changed account · endpoint that way mix into the default field.
+/// ★Only env is looked at — a hole this decision cannot see★: `-c` (config override) · `--profile` in the profile's extra arguments.
+///   Observations of an agent that changed account · endpoint that way mix into the default field.
 pub(super) fn collects_default_account_usage(
     spec_env: &[(String, String)],
     daemon_env: impl Fn(&str) -> Option<OsString>,
@@ -212,7 +209,7 @@ pub(super) fn collects_default_account_usage(
         .any(|key| env_overrides_daemon(spec_env, key, daemon_env(key).as_deref()))
 }
 
-/// Set the spawn path's decoder per the pickup decision — if it picks up, it returns it **as is**, and if not, it blocks it with [`UsageGate`].
+/// Set the spawn path's decoder per the pickup decision — if it picks up, return it **as is**; if not, block it with [`UsageGate`].
 /// The decision's daemon-side value is read here from the process env.
 pub(super) fn gate_decoder(
     decoder: Box<dyn OutputDecoder>,
@@ -239,7 +236,6 @@ mod tests {
         observation_from_rate_limits_updated(&notification)
     }
 
-    /// `{"rateLimits": <snapshot>}` — only swaps the snapshot in.
     fn parse_snapshot(snapshot: &str) -> Option<UsageObservation> {
         parse(&format!(r#"{{"rateLimits":{snapshot}}}"#))
     }
@@ -251,7 +247,8 @@ mod tests {
         })
     }
 
-    /// The default bucket of the query measurement (research doc §4-1) — the numbers are that measured value and `limitId` is not in the measurement so we put in [`DEFAULT_LIMIT_ID`].
+    /// The default bucket of the query measurement (research doc §4-1) — the numbers are that measured value and `limitId` is not in the
+    ///   measurement so we put in [`DEFAULT_LIMIT_ID`].
     const DEFAULT_BUCKET: &str = r#"{"limitId":"codex","planType":"plus","primary":{"usedPercent":37,"windowDurationMins":300,"resetsAt":1790424706},"secondary":{"usedPercent":58,"windowDurationMins":10080,"resetsAt":1790739378},"credits":null}"#;
 
     // ── Shape ──
@@ -320,7 +317,6 @@ mod tests {
         assert_eq!(obs.five_hour, window(Some(10.0), None));
         assert_eq!(obs.weekly, None);
 
-        // If the front slot comes without a value, the back slot fills that window.
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":"10","windowDurationMins":300},"secondary":{"usedPercent":99,"windowDurationMins":300}}"#,
         )
@@ -360,7 +356,6 @@ mod tests {
             parse_snapshot(r#"{"primary":{"usedPercent":40,"windowDurationMins":null}}"#),
             None
         );
-        // A known duration next to an unknown duration survives.
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":40,"windowDurationMins":43200},"secondary":{"usedPercent":7,"windowDurationMins":10080}}"#,
         )
@@ -369,8 +364,8 @@ mod tests {
         assert_eq!(obs.weekly, window(Some(7.0), None));
     }
 
-    /// A per-model bucket — in the measured shape (`base_model_inference` in research doc §4-1) `primary` is weekly, and that value must not go
-    /// into the account weekly field.
+    /// A per-model bucket — in the measured shape (`base_model_inference`, research doc §4-1) `primary` is weekly, and that value must not
+    ///   go into the account weekly field.
     #[test]
     fn other_buckets_are_dropped_whole() {
         assert_eq!(
@@ -412,7 +407,8 @@ mod tests {
         .expect("observation");
         assert_eq!(obs.five_hour, window(Some(37.0), None));
 
-        // A reset or duration with a fractional part is not an integer — only that field is missing (without a duration the window cannot be told apart).
+        // A reset or duration with a fractional part is not an integer — only that field is missing (without a duration the window cannot
+        //   be told apart).
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":37.5,"windowDurationMins":300,"resetsAt":1790424706.0}}"#,
         )
@@ -440,7 +436,6 @@ mod tests {
 
     #[test]
     fn broken_numbers_never_panic() {
-        // Negative → 0 · huge number → 100 · out-of-range epoch → that field is missing.
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":-30,"windowDurationMins":300,"resetsAt":-5},"secondary":{"usedPercent":1e308,"windowDurationMins":10080,"resetsAt":99999999999999999}}"#,
         )
@@ -454,7 +449,6 @@ mod tests {
         .expect("observation");
         assert_eq!(obs.five_hour, window(Some(100.0), None), "u64 max");
 
-        // If the window duration is outside i64, it is an unknown duration.
         assert_eq!(
             parse_snapshot(
                 r#"{"primary":{"usedPercent":1,"windowDurationMins":18446744073709551615}}"#
@@ -551,7 +545,6 @@ mod tests {
         ));
     }
 
-    /// If it picks up, returns the decoder as is; if not, returns it blocked — the daemon-side value is the real process env.
     #[test]
     fn gate_decoder_blocks_only_when_not_collecting() {
         use crate::backend::codex::decoder::CodexAppServerDecoder;
@@ -563,7 +556,6 @@ mod tests {
             })
         );
 
-        // If the spec changes nothing, it picks up whatever the process env is.
         let mut d = gate_decoder(Box::new(CodexAppServerDecoder::new()), &[]);
         d.decode(line.as_bytes());
         assert_eq!(d.take_usage().len(), 1);

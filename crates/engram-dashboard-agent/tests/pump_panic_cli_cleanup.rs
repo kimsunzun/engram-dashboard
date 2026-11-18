@@ -1,19 +1,19 @@
-//! CLI cleanup after a contained pump panic — for each pump kind (PTY · stdio · codex reader), raise a panic inside the contained pump
-//! of an agent launched with the operating manager, and measure whether the existing cleanup path alone (`finish` → `Failed` → the reaper removes the session → the last `Arc`
-//! drop → link drop → group owner drop → Job `KILL_ON_JOB_CLOSE`), with no explicit termination, makes the whole CLI process tree — not only the root `cmd /c`
-//! but also the CLI below it and the grandchild the CLI launched — disappear within the deadline.
+//! CLI cleanup after a contained pump panic — per pump kind (PTY · stdio · codex reader), raise a panic inside the contained pump of an agent
+//! launched with the operating manager and measure whether the existing cleanup path alone (`finish` → `Failed` → reaper removes the
+//! session → last `Arc` drop → link drop → group owner drop → Job `KILL_ON_JOB_CLOSE`), with no explicit termination, makes the whole CLI
+//! tree (root `cmd /c`, the CLI, the CLI's grandchild) disappear within the deadline.
 //!
-//! The entry is `AgentManager::spawn_agent(Fresh)`. A panic raised inside the activation entry's decision window (`early_activation_verdict` ·
-//! `link_activation_verdict`) and a panic raised during the codex handshake are not measured.
+//! Entry = `AgentManager::spawn_agent(Fresh)`. Panics inside the activation entry's decision window (`early_activation_verdict` ·
+//! `link_activation_verdict`) and during the codex handshake are not measured.
 //!
-//! ★The test turns nothing off until the decision is over★ — it does not call kill · shutdown, and the cleanup (`Cleanup`) runs only in the drop
-//! after the decision. If something the test turned off became the ground for passing, this test would measure nothing.
+//! ★The test turns nothing off until the decision is over★ — no kill · shutdown call; `Cleanup` runs only in the drop after the decision.
+//! Otherwise something the test turned off could be the ground for passing.
 //!
-//! The fake CLI is a PowerShell script — it does not launch the real claude · codex.
+//! The fake CLI is a PowerShell script (no real claude · codex).
 //!
-//! Windows only: the end link being measured (Job) and the means to see the tree (`engram_dashboard_platform::process`) exist only on Windows. On other
-//! OSes the group owner is a no-op, so the CLI is likely to remain (not measured — TRD S21-panic-policy §7 「accepted residue」) — the
-//! `#[ignore]` marker below exposes that gap.
+//! Windows only: the measured end link (Job) and the tree-viewing means (`engram_dashboard_platform::process`) exist only there. Elsewhere
+//! the group owner is a no-op and the CLI likely remains (not measured — TRD S21-panic-policy §7 「accepted residue」); the `#[ignore]`
+//!   marker exposes that gap.
 // ADR-0292
 
 #[cfg(not(windows))]
@@ -48,16 +48,15 @@ mod on_windows {
     };
     use engram_dashboard_platform::testing::is_ping;
 
-    /// The bound from the panic until the whole tree is gone — the same as the budget the explicit kill path gives the pump join (`AgentManager::kill_agent`
-    /// 's `session.kill(5 s)` · ADR-0001). Decision A is the claim 「it ends through the existing cleanup path」, so the existing budget of that path
-    /// is used as the yardstick — it is not a value chosen to fit this measurement (ADR-0038). The chain has no polling step (the reaper receives on a channel).
+    /// Bound from the panic until the whole tree is gone — the budget the explicit kill path gives the pump join (`AgentManager::kill_agent`'s
+    /// `session.kill(5 s)` · ADR-0001). Decision A claims 「it ends through the existing cleanup path」, so that path's budget is the
+    /// yardstick, not a value fitted to this measurement (ADR-0038). The chain has no polling step.
     const BOUND: Duration = Duration::from_secs(5);
 
-    /// The deadline that tells apart an experiment that did not stand (the fake failed to launch · no panic happened), and the deadline for keeping watch on a tree
-    /// that exceeded the bound — not a measurement bound. PowerShell startup time was not measured.
+    /// Deadline telling apart an experiment that did not stand (the fake failed to launch · no panic) and for watching an overrun tree — not a
+    /// measurement bound. PowerShell startup time was not measured.
     const SETUP: Duration = Duration::from_secs(30);
 
-    /// The tick of the measured time.
     const POLL: Duration = Duration::from_millis(10);
 
     /// The deadline for retrying the test folder deletion (`Scratch` drop) — a cleanup job unrelated to the decision, and an unmeasured value.
@@ -65,21 +64,18 @@ mod on_windows {
 
     const PANIC_MARK: &str = "U4: subscriber panic inside the contained pump";
 
-    /// The fake CLI. It first launches a grandchild (a long `ping`), announces its own and the grandchild's identity (PID · start time) in a marker file, then, if codex,
-    /// answers the two handshake requests, and emits one line every 200 ms forever — forever so that whenever the subscription · arming stands, the pump
-    /// emits after it.
-    /// ★stdout is written as raw bytes★ — the encoding · BOM of `Write-Output` can make the first line not JSON (same
-    /// reason = the fake app-server in `backend/codex/mod.rs`).
-    /// ★The marker is written by a rename **after** launching the grandchild★ — at the moment the test reads the marker, the grandchild already exists and the content is complete.
-    /// If it cannot leave the marker, it turns off the grandchild and ends — if the CLI dies while nobody knows that identity, killing from the root does not reach it and the grandchild
-    /// remains for an hour.
-    /// ★Start times are read through the handle each one holds★ (self = the current process · grandchild = the `Process` received when launching it) — so the identity in the marker
-    /// belongs to these processes even if the PID later passes to someone else. `StartTime` is the creation FILETIME converted to local time,
-    /// and `ToFileTimeUtc` converts it back (same 100 ns tick). In the hour where daylight saving overlaps it can be off — then
-    /// the test's cross-check assertion goes red, and the cleanup does not turn off the mismatched identity (because the start time differs).
-    /// ★The grandchild is launched with its own (hidden) console and no pipes attached★ — this removes the ways it could die from the PTY console closing or a pipe breaking.
-    /// So the grandchild disappearing cannot be explained by anything other than closing the group (Job) (the control group below measures this). `Send` swallowing write failures
-    /// is so that the CLI does not die on its own after the pump stops reading.
+    /// The fake CLI. It launches a grandchild (a long `ping`), announces its own and the grandchild's identity (PID · start time) in a
+    /// marker file, answers the two handshake requests if codex, then emits one line every 200 ms forever (so the pump emits after any
+    ///   subscription · arming).
+    /// ★stdout is raw bytes★ — `Write-Output` encoding · BOM can make the first line not JSON (as the fake app-server in
+    ///   `backend/codex/mod.rs`).
+    /// ★The marker is written by a rename **after** launching the grandchild★ — when the test reads it, the content is complete. If the marker
+    /// cannot be left, it turns off the grandchild and ends (an unknown-identity grandchild would live for an hour).
+    /// ★Start times come from each process's own handle★, so the marker identity stays theirs after PID reuse. `StartTime` is the creation
+    /// FILETIME in local time and `ToFileTimeUtc` converts back (same 100 ns tick); in the DST-overlap hour it can be off — the
+    /// cross-check assertion goes red and cleanup skips the mismatched identity.
+    /// ★The grandchild has its own hidden console and no pipes★ — so its disappearance is explained only by closing the group (Job) (the control
+    /// group below measures this). `Send` swallows write failures so the CLI does not die on its own after the pump stops reading.
     const FAKE_CLI_PS1: &str = r#"
 param([string]$Mode)
 $ErrorActionPreference = 'Stop'
@@ -139,8 +135,8 @@ while ($true) {
             }
         }
 
-        /// A line that link's decoder turns into an event — with a line it does not turn into one, the pump does not emit (the claude decoder drops non-JSON
-        /// lines, the codex reader drops lines that are not notifications).
+        /// A line link's decoder turns into an event — other lines make no pump emit (claude decoder drops non-JSON, codex reader drops
+        ///   non-notifications).
         fn tick(self) -> &'static str {
             match self {
                 Pump::Pty => "tick",
@@ -163,9 +159,9 @@ while ($true) {
         }
 
         fn profile(self, cli_dir: &Path) -> AgentProfile {
-            // ★The child's PATH and working folder are a folder holding only the fakes★ — cmd looks for `claude` · `codex` only in those two, so there is no way
-            //   to reach the real CLI (same block = `claude_profile_that_cannot_launch` in the `manager.rs` tests). PTY is a shell agent that calls the shim by absolute
-            //   path, so it does not touch PATH — if emptied, portable-pty cannot even find `cmd.exe`.
+            // ★The child's PATH and working folder hold only the fakes★ — cmd finds `claude` · `codex` only there, so the real CLI is
+            //   unreachable (as `claude_profile_that_cannot_launch` in the `manager.rs` tests). PTY calls the shim by absolute path, so
+            //   PATH stays untouched — emptied, portable-pty cannot find `cmd.exe`.
             let only_fakes = vec![("PATH".to_string(), cli_dir.to_string_lossy().into_owned())];
             let (command, env) = match self {
                 Pump::Pty => (
@@ -203,7 +199,6 @@ while ($true) {
         }
     }
 
-    /// One test's folder — `cli` holds only the three fakes (shim · script · marker) (that folder is the child's PATH).
     struct Scratch {
         root: PathBuf,
         cli: PathBuf,
@@ -239,8 +234,7 @@ while ($true) {
     }
 
     impl Drop for Scratch {
-        /// If a process that just ended still holds the working folder, deletion fails (measured — once the `cli` folder remained) — retry
-        /// for a moment.
+        /// A just-ended process may still hold the working folder and fail deletion (measured once) — retry briefly.
         fn drop(&mut self) {
             wait_until(DELETE_RETRY, || {
                 std::fs::remove_dir_all(&self.root).is_ok() || !self.root.exists()
@@ -265,7 +259,7 @@ while ($true) {
                 .collect()
         }
 
-        /// The list notification after the panic in which that agent is gone — the notification sent after the reaper removed the session (`ReaperDeps::reap_one`).
+        /// The list notification sent after the reaper removed the session (`ReaperDeps::reap_one`).
         fn dropped_from_list_since(&self, id: AgentId, since: Instant) -> bool {
             self.lists
                 .lock()
@@ -287,8 +281,8 @@ while ($true) {
         }
     }
 
-    /// Panics on the first frame received **inside the mark** after being armed. Before arming · outside the mark (the test
-    /// thread passing over the replay at subscription, the place where the mark is off) it only receives — so the panic happens after the tree was captured, and only inside the pump's `contain`.
+    /// Panics on the first frame received **inside the mark** after arming. Before arming · outside the mark (the test thread replaying at
+    /// subscription) it only receives — so the panic comes after the tree was captured, and only inside the pump's `contain`.
     struct PanicOnArm {
         id: SinkId,
         armed: AtomicBool,
@@ -327,11 +321,11 @@ while ($true) {
         }
     }
 
-    /// After the decision (or when the experiment fell over midway) this withdraws only what this test launched. ★Runs only in drop★ — if it ran during the measurement, the test
+    /// After the decision (or a mid-way fall) this withdraws only what this test launched. ★Runs only in drop★ — during the measurement it
     /// would make the ground for passing.
-    /// ★It does not turn anything off holding only a PID★ — a live session by explicit kill (with its group), a held root by capturing what is below it, turning those off, then turning it off through that handle,
-    /// and an identity only after `terminate_if_same` confirmed the start time through the same handle. What it could not read the identity of is not turned off, and the fact
-    /// that it was left is written down.
+    /// ★Nothing is turned off by PID alone★ — a live session by explicit kill; a held root by capturing what is below it, then through its
+    /// handle; an identity only after `terminate_if_same` confirmed the start time via the same handle. Unreadable identities are left and
+    ///   the fact is written down.
     struct Cleanup<'a> {
         session: Option<(&'a AgentManager, AgentId)>,
         pipe_root: Option<std::process::Child>,
@@ -378,9 +372,9 @@ while ($true) {
         }
     }
 
-    /// Captures what is below by the start time read while the held root handle pins that PID, and turns them off one by one — if it fell over before the marker
-    /// arrived, the list is empty, and turning off only the root leaves the CLI and the grandchild. Because the handle pins the root PID, even after the root ended
-    /// a child carrying that PID as its parent is really that root's child.
+    /// Captures what is below by the start time read while the held root handle pins that PID, then turns them off one by one — if the
+    /// marker never arrived the list is empty and the root alone would leave the CLI and grandchild. The pin makes a child naming that PID
+    ///   as parent really its child.
     fn end_tree_under(root_pid: u32) {
         if let Some(root_start) = process_creation_time(root_pid) {
             for p in subtree(root_pid, root_start) {
@@ -400,8 +394,8 @@ while ($true) {
         }
     }
 
-    /// The list at the **moment of capturing** the identities below the root (the `cmd.exe` this test process launched) — descendants born after that are not included (the fake
-    /// launches one grandchild and launches nothing more after that).
+    /// The identities below the root (the `cmd.exe` this test launched) at **capture time** — later-born descendants are not included (the
+    ///   fake launches one grandchild only).
     struct Tree {
         root: ProcessIdentity,
         cli: ProcessIdentity,
@@ -442,8 +436,8 @@ while ($true) {
         )
     }
 
-    /// Finds and captures the CLI's tree via the marker. The marker's identities (PID · start time the fake read through its own handle) are put into `cleanup`
-    /// **before anything else that can fall over** — so that even if the check falls over, the grandchild is withdrawn too.
+    /// Finds and captures the CLI's tree via the marker. Its identities go into `cleanup` **before anything else that can fall over**, so
+    /// the grandchild is withdrawn even if the check falls.
     fn observe_tree(cli_dir: &Path, cleanup: &mut Cleanup) -> Tree {
         let marker = cli_dir.join("cli.pid");
         assert!(
@@ -489,8 +483,8 @@ while ($true) {
         }
     }
 
-    /// The process of that identity is still running. Even after it ends the object remains if someone holds a handle (`ProcessStart` doc), so besides the start-time cross-check
-    /// it looks at whether it exited. If it cannot read it (`Unknown`) it treats it as running — a false failure rather than a false pass.
+    /// That identity's process is still running. An ended process's object remains while someone holds a handle (`ProcessStart` doc), so
+    /// besides the start-time cross-check it checks exit. Unreadable (`Unknown`) counts as running — a false failure rather than a false pass.
     fn running(p: &ProcessIdentity) -> bool {
         match process_start(p.pid) {
             ProcessStart::Known(start) if start == p.start_time => pid_alive(p.pid),
@@ -641,9 +635,9 @@ while ($true) {
 
     // ── Control group: without a group (Job), the grandchild lives past the bound ──
     //
-    // Even if everything the contained panic path releases before · together with the group (output read end · stdin · root · PTY console) is released without a group, the fake's
-    // grandchild lives for the bound — so the grandchild disappearing within the bound in the test above cannot be explained by anything other than closing the group.
-    // If the fake changes so that the grandchild dies on its own, this goes red.
+    // Releasing everything else the contained panic path releases (output read end · stdin · root · PTY console) without a group still
+    // leaves the grandchild alive for the bound — so in the test above its disappearance is explained only by closing the group. Goes red
+    //   if the fake's grandchild dies on its own.
 
     fn assert_the_grandchild_outlives_the_bound(tree: &Tree) {
         std::thread::sleep(BOUND);
@@ -660,9 +654,9 @@ while ($true) {
         );
     }
 
-    /// The branch where the fake cannot leave the marker — blocks the marker's place in advance to make the rename fail. The fake ends in failure and turns off the grandchild
-    /// with it. The evidence that it reached that branch is `cli.pid.tmp` written before the rename, and the grandchild is measured by the identity written there —
-    /// if powershell fell over before that, there would be no grandchild at all and 「no grandchild left」 would pass falsely.
+    /// The branch where the fake cannot leave the marker — its place is blocked in advance so the rename fails; the fake ends in failure
+    /// and turns off the grandchild. Evidence of reaching the branch = `cli.pid.tmp` written before the rename; the grandchild is measured
+    /// by that identity (had powershell fallen earlier there would be no grandchild and 「no grandchild left」 would pass falsely).
     #[test]
     fn a_fake_cli_that_cannot_write_its_marker_ends_its_grandchild() {
         use std::process::{Command, Stdio};

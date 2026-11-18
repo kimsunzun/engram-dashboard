@@ -1,29 +1,18 @@
 //! ClaudeBackend — produces the CommandSpec for the claude CLI only.
 //!
-//! ★The rule this folder sets = claude knowledge lives only in here (ADR-0004)★: claude flags · env conventions ·
-//! stream-json I/O schema · `.jsonl` transcript file layout · resume-failure text · turn-signal mapping are
-//! all in this folder. The outside (manager · `backend/mod.rs` dispatch · transport · core) only carries abstract descriptors and
-//! bytes.
-//! ★That is why it is a folder and not a file★ — a bare `claude.rs` cannot say "this is where claude ends" through its name,
-//! so even when knowledge leaks into dispatch nobody reads it as a violation. It actually leaked: `backend/mod.rs` directly called this module's functions for
-//! the four of input encoding · synthetic echo · output decoder · transcript seed, and while it lived in one file
-//! that was not visible.
+//! ★Claude knowledge lives only in this folder (ADR-0004)★: flags · env conventions · stream-json I/O schema · `.jsonl` transcript layout · resume-failure text · turn-signal mapping. The outside (manager · `backend/mod.rs`
+//! dispatch · transport · core) carries only abstract descriptors and bytes.
+//! ★A folder, not a file★ — a bare `claude.rs` cannot say 「claude ends here」, so leaks into dispatch went unread as violations; it did leak (`backend/mod.rs` called this module directly for input encoding · synthetic echo ·
+//! output decoder · transcript seed).
 //!
-//! ★The surface going out = one [`crate::backend::AgentBackend`] implementation + one usage prober singleton
-//!   [`CLAUDE_USAGE_PROBE`] ([`crate::usage::UsageProbe`])★: when the outside needs new knowledge, a method is added to that trait
-//!   and implemented here — not by the outside calling this module's items by name. The prober is not a trait field
-//!   because it is a query that runs even without an agent, to avoid a two-layer dispatch, and the only place that can call it by name
-//!   is the registry in `backend/mod.rs` — outside the crate the compiler blocks it since it is `pub(crate)`, and inside the crate
-//!   the isolation gate below watches.
-//! ★Isolation gate (common to the four backend folders — run with only the name swapped)★:
+//! ★Surface going out = one [`crate::backend::AgentBackend`] implementation + one usage prober singleton [`CLAUDE_USAGE_PROBE`] ([`crate::usage::UsageProbe`])★: new outside knowledge means a trait method implemented here, not
+//! the outside calling this module's items by name. The prober is not a trait field because it is a query that runs without an agent (avoids a two-layer dispatch); only the registry in `backend/mod.rs` may call it by
+//! name — `pub(crate)` blocks the outside of the crate and the gate below watches the inside.
+//! ★Isolation gate (common to the four backend folders — swap the name)★:
 //!   `rg -n --glob '*.rs' --glob '!**/backend/claude/**' "\bclaude::" crates/ src-tauri/`
-//!   ★Do not count hits★ — decide whether each hit is the **registry** of `backend/mod.rs` (`pub use claude::ClaudeBackend;`).
-//!   The registry and the dispatch table are places that cannot avoid writing the name, and any other hit is a violation.
-//!   ★What it cannot see — do not inflate it★: ① **knowledge that leaks without carrying the vendor name** (unnamed conventions like a magic timeout or
-//!   a bare `pid` field) is never caught in the first place — this gate measures only names ② the backend alphabet is written by hand,
-//!   so **a new backend is invisible until someone adds its name to the gate** ③ an alias import
-//!   (`use crate::backend::claude as c;` → `c::foo()`) and `#[path]` relocation leave no `claude::` and
-//!   slip through.
+//!   ★Do not count hits★ — judge whether each is the **registry** of `backend/mod.rs` (`pub use claude::ClaudeBackend;`); the registry and dispatch table must write the name, any other hit is a violation.
+//!   ★What it cannot see★: ① **knowledge leaking without the vendor name** (a magic timeout, a bare `pid` field); ② the backend alphabet is hand-written, so **a new backend is invisible until its name is added**; ③ an alias
+//!   import (`use crate::backend::claude as c;`) and `#[path]` relocation leave no `claude::`.
 //!
 //! tauri import 0.
 
@@ -66,17 +55,13 @@ use crate::usage::UsageObservation;
 
 const CLAUDE_PROGRAM: &str = "claude";
 
-/// env carried by every claude we launch — turns off only the background auto-update (a manual `claude update` stays as is).
-/// We end claude forcibly (Job Object terminate), and there is a user observation that being cut off mid-update broke the shared installation.
-/// Grounds · discarded alternatives = `docs/research/child-process-shutdown-peers-2026-10-14.md` §5 (chosen = C · user 2026-10-20).
+/// env carried by every claude we launch — turns off only the background auto-update (a manual `claude update` stays). We end claude forcibly (Job Object terminate) and being cut off mid-update broke the shared
+/// installation. Grounds · discarded alternatives: `docs/research/child-process-shutdown-peers-2026-10-14.md` §5 (chosen = C).
 const NO_AUTOUPDATE_ENV: (&str, &str) = ("DISABLE_AUTOUPDATER", "1");
 
-/// Whether claude launches with `--output-format stream-json` = the point where the four axes in this folder (link · input encoding · output
-/// decoder · transcript seed) split together.
+/// Whether claude launches with `--output-format stream-json` — the point where the four axes in this folder (link · input encoding · output decoder · transcript seed) split together.
 ///
-/// ★Do not move this predicate back to `profile`★ (ADR-0004): there, claude's output-format axis would directly drive the link choice of the
-///   shared layer. What goes out is only the value of a neutral axis such as
-///   [`AgentBackend::transport_shape`].
+/// ★Do not move this predicate back to `profile`★ (ADR-0004): claude's output-format axis would drive the shared layer's link choice. Only a neutral axis value such as [`AgentBackend::transport_shape`] goes out.
 fn is_stream_json(command: &AgentCommand) -> bool {
     matches!(
         command,
@@ -87,8 +72,7 @@ fn is_stream_json(command: &AgentCommand) -> bool {
     )
 }
 
-/// Mid-turn input policy — only JSON mode has the session classify and the vendor release ([`cancel_line`] is the cancel means).
-/// Terminal mode is today's path: there is neither a line decoder to give per-entry ack notices nor a control channel to receive a cancel line.
+/// Mid-turn input policy — only JSON mode has the session classify and the vendor release ([`cancel_line`] is the cancel means). Terminal mode has neither a line decoder for per-entry acks nor a control channel for a cancel line.
 // ADR-0231
 fn mid_turn_policy(command: &AgentCommand) -> MidTurnPolicy {
     if is_stream_json(command) {
@@ -98,12 +82,10 @@ fn mid_turn_policy(command: &AgentCommand) -> MidTurnPolicy {
     }
 }
 
-/// **Lowercase fragment** of the text claude emits when `--resume <sid>` cannot find the conversation to resume.
+/// **Lowercase fragment** of the text claude emits when `--resume <sid>` cannot find the conversation.
 ///
-/// ★It is an external program's output, not a value we chose★ — measured: `--resume <missing uuid>` emits, with exit 1,
-///   `No conversation found with session ID: …` (`docs/process/S9-session-restore/spike-results.md`).
-/// ★Even if it fails to match, the entry is not locked★: if claude changes the text, the classification falls to 「early exit right after resume」,
-///   and that one is retryable (ADR-0172 fail-open).
+/// ★An external program's output, not our value★ — measured: `--resume <missing uuid>` emits `No conversation found with session ID: …` with exit 1 (`docs/process/S9-session-restore/spike-results.md`).
+/// ★A failed match does not lock the entry★: if claude changes the text the classification falls to 「early exit right after resume」, which is retryable (ADR-0172 fail-open).
 // ADR-0172
 const NO_CONVERSATION_MARKER: &str = "no conversation found";
 
@@ -127,20 +109,13 @@ impl AgentBackend for ClaudeBackend {
     fn accepts_mcp_config(&self) -> bool {
         // claude attaches the mcp-config with `--mcp-config` → MCP-capable.
         //
-        // ★What this value decides — not wiring but education and enforcement (ADR-0133)★:
-        //   - **Wiring goes to everyone.** The `engram` executable, credentials and PATH are laid down for MCP-capable spawns too —
-        //     the control verbs are open to all (ADR-0132 decision 5) and there is only one executable, so it cannot be laid down split by family.
-        //   - **Only education differs.** Whether the priming is loaded depends on this value. ★What differs is not 「which variant」
-        //     but 「load it or not」★ — the CLI-only copy was deleted in commit `2ef6902`, and today only MCP-capable spawns
-        //     receive the priming (non-MCP gets 0 lines of instructions — ADR-0209 decision 3).
-        //   - **Enforcement is only the daemon's refusal.** The daemon refuses mail requests that come with the credentials of an MCP-capable spawn.
-        //     ★The mail screen of `engram help` opens regardless of this value★ — the marker that chose the screen by spawn env
-        //     was removed (user decision 2026-09-23). Bringing it back would let a value the agent can erase decide the screen.
-        // ★Teaching a channel it cannot use reproduces the send freeze ADR-0099 measured★ — priming load and mail
-        //   availability must be decided by the same value (today the non-MCP side **teaches nothing**, so that equality holds).
-        // ★The living invariant this flag implements is still channel unification (ADR-0128 decision 1)★: the mail channel
-        //   is decided only by backend capability, with no runtime switching or fallback. What ADR-0133 changed is only
-        //   **how** that unification is enforced.
+        // ★What this value decides — education and enforcement, not wiring (ADR-0133)★:
+        //   - **Wiring goes to everyone.** The `engram` executable, credentials and PATH are laid down for MCP-capable spawns too (control verbs open to all — ADR-0132 decision 5; one executable cannot be split by family).
+        //   - **Only education differs**: whether the priming is loaded — ★「load it or not」, not 「which variant」★ (the CLI-only copy was deleted in `2ef6902`; non-MCP gets 0 lines of instructions — ADR-0209 decision 3).
+        //   - **Enforcement is only the daemon's refusal** of mail requests carrying an MCP-capable spawn's credentials. ★The mail screen of `engram help` opens regardless★ — the spawn-env marker that chose the screen was removed;
+        //     bringing it back would let a value the agent can erase decide the screen.
+        // ★Teaching a channel it cannot use reproduces the send freeze ADR-0099 measured★ — priming load and mail availability must be decided by the same value (the non-MCP side teaches nothing, so that holds).
+        // ★The living invariant is channel unification (ADR-0128 decision 1)★: the mail channel is decided only by backend capability, no runtime switching or fallback; ADR-0133 changed only **how** it is enforced.
         // ADR-0099
         // ADR-0126
         // ADR-0128
@@ -149,12 +124,9 @@ impl AgentBackend for ClaudeBackend {
         true
     }
 
-    /// ★This backend **actually opens** that file★ — `build_spec` below passes the path with `--mcp-config <path>`,
-    /// and claude reads it and carries the `Authorization` header (measured on 2.1.170 · the daemon's
-    /// `control/mcp_config.rs` header is the canonical source of that schema). So only here is it true.
-    /// ★Do not let the spawn continue on a write failure of that file (keep fail-closed)★: without the file, the injection below
-    ///   does not run a single line and the MCP entry physically disappears, and that spawn becomes an agent running without a control channel.
-    ///   The canonical decision is that `?` in the daemon's `control::provision`.
+    /// ★This backend **actually opens** that file★ — `build_spec` passes `--mcp-config <path>` and claude reads it and carries the `Authorization` header (measured on 2.1.170; the daemon's `control/mcp_config.rs` header
+    /// is the schema's canonical source). Only here is it true.
+    /// ★Keep fail-closed on a write failure of that file★: without it the injection below runs not one line and the MCP entry vanishes — an agent without a control channel. Canonical decision: the `?` in the daemon's `control::provision`.
     // ADR-0086
     // ADR-0099
     // ADR-0209
@@ -178,14 +150,9 @@ impl AgentBackend for ClaudeBackend {
                 output_format,
             } => {
                 let mut args = Vec::with_capacity(8 + extra_args.len());
-                // ★AUTO permission mode — `--permission-mode bypassPermissions` (user decision 2026-07-22)★:
-                //   the spawned claude is a headless worker, so there is no approver — default-deny + per-tool grant wiring
-                //   does not hold because nobody is there to answer the approval prompt (CLI measured 0/38, all permission-blocked).
-                //   **A temporary regime**; the proper replacement is a constraint layer shared by all LLMs (this base flag is removed then).
-                //   ★Placed first★: `--permission-mode`+`bypassPermissions` is a NON-variadic 2-element pair, so placing it first
-                //   does not trip the absorption rule of the later group (the extra_args comment below). Injected **unconditionally**,
-                //   regardless of control endpoint presence or spawn mode.
-                // User decision 2026-07-22
+                // ★AUTO permission mode — `--permission-mode bypassPermissions`★: the spawned claude is a headless worker with no approver, so default-deny + per-tool grants cannot hold (CLI measured 0/38, all permission-blocked).
+                //   **A temporary regime**; its replacement is a constraint layer shared by all LLMs (this flag is removed then).
+                //   ★Placed first★: it is a NON-variadic 2-element pair, so it does not trip the later group's absorption rule (the extra_args comment below). Injected **unconditionally** (any endpoint, any mode).
                 // ADR-0097
                 args.push("--permission-mode".to_string());
                 args.push("bypassPermissions".to_string());
@@ -208,7 +175,7 @@ impl AgentBackend for ClaudeBackend {
                     }
                     // ── JSON (headless stream-json) — ADR-0044 ──
                     // stream-json I/O is for claude `-p` only (measured: --help "only works with --print").
-                    // --replay-user-messages: echoes user turns into the output stream → the frontend renders from the output as the single source.
+                    // --replay-user-messages echoes user turns into the output stream, so the frontend renders from the output as the single source.
                     AgentOutputFormat::StreamJson => {
                         args.push("-p".to_string());
                         args.push("--input-format".to_string());
@@ -216,20 +183,16 @@ impl AgentBackend for ClaudeBackend {
                         args.push("--output-format".to_string());
                         args.push("stream-json".to_string());
                         args.push("--replay-user-messages".to_string());
-                        // ★--verbose is required (confirmed by M2 QA measurement, 2026-07-02)★: claude 2.1.170 has no text about it in --help,
-                        //   but the runtime kills it immediately with "When using --print, --output-format=stream-json
-                        //   requires --verbose" (shows up as the agent vanishing right after spawn). Must not be removed.
+                        // ★--verbose is required (M2 QA)★: claude 2.1.170 has no text about it in --help, but the runtime kills it at once with "When using --print, --output-format=stream-json requires --verbose" (the agent
+                        //   vanishes right after spawn). Must not be removed.
                         args.push("--verbose".to_string());
-                        // Text streaming: the vendor sends, **separately** from the `stream_event` text deltas, a complete `assistant` line per block too —
-                        //   what reduces the two copies to one is the decoder's `PartialMessage` (the frontend has no dedup).
+                        // The vendor sends, **separately** from the `stream_event` text deltas, a complete `assistant` line per block too; the decoder's `PartialMessage` reduces the two copies to one (the frontend has no dedup).
                         // ADR-0240
                         args.push("--include-partial-messages".to_string());
                         // ADR-0044 follow-up done / ADR-0008 reuse: json (stream-json) resume enabled.
                         if let Some(sid) = session_id {
-                            // ★Measured (2026-07-13, claude 2.1.170)★: headless stream-json also supports `--resume <sid>`
-                            //   — it coexists with `-p`/`--input-format stream-json`/`--output-format stream-json`
-                            //   and resumes the past conversation losslessly without "session already in use". So
-                            //   it uses the same mode split as the terminal branch (controlled-sid infrastructure, ADR-0008 reuse).
+                            // ★Measured (claude 2.1.170)★: headless stream-json also supports `--resume <sid>` — it coexists with `-p`/`--input-format stream-json`/`--output-format stream-json` and resumes losslessly with no
+                            //   "session already in use", so it uses the same mode split as the terminal branch (controlled-sid infrastructure, ADR-0008).
                             let flag = match mode {
                                 SpawnMode::Fresh => "--session-id",
                                 SpawnMode::Resume => "--resume",
@@ -237,17 +200,11 @@ impl AgentBackend for ClaudeBackend {
                             args.push(flag.to_string());
                             args.push(sid.to_string());
                         }
-                        // ADR-0049: measured (2026-07-06, claude 2.1.170) — headless stream-json emits `"type":"thinking"` blocks only when env
-                        //   MAX_THINKING_TOKENS is present (off by CLI default).
-                        //   So 8000 is injected for json mode only. The terminal path keeps CLI parity — not injected.
-                        // ★Profile first (explicit-skip)★: skipped if the profile already set the same key. env is
-                        //   a (k,v) Vec and the transport applies cmd.env in order so the later one wins, but rather than relying on
-                        //   merge order, the profile deterministically wins.
-                        //   ★Key comparison follows the OS's environment variable name rules (`env_key_eq`)★: on Windows
-                        //   it is case-insensitive, so the profile's `max_thinking_tokens` is also recognized as the same key, preventing duplicate
-                        //   injection.
-                        //   ★Normalizing duplicate keys within the profile is out of scope★: it follows standard last-wins env semantics as is
-                        //   (special-casing one key would break consistency).
+                        // ADR-0049: measured (claude 2.1.170) — headless stream-json emits `"type":"thinking"` blocks only when env MAX_THINKING_TOKENS is present (off by CLI default), so 8000 is injected for json mode only;
+                        //   the terminal path keeps CLI parity.
+                        // ★Profile first (explicit-skip)★: skipped if the profile already set the same key — not relying on env merge order (later wins in the transport), the profile deterministically wins.
+                        //   ★Key comparison follows the OS env name rules (`env_key_eq`)★: case-insensitive on Windows, so the profile's `max_thinking_tokens` counts as the same key.
+                        //   Normalizing duplicate keys within the profile is out of scope (standard last-wins env semantics).
                         const MAX_THINKING_TOKENS_KEY: &str = "MAX_THINKING_TOKENS";
                         if !env
                             .iter()
@@ -257,14 +214,11 @@ impl AgentBackend for ClaudeBackend {
                         }
                     }
                 }
-                // ADR-0086: control channel injection — translates the endpoint the claude way. The CLI entry (credential env ·
-                //   PATH · mail marker) is laid down for **every spawn with a control endpoint**, and `--mcp-config` is
-                //   **added** when there is a config_path (the two are not exclusive — ADR-0133).
-                //   ★Same injection regardless of mode★: both terminal and json are connection targets (claude 2.1.170 measured — the
-                //   Authorization header is actually sent on every request: initialize/tools/list/tools/call).
-                //   ★Making the two injections exclusive again would halve the control plane★: if an MCP-capable spawn cannot call `engram`,
-                //   it cannot reach the control verbs (ADR-0132 decision 5 = open to all). Mail isolation is done not by this split but
-                //   by the daemon's credential refusal.
+                // ADR-0086: control channel injection — translates the endpoint the claude way. The CLI entry (credential env · PATH · mail marker) is laid down for **every spawn with a control endpoint**, and `--mcp-config` is
+                //   **added** when there is a config_path (not exclusive — ADR-0133).
+                //   ★Same injection regardless of mode★: terminal and json are both connection targets (claude 2.1.170 measured: the Authorization header is sent on every request).
+                //   ★Making the two injections exclusive again would halve the control plane★: an MCP-capable spawn that cannot call `engram` cannot reach the control verbs (ADR-0132 decision 5). Mail isolation is the daemon's
+                //   credential refusal, not this split.
                 // ADR-0086 / ADR-0099 / ADR-0133
                 if let Some(endpoint) = &control {
                     inject_cli_entrance(&mut env, endpoint);
@@ -273,9 +227,8 @@ impl AgentBackend for ClaudeBackend {
                         args.push(config_path.to_string_lossy().into_owned());
                     }
                 }
-                // ADR-0092: priming (receive contract) injection — `--append-system-prompt-file <abs-path>`.
-                //   The claude CLI (2.1.170) **reads that file directly** and appends it **after** the default system prompt.
-                //   Both terminal and json receive the system prompt, so the injection is the same regardless of mode.
+                // ADR-0092: priming (receive contract) injection — `--append-system-prompt-file <abs-path>`: the CLI (2.1.170) **reads the file directly** and appends it **after** the default system prompt; both modes receive the
+                //   system prompt, so the injection is mode-independent.
                 // ADR-0092
                 if let Some(endpoint) = &control {
                     if let Some(priming) = &endpoint.priming_file {
@@ -285,65 +238,39 @@ impl AgentBackend for ClaudeBackend {
                 }
                 // S18 D (spec §6): session-scoped settings fragment injection — `--settings <abs-path>`. (ADR-0109)
                 //
-                // ★Why a **file path** and not inline JSON (load-bearing — Windows quoting hell)★:
-                //   claude's `--settings` also accepts a JSON string, but on Windows the spawn's `console_command` puts in
-                //   one more layer of cmd.exe. Putting a chunk of quotes and braces like `{"allowedMcpServers":[…]}` in that argv
-                //   makes it easy to break silently under cmd's quoting/escape rules (lost quotes · `&`/`^` special characters), and the broken
-                //   result is "starts normally with the settings ignored" (= MCP tools missing again), so it shows up
-                //   late. A file path only has to handle spaces, and the same path-passing method (`--mcp-config`/
-                //   `--append-system-prompt-file`) is already verified by measurement (M3 deliberation record) — so
-                //   the path is chosen. The cost is managing one file's lifetime, which is absorbed by reusing as is the **same folder and
-                //   the same create/delete/boot-sweep path** as the mcp-config file (mcp_config.rs).
+                // ★Why a **file path** and not inline JSON (load-bearing — Windows quoting)★: `--settings` also accepts a JSON string, but on Windows `console_command` adds a cmd.exe layer, and quotes/braces like
+                //   `{"allowedMcpServers":[…]}` in argv break silently under cmd's quoting/escaping (lost quotes · `&`/`^`) into 「starts normally with the settings ignored」 (MCP tools missing again), noticed late. A path only has to
+                //   handle spaces, and the same path-passing (`--mcp-config`/`--append-system-prompt-file`) is already measured (M3). The cost — one file's lifetime — reuses the **same folder and create/delete/boot-sweep path** as the
+                //   mcp-config file (mcp_config.rs).
                 if let Some(endpoint) = &control {
                     if let Some(settings) = &endpoint.settings_file {
                         args.push("--settings".to_string());
                         args.push(settings.to_string_lossy().into_owned());
                     }
                 }
-                // ★Order invariant (load-bearing, ADR-0094 least privilege)★: `extra_args` (caller passthrough) is appended
-                //   **before the `--allowedTools` injection**. The reason is that `--allowedTools <tools...>` is
-                //   **variadic** in claude (measured on 2.1.170) — it absorbs every positional argv value
-                //   after this flag as "allowed tools" until the next `--flag` appears. If extra_args came after the grant group
-                //   and its first element were a bare positional (e.g. `Bash`), that value would be
-                //   sucked in as an **extra allowed tool**, granting blanket Bash permission (an ADR-0094 least-privilege violation).
-                //   So extra_args is consumed first, and the `--allowedTools` group is put at the **very end** of the args vector.
-                //   Both spawn modes feed the prompt through stdin (write_input), so argv has **no trailing
-                //   positional** (AgentCommand::Claude has no prompt field), and absorption after the group is
-                //   structurally impossible.
+                // ★Order invariant (load-bearing, ADR-0094 least privilege)★: `extra_args` (caller passthrough) is appended **before the `--allowedTools` injection**. `--allowedTools <tools...>` is **variadic** in claude (2.1.170) — it
+                //   absorbs every positional argv value after it as an "allowed tool" until the next `--flag`. extra_args after the grant group starting with a bare positional (e.g. `Bash`) would be sucked in as an **extra allowed
+                //   tool**, granting blanket Bash (an ADR-0094 violation). So extra_args goes first and the `--allowedTools` group is at the **very end**. Both modes feed the prompt through stdin (write_input) and
+                //   `AgentCommand::Claude` has no prompt field, so argv has **no trailing positional** and absorption after the group is structurally impossible.
                 args.extend(extra_args.iter().cloned());
-                // ADR-0094 / ADR-0106: blocking the built-in SendMessage — `--disallowedTools SendMessage`,
-                //   injected **only when there is a control endpoint**.
-                //   ★Why it was brought in★: the trigger was a name collision between the harness built-in tool `SendMessage` (PascalCase) and
-                //   the **old name** of our MCP tool, `send_message` (server: engram, snake_case) — when the spawned
-                //   claude misread the priming and called the built-in SendMessage, it did not know the engram agent names and
-                //   failed with "No agent named 'X' is reachable" (measured 2026-07-26 roundtrip diagnosis — reproduced on every
-                //   spawn). Fixing only the priming text let it recur, so the tool itself was blocked to cut it off.
-                //   ★That tool is now `eg_send` — the names no longer resemble each other, but the deny is deliberately kept★:
-                //   the measured failure was **the harness misfiring its own built-in tool**, not something proven to
-                //   happen because the two names were spelled alike. Removing it because the names diverged would mean learning whether the misfire is gone
-                //   only at a spawn site — it is not removed without a reproduction measurement.
-                //   ★Scope = only when there is control (ADR-0106, review finding 2026-07-26)★: the collision only matters
-                //   for agents that received the messaging priming, which are only spawns with a control endpoint. Blocking it for non-messaging
-                //   spawns too would (a) lose a built-in feature for no reason and (b) make claude meet an unregistered tool in the deny list
-                //   and pay a warning cost on every call.
-                //   ★Order★: `--disallowedTools` is also variadic, so it goes **after** extra_args. The following
-                //   `--allowedTools` ends this variadic as a new `--flag`, so the allowedTools group keeps its
-                //   very-last position.
+                // ADR-0094 / ADR-0106: blocking the built-in SendMessage — `--disallowedTools SendMessage`, injected **only when there is a control endpoint**.
+                //   ★Why★: the harness built-in `SendMessage` (PascalCase) collided with the **old name** of our MCP tool, `send_message` (engram, snake_case) — the spawned claude misread the priming, called the built-in, did not know the
+                //   engram agent names and failed with "No agent named 'X' is reachable" (measured 2026-07-26, every spawn). Fixing only the priming let it recur, so the tool is blocked.
+                //   ★The tool is now `eg_send` — the deny is deliberately kept★: the measured failure was **the harness misfiring its own built-in**, not proven to need similar spelling; removing it because the names diverged would learn
+                //   the misfire is gone only at a spawn site. Not removed without a reproduction measurement.
+                //   ★Scope = only with control (ADR-0106)★: only messaging-primed spawns (control endpoint) hit the collision; blocking it elsewhere would (a) lose a built-in for no reason and (b) make claude meet an unregistered tool in the deny list
+                //   and pay a warning on every call.
+                //   ★Order★: `--disallowedTools` is also variadic, so it goes **after** extra_args; the following `--allowedTools` ends it as a new `--flag` and keeps the allowedTools group last.
                 // ADR-0094 / ADR-0106
                 if control.is_some() {
                     args.push("--disallowedTools".to_string());
                     args.push("SendMessage".to_string());
                 }
                 // ADR-0094: send-entry pre-authorization — `--allowedTools <pattern>...`.
-                //   ★Why the grant is kept (even after bypass became the spawn default)★: the real authorization is done by the bypass of the base flag
-                //   above. Even so, this least-privilege grant injection is **kept**: (a) under bypass it is a
-                //   harmless duplicate authorization, (b) it is the deterministic policy surface to reuse when a future shared constraint layer removes bypass,
-                //   and (c) it is the surface that shows "which send entries this agent has".
-                //   For now it is a policy declaration, not a gate — do not delete it.
-                //   ★arg shape★: each pattern after `--allowedTools` is appended as an **individual args element** — a pattern containing spaces
-                //   (`Bash(C:\Program Files\…:*)`) must stay one argv element so claude does not split it on spaces as value
-                //   separators (why it is not joined into a single comma-joined value). The permission gate is independent of mode.
-                //   ★Placed last★ regression guard = tests claude_allowed_tools_group_is_last_and_*.
+                //   ★Why the grant is kept (even with bypass as the spawn default)★: real authorization is the base flag's bypass; this least-privilege injection stays because (a) under bypass it is a harmless duplicate, (b) it is the deterministic
+                //   policy surface when a future shared constraint layer removes bypass, and (c) it shows "which send entries this agent has". It is a policy declaration, not a gate — do not delete it.
+                //   ★arg shape★: each pattern after `--allowedTools` is its own **args element** — a pattern with spaces (`Bash(C:\Program Files\…:*)`) must stay one argv element so claude does not split it (hence not one comma-joined value).
+                //   The permission gate is mode-independent. ★Placed last★ — regression guard: tests `claude_allowed_tools_group_is_last_and_*`.
                 // ADR-0094
                 if let Some(endpoint) = &control {
                     let patterns = grants_to_allowed_tools(&endpoint.grants);
@@ -373,8 +300,7 @@ impl AgentBackend for ClaudeBackend {
         }
     }
 
-    /// Both terminal and json (stream-json) resume losslessly with `--resume <sid>`, so resume=true — that is why
-    /// it does not look at `command` (the mode). snapshot and model options are not supported since it is a console CLI.
+    /// Terminal and json (stream-json) both resume losslessly with `--resume <sid>`, so resume=true and `command` (the mode) is not looked at. snapshot and model options are unsupported (console CLI).
     /// The signature keeps the contract that the backend is the source of the session caps (ADR-0030 type split).
     fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
         let resume = true;
@@ -396,13 +322,9 @@ impl AgentBackend for ClaudeBackend {
         classify_turn
     }
 
-    /// ★The old comment's "an answer only comes in terminal mode (known and accepted)" is no longer true — do not bring it back★:
-    ///   a structured (stream-json) session still sends diagnostics to stderr, but the caller captures that stderr
-    ///   into a separate diagnostic buffer and passes it merged into `evidence` (ADR-0172). stream-json is the default output format, so
-    ///   while that branch was silent this classifier was **effectively dead code for most agents**.
-    /// ★claude emits this text only when it failed to resume★ — so it can be settled by looking only at the diagnostics of a
-    ///   still-living session (the condition in the trait doc). Adding text here that could appear mixed into the conversation body would
-    ///   break that property.
+    /// ★Do not bring back "an answer only comes in terminal mode (known and accepted)"★: a structured (stream-json) session still sends diagnostics to stderr, the caller captures it into a separate diagnostic buffer and merges it into
+    ///   `evidence` (ADR-0172). stream-json is the default output format, so while that branch was silent this classifier was **effectively dead code for most agents**.
+    /// ★claude emits this text only when it failed to resume★ — so a still-living session's diagnostics settle it (the trait doc's condition); adding text that could mix into the conversation body would break that.
     fn resume_failure_kind(&self, evidence: &str) -> Option<AgentFailureKind> {
         if evidence.to_lowercase().contains(NO_CONVERSATION_MARKER) {
             return Some(AgentFailureKind::NoConversationToResume);
@@ -410,10 +332,9 @@ impl AgentBackend for ClaudeBackend {
         None
     }
 
-    /// stream-json requires a pipe — because it streams line-based JSON to stdout, not a TUI.
+    /// stream-json requires a pipe — it streams line-based JSON to stdout, not a TUI.
     ///
-    /// ★It is only a reported value; the real thing is built by [`AgentBackend::open_spawn`] below★ — both look at [`is_stream_json`],
-    ///   so fixing only one makes the report and the real thing diverge, and the declaration-table tripwire measures only this reported value.
+    /// ★Only the reported value; the real thing is built by [`AgentBackend::open_spawn`]★ — both look at [`is_stream_json`], so fixing one diverges them, and the declaration-table tripwire measures only this value.
     fn transport_shape(&self, command: &AgentCommand) -> TransportShape {
         if is_stream_json(command) {
             TransportShape::StdioNdjson
@@ -424,15 +345,10 @@ impl AgentBackend for ClaudeBackend {
 
     /// stream-json mode builds a structured pipe, terminal mode a PTY.
     ///
-    /// ★The decision is [`is_stream_json`] alone — it does not re-read the `transport_shape` reported value and match on it (ADR-0191)★:
-    ///   doing so would create a second switch splitting on the shape value, going back to the very shape this decision removed.
-    /// ★This is where `structured: true` is injected (ADR-0044/0030)★: the pipe itself does not know whether the bytes it carries
-    ///   are line-based JSON (a dumb pipe), so [`StdioTransport`] does not hardcode that value but receives it and
-    ///   reports it in caps. The side that knows is this backend, which chose `--output-format`. The interrupt line function is plugged in
-    ///   here for the same reason — the line shape and 「is a turn open now」 are this backend's knowledge (ADR-0238).
-    /// ★`sid_sink` is not used because this backend **does not fetch** the session id★ — we
-    ///   issue it and hand it over ([`AgentBackend::assigns_session_id`]), and the drift after that is observed not by the link but by the file
-    ///   watcher ([`AgentBackend::session_id_source`]). That is this backend's record path.
+    /// ★The decision is [`is_stream_json`] alone — do not re-read `transport_shape` and match on it (ADR-0191)★ (a second switch on the shape value, the shape this decision removed).
+    /// ★This is where `structured: true` is injected (ADR-0044/0030)★: the pipe does not know whether its bytes are line-based JSON, so [`StdioTransport`] receives the value and reports it in caps; this backend, which chose
+    ///   `--output-format`, knows. The interrupt line function is plugged in for the same reason — the line shape and 「is a turn open now」 are this backend's knowledge (ADR-0238).
+    /// ★`sid_sink` is unused because this backend **does not fetch** the session id★ — we issue it ([`AgentBackend::assigns_session_id`]) and later drift is observed by the file watcher ([`AgentBackend::session_id_source`]).
     // ADR-0044
     // ADR-0191
     fn open_spawn(
@@ -449,9 +365,8 @@ impl AgentBackend for ClaudeBackend {
         // ★This backend has no link to set up — `declares_link()` is false, so the assembly point gives `None`
         //   in the first place. Receiving and ignoring it is the contract (the same shape as the `session_id` field).
         _link_sink: Option<LinkSink>,
-        // ★The control plane is translated **entirely into the command line** for this backend ([`AgentBackend::build_spec`]) — putting it
-        //   in the link handshake as well would have one spawn send the same value by two means. Here only `agent_id` is read, as the attribution of
-        //   leftover-cleanup logs, and not sent over the link, so that is not the case.
+        // ★The control plane is translated **entirely into the command line** for this backend ([`AgentBackend::build_spec`]) — sending it in the link handshake too would send one value by two means. Only `agent_id` is read here, as
+        //   the attribution of leftover-cleanup logs.
         // ADR-0262
         control: Option<&ControlEndpoint>,
     ) -> Result<SpawnParts, PtyError> {
@@ -460,14 +375,13 @@ impl AgentBackend for ClaudeBackend {
         let delivery_ack = Arc::new(DeliveryAck::new());
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_stream_json(command) {
-                // For each incarnation, one new gate is held together by the decoder (the side that opens and closes it) and the interrupt line function (the side that sees it open and sets up an interrupt episode).
-                // The cleaner has to know the link's group and root, so the gate is set up after the link is opened, and the decoder receives it as a slot.
+                // Per incarnation, one new gate is held by the decoder (opens and closes it) and the interrupt line function (sees it open and sets up an interrupt episode).
+                // The cleaner must know the link's group and root, so the gate is set up after the link is opened and the decoder receives it as a slot.
                 // ADR-0238
                 // ADR-0262
                 let gate_slot = GateSlot::default();
-                // ★The pickup decision is made here — `stream_decoder`, which builds the decoder, does not receive the spawn spec (env), so it cannot decide★.
-                //   Keeps observations of a profile that is not the default account from mixing into the default entry (`usage.rs`). The wrapper masks only usage pickup
-                //   and passes decode/flush through as is, so opening and closing the gate (inside the decoder) is unaffected.
+                // ★The pickup decision is made here — `stream_decoder` does not receive the spawn spec (env), so it cannot decide★: keeps a non-default account's observations out of the default entry (`usage.rs`). The wrapper masks only usage
+                //   pickup; decode/flush and the gate (inside the decoder) are unaffected.
                 let decoder = usage::gate_decoder(
                     stream_decoder(Arc::clone(&delivery_ack), Arc::clone(&gate_slot)),
                     &spec.env,
@@ -505,9 +419,7 @@ impl AgentBackend for ClaudeBackend {
         wrap_user_turn(text, msg_uuid)
     }
 
-    /// ★Unconditionally `Some`★: this method is called only through the tag chosen by `input_encoder`
-    /// ([`crate::backend::backend_for_encoder`]) — terminal mode is `Raw`, so it does not reach here. Looking at
-    /// the mode again here would put the same decision in two homes.
+    /// ★Unconditionally `Some`★: called only through the tag chosen by `input_encoder` ([`crate::backend::backend_for_encoder`]); terminal mode is `Raw` and never reaches here — looking at the mode again would put one decision in two homes.
     fn input_echo_event(&self, text: &str, msg_uuid: Uuid) -> Option<OutputEvent> {
         Some(OutputEvent::Structured {
             kind: "user".to_string(),
@@ -543,8 +455,7 @@ impl AgentBackend for ClaudeBackend {
         }
     }
 
-    /// Not split by mode — whether terminal or stream-json, claude writes the same `sessions/<pid>.json`,
-    /// and the sid switching happens on both sides.
+    /// Not split by mode — terminal and stream-json both write the same `sessions/<pid>.json` and the sid switch happens on both.
     // ADR-0004
     fn session_id_source(
         &self,
@@ -559,35 +470,20 @@ impl AgentBackend for ClaudeBackend {
 
 /// claude stream-json events → turn signals (ADR-0113).
 ///
-/// ★Counting `Structured` as progress is load-bearing — and that decision is **claude-only**★: claude emits the
-///   **user echo at input time** as this variant (`user_text_echo_json` · the decoder's user line). So
-///   turns started by the dashboard user typing directly into the terminal and turns started by mail injection are both caught by this branch —
-///   without it, the turn starts of those two paths would fall entirely outside observation.
-/// ★Only one `kind` is filtered — the interrupted marker ([`INTERRUPTED_KIND`]) is not progress★: it is a marker about the end saying the turn was interrupted,
-///   so counting it as progress would, when it comes after that turn's `result`, turn 「in a turn」 back on and block mail until the 30-minute fail-open (the turn-open
-///   gate reads the same classification, so it does not open either). All other `Structured` are lines that occur inside a turn, so kind
-///   is not split — if claude starts emitting structured lines outside turns, that kind must be filtered here too.
-/// ★Why `Usage`/`Error` are not ends★: `Usage` also comes mid-turn, and `Error` is not a turn boundary (a failed
-///   turn also closes with `MessageDone` — decoder FIX-C). `TerminalBytes` is console bytes without turn-boundary information.
-/// ★Among `Error`s, the 「turn error」 (`Failed`) is only the one from a failed `result` — told apart by the prefix ([`RESULT_FAILURE_DETAIL`])★:
-///   that `Error` comes from the same line as the `MessageDone` right after it, so the table folds that end into an error end (stop after
-///   error). ★Do not count other `Error`s such as a line-buffer overflow as `Failed`★ — if one occurs outside a turn, the table holds it
-///   and folds **the next clean turn** into an error end, and that incarnation's mail stops until the user makes the next turn succeed
-///   (the stop has no cap). Why it is told apart by a prefix and not a field: `Error` is a single string, so adding a marker field would change every
-///   consumer's match — both the side that builds that string and the side that reads it live inside this folder.
-/// ★There is no correlation key (known scope)★: claude's ends (`MessageDone` · interrupted `TurnEnd`) all have None in the id fields,
-///   so there is no key to match "which turn's end is this". So no turn counting or fencing is done, and **the last observation
-///   decides**. Whether a nested Task subagent's end line leaks as the parent turn's end is unverified, and if it does the symptom is
-///   "the parent is still in a turn but misjudged as idle → early injection" (no loss, only timing off).
-/// ★Why it can be shared with terminal mode (no per-mode branch needed)★: terminal mode has no decoder, so only
-///   `TerminalBytes` flows, and using this mapping as is yields no signal at all.
-/// ★Among registry events, progress is only `Delivered`★: it is the 1:1 translation of the vendor `command_lifecycle` `started` line,
-///   so 「the vendor started running this input in the current turn」 is a fact of the vendor output. The rest are `None` —
-///   if an event that comes **after** the turn end, like `Dropped`, turned 「in a turn」 back on, that incarnation's mail would be blocked until the 30-minute fail-open
-///   valve. Registry events the core rewrote (seal · after the ack-unavailable decision) do not pass through this classifier.
-/// ★A tool's end result (`ToolResult`) is neither progress nor an error★ — this translator does not emit it yet, but the rule is the same as codex: an end
-///   can come even after the turn end, so counting it as progress turns 「in a turn」 back on, and a tool failure is not a turn failure, so counting it as an error sets
-///   the stop after error.
+/// ★`Structured` counts as progress — load-bearing, **claude-only**★: claude emits the **user echo at input time** as this variant (`user_text_echo_json` · the decoder's user line), so turns started by the user typing into the
+///   terminal and turns started by mail injection are both caught here; without it their turn starts fall outside observation.
+/// ★Only one `kind` is filtered — the interrupted marker ([`INTERRUPTED_KIND`]) is not progress★: it marks the end; counted as progress after that turn's `result` it turns 「in a turn」 back on and blocks mail until the 30-minute
+///   fail-open (the turn-open gate reads the same classification). Other `Structured` lines occur inside a turn, so kind is not split — if claude starts emitting structured lines outside turns, filter that kind here too.
+/// ★`Usage`/`Error` are not ends★: `Usage` also comes mid-turn; `Error` is not a turn boundary (a failed turn also closes with `MessageDone` — decoder FIX-C). `TerminalBytes` has no boundary information.
+/// ★Among `Error`s only a failed `result`'s is the 「turn error」 (`Failed`) — told apart by prefix ([`RESULT_FAILURE_DETAIL`])★: it comes from the same line as the `MessageDone` right after, so the table folds that end into an error end
+///   (stop after error). ★Do not count other `Error`s (e.g. line-buffer overflow) as `Failed`★ — outside a turn the table holds it and folds **the next clean turn** into an error end, stopping that incarnation's mail until the user makes
+///   the next turn succeed (no cap). Prefix, not a field: `Error` is a single string and a marker field would change every consumer's match (builder and reader both live in this folder).
+/// ★No correlation key (known scope)★: claude's ends (`MessageDone` · interrupted `TurnEnd`) have None in the id fields, so no turn counting or fencing is done and **the last observation decides**. Whether a nested Task subagent's end line
+///   leaks as the parent turn's end is unverified; if so the symptom is 「parent still in a turn but judged idle → early injection」 (timing only, no loss).
+/// ★Shared with terminal mode★: no decoder there, only `TerminalBytes`, so this mapping yields no signal.
+/// ★Registry events: only `Delivered` is progress★ — the 1:1 translation of the vendor `command_lifecycle` `started` line (「the vendor started running this input in the current turn」). The rest are `None`: an event **after** the turn end such
+///   as `Dropped` turning 「in a turn」 back on would block that incarnation's mail until the 30-minute valve. Events the core rewrote (seal · after the ack-unavailable decision) do not pass this classifier.
+/// ★`ToolResult` is neither progress nor error★ — not emitted yet, same rule as codex: an end can come after the turn end (progress would re-open 「in a turn」), and a tool failure is not a turn failure (an error would set the stop after error).
 // ADR-0113
 // ADR-0004
 // ADR-0231
@@ -624,31 +520,19 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
 
 /// ADR-0094: abstract `ToolGrant` list → list of claude `--allowedTools` pattern strings.
 ///
-/// ★MCP pattern★: `mcp__<server>__<tool>` is the claude MCP tool naming convention.
-/// ★CLI pattern syntax★: the **colon-star** of `Bash(<X>:*)` is the documented **prefix
-///   wildcard** syntax of the Claude Code permission system — it allows only commands **starting with** that string (not all of Bash). exe is the bare command
-///   name, and the command the priming teaches, this grant pattern and the actual invocation are all aligned on that bare name.
-///   ★The range this prefix covers now (user accepted, decided not to narrow it)★: the executable name is `engram`, so
-///     `Bash(engram:*)` also covers the siblings **starting with** that name — `engram-dashboard`·
-///     `engram-dashboard-daemon` living in the release folder (ADR-0100 co-location). Those siblings are also reachable by bare name because of the
-///     PATH prepend below. **Whether the matcher looks at token boundaries is unverified** (whether "prefix" is a string prefix or
-///     looks up to argument boundaries), so narrowing it would require measuring that behavior first.
-///   ★Why it is still not a risk now — and when to look again★: spawns always run under `--permission-mode bypassPermissions`
-///     (ADR-0097), so the grant is **not a runtime gate but a policy surface** (= the breadth of this list
-///     opens nothing now). That auto mode is a temporary regime and its successor is named (the "constraint layer shared by all LLMs" in the `ToolGrant`
-///     comment), so **the moment that flag is removed, this prefix range must be reviewed
-///     first** — at that point the breadth becomes the permission itself.
-///   ★One unconfirmed item attached to that "always" (ADR-0132 §Impact)★: the profile's `extra_args` are appended **after** our flags.
-///     If the user puts `--permission-mode` there again, **whether the later value wins is unverified** — if it does, only that
-///     spawn is not in auto, and the "inert for now" premise above breaks for that spawn alone, making the broad prefix an **actual permission**.
-///     That is, the acceptance in this section is conditional on that unconfirmed item.
-///   ★Windows PowerShell tool coverage (FIX-4)★: Claude Code on Windows exposes a **PowerShell tool** separately,
-///     and agents sometimes run commands there (measured: an agent said "I'll send it with PowerShell").
-///     So one `Cli{exe}` yields two patterns — just two shell shapes of the same send entry, no new command.
-///     In environments without the PowerShell tool it is a harmless no-op.
-///   ★The old `Bash(<abs> *)` (space-star + absolute path) is discarded★: in a live measurement it was permission-blocked 0/38
-///     (unmatched syntax + absolute coordinates unfriendly to deployment). Replaced with colon-star + bare name + injected PATH.
-/// ★Pattern order (Cli)★: Bash first, PowerShell next — build_spec appends them to args in this order (test anchor).
+/// ★MCP pattern★: `mcp__<server>__<tool>` is claude's MCP tool naming convention.
+/// ★CLI pattern syntax★: the **colon-star** of `Bash(<X>:*)` is the documented **prefix wildcard** of the Claude Code permission system — it allows only commands **starting with** that string. exe is the bare command name; the priming,
+///   this grant pattern and the actual invocation all align on it.
+///   ★Range of the prefix (accepted, decided not to narrow)★: the executable is `engram`, so `Bash(engram:*)` also covers siblings **starting with** it — `engram-dashboard` · `engram-dashboard-daemon` in the release folder (ADR-0100
+///     co-location), also reachable by bare name via the PATH prepend below. **Whether the matcher looks at token boundaries is unverified**; narrowing needs that measured first.
+///   ★Why it is no risk now — and when to look again★: spawns always run under `--permission-mode bypassPermissions` (ADR-0097), so the grant is **a policy surface, not a runtime gate**. That auto mode is a temporary regime (successor: the
+///     "constraint layer shared by all LLMs" in the `ToolGrant` comment), so **when that flag is removed, review this prefix range first** — the breadth then becomes the permission itself.
+///   ★Unconfirmed item on that "always" (ADR-0132 §Impact)★: the profile's `extra_args` are appended **after** our flags; if the user puts `--permission-mode` there, **whether the later value wins is unverified** — if so, that spawn alone
+///     is not in auto and the broad prefix becomes an **actual permission**. The acceptance above is conditional on this.
+///   ★Windows PowerShell tool (FIX-4)★: Claude Code on Windows exposes a separate **PowerShell tool** and agents sometimes use it (measured), so one `Cli{exe}` yields two patterns — two shell shapes of the same send entry; a harmless no-op
+///     where the tool is absent.
+///   ★The old `Bash(<abs> *)` (space-star + absolute path) is discarded★: permission-blocked 0/38 live (unmatched syntax, deployment-unfriendly); replaced with colon-star + bare name + injected PATH.
+/// ★Pattern order (Cli)★: Bash first, PowerShell next — build_spec appends them in this order (test anchor).
 // ADR-0098
 pub(crate) fn grants_to_allowed_tools(grants: &[ToolGrant]) -> Vec<String> {
     let mut out = Vec::with_capacity(grants.len());
@@ -664,22 +548,14 @@ pub(crate) fn grants_to_allowed_tools(grants: &[ToolGrant]) -> Vec<String> {
     out
 }
 
-/// Builds one user-turn line (line terminator `\n`) for claude stream-json stdin (ADR-0044 §4).
+/// Builds one user-turn line (terminator `\n`) for claude stream-json stdin (ADR-0044 §4).
 ///
-/// ★1 call = 1 complete user turn (FIX 6a)★: wraps the whole `text` into one user-turn line — passing partial/one-character
-///   text would make that fragment a turn by itself and break the conversation. It is the caller's responsibility to pass
-///   **the whole completed message**.
-/// ★uuid dedup contract (the official VS Code extension's way)★: if the `uuid` we plant is carried at top level, the user line claude
-///   echoes back with `--replay-user-messages` **keeps this uuid as is** and carries `"isReplay":true`
-///   (confirmed by measurement, 2026-07-06). So the uuid here **must be the same** as the value the same write_input used for the synthetic echo
-///   (user_text_echo_json) — the caller generates it once and passes it to both.
-/// ★Exact escaping★: quotes, newlines and Unicode are handled by serde_json — no hand-assembly by string formatting
-///   (an unescaped `"` breaks the stdin JSON parser).
-/// claude parses stdin line by line, so it must be terminated with `\n`.
-///
-/// ★Key order★: `serde_json::json!` (Value=BTreeMap) reorders keys alphabetically. claude accepts any
-///   order, but to expose the schema as specified (`{"type":"user","message":{"role":"user","content":[…]},"uuid":…}`)
-///   it is serialized as a **typed struct** — serde writes struct fields in declaration order.
+/// ★1 call = 1 complete user turn (FIX 6a)★: the whole `text` becomes one user-turn line — partial text would make the fragment a turn and break the conversation. The caller passes **the whole completed message**.
+/// ★uuid dedup contract (the official VS Code extension's way)★: with the `uuid` we plant at top level, the user line claude echoes with `--replay-user-messages` **keeps this uuid** and carries `"isReplay":true` (measured). So it **must
+///   equal** the uuid the same write_input used for the synthetic echo (user_text_echo_json) — the caller generates it once and passes it to both.
+/// ★Exact escaping★: serde_json handles quotes, newlines and Unicode — no hand assembly (an unescaped `"` breaks the stdin JSON parser). claude parses stdin line by line, so end with `\n`.
+/// ★Key order★: `serde_json::json!` (BTreeMap) reorders keys alphabetically; claude accepts any order, but to expose the schema as specified (`{"type":"user","message":{"role":"user","content":[…]},"uuid":…}`) it is a **typed struct**
+///   (serde writes fields in declaration order).
 pub(crate) fn wrap_user_turn(text: &str, uuid: Uuid) -> Vec<u8> {
     #[derive(serde::Serialize)]
     struct UserTurn<'a> {
@@ -716,14 +592,10 @@ pub(crate) fn wrap_user_turn(text: &str, uuid: Uuid) -> Vec<u8> {
 
 /// Builds the json payload of the input-time user echo `Structured{kind:"user"}` (ADR-0044/0045).
 ///
-/// ★Why it is built at input time★: in json (stream-json) mode input is not echoed locally right away like in a PTY —
-///   it does not appear on screen until claude echoes it back with `--replay-user-messages` (round-trip delay). So right after write_input
-///   succeeds, the session layer emits a **synthetic user event** to imitate the terminal's immediate echo.
-///
-/// ★uuid dedup shape contract (load-bearing)★: this json must have **the same shape** as what the decoder builds for a replayed user text block
-///   (`{"type":"text","text":<raw>,"uuid":"X"}`) — the frontend accumulator
-///   dedups user items by `uuid`, so if the shape or uuid diverges, the synthetic echo and the replay echo remain as
-///   two.
+/// ★Built at input time★: in json mode input is not echoed locally like in a PTY — it appears only when claude echoes it back with `--replay-user-messages` (round-trip delay), so right after write_input succeeds the session layer emits
+///   a **synthetic user event** imitating the terminal's immediate echo.
+/// ★uuid dedup shape contract (load-bearing)★: this json must have **the same shape** as what the decoder builds for a replayed user text block (`{"type":"text","text":<raw>,"uuid":"X"}`) — the frontend accumulator dedups user items by
+///   `uuid`, so a diverging shape or uuid leaves the synthetic and replay echoes as two.
 pub(crate) fn user_text_echo_json(text: &str, uuid: Uuid) -> String {
     #[derive(serde::Serialize)]
     struct TextBlock<'a> {
@@ -741,19 +613,15 @@ pub(crate) fn user_text_echo_json(text: &str, uuid: Uuid) -> String {
     serde_json::to_string(&block).unwrap_or_default()
 }
 
-/// Prefix of the cancel request `request_id` — the uuid of that input follows.
-///
-/// ★Carrying the uuid in the request id is the means of keeping the decoder stateless★: only the request id comes back in the response envelope,
-///   so the decoder takes the uuid off there without a table of sent requests and emits the registry event ([`cancel_response_event`]).
+/// Prefix of the cancel request `request_id` — the uuid of that input follows. ★Carrying the uuid in the request id keeps the decoder stateless★: only the request id comes back in the response envelope, so the decoder takes the uuid off
+/// there without a table of sent requests and emits the registry event ([`cancel_response_event`]).
 // ADR-0231
 const CANCEL_REQUEST_PREFIX: &str = "cancel:";
 
-/// The stdin line (newline included) requesting cancellation of one queued input `id` — of [`MidTurnPolicy::SessionClassified`]
-/// `cancel_line`.
+/// The stdin line (newline included) requesting cancellation of one queued input `id` — of [`MidTurnPolicy::SessionClassified`] `cancel_line`.
 ///
-/// ★Vendor contract (measured M3 — claude 2.1.280)★: `control_request` `cancel_async_message` is accepted in our
-///   `-p` stream-json mode without `initialize`. The response comes as `control_response` and the value is nested in `response.response.cancelled`.
-///   The key order is the typed struct declaration order, for the same reason as [`wrap_user_turn`].
+/// ★Vendor contract (measured M3 — claude 2.1.280)★: `control_request` `cancel_async_message` is accepted in our `-p` stream-json mode without `initialize`; the response is a `control_response` with the value nested in
+///   `response.response.cancelled`. Key order = typed struct declaration order, as in [`wrap_user_turn`].
 // ADR-0231
 fn cancel_line(id: &str) -> Vec<u8> {
     #[derive(serde::Serialize)]
@@ -785,39 +653,28 @@ fn cancel_line(id: &str) -> Vec<u8> {
 
 // ── ADR-0238: interrupt — the turn-open gate + control line ──────────────────────────────────────────
 
-/// The slot receiving this incarnation's turn-open gate ([`GateCell`]) — the live decoder opens and closes the gate through it, and the interrupt line function
-/// ([`interrupt_line`]) holds the same gate directly.
+/// The slot receiving this incarnation's turn-open gate ([`GateCell`]) — the live decoder opens and closes the gate through it, and the interrupt line function ([`interrupt_line`]) holds the same gate directly.
 ///
-/// ★Why the gate is received as a slot rather than held directly★: the gate contains the leftover cleaner, and the cleaner has to know the root process the link launched and its group,
-///   so it can only stand **after** the link is opened, while the decoder is handed to the link **before** that (an argument of `StdioTransport::open`).
-///   The pump runs only at `start`, so the slot is filled before the first line. If it is empty, the decoder does not touch the gate.
-/// ★「in a turn」 is drawn from the same classifier as turn observation ([`classify_turn`])★ — if one live line's events include a progress signal it
-///   opens, and it closes on the end signal (= the translation of the `result` line — that is the only line that ends). New input during progress (live `started`'s
-///   translation `Delivered`) is announced separately — it drops that turn's interrupt episode and, if it was closed, opens in one section. Resume
-///   original text does not pass through this gate. Measured (B2 · claude 2.1.280): the opening line was always that turn's `command_lifecycle` `started`, and
-///   there was no line opening it outside a turn.
-/// ★Still, it is not the same value as turn observation — its front end is late★: the session's input-time synthetic echo (`input_echo_event`) turns turn observation
-///   on but does not pass through the decoder, so the gate opens only at the vendor `started`. An interrupt in that gap is a refused no-op (TRD §9
-///   「F2 interrupt before the turn opens」).
-/// ★It inherits the classifier's 「no `result`」 hole as is, and has no 30-minute fail-open cap of the turn table★: if a `result` line is dropped by the 4 MiB
-///   resync or cannot be read, or the vendor emits only progress and ends the turn without `result`, the gate stays open. The
-///   interrupt line then reaches an idle CLI, and per measurement (B2 S6) that interrupt is a harmless line producing only one response line — if the CLI has queued
-///   input at that moment, it can interrupt that. The episode that interrupt opened is not erased by a turn end either, so N seconds after it is written the cleanup pass
-///   runs (if no leftover satisfies the selection rules, nothing is ended).
-/// ★The vendor does not refuse an interrupt while idle (measured B2 S6 — always `success`)★ — only this gate can say
-///   「there is no turn to interrupt」. So if the gate is closed, the line is not sent and the link refuses with `Unsupported`.
-/// ★A race remains that is only narrowed, not closed★ — if, after the gate is read and before the line reaches the CLI, that turn ends and the CLI opens the next turn (queued
-///   input) by itself, the line interrupts that next turn. The vendor `control_request` has no turn id, so we cannot tell them apart (measured
-///   B2 S7 — the interrupted next turn closes as an aborted turn, not an error).
-/// ★The session, link and wire types do not know this value★ — so it lives in this folder, not in `types.rs` ([`DeliveryAck`] is read by the session,
-///   so it is there).
+/// ★Why a slot, not held directly★: the gate contains the leftover cleaner, which must know the root process and group the link launched, so it can only stand **after** the link is opened, while the decoder is handed to the link **before**
+///   (`StdioTransport::open` argument). The pump runs only at `start`, so the slot is filled before the first line; if empty, the decoder does not touch the gate.
+/// ★「In a turn」 is drawn from the same classifier as turn observation ([`classify_turn`])★ — a progress signal among one live line's events opens it, the end signal (the `result` line, the only line that ends) closes it. New input during
+///   progress (live `started`'s translation `Delivered`) is announced separately: it drops that turn's interrupt episode and, if closed, opens in one section. Resume original text does not pass this gate. Measured (B2 · claude 2.1.280):
+///   the opening line was always that turn's `command_lifecycle` `started`, and no line opened it outside a turn.
+/// ★Not the same value as turn observation — its front end is late★: the session's input-time synthetic echo (`input_echo_event`) turns observation on without passing the decoder, so the gate opens only at the vendor `started`. An interrupt in
+///   that gap is a refused no-op (TRD §9 「F2 interrupt before the turn opens」).
+/// ★It inherits the classifier's 「no `result`」 hole and has no 30-minute fail-open cap★: if a `result` line is dropped by the 4 MiB resync or unreadable, or the vendor ends the turn with progress only, the gate stays open; the interrupt line then
+///   reaches an idle CLI, which (B2 S6) answers one harmless response line — or interrupts input the CLI has queued at that moment. The episode that interrupt opened is not erased by a turn end; N seconds after the write the cleanup pass runs
+///   (nothing is ended if no leftover satisfies the selection rules).
+/// ★The vendor does not refuse an interrupt while idle (B2 S6 — always `success`)★ — only this gate can say 「no turn to interrupt」; with the gate closed the line is not sent and the link refuses with `Unsupported`.
+/// ★A narrowed-not-closed race remains★: if, between the gate read and the line reaching the CLI, that turn ends and the CLI opens the next turn (queued input) itself, the line interrupts that next turn; `control_request` has no turn id
+///   (B2 S7 — the interrupted next turn closes as an aborted turn, not an error).
+/// ★The session, link and wire types do not know this value★ — it lives in this folder, not `types.rs` ([`DeliveryAck`] is read by the session, so it is there).
 // ADR-0238
 // ADR-0262
 type GateSlot = Arc<OnceLock<Arc<GateCell>>>;
 
-/// This incarnation's leftover cleaner. `None` = only opens and closes the gate — the link does not hand out a process group (outside Windows) or there is no root PID.
-/// The port and listening thread are not started here — the first interrupt episode starts them. Log attribution is the control channel's agent
-/// id, and if absent it continues with the root PID (ADR-0217).
+/// This incarnation's leftover cleaner. `None` = only opens and closes the gate — the link hands out no process group (outside Windows) or there is no root PID. The port and listening thread are not started here; the first interrupt episode starts
+/// them. Log attribution is the control channel's agent id, else the root PID (ADR-0217).
 // ADR-0262
 fn leftover_cleaner(
     transport: &StdioTransport,
@@ -834,20 +691,16 @@ fn leftover_cleaner(
     )))
 }
 
-/// Prefix of the interrupt request `request_id` — a new uuid v4 follows for each request.
+/// Prefix of the interrupt request `request_id` — a new uuid v4 follows each request.
 ///
-/// ★The response is not translated★ — a response arriving does not mean the turn stopped (the end is announced by that turn's `result` · measured B2: the response
-///   always comes before that `result`). [`cancel_response_event`] looks only at [`CANCEL_REQUEST_PREFIX`], so a response with this prefix
-///   has no event.
+/// ★The response is not translated★ — a response does not mean the turn stopped (the end is that turn's `result`; B2: the response always precedes it). [`cancel_response_event`] looks only at [`CANCEL_REQUEST_PREFIX`], so a response with this prefix has no event.
 // ADR-0238
 const INTERRUPT_REQUEST_PREFIX: &str = "interrupt:";
 
 /// The stdin line (newline included) asking to interrupt one running turn.
 ///
-/// ★Vendor contract (measured B2 — claude 2.1.280)★: accepted in our `-p` stream-json mode without `initialize`. A running Bash tool
-///   dies and its `tool_result` comes with `is_error:true`. The response's `still_queued` = queued messages that survive this interrupt and run in the
-///   next turn. ★Optional fields like `cancel_queued` are not carried★ — accepted queued input is not discarded but sent to the next turn
-///   (the same meaning as ADR-0235 decisions 4 · 5). The key order is the typed struct declaration order, for the same reason as [`wrap_user_turn`].
+/// ★Vendor contract (B2 — claude 2.1.280)★: accepted in our `-p` stream-json mode without `initialize`; a running Bash tool dies and its `tool_result` comes with `is_error:true`; the response's `still_queued` = queued messages that survive and run in
+///   the next turn. ★Optional fields like `cancel_queued` are not carried★ — accepted queued input is sent to the next turn, not discarded (ADR-0235 decisions 4 · 5). Key order = typed struct declaration order, as in [`wrap_user_turn`].
 // ADR-0238
 fn interrupt_line_bytes(request_uuid: Uuid) -> Vec<u8> {
     #[derive(serde::Serialize)]
@@ -875,10 +728,8 @@ fn interrupt_line_bytes(request_uuid: Uuid) -> Vec<u8> {
     line.into_bytes()
 }
 
-/// The interrupt line function plugged into the link — gives a line only while the gate is open (`None` → link `Unsupported` → bus CONFLICT). Whether to give
-/// the line and whether to carry a callback after it is written (write confirmation) is decided by the gate — an interrupt that sets up or continues an episode is recorded in the gate
-/// **before** the line is returned. An interrupt that came while another interrupt is opening an episode, or one whose turn changed while opening, goes out as a line only,
-/// without an episode (and without write confirmation).
+/// The interrupt line function plugged into the link — gives a line only while the gate is open (`None` → link `Unsupported` → bus CONFLICT). The gate decides whether to give the line and whether to carry a write-confirmation callback: an interrupt that
+/// sets up or continues an episode is recorded in the gate **before** the line is returned; one that came while another interrupt is opening an episode, or whose turn changed while opening, goes out as a line only (no episode, no write confirmation).
 // ADR-0238
 // ADR-0262
 fn interrupt_line(gate: Arc<GateCell>) -> InterruptLine {
@@ -889,18 +740,14 @@ fn interrupt_line(gate: Arc<GateCell>) -> InterruptLine {
 //
 // Schema grounds = measured fixtures `backend/fixtures/claude_{text,tool}.jsonl`.
 
-/// ★Cap on the unterminated line buffer★: with malformed/runaway output where a newline never comes, the buffer grows without bound and
-///   causes OOM. The link is a dumb pipe (ADR-0044 unrefined invariant), so upstream does not guarantee lines, and
-///   the consumer (decoder) defends — past 4MB it discards the partial line and recovers from the next newline. There is no normal case where one NDJSON
-///   line exceeds 4MB (thinking/text blocks are far smaller) → exceeding the cap
-///   = treated as abnormal.
+/// ★Cap on the unterminated line buffer★: with malformed/runaway output where a newline never comes the buffer would grow without bound (OOM). The link is a dumb pipe (ADR-0044), so the decoder defends — past 4MB it discards the partial line and
+/// recovers from the next newline. A normal NDJSON line never exceeds 4MB (thinking/text blocks are far smaller), so exceeding it is abnormal.
 const MAX_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
-/// Maximum bytes of a message id — the same value and the same rule as the cap of the same name in the codex translator.
+/// Maximum bytes of a message id — same value and rule as the cap of the same name in the codex translator.
 ///
-/// ★**Filtered**, not truncated★: the id is a token compared for equality (dropping the complete text of a streamed block is that comparison), so truncating
-///   would read two different long ones as the same. A filtered message is not streamed and shows as one complete text. Without a cap, one long
-///   id is duplicated for every streamed delta. The observed id is `msg_` + 26 characters (30 bytes).
+/// ★**Filtered**, not truncated★: the id is compared for equality (dropping the complete text of a streamed block is that comparison), so truncating would read two different long ids as the same. A filtered message is not streamed and shows as one
+/// complete text; without a cap one long id is duplicated for every streamed delta. The observed id is `msg_` + 26 characters.
 // ADR-0240
 const MAX_MESSAGE_ID_BYTES: usize = 128;
 
@@ -910,21 +757,18 @@ fn bounded_message_id(id: Option<&serde_json::Value>) -> Option<String> {
         .map(String::from)
 }
 
-/// Prefix of the [`OutputEvent::Error`] emitted by a failed `result` — ★the turn classifier tells 「turn error」 apart by this prefix★
-/// ([`classify_turn`]). If another `Error` text such as a line-buffer overflow started with this, that error would fold the turn into a failure.
+/// Prefix of the [`OutputEvent::Error`] emitted by a failed `result` — ★the turn classifier tells 「turn error」 apart by this prefix★ ([`classify_turn`]); another `Error` text (e.g. line-buffer overflow) starting with it would fold the turn into a failure.
 // ADR-0231
 const RESULT_FAILURE_DETAIL: &str = "claude stream-json result reported failure";
 
 /// The ending reason (`terminal_reason`) an interrupted turn's `result` carries — while streaming text, thinking or tool input | while running a tool.
 ///
-/// ★An interruption cannot be told apart by `subtype`·`is_error` (measured B2 — claude 2.1.280 · interrupted turns 14/14)★: an interrupted turn
-///   comes as `subtype:"error_during_execution"` · `is_error:true` — the same words as a real execution error. Reading it as an error would make
-///   one Esc draw an error row and set the stop after error, stopping mail. Normal turns were `"completed"`.
+/// ★An interruption cannot be told apart by `subtype`·`is_error` (B2 — claude 2.1.280 · interrupted 14/14)★: it comes as `subtype:"error_during_execution"` · `is_error:true`, the same words as a real execution error; reading it as an error would
+///   draw an error row on one Esc and set the stop after error, stopping mail. Normal turns were `"completed"`.
 // ADR-0238
 const INTERRUPTED_TERMINAL_REASONS: [&str; 2] = ["aborted_streaming", "aborted_tools"];
 
-/// Whether it is an interrupted turn's `result` — [`INTERRUPTED_TERMINAL_REASONS`] or `subtype:"interrupted"` (not observed on this installation
-/// — kept for older CLIs).
+/// Whether it is an interrupted turn's `result` — [`INTERRUPTED_TERMINAL_REASONS`] or `subtype:"interrupted"` (not observed on this installation; kept for older CLIs).
 // ADR-0238
 fn is_interrupted_result(value: &serde_json::Value) -> bool {
     value.get("subtype").and_then(|v| v.as_str()) == Some("interrupted")
@@ -934,26 +778,20 @@ fn is_interrupted_result(value: &serde_json::Value) -> bool {
             .is_some_and(|r| INTERRUPTED_TERMINAL_REASONS.contains(&r))
 }
 
-/// The `Structured` kind of the interrupted-marker event — the frontend accumulator moves this word into an interrupted-marker row instead of a user bubble.
-/// `json` = `{"text": <vendor original>}`.
+/// The `Structured` kind of the interrupted-marker event — the frontend accumulator moves this word into an interrupted-marker row instead of a user bubble. `json` = `{"text": <vendor original>}`.
 // ADR-0243
 const INTERRUPTED_KIND: &str = "interrupted";
 
-/// The head of the user-line text the CLI itself inserts before the `result` of every interrupted turn — if a tool was running, it is followed by
-/// ` for tool use]`, otherwise by `]` (measured B2 — claude 2.1.280 · 14/14 · also kept in the transcript).
+/// The head of the user-line text the CLI inserts before the `result` of every interrupted turn — followed by ` for tool use]` if a tool was running, else `]` (B2 — claude 2.1.280 · 14/14 · also kept in the transcript).
 ///
-/// ★This is vendor string matching★ — if the text changes, that line goes back to being a user bubble as today (visible, nothing lost).
-///   ★Do not recognize it by position (right before `result`)★ — a resumed transcript has no `result`.
+/// ★Vendor string matching★ — if the text changes, that line goes back to being a user bubble (visible, nothing lost). ★Do not recognize it by position (right before `result`)★ — a resumed transcript has no `result`.
 // ADR-0243
 const INTERRUPT_NOTE_PREFIX: &str = "[Request interrupted by user";
 
-/// If one `user` line is an interrupt synthetic line, its original text — only when `message.content` is exactly one text block and that text
-/// starts with [`INTERRUPT_NOTE_PREFIX`]. `None` if there are two or more blocks or a non-text block (`tool_result` etc.).
+/// If one `user` line is an interrupt synthetic line, its original text — only when `message.content` is exactly one text block starting with [`INTERRUPT_NOTE_PREFIX`]; `None` for two or more blocks or a non-text block (`tool_result` etc.).
 ///
-/// ★`isReplay:true` lines are excluded★ — if text the user typed happens to start with that head, the CLI echoes it back carrying our uuid
-///   (real synthetic lines have no `isReplay` — measured B2), and turning that into an interrupted marker would bypass the frontend's queued-row matching and uuid dedup
-///   and lose the progress signal too. A plain-string `content` is not recognized — it has never been observed, and such `user` lines
-///   are not translated in the first place.
+/// ★`isReplay:true` lines are excluded★ — user-typed text that happens to start with that head is echoed back carrying our uuid (real synthetic lines have no `isReplay` — B2), and turning it into an interrupted marker would bypass the
+///   frontend's queued-row matching and uuid dedup and lose the progress signal. A plain-string `content` is not recognized (never observed; such `user` lines are not translated).
 // ADR-0243
 fn interrupt_note_text(value: &serde_json::Value) -> Option<&str> {
     if value.get("isReplay").and_then(|v| v.as_bool()) == Some(true) {
@@ -971,8 +809,7 @@ fn interrupt_note_text(value: &serde_json::Value) -> Option<&str> {
         .filter(|text| text.starts_with(INTERRUPT_NOTE_PREFIX))
 }
 
-/// The word in `system/init`'s `capabilities` meaning 「emits a per-entry lifecycle」 (measured M4 —
-/// claude 2.1.280).
+/// The word in `system/init`'s `capabilities` meaning 「emits a per-entry lifecycle」 (measured M4 — claude 2.1.280).
 // ADR-0231
 const MSG_LIFECYCLE_CAPABILITY: &str = "msg_lifecycle_v1";
 
@@ -991,12 +828,10 @@ fn stream_decoder(ack: Arc<DeliveryAck>, gate: GateSlot) -> Box<dyn OutputDecode
     Box::new(ClaudeStreamDecoder::live(ack, gate))
 }
 
-/// Live partial message tracking — filled by `stream_event` and read by the complete `assistant` line.
+/// Live partial message tracking — filled by `stream_event`, read by the complete `assistant` line.
 ///
-/// ★Takes 「message id, block number」 as the block open now★: the complete line has no block number. The vendor contract is 「one complete message per non-empty block, before that block's `content_block_stop`」
-///   (measured + official docs), so at the moment a complete line arrives
-///   the open block is that line's block. If the vendor changes the order (complete after stop), `open` is empty and the complete text
-///   is emitted as is — erring on the side of overlap rather than loss.
+/// ★Takes 「message id, block number」 as the block open now★: the complete line has no block number. The vendor contract is 「one complete message per non-empty block, before that block's `content_block_stop`」 (measured + official docs), so at a complete
+///   line the open block is that line's block. If the vendor changes the order, `open` is empty and the complete text is emitted as is — erring toward overlap rather than loss.
 // ADR-0240
 #[derive(Debug, Default)]
 struct PartialMessage {
@@ -1019,42 +854,30 @@ impl PartialMessage {
 
 /// claude stream-json live decoder.
 ///
-/// ★The decoder's own state = line reassembly + partial message tracking (`partial`) + usage observations the pump drains per chunk (`usage`)★.
-///   Partial message tracking is used only to reduce the vendor sending the same text
-///   twice, as deltas and as a complete line, to one copy — ★the frontend accumulator has no dedup★ (it only appends text
-///   deltas to the last text item). Other merging (joining blocks of the same message.id) is still the frontend's job.
-///   It does not know list entries either — a registry event is a 1:1 translation of one vendor line, and interpretation is done by the reduction rules of the registry and accumulator.
-/// ★The ack value (`ack`) and the turn-open gate (`gate`) are not decoder state but handles to incarnation-shared values★ — the ack value is read by the session,
-///   and the gate by the interrupt line function plugged into the link, both reading the same value.
+/// ★Own state = line reassembly + partial message tracking (`partial`) + usage observations the pump drains per chunk (`usage`)★. Partial tracking only reduces the vendor sending the same text twice (deltas and a complete line) to one copy —
+///   ★the frontend accumulator has no dedup★ (it appends text deltas to the last text item); other merging (joining blocks of one message.id) stays the frontend's job. It does not know list entries: a registry event is a 1:1 translation of one
+///   vendor line, interpreted by the registry and accumulator reduction rules.
+/// ★`ack` and the turn-open gate (`gate`) are handles to incarnation-shared values, not decoder state★ — the session reads the ack value and the interrupt line function the gate.
 // ADR-0240
 // ADR-0238
 #[derive(Debug, Default)]
 pub struct ClaudeStreamDecoder {
     /// Incomplete line bytes after the last `\n` (for line-level split reassembly).
     ///
-    /// ★Invariant (load-bearing)★: **never UTF-8 decode before a complete line (up to the newline) is
-    ///   settled.** The pump throws arbitrary byte chunks (at most 4096B) ignoring NDJSON line boundaries and character boundaries,
-    ///   so multibyte UTF-8 characters (Hangul · emoji) can be cut at chunk boundaries. Joining only as bytes
-    ///   and decoding only complete lines that got a `\n` naturally absorbs boundary cuts (the newline `0x0A`
-    ///   cannot appear as a UTF-8 continuation byte, so searching for line boundaries at the byte level is safe).
+    /// ★Invariant (load-bearing)★: **never UTF-8 decode before a complete line (up to the newline) is settled.** The pump throws arbitrary byte chunks (≤4096B) ignoring line and character boundaries, so multibyte characters (Hangul · emoji) can be
+    ///   cut at chunk boundaries; joining as bytes and decoding only `\n`-terminated lines absorbs that (`0x0A` cannot be a UTF-8 continuation byte, so byte-level line search is safe).
     buffer: Vec<u8>,
 
-    /// ★Overflow resync state (FIX-A)★: whether it is **discarding the whole remaining tail of an overflowed polluted line up to the next `\n`**.
-    ///   While true, incoming bytes are discarded until a newline appears — on meeting a newline it is
-    ///   released to false and normal line processing resumes from then on.
+    /// ★Overflow resync state (FIX-A)★: whether it is **discarding the remaining tail of an overflowed polluted line up to the next `\n`** — incoming bytes are discarded until a newline, which releases it to false.
     ///
-    /// ★Why it is needed★: with a plain `buffer.clear()` alone, the tail of the polluted line (the remaining bytes not yet arrived,
-    ///   and bytes appended after the clear) is parsed as a "new line" up to the next `\n` and can emit **fake
-    ///   events** (especially if the tail happens to contain a valid JSON fragment). To lose only the one polluted line
-    ///   and recover fully **from after the `\n` that ends that line**, a state of "discarding up to the next newline"
-    ///   is needed.
+    /// ★Why★: a plain `buffer.clear()` would parse the polluted line's tail (bytes not yet arrived and bytes appended after the clear) as a "new line" up to the next `\n` and could emit **fake events** (if the tail contains a valid JSON fragment). To
+    ///   lose only the one polluted line and recover from after its `\n`, a "discarding" state is needed.
     discarding: bool,
 
     /// Usage observations picked up from `rate_limit_event` — the pump drains them per chunk with `take_usage`.
     usage: Vec<UsageObservation>,
 
-    /// Whether this incarnation can give ack notices — leaves `Unknown` through the capability list of `system/init` and the first `command_lifecycle` line.
-    /// In production it is **the very** Arc the backend puts in `SpawnParts::delivery_ack`.
+    /// Whether this incarnation can give ack notices — leaves `Unknown` through the capability list of `system/init` and the first `command_lifecycle` line. In production it is **the very** Arc the backend puts in `SpawnParts::delivery_ack`.
     // ADR-0231
     ack: Arc<DeliveryAck>,
 
@@ -1093,9 +916,8 @@ impl ClaudeStreamDecoder {
         Self::default()
     }
 
-    /// A decoder that fills the `ack` the test rig holds — the gate slot is empty (production assembly = [`Self::live`]).
-    /// ★The decoder that wins the `Unknown → Unavailable` transition emits `AckUnavailable{delivered: []}` once★
-    /// (once even if several decoders hold the same Arc).
+    /// A decoder that fills the `ack` the test rig holds — the gate slot is empty (production assembly = [`Self::live`]). ★The decoder that wins the `Unknown → Unavailable` transition emits `AckUnavailable{delivered: []}` once★ (once even if several
+    /// decoders hold the same Arc).
     // ADR-0231
     #[cfg(test)]
     fn with_delivery_ack(ack: Arc<DeliveryAck>) -> Self {
@@ -1155,11 +977,8 @@ impl ClaudeStreamDecoder {
         events
     }
 
-    /// Called at EOF (stream end) — processes the last line not terminated by a newline.
-    /// On a normal end the buffer is empty, so 0 events (the last line is also `\n`-terminated by convention).
-    // ★Invariant★: when discarding=true, buffer is always empty (clear on overflow + not loaded while
-    //   discarding). So a flush in that state yields 0 events — do not try to handle a discarding remainder in flush
-    //   (there is no remainder to handle). Adding logic is a regression that breaks this invariant.
+    /// Called at EOF — processes the last line not terminated by a newline. On a normal end the buffer is empty, so 0 events.
+    // ★Invariant★: when discarding=true the buffer is always empty (clear on overflow + not loaded while discarding), so a flush then yields 0 events — do not handle a discarding remainder in flush (adding logic breaks this invariant).
     pub fn flush(&mut self) -> Vec<OutputEvent> {
         let mut events = Vec::new();
         if !self.buffer.is_empty() {
@@ -1169,10 +988,8 @@ impl ClaudeStreamDecoder {
         events
     }
 
-    /// Translates one live line and runs the events that line emitted through the turn classifier in order, announcing to the turn-open gate — progress = open (only when
-    /// closed) · new input (`Delivered` = live `started`) = drop that turn's interrupt episode and open · end = close and
-    /// drop the episode. Turn errors (`Failed`) and events without a signal do not touch the gate.
-    /// ★Announcing to the gate happens before the event is emitted from the pump★ — it is emitted only after decode returns.
+    /// Translates one live line and runs the events it emitted through the turn classifier in order, announcing to the turn-open gate — progress = open (only when closed) · new input (`Delivered` = live `started`) = drop that turn's interrupt episode and
+    /// open · end = close and drop the episode. Turn errors (`Failed`) and signal-less events do not touch the gate. ★Announcing happens before the event is emitted from the pump★ (emitted only after decode returns).
     // ADR-0238
     // ADR-0262
     fn consume_live_line(&mut self, line: &[u8], events: &mut Vec<OutputEvent>) {
@@ -1204,9 +1021,7 @@ impl ClaudeStreamDecoder {
         }
     }
 
-    /// Announces one thing to the gate (one section of the gate lock). The pump calls decode without any lock, so there is no edge from another lock into the gate lock
-    /// — that the gate lock is a leaf (takes nothing while held) is kept by the [`GateCell`] side. If the slot
-    /// is empty, it does nothing.
+    /// Announces one thing to the gate (one section of the gate lock). The pump calls decode without a lock, so no other lock has an edge into the gate lock — that the gate lock is a leaf (takes nothing while held) is kept by [`GateCell`]. An empty slot does nothing.
     // ADR-0262
     fn move_gate(&mut self, to: GateMove) {
         let Some(gate) = self.gate.get() else {
@@ -1233,19 +1048,13 @@ impl ClaudeStreamDecoder {
     ///
     /// Parse rules — failures and meta are silently skipped (no panic):
     /// - non-UTF8 / non-JSON (e.g. stderr "Warning: no stdin…") → skip.
-    /// - `assistant`/`user` lines → each block of message.content[] as events in order. Except an interrupt synthetic `user` line becomes
-    ///   one `Structured{kind:"interrupted"}` (ADR-0243 — [`interrupt_note_text`]).
-    /// - `result` line → MessageDone (+ emit Usage too if result.usage exists;
-    ///   if is_error/subtype is of the error family, Error is also emitted **before** MessageDone — FIX-C).
-    ///   ※ Surfacing result errors is a **new backend policy** (a decision the frontend parser did not have).
-    ///   The result of an interrupted turn is one `TurnEnd{Interrupted}` after Usage — no Error or MessageDone (ADR-0238).
-    /// - Live only: `command_lifecycle` → registry events · `control_response` of a `cancel:<uuid>` request → cancel response
-    ///   event · `system/init` → ack availability decision (ADR-0231).
+    /// - `assistant`/`user` lines → each block of message.content[] as events in order; an interrupt synthetic `user` line becomes one `Structured{kind:"interrupted"}` (ADR-0243 — [`interrupt_note_text`]).
+    /// - `result` line → MessageDone (+ Usage if result.usage exists; if is_error/subtype is of the error family, Error is also emitted **before** MessageDone — FIX-C). ※ Surfacing result errors is a **new backend policy**
+    ///   (the frontend parser had none). An interrupted turn's result is one `TurnEnd{Interrupted}` after Usage — no Error or MessageDone (ADR-0238).
+    /// - Live only: `command_lifecycle` → registry events · `control_response` of a `cancel:<uuid>` request → cancel response event · `system/init` → ack availability decision (ADR-0231).
     /// - Transcript only: `attachment{queued_command}` → user bubble.
-    /// - `stream_event` → only when `partial` exists (live), streams text deltas as `TextDelta` and does not emit the complete `assistant`
-    ///   text of a streamed block. Without `partial` (transcript) it is skipped entirely — the complete line emits the full text (ADR-0240).
-    /// - `rate_limit_event` → 0 events. If `observations` is `Some`, a usage observation is added there
-    ///   (`usage.rs`). `None` = not picked up — the caller is reading past records (transcript).
+    /// - `stream_event` → only when `partial` exists (live): streams text deltas as `TextDelta` and does not emit the complete `assistant` text of a streamed block. Without `partial` (transcript) skipped entirely — the complete line emits the full text (ADR-0240).
+    /// - `rate_limit_event` → 0 events; if `observations` is `Some` a usage observation is added there (`usage.rs`), `None` = not picked up (reading past records).
     /// - Other `system`/`queue-operation`/unknown types → skip (0).
     // ADR-0240
     fn consume_line(
@@ -1295,8 +1104,7 @@ impl ClaudeStreamDecoder {
                     Some(arr) => arr,
                     None => return, // skip if content is not an array (schema deviation)
                 };
-                // ★The complete text of a streamed block is dropped — without this every claude answer appears twice★ (the frontend only appends).
-                //   Only text blocks are dropped — tools and thinking are not streamed as deltas, so the complete line is their only source.
+                // ★The complete text of a streamed block is dropped — without this every claude answer appears twice★ (the frontend only appends). Only text blocks: tools and thinking are not streamed as deltas, so the complete line is their only source.
                 // ADR-0240
                 let already_streamed = role == "assistant"
                     && partial
@@ -1312,10 +1120,8 @@ impl ClaudeStreamDecoder {
                 }
             }
             (Some("result"), _) => {
-                // ★Emit Usage before MessageDone★: the order is fixed so the consumer receives that turn's
-                //   final token totals before seeing the "turn end" signal (coming after would look like a delayed arrival after the end).
-                //   result.usage.{input_tokens,output_tokens} — confirmed in the measured fixture (text.jsonl line 5:
-                //   input=17095, output=4).
+                // ★Emit Usage before MessageDone★: the consumer receives the turn's final token totals before the "turn end" signal (after it they would look like a delayed arrival). result.usage.{input_tokens,output_tokens} confirmed in the measured fixture
+                //   (text.jsonl line 5: input=17095, output=4).
                 if let Some(usage) = value.get("usage") {
                     let input_tokens = usage
                         .get("input_tokens")
@@ -1335,10 +1141,8 @@ impl ClaudeStreamDecoder {
                         });
                     }
                 }
-                // ★An interrupted turn is not an error — split off before the error decision★: an interrupted `result` comes with `is_error:true` and
-                //   an error-family subtype (measured B2), so reaching the decision below would make it a failed turn. An interruption is closed only through
-                //   the one `TurnEnd` branch — the turn classifier reads it as `Ended(Other)` and neither sets nor clears the stop after error. Other ends
-                //   are `MessageDone` as before (this is not a migration).
+                // ★An interrupted turn is not an error — split off before the error decision★: its `result` comes with `is_error:true` and an error-family subtype (B2), so the decision below would make it a failed turn. An interruption closes only through the one
+                //   `TurnEnd` branch (the classifier reads `Ended(Other)`, neither setting nor clearing the stop after error); other ends are `MessageDone` as before.
                 // ADR-0238
                 if is_interrupted_result(&value) {
                     events.push(OutputEvent::TurnEnd {
@@ -1346,20 +1150,15 @@ impl ClaudeStreamDecoder {
                         outcome: TurnOutcome::Interrupted,
                     });
                 } else {
-                    // ★Surfacing failed turns (FIX-C)★: always emitting only MessageDone would disguise a turn that failed by API error, max-turns or refusal
-                    //   as "completed normally". The payload of a real failure is not captured (`result_error_handbuilt` was
-                    //   built by hand), so only the existing fields are stringified. The order is Error → MessageDone (so the consumer
-                    //   learns of the error before seeing the end signal).
+                    // ★Surfacing failed turns (FIX-C)★: MessageDone alone would disguise a turn failed by API error, max-turns or refusal as "completed normally". A real failure's payload is not captured (`result_error_handbuilt` was hand-built), so only
+                    //   existing fields are stringified. Order Error → MessageDone (the consumer learns of the error before the end signal).
                     let is_error = value
                         .get("is_error")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let subtype = value.get("subtype").and_then(|v| v.as_str());
-                    // ★error allowlist (not a denylist)★: it is caught as an error only when the subtype is of the error family
-                    //   (measured error_max_turns · error_during_execution → covered by s.starts_with("error")).
-                    //   Do not revert to a denylist (`s != "success"`) — it would automatically turn non-error subtypes added in the future
-                    //   into errors (the old shape even read `subtype:"interrupted"` of a turn normally aborted with Esc as an error —
-                    //   that subtype is now taken first by the interrupt branch above).
+                    // ★error allowlist (not a denylist)★: an error only when the subtype is of the error family (measured error_max_turns · error_during_execution → `s.starts_with("error")`). Do not revert to a denylist (`s != "success"`) — future non-error
+                    //   subtypes would turn into errors (the old shape read an Esc-aborted turn's `subtype:"interrupted"` as an error; the interrupt branch above now takes it first).
                     let subtype_is_error = subtype.map(|s| s.starts_with("error")).unwrap_or(false);
                     if is_error || subtype_is_error {
                         let mut detail = String::from(RESULT_FAILURE_DETAIL);
@@ -1376,8 +1175,7 @@ impl ClaudeStreamDecoder {
                         message_id: None,
                     });
                 }
-                // ★Tracking is cleared at the turn end★ — late deltas arriving after that without `message_start` are discarded, so there is no way for a progress
-                //   signal (`TextDelta`) after the turn end to turn 「in a turn」 back on (blocked until the 30-minute fail-open).
+                // ★Tracking is cleared at the turn end★ — late deltas without `message_start` are discarded, so a progress signal (`TextDelta`) after the turn end cannot turn 「in a turn」 back on (blocked until the 30-minute fail-open).
                 // ADR-0240
                 if let Some(partial) = partial {
                     *partial = PartialMessage::default();
@@ -1396,11 +1194,9 @@ impl ClaudeStreamDecoder {
                 }
             }
             (Some("command_lifecycle"), LineSource::Live(ack)) => {
-                // That a recognized line arrived means 「this CLI emits per-entry lifecycles」 — init comes only 0.6–0.9 s after the turn starts,
-                //   but the lifecycle comes within 1 ms after writing (M1·M4).
-                // ★Not opened by a line whose type matches but that is not recognized (narrower than TRD §5-4 「Available on first sight」)★ — it is an internal
-                //   surface, so if the vendor changes keys or state words, an opened registry row would never close. Left as is, an init without the capability
-                //   sends it to `Unavailable` and it falls to today's path.
+                // A recognized line means 「this CLI emits per-entry lifecycles」 — init comes only 0.6–0.9 s after the turn starts, the lifecycle within 1 ms after writing (M1·M4).
+                // ★A line whose type matches but is not recognized does not open it (narrower than TRD §5-4 「Available on first sight」)★ — an internal surface: if the vendor changes keys or state words an opened registry row would never close. An init without the
+                //   capability sends it to `Unavailable` and falls to today's path.
                 // ADR-0231
                 if is_recognisable_lifecycle(&value) {
                     ack.set_available();
@@ -1432,12 +1228,9 @@ impl ClaudeStreamDecoder {
 
     /// `attachment{queued_command}` of the resume transcript → user bubble (uuid = `source_uuid`).
     ///
-    /// ★Input folded in mid-turn remains not as a `user` line but as this one line (measured M5 — claude 2.1.280)★ — skipping
-    ///   it would make that text disappear from the resumed conversation. The `queue-operation` line that follows has no body and is discarded. A cancelled
-    ///   input leaves no body, so it is not revived (it is discarded text).
-    /// ★Only `commandMode: "prompt"` is moved★ — what other modes carry has not been examined (they may be commands the CLI inserted
-    ///   itself). Only what has grounds for being text a person typed is set up as a bubble, and the rest is discarded as today.
-    /// ★The bubble shape is the same as a text block of a `user` line★ — it goes through the user branch of `consume_block` as is.
+    /// ★Input folded in mid-turn remains not as a `user` line but as this one line (M5 — claude 2.1.280)★ — skipping it would make the text disappear from the resumed conversation. The following `queue-operation` line has no body and is discarded; a cancelled
+    ///   input leaves no body, so it is not revived.
+    /// ★Only `commandMode: "prompt"` is moved★ — other modes are unexamined (may be CLI-inserted commands); only what is grounded as person-typed text becomes a bubble. ★Same bubble shape as a `user` line's text block★ (goes through `consume_block`'s user branch).
     // ADR-0231
     fn consume_queued_command(value: &serde_json::Value, events: &mut Vec<OutputEvent>) {
         let Some(attachment) = value.get("attachment") else {
@@ -1467,13 +1260,11 @@ impl ClaudeStreamDecoder {
 
     /// One live `stream_event` line → 0–1 streamed text `TextDelta` + `partial` update.
     ///
-    /// ★Emits no event other than text deltas★ — `message_stop` comes on every tool call, so turning it into an end would end the turn on every tool
-    ///   call, and emitting the auxiliary lines as `Structured` would have the turn classifier count them as progress, becoming the path of a 30-minute block after the turn end.
-    ///   The turn end is only the one `result` line. Thinking and tool-input deltas are discarded too — both are emitted from the complete line.
-    /// ★Lines with `parent_tool_use_id` are discarded entirely★ — if a subagent's `message_start` overwrote the parent's tracking,
-    ///   the parent's streamed block would come out once more as complete text (whether subagent deltas come at all is unconfirmed — docs and peers disagree).
-    /// ★Text deltas arriving without `message_start` (no id) and text deltas without a block number are discarded★ — if the streamed position cannot be recorded,
-    ///   the complete text would not be dropped and there would be two copies, so instead of streaming, it shows as one complete text.
+    /// ★Emits nothing but text deltas★ — `message_stop` comes on every tool call, so an end from it would end the turn on every tool call, and auxiliary lines as `Structured` would be counted as progress by the classifier (a 30-minute block after the turn end).
+    ///   The turn end is the one `result` line. Thinking and tool-input deltas are discarded too (emitted from the complete line).
+    /// ★Lines with `parent_tool_use_id` are discarded entirely★ — a subagent's `message_start` would overwrite the parent's tracking and the parent's streamed block would come out once more as complete text (whether subagent deltas come at all is
+    ///   unconfirmed — docs and peers disagree).
+    /// ★Text deltas without `message_start` (no id) or without a block number are discarded★ — an unrecordable streamed position would leave two copies, so it shows as one complete text instead of streaming.
     // ADR-0240
     fn consume_stream_event(
         value: &serde_json::Value,
@@ -1520,10 +1311,8 @@ impl ClaudeStreamDecoder {
                     return;
                 };
                 partial.streamed.insert(index);
-                // Ring pressure: if the event right before is text of the same message, append to that text instead of a new event — `events` is the share of one
-                //   decode(), so this merging reduces only when several lines came in one pump read (measured 2026-09-27 — the 519 delta lines of a 2,428-character
-                //   answer came one line per read, so even merged it was 519).
-                //   seq is assigned at emit so no holes appear, and the accumulator appends to the last text item anyway.
+                // Ring pressure: if the event right before is text of the same message, append to it instead of a new event — `events` is the share of one decode(), so this merging reduces only when several lines came in one pump read (measured: the 519 delta
+                //   lines of a 2,428-character answer came one line per read, so even merged it was 519). seq is assigned at emit so no holes appear; the accumulator appends to the last text item anyway.
                 // ADR-0240
                 if let Some(OutputEvent::TextDelta {
                     text: previous,
@@ -1551,9 +1340,7 @@ impl ClaudeStreamDecoder {
         }
     }
 
-    /// One content[] block → OutputEvent.
-    ///
-    /// `line_uuid`: the line-level `uuid` of a user line (replay dedup key). Used only for user-role blocks.
+    /// One content[] block → OutputEvent. `line_uuid`: the line-level `uuid` of a user line (replay dedup key), used only for user-role blocks.
     fn consume_block(
         role: &str,
         block: &serde_json::Value,
@@ -1561,18 +1348,12 @@ impl ClaudeStreamDecoder {
         line_uuid: Option<&str>,
         events: &mut Vec<OutputEvent>,
     ) {
-        // ★User line blocks are preserved whole as Structured{kind:"user"}★: OutputEvent has no role concept
-        //   (only assistant-only fields), so a user replay turn cannot be expressed as a formal variant → the original block
-        //   is passed through the escape hatch as is.
+        // ★User line blocks are preserved whole as Structured{kind:"user"}★: OutputEvent has no role concept (only assistant-only fields), so a user replay turn has no formal variant → the original block goes through the escape hatch as is.
         if role == "user" {
-            // ★No suppression (do not bring it back)★: user-role text blocks used to be suppressed unconditionally — the reason was that they
-            //   duplicated the input-time synthetic echo, but with resume on it was a bug that made all past user text
-            //   disappear (even deleting lines for which no synthetic echo was ever made). Instead, they pass through carrying the uuid and dedup is
-            //   left to the frontend.
-            //   ★tool_result safe (HIGH FIX)★: a text echo and a tool_result can come together in one user line.
-            //     Even if every block carries the same line-level uuid, the frontend dedup applies only to `type==="text"`
-            //     (extractUserUuid returns null for non-text), so tool_result is always preserved.
-            //   Without a uuid (past lines · non-replay) the original is kept as is — such items are not deduped.
+            // ★No suppression (do not bring it back)★: user-role text blocks were once suppressed unconditionally (they duplicated the input-time synthetic echo), but with resume on that made all past user text disappear (even lines with no synthetic echo).
+            //   They pass through carrying the uuid and dedup is left to the frontend.
+            //   ★tool_result safe (HIGH FIX)★: a text echo and a tool_result can share one user line; with every block carrying the same line-level uuid, frontend dedup applies only to `type==="text"` (extractUserUuid returns null for non-text), so tool_result is always kept.
+            //   Without a uuid (past lines · non-replay) the original is kept as is — not deduped.
             let json = match line_uuid {
                 Some(u) => Self::user_block_with_uuid(block, u),
                 None => block.to_string(),
@@ -1586,12 +1367,9 @@ impl ClaudeStreamDecoder {
 
         match block.get("type").and_then(|t| t.as_str()) {
             Some("text") => {
-                // What comes here is complete text (blocks not streamed as deltas · transcript) — OutputEvent has no "complete text"
-                //   variant, and TextDelta is the formal representation of a text increment.
-                // ★malformed contract (FIX-B)★: without a string `text` (schema deviation) it skips instead of
-                //   emitting an empty TextDelta — an empty delta is meaningless noise downstream and cannot be told apart from "a normal text
-                //   block whose content is the empty string". (Skip chosen instead of preserving as Structured:
-                //   unlike a missing tool_use name, a missing text loses no matching information, so dropping it silently is safe.)
+                // What comes here is complete text (blocks not streamed as deltas · transcript) — OutputEvent has no "complete text" variant, and TextDelta is the formal text increment.
+                // ★malformed contract (FIX-B)★: without a string `text` (schema deviation) it skips instead of emitting an empty TextDelta — meaningless downstream noise, indistinguishable from a normal empty-string text block. (Skip, not Structured preservation:
+                //   unlike a missing tool_use name, a missing text loses no matching information.)
                 let Some(text) = block.get("text").and_then(|v| v.as_str()) else {
                     return;
                 };
@@ -1603,10 +1381,8 @@ impl ClaudeStreamDecoder {
             }
             Some("tool_use") => {
                 // id is tool_use.id — the key pairing it with the following tool_result.
-                // ★malformed contract (FIX-B)★: without a string `name` (schema deviation) it does not build a fake
-                //   ToolCall with an empty name — a call with an empty name is dangerous, disguised downstream as "a nameless
-                //   tool run". Instead the original block is preserved whole as Structured{kind:"tool_use"}
-                //   (avoiding both information loss and a fake call — the render layer decides by looking at the original).
+                // ★malformed contract (FIX-B)★: without a string `name` (schema deviation) no fake ToolCall with an empty name is built (downstream it would pass as 「a nameless tool run」); the original block is preserved whole as
+                //   Structured{kind:"tool_use"} (no information loss, no fake call — the render layer decides from the original).
                 let Some(name) = block.get("name").and_then(|v| v.as_str()) else {
                     events.push(Self::structured("tool_use", block));
                     return;
@@ -1626,9 +1402,8 @@ impl ClaudeStreamDecoder {
                     category: tool_category(name),
                 });
             }
-            // thinking and tool_result have no formal variant → the original block is preserved through the Structured escape hatch.
-            // (thinking = a reasoning block; tool_result normally comes in a user line and is eaten by the user branch above,
-            //  but if it comes in an assistant line it is defensively absorbed by the escape hatch. kind is the block type as is.)
+            // thinking and tool_result have no formal variant → the original block goes through the Structured escape hatch (kind = the block type as is). tool_result normally comes in a user line and is eaten by the user branch above; in an assistant line it is
+            // defensively absorbed here.
             Some(kind @ ("thinking" | "tool_result")) => {
                 events.push(Self::structured(kind, block));
             }
@@ -1649,10 +1424,8 @@ impl ClaudeStreamDecoder {
 
     /// Serializes a user replay block with the line-level `uuid` on it (attaches the dedup key).
     ///
-    /// ★shape contract★: a top-level `uuid` key is added to the original block object so it has the same shape as the synthetic echo
-    ///   user_text_echo_json builds (`{"type":…,…,"uuid":"X"}`). If the original is not a JSON object (schema
-    ///   deviation), there is no place to put the uuid, so the original is serialized as is (defensive — a normal replay block is always an object).
-    ///   Even if the block already has a `uuid`, it is overwritten with the line-level one (our controlled value) — the single source of the dedup key.
+    /// ★shape contract★: a top-level `uuid` key is added to the original block object so it has the same shape as the synthetic echo user_text_echo_json builds (`{"type":…,…,"uuid":"X"}`). A non-object original (schema deviation) has no place for
+    ///   the uuid and is serialized as is (defensive). An existing block `uuid` is overwritten with the line-level one (our controlled value) — the single source of the dedup key.
     fn user_block_with_uuid(block: &serde_json::Value, uuid: &str) -> String {
         match block.as_object() {
             Some(map) => {
@@ -1668,8 +1441,7 @@ impl ClaudeStreamDecoder {
     }
 }
 
-/// claude tool name → neutral category. ★Exact match (case-sensitive)★ — an unknown new tool falls to [`ToolCategory::Other`]
-/// (the grouping still stands and only the summary text becomes 「other」). `Glob` is `Search` — Claude Code itself groups it as 「finds files」.
+/// claude tool name → neutral category. ★Exact match (case-sensitive)★ — an unknown new tool falls to [`ToolCategory::Other`] (grouping still stands, only the summary says 「other」). `Glob` is `Search` — Claude Code groups it as 「finds files」.
 // ADR-0239
 fn tool_category(name: &str) -> ToolCategory {
     match name {
@@ -1689,10 +1461,9 @@ fn tool_category(name: &str) -> ToolCategory {
 
 /// One `command_lifecycle` line → registry event.
 ///
-/// ★The key is `command_uuid` (the uuid we wrote) — the line's own `uuid` is newly drawn by the CLI (measured M1)★.
-/// ★The lifecycle of input sent right away while idle is translated too★ — it is an id the registry and accumulator do not know, so only a tombstone remains (reduction rule).
-/// Translation table: `started` → accepted · `cancelled` → unknown (interrupt · failed turn · our cancel — the cancel response tells the cause apart) ·
-///   `discarded` → agent ended · `refused` → refused. `queued` (entering the queue) · `completed` (after the outcome) · unknown states → none.
+/// ★The key is `command_uuid` (the uuid we wrote) — the line's own `uuid` is newly drawn by the CLI (M1)★.
+/// ★The lifecycle of input sent right away while idle is translated too★ — an id the registry and accumulator do not know, so only a tombstone remains (reduction rule).
+/// Table: `started` → accepted · `cancelled` → unknown (interrupt · failed turn · our cancel — the cancel response tells the cause) · `discarded` → agent ended · `refused` → refused. `queued` · `completed` · unknown states → none.
 // ADR-0231
 fn lifecycle_event(value: &serde_json::Value) -> Option<QueuedInputEvent> {
     let id = value
@@ -1720,8 +1491,7 @@ const LIFECYCLE_STATES: [&str; 6] = [
     "refused",
 ];
 
-/// Whether it is a `command_lifecycle` line having both a non-empty string `command_uuid` and a known state word — the condition that opens acks
-/// as `Available`.
+/// Whether it is a `command_lifecycle` line with both a non-empty string `command_uuid` and a known state word — the condition that opens acks as `Available`.
 // ADR-0231
 // ADR-0234
 fn is_recognisable_lifecycle(value: &serde_json::Value) -> bool {
@@ -1736,11 +1506,10 @@ fn is_recognisable_lifecycle(value: &serde_json::Value) -> bool {
     has_id && known_state
 }
 
-/// `control_response` of a request [`cancel_line`] sent → cancel response event. `None` if it is a response to another request.
+/// `control_response` of a request [`cancel_line`] sent → cancel response event; `None` for a response to another request.
 ///
-/// ★The value is nested in `response.response.cancelled` (measured M3)★. If it succeeded but that value is missing, it is read as 「could not remove」 (`false`)
-///   — `false` is not an outcome but material for telling apart the cause of the vendor close that follows, so that is the side to lean to when unknown.
-/// The `subtype:"error"` envelope is not captured (from reading — TRD §3-1) — only the request id is read from the same place.
+/// ★The value is nested in `response.response.cancelled` (M3)★. Success with the value missing reads as 「could not remove」 (`false`) — `false` is material for telling the cause of the vendor close that follows, so it is the side to lean to when unknown.
+/// The `subtype:"error"` envelope is not captured (TRD §3-1) — only the request id is read from the same place.
 // ADR-0231
 fn cancel_response_event(value: &serde_json::Value) -> Option<QueuedInputEvent> {
     let response = value.get("response")?;
@@ -1764,12 +1533,10 @@ fn cancel_response_event(value: &serde_json::Value) -> Option<QueuedInputEvent> 
     }
 }
 
-/// Decides ack availability from one `system/init` line — `Available` if [`MSG_LIFECYCLE_CAPABILITY`] is in the capability list,
-/// otherwise (including old CLIs with no list at all) `Unavailable`.
+/// Decides ack availability from one `system/init` line — `Available` if [`MSG_LIFECYCLE_CAPABILITY`] is in the capability list, otherwise (including old CLIs with no list) `Unavailable`.
 ///
-/// ★Only the call that wins the `Unavailable` transition returns `AckUnavailable{delivered: []}`★ — just once for this incarnation. Moving the remaining
-///   entries into bubbles is done by the registry and accumulator that reduce that event (the decoder does not know the entries), and the body copies are
-///   filled by the core. Once `Available`, whatever later inits say does not revert it.
+/// ★Only the call that wins the `Unavailable` transition returns `AckUnavailable{delivered: []}`★ — once per incarnation. Moving the remaining entries into bubbles is the registry and accumulator's job (the decoder does not know the entries) and the core fills
+///   body copies. Once `Available`, later inits do not revert it.
 // ADR-0231
 fn judge_delivery_ack(ack: &DeliveryAck, value: &serde_json::Value) -> Option<QueuedInputEvent> {
     let lifecycle = value
@@ -1793,33 +1560,20 @@ fn judge_delivery_ack(ack: &DeliveryAck, value: &serde_json::Value) -> Option<Qu
 
 // ── ADR-0079: `.jsonl` transcript → OutputEvent seed on resume ──────
 //
-// ★Mapping reuse (one decoder)★: the `assistant`/`user` lines of the transcript have **the same**
-//   envelope (top-level `type` + `message.content[]` blocks) as live stream-json (measured 2026-07-13, claude 2.1.170). So
-//   instead of writing a new mapping for past turns, the live decoder's `consume_line` is reused as is. The transcript
-//   carries extra top-level keys in the envelope (`parentUuid`/`uuid`/`timestamp`/`sessionId`/`isSidechain` …) and line types not in live
-//   (`summary`/`file-history-snapshot`/`queue-operation`/`attachment`/`ai-title`),
-//   but `consume_line`'s catch-all (`_ => {}`) already harmlessly skips unknown types, so those lines are naturally excluded.
-//   ★The one exception = `attachment{queued_command}`★ — the body of input folded in mid-turn remains only there, so it is moved into a bubble
-//   (the `LineSource::Transcript` branch). Live-only lines (lifecycle · cancel response · init) are not translated in that branch.
-//   `stream_event` is also called without partial message tracking (`partial: None`) and skipped — the complete line emits one copy of the text (ADR-0240).
-//   The only extra filter is `isSidechain:true` (sub-agent turns) — their `type` is still user/assistant, so
-//   consume_line does not filter them out, and they are skipped at line level here.
+// ★Mapping reuse (one decoder)★: the transcript's `assistant`/`user` lines have **the same** envelope (top-level `type` + `message.content[]`) as live stream-json (measured, claude 2.1.170), so the live decoder's `consume_line` is reused as is. Extra top-level
+//   keys (`parentUuid`/`uuid`/`timestamp`/`sessionId`/`isSidechain` …) and non-live line types (`summary`/`file-history-snapshot`/`queue-operation`/`attachment`/`ai-title`) are skipped by `consume_line`'s catch-all (`_ => {}`).
+//   ★The one exception = `attachment{queued_command}`★ — the body of input folded in mid-turn remains only there, so it is moved into a bubble (the `LineSource::Transcript` branch); live-only lines (lifecycle · cancel response · init) are not translated there.
+//   `stream_event` is called without partial tracking (`partial: None`) and skipped — the complete line emits one copy of the text (ADR-0240).
+//   The only extra filter is `isSidechain:true` (sub-agent turns): their `type` is still user/assistant, so they are skipped at line level here.
 
-/// Maximum bytes to parse on transcript seed (from the end of the file). Matched to the Ring cap (2MB/4096 events),
-/// **only this much from the end (tail) of the file** is read and parsed — parsing a huge `.jsonl` (tens of MB) whole and then scanning
-/// even the old parts the Ring would discard anyway makes spawn latency explode. Truncating the excess (the old past) is accepted
-/// (ADR-0079 — the Ring also evicts the oldest first anyway). 2MB + margin = 4MB (the truncated first partial line at the seek point is
-/// explicitly discarded up to the first `\n` by read_transcript_events, so it is safe).
+/// Maximum bytes to parse on transcript seed (**only this much from the end of the file**). Matched to the Ring cap (2MB/4096 events): parsing a huge `.jsonl` (tens of MB) whole and scanning old parts the Ring would discard makes spawn latency explode.
+/// Truncating the old past is accepted (ADR-0079; the Ring evicts oldest first anyway). 2MB + margin = 4MB (the truncated first partial line at the seek point is explicitly discarded up to the first `\n` by read_transcript_events).
 const TRANSCRIPT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Encodes the cwd into the claude project directory slug.
 ///
-/// ★Encoding rule (confirmed by measurement 2026-07-13)★: **every non-alphanumeric character** of the cwd (`:` `\` `/` `.` `_` space etc.)
-///   is replaced with `-`. E.g. `C:\Users\X\AppData\Local\Temp\engram-resume-test` →
-///   `C--Users-X-AppData-Local-Temp-engram-resume-test` (colon+backslash = `--`), `I:\Engram_Workspace\a`
-///   → `I--Engram-Workspace-a`. claude makes the `~/.claude/projects/<slug>/` directory by this rule
-///   (confirmed 100% match against 45 local project directories). It is lossy (different cwds can become the same slug), but
-///   the goal is to match claude's actual behavior, so it is followed as is.
+/// ★Encoding rule (measured)★: **every non-alphanumeric character** of the cwd (`:` `\` `/` `.` `_` space etc.) becomes `-`. E.g. `C:\Users\X\AppData\Local\Temp\engram-resume-test` → `C--Users-X-AppData-Local-Temp-engram-resume-test`,
+///   `I:\Engram_Workspace\a` → `I--Engram-Workspace-a`. claude makes `~/.claude/projects/<slug>/` by this rule (100% match against 45 local directories). It is lossy (different cwds can share a slug), but the goal is matching claude's behavior.
 fn project_slug(cwd: &std::path::Path) -> String {
     cwd.to_string_lossy()
         .chars()
@@ -1827,11 +1581,9 @@ fn project_slug(cwd: &std::path::Path) -> String {
         .collect()
 }
 
-/// The directory where claude keeps its state = `CLAUDE_CONFIG_DIR` (when not empty), otherwise `~/.claude`.
-/// None if home cannot be found either.
+/// The directory where claude keeps its state = `CLAUDE_CONFIG_DIR` (when not empty), otherwise `~/.claude`; None if home cannot be found either.
 ///
-/// ★Every claude file path of this folder branches off from here★ — the transcript (`projects/`) and the session file
-/// (`sessions/`) alike. Writing the same convention in two places gets only one side fixed and the override only half-applies.
+/// ★Every claude file path of this folder branches off from here★ (transcript `projects/`, session file `sessions/`) — the same convention in two places would get only one side fixed and the override half-applied.
 pub(super) fn config_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         if !dir.is_empty() {
@@ -1851,13 +1603,11 @@ fn transcript_path(cwd: &std::path::Path, sid: Uuid) -> Option<PathBuf> {
     )
 }
 
-/// ADR-0079: transcript original (line NDJSON) → list of past `OutputEvent`s. **A pure function (0 external dependencies)** — unit-tested
-/// with real fixtures. File I/O is handled by `read_transcript_events`, and this function only receives an already-read
-/// string (ADR-0012 seam isolation).
+/// ADR-0079: transcript original (line NDJSON) → list of past `OutputEvent`s. **A pure function (0 external dependencies)**, unit-tested with real fixtures; file I/O is `read_transcript_events` (ADR-0012 seam isolation).
 ///
 /// - `isSidechain:true` (sub-agent turn) lines are skipped — only the original conversation is restored.
 /// - result lines get the same translation as live (MessageDone · `TurnEnd` for an interrupted turn, + usage), so a turn-boundary separator appears.
-/// - If it ends **without** that result line, one synthetic MessageDone is appended at the end (reason below).
+/// - If it ends **without** that result line, one synthetic MessageDone is appended (reason below).
 pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
     let mut events = Vec::new();
     for line in transcript.lines() {
@@ -1879,19 +1629,13 @@ pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
             None,
         );
     }
-    // ★The restored history must always end as a "closed turn" (load-bearing)★: a real `.jsonl` transcript **does not contain**
-    //   the `result` lines of live stream-json (measured 2026-08-17 — 0 in all 12 recent transcripts.
-    //   The line kinds are only user/assistant + meta such as queue-operation · attachment · last-prompt). So the seed
-    //   ends only with progress signals (text/tool/user) and has no turn-end signal. A structured slot that receives that state
-    //   reads `!turnDone && items>0` as streaming, so right after resume, **with nothing sent**, the waiting indicator
-    //   (Wait …) shows permanently (measured bug 2026-08-17). The new incarnation is idle right after resume and does not continue
-    //   past turns, so closing the restored part with one MessageDone matches the facts.
+    // ★The restored history must always end as a "closed turn" (load-bearing)★: a real `.jsonl` **does not contain** live stream-json's `result` lines (measured 2026-08-17: 0 in all 12 recent transcripts; only user/assistant + meta such as
+    //   queue-operation · attachment · last-prompt). The seed would end on progress signals with no turn end, and a structured slot reads `!turnDone && items>0` as streaming, so right after resume, **with nothing sent**, the waiting indicator (Wait …)
+    //   shows permanently. The new incarnation is idle after resume and does not continue past turns, so closing with one MessageDone matches the facts.
     //
-    //   ★Unrelated to observation (ADR-0113)★: this synthetic signal is **for the replay buffer only** — the seed does not go through the turn observation path
-    //   at all (OutputCore::seed), so busy/idle is not bootstrapped by it. Do not bring it back.
+    //   ★Unrelated to observation (ADR-0113)★: this synthetic signal is **for the replay buffer only** — the seed does not go through turn observation (OutputCore::seed), so busy/idle is not bootstrapped by it. Do not bring it back.
     //
-    //   If it already ends with a turn end (MessageDone · an interrupted turn's TurnEnd) (fixtures · a future claude that leaves result),
-    //   nothing is appended — prevents a duplicate turn boundary. With 0 events (an empty or meta-only transcript) it stays 0 = same as fresh.
+    //   If it already ends with a turn end (MessageDone · an interrupted turn's TurnEnd) (fixtures · a future claude that leaves result) nothing is appended (no duplicate boundary). 0 events (empty or meta-only transcript) stays 0 = same as fresh.
     let already_closed = matches!(
         events.last(),
         Some(OutputEvent::MessageDone { .. } | OutputEvent::TurnEnd { .. })
@@ -1913,18 +1657,11 @@ fn is_sidechain_line(line: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// ADR-0079: the entry point the daemon calls on a resume spawn. If the file is missing (new session) or reading fails, an empty
-/// Vec (no seed = same as fresh). **This is the only file I/O point**, and parsing is delegated to the pure function.
+/// ADR-0079: the entry point the daemon calls on a resume spawn. Missing file (new session) or read failure → an empty Vec (no seed = same as fresh). **The only file I/O point**; parsing is delegated to the pure function.
 ///
-/// ★tail read (prevents spawn latency)★: if the file is larger than the cap, only TRANSCRIPT_TAIL_BYTES are read from the end. In that case
-///   the first (partial) line at the seek point was cut in the middle of an object, so it is **explicitly discarded** — the bytes up to the first `\n`
-///   are dropped before parsing (cross-family review 2026-07-13). It does not rely on the implicit assumption that "a partial line is non-JSON anyway":
-///   if the truncated fragment happens to end with a valid JSON suffix, a fake event could be synthesized.
-///   If the seek offset is 0 (file ≤ cap), the first line is intact, so it is not discarded.
-///
-/// ★bounded read (defense against concurrent growth)★: `read_to_end` reads without bound if the file grows while reading. With `take`
-///   it reads at most TRANSCRIPT_TAIL_BYTES, putting a hard cap (exactly that much from the seek point). A seek failure does not
-///   silently read from an arbitrary position but explicitly returns an empty Vec (prevents offset pollution).
+/// ★tail read (spawn latency)★: a file over the cap reads only TRANSCRIPT_TAIL_BYTES from the end. The first (partial) line at the seek point was cut mid-object, so it is **explicitly discarded** — bytes up to the first `\n` are dropped before parsing —
+///   not relying on 「a partial line is non-JSON anyway」: a fragment that happens to end in a valid JSON suffix could synthesize a fake event. Seek offset 0 (file ≤ cap) keeps the intact first line.
+/// ★bounded read (concurrent growth)★: `read_to_end` is unbounded if the file grows while reading; `take` hard-caps at TRANSCRIPT_TAIL_BYTES from the seek point. A seek failure returns an empty Vec explicitly instead of reading from an arbitrary position.
 pub(crate) fn read_transcript_events(cwd: &std::path::Path, sid: Uuid) -> Vec<OutputEvent> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -2029,8 +1766,7 @@ mod tests {
         }
     }
 
-    /// A tool's end result is not a turn signal whatever its outcome — as progress, an end after the turn end would turn 「in a turn」 back on, and as an error, one tool
-    /// failure would set the stop after error.
+    /// A tool's end result is not a turn signal whatever its outcome — as progress an end after the turn end would turn 「in a turn」 back on, as an error one tool failure would set the stop after error.
     // ADR-0241
     #[test]
     fn a_tool_result_is_never_a_turn_signal() {
@@ -2052,8 +1788,7 @@ mod tests {
         }
     }
 
-    /// Among registry events, the progress signal is only `Delivered`, the translation of the vendor `started` — if the rest counted as progress, an event that came
-    /// after the turn end would turn 「in a turn」 back on and mail would be blocked until the 30-minute valve.
+    /// Among registry events only `Delivered` (the vendor `started`) is progress — others counted as progress would turn 「in a turn」 back on after the turn end and block mail until the 30-minute valve.
     // ADR-0231
     #[test]
     fn only_a_delivered_queued_input_is_turn_progress() {
@@ -2221,9 +1956,7 @@ mod tests {
         }
     }
 
-    /// The endpoint a non-MCP backend spawn receives — `config_path=None` (no MCP entry) + mail allowed. Both variants receive the CLI wiring itself
-    ///   identically (ADR-0133), so what this variant alone guards are the two axes **no mcp-config** and **mail marker
-    ///   on**.
+    /// The endpoint a non-MCP backend spawn receives — `config_path=None` (no MCP entry) + mail allowed. Both variants get the CLI wiring identically (ADR-0133), so this variant alone guards **no mcp-config** and **mail marker on**.
     fn ep_cli_only() -> ControlEndpoint {
         ControlEndpoint {
             config_path: None,
@@ -2436,9 +2169,7 @@ mod tests {
         );
     }
 
-    /// build_spec helper injecting a profile env (initial env vector) — for verifying profile PATH first (FIX-1).
-    ///   spec_with_control always starts with an empty env, so to reproduce env the profile planted beforehand,
-    ///   build_spec is called directly (imitating the spawn path pushing profile.env first).
+    /// build_spec helper injecting a profile env (initial env vector), to verify profile PATH first (FIX-1): spec_with_control always starts with an empty env, so build_spec is called directly (imitating the spawn path pushing profile.env first).
     fn spec_with_env(
         command: &AgentCommand,
         control: Option<ControlEndpoint>,
@@ -2595,11 +2326,8 @@ mod tests {
         );
     }
 
-    // ★The non-UTF8/join-failure skip cannot be reproduced portably★: making a join_paths failure (a separator character
-    //   in a path) or a non-UTF8 PATH at the CommandSpec.env (=Vec<(String,String)>) boundary would require it to already be a valid
-    //   UTF-8 String, a contradiction, and there is no OsString non-UTF8 injection path. So this skip branch is
-    //   not enforced by a unit test (observability is secured by the FIX-2/3 comments and a loud warn). On failure it is today's behavior
-    //   (inherited PATH kept), a safe fallback — low regression risk.
+    // ★The non-UTF8/join-failure skip cannot be reproduced portably★: a join_paths failure (separator in a path) or non-UTF8 PATH at the CommandSpec.env (`Vec<(String,String)>`) boundary would have to already be a valid UTF-8 String, a contradiction,
+    //   and there is no OsString injection path. So this branch has no unit test (observability: the FIX-2/3 comments and a loud warn); on failure the inherited PATH is kept, a safe fallback.
 
     // ── ADR-0133: wiring goes to everyone, only mail is split by the marker (bidirectional assertions on both branches) ──────────────────
     fn env_value<'a>(s: &'a CommandSpec, key: &str) -> Option<&'a str> {
@@ -2995,9 +2723,8 @@ mod tests {
     #[test]
     fn claude_terminal_injects_auto_permission_mode_pair() {
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
-        // ★First `--` flag = pair pin★: the absolute index differs per platform because the Windows console_command wrapper (`cmd.exe /c claude`)
-        //   puts tokens in front. Instead it asserts "the first flag of args is this pair" —
-        //   even if the extra_args passthrough happens to form the pair, it cannot mask a base injection regression (base always comes first).
+        // ★First `--` flag = pair pin★: the absolute index differs per platform (the Windows console_command wrapper `cmd.exe /c claude` puts tokens in front), so it asserts "the first flag of args is this pair" — an extra_args passthrough forming the pair
+        //   cannot mask a base injection regression (base always comes first).
         let first_flag = s.args.iter().position(|a| a.starts_with("--"));
         assert!(
             first_flag.is_some()
@@ -3617,10 +3344,7 @@ mod tests {
     // ADR-0079: transcript fixture for resume seed — reproduces the measured envelope, includes 1 sidechain turn.
     const TRANSCRIPT_JSONL: &str = include_str!("fixtures/claude_transcript.jsonl");
 
-    /// ★env serialization lock★: `CLAUDE_CONFIG_DIR` is process-global, so under cargo's default parallel run, tests touching this key
-    ///   race each other (one test reads a value another test set). So every test touching this key
-    ///   takes this lock and makes set→call→remove an atomic section (ignoring poison = so another test's
-    ///   panic does not pollute this test).
+    /// ★env serialization lock★: `CLAUDE_CONFIG_DIR` is process-global, so tests touching it race under cargo's parallel run; each takes this lock and makes set→call→remove atomic (poison ignored so another test's panic does not pollute this one).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// The returned temp base directory (the value to pass as `CLAUDE_CONFIG_DIR`) is cleaned up by the caller on drop.
@@ -4088,8 +3812,7 @@ mod tests {
 
     // ── ADR-0239: tool name → neutral category ─────────────────────────────────────────────
 
-    /// ★The category is set by the `tool_use` branch through the name table★ — every word of the table · the `mcp__` prefix · unknown names (`Other`) ·
-    /// exact match (`Other` if the case differs) are measured through the translator path.
+    /// ★The category is set by the `tool_use` branch through the name table★ — every table word · the `mcp__` prefix · unknown names (`Other`) · exact match (`Other` if the case differs) are measured through the translator path.
     // ADR-0239
     #[test]
     fn tool_use_name_maps_to_its_neutral_category() {
@@ -4332,9 +4055,7 @@ mod tests {
 
     // ── FIX (2026-08-17): a transcript without result lines is closed with a synthetic MessageDone ──────────
     //
-    // ★What regression this prevents★: a real `.jsonl` has no `result` lines (measured — 0 in the 12 recent files). Without closing,
-    //   right after resume the structured slot reads `!turnDone && items>0` as streaming, and although not a single chat line
-    //   was typed, the waiting indicator (Wait …) shows permanently.
+    // ★Prevents★: a real `.jsonl` has no `result` lines (0 in the 12 recent files); without closing, the structured slot reads `!turnDone && items>0` as streaming right after resume and the waiting indicator (Wait …) shows permanently.
     #[test]
     fn transcript_without_result_line_is_closed_with_synthetic_done() {
         // Measured shape, abbreviated: ends with user → assistant and has no result line (including the meta line last-prompt).
@@ -4465,13 +4186,9 @@ mod tests {
         assert!(ev.is_empty(), "empty file → empty Vec");
     }
 
-    /// ★The setup in which the test actually proves the discard (cross-family review 2026-07-13 FIX B)★: the seek point (= len-4MB)
-    ///   is aligned to fall exactly on **the start byte of the inner valid JSON object inside the trap line**. So the leading fragment before the first `\n`
-    ///   after the seek (= the drop target) is **a valid conversation line that parses intact by itself** (synthesizing a phantom "text" event).
-    ///   This way, without the discard the phantom appears, and with it, it disappears — removing the drop makes
-    ///   the test fail (the old setup's leading fragment was non-JSON, so it was skipped regardless of the drop and proved nothing).
-    ///   ★Paired counter-proof★: below it also asserts that parsing without the drop (`parse_transcript_events(leading)`) actually
-    ///   produces the phantom, pinning the premise that "the leading fragment is a valid line" as true.
+    /// ★The setup in which the test actually proves the discard (FIX B)★: the seek point (= len-4MB) falls exactly on **the start byte of the inner valid JSON object inside the trap line**, so the leading fragment before the first `\n` after the seek (= the
+    ///   drop target) is **a valid conversation line that parses by itself** (a phantom "text" event). Without the discard the phantom appears, with it it disappears — removing the drop fails the test (the old setup's fragment was non-JSON, skipped regardless,
+    ///   proving nothing). ★Paired counter-proof★: it also asserts that parsing without the drop (`parse_transcript_events(leading)`) does produce the phantom, pinning the premise.
     #[test]
     fn read_transcript_events_tail_drops_partial_leading_line_no_phantom() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -4594,10 +4311,8 @@ mod tests {
 
     // ── ADR-0084: proof of the `--resume <sid>` assembly on reactivation (Resume) (dispatch level) ──────────────────
     //
-    // Reinforcing the weak Shell test of ADR-0083 regression ③: whether reactivation actually passes the controlled sid as the `--resume` argument
-    // is asserted directly as the backend contract through **the public dispatch `build_command_spec`** (no real claude process).
-    // manager.spawn_agent(Resume) calls this dispatch, so verifying --resume<sid> here
-    // proves that the reactivation respawn passes the resume sid losslessly (ADR-0008).
+    // Reinforces the weak Shell test of ADR-0083 regression ③: that reactivation passes the controlled sid as `--resume` is asserted as the backend contract through **the public dispatch `build_command_spec`** (no real claude process). manager.spawn_agent(Resume)
+    // calls this dispatch, so this proves the reactivation respawn passes the resume sid losslessly (ADR-0008).
     #[test]
     fn build_command_spec_resume_emits_resume_flag_with_sid() {
         use crate::backend::build_command_spec;
@@ -4632,7 +4347,7 @@ mod tests {
 
     // ── ADR-0231: queued input — lifecycle · cancel response · ack decision · turn error · attachment restore ─────────────────
     //
-    // Canonical = Phase 0 measured fixtures (claude 2.1.280). Only `result_error_handbuilt` was built by hand (README).
+    // Canonical = Phase 0 measured fixtures (claude 2.1.280); only `result_error_handbuilt` was hand-built (README).
 
     const LIFECYCLE_M1: &str = include_str!("fixtures/lifecycle_m1.jsonl");
     const CANCEL_M3: &str = include_str!("fixtures/cancel_m3.jsonl");
@@ -4704,8 +4419,7 @@ mod tests {
         }
     }
 
-    /// The lifecycle key is `command_uuid` — not the `uuid` of the same line (a value the CLI newly draws). A, written while idle, also emits a lifecycle
-    /// (M1).
+    /// The lifecycle key is `command_uuid`, not the same line's `uuid` (newly drawn by the CLI). A, written while idle, also emits a lifecycle (M1).
     // ADR-0231
     #[test]
     fn lifecycle_lines_translate_keyed_by_command_uuid() {
@@ -4763,8 +4477,7 @@ mod tests {
         }
     }
 
-    /// Vendor drift — a lifecycle line whose key changed (no `command_uuid`) or with an unknown state word does not open acks (`Unknown`).
-    /// So the following init without the capability picks today's path with one `Unavailable` + `AckUnavailable{[]}`.
+    /// Vendor drift — a lifecycle line with a changed key (no `command_uuid`) or an unknown state word does not open acks (`Unknown`); the following init without the capability then takes today's path with one `Unavailable` + `AckUnavailable{[]}`.
     // ADR-0231
     #[test]
     fn an_unrecognisable_lifecycle_line_does_not_make_the_ack_available() {
@@ -4795,8 +4508,7 @@ mod tests {
         }
     }
 
-    /// In every measured fixture, one `started` line = one `Delivered` (same `command_uuid`, same order) — folding at tool boundaries (M1)
-    /// · cancel (M3) · drain turn (M7) · slash command mid-turn (M13): the translation is the same in every branch.
+    /// In every measured fixture one `started` line = one `Delivered` (same `command_uuid`, same order) — folding at tool boundaries (M1) · cancel (M3) · drain turn (M7) · slash command mid-turn (M13).
     // ADR-0231
     #[test]
     fn every_started_line_in_every_fixture_is_one_delivered() {
@@ -4822,8 +4534,7 @@ mod tests {
         }
     }
 
-    /// M3 — (a) our cancel removed it: the `cancelled` lifecycle comes before the response `true` · (c2) the cancel arrived before the text:
-    /// after the response `false`, that text was folded in and delivered (`started`). The response's uuid is taken off the request id.
+    /// M3 — (a) our cancel removed it: the `cancelled` lifecycle comes before the response `true` · (c2) the cancel arrived before the text: after the response `false` that text was folded in and delivered (`started`). The response's uuid is taken off the request id.
     // ADR-0231
     #[test]
     fn cancel_m3_translates_answers_and_lifecycle_in_line_order() {
@@ -4907,8 +4618,7 @@ mod tests {
         ));
     }
 
-    /// The first lifecycle line opens acks as `Available` — init comes only after the turn starts, so this comes first (M1·M4). A later
-    /// init changes nothing.
+    /// The first lifecycle line opens acks as `Available` — init comes only after the turn starts, so this is first (M1·M4); a later init changes nothing.
     // ADR-0231
     #[test]
     fn the_first_lifecycle_line_makes_delivery_ack_available_before_init() {
@@ -4949,8 +4659,7 @@ mod tests {
         assert_eq!(ack.state(), DeliveryAckState::Available);
     }
 
-    /// An init without the capability (2.1.170) → `Unavailable` + `AckUnavailable{[]}` **once for this incarnation** — whether the same decoder
-    /// sees it again or another decoder holding the same Arc sees it, there is no second.
+    /// An init without the capability (2.1.170) → `Unavailable` + `AckUnavailable{[]}` **once per incarnation** — the same decoder seeing it again or another decoder holding the same Arc gives no second.
     // ADR-0231
     #[test]
     fn an_init_without_the_capability_is_unavailable_with_exactly_one_ack_unavailable() {
@@ -4990,8 +4699,7 @@ mod tests {
         assert_eq!(ack.state(), DeliveryAckState::Available);
     }
 
-    /// The turn error signal is only the `Error` a failed `result` emitted right before `MessageDone` — measured with real decoder output (if the prefixes
-    /// diverge, it breaks here). `success`·`interrupted` ends give 0 signals, and a line-buffer overflow `Error` gives 0 too.
+    /// The turn error signal is only the `Error` a failed `result` emitted right before `MessageDone` — measured with real decoder output (diverging prefixes break here). `success`·`interrupted` ends and a line-buffer overflow `Error` give 0 signals.
     // ADR-0231
     #[test]
     fn only_the_failed_result_error_is_a_turn_error_signal() {
@@ -5052,8 +4760,7 @@ mod tests {
         assert!(!after_clean.in_turn);
     }
 
-    /// ★A line-buffer overflow `Error` outside a turn does not fold the next clean turn into an error end★ — counted as a turn error, the table would hold it
-    /// and fold the next clean `result` into a failure, and mail would stop until the user makes one succeed again.
+    /// ★A line-buffer overflow `Error` outside a turn does not fold the next clean turn into an error end★ — counted as a turn error the table would hold it, fold the next clean `result` into a failure and stop mail until the user succeeds once.
     // ADR-0231
     #[test]
     fn a_line_overflow_error_outside_a_turn_does_not_fail_the_next_clean_turn() {
@@ -5072,8 +4779,7 @@ mod tests {
         assert!(!table.get(id, epoch).expect("observed").last_end_failed);
     }
 
-    /// Drain turn (M7): a core made idle by the previous turn's `result` becomes in-turn right at the queued item's `started` (=`Delivered`) —
-    /// without waiting for that turn's `system/init` (0.6–0.9 s later).
+    /// Drain turn (M7): a core made idle by the previous `result` becomes in-turn right at the queued item's `started` (=`Delivered`), without waiting for that turn's `system/init` (0.6–0.9 s later).
     // ADR-0231
     #[test]
     fn a_drain_turn_started_puts_the_core_in_turn_before_its_init() {
@@ -5102,8 +4808,7 @@ mod tests {
         );
     }
 
-    /// Resume: the `attachment{queued_command}` of folded-in input → a user bubble in that place (uuid = `source_uuid`, body =
-    /// the text of `prompt`) · `queue-operation` lines are discarded · no registry events in the seed (M5).
+    /// Resume: the `attachment{queued_command}` of folded-in input → a user bubble in that place (uuid = `source_uuid`, body = the text of `prompt`) · `queue-operation` lines discarded · no registry events in the seed (M5).
     // ADR-0231
     #[test]
     fn a_queued_command_attachment_restores_as_a_user_bubble_in_place() {
@@ -5167,8 +4872,7 @@ mod tests {
         );
     }
 
-    /// The two streams do not mix — live does not move attachment lines (live gets the echo separately — moving them would make two bubbles),
-    /// and the transcript does not translate lifecycles, cancel responses or init (the seed does not pass through the registry door).
+    /// The two streams do not mix — live does not move attachment lines (live gets the echo separately; moving would make two bubbles), and the transcript does not translate lifecycles, cancel responses or init (the seed bypasses the registry door).
     // ADR-0231
     #[test]
     fn live_and_transcript_line_kinds_do_not_cross() {
@@ -5674,8 +5378,7 @@ mod tests {
         items
     }
 
-    /// 1 · 3 · 4 · 7 by measurement: per message, the join of streamed text = that message's complete text (one copy) · one event per text delta line ·
-    /// a tool once from the complete line · thinking as many as the complete blocks · a new message after folded-in input is also one copy.
+    /// 1 · 3 · 4 · 7 by measurement: per message the join of streamed text = that message's complete text (one copy) · one event per text delta line · a tool once from the complete line · thinking as many as the complete blocks · a new message after folded-in input is one copy too.
     // ADR-0240
     #[test]
     fn the_partial_fixture_streams_every_text_block_exactly_once() {
@@ -5754,8 +5457,7 @@ mod tests {
         );
     }
 
-    /// 9 · 14 by measurement: wherever the chunk boundary falls (including the middle of a Hangul character), the items the accumulator folds are the same, and when fed at once
-    /// the text is the same even if neighboring deltas merge.
+    /// 9 · 14 by measurement: wherever the chunk boundary falls (even mid-Hangul character) the items the accumulator folds are the same, and fed at once the text is the same even if neighboring deltas merge.
     // ADR-0240
     #[test]
     fn the_partial_fixture_folds_to_the_same_items_at_any_chunk_boundary() {
@@ -5781,8 +5483,7 @@ mod tests {
         );
     }
 
-    /// 13: in the captured idle intervals (after each `result` ~ before the next input's `queued` — including the 32 seconds after T1) there is no top-level `stream_event`,
-    /// the events of those intervals are not progress signals, and the core stays idle.
+    /// 13: in the captured idle intervals (after each `result` to the next input's `queued`, incl. the 32 s after T1) there is no top-level `stream_event`, those events are not progress signals and the core stays idle.
     // ADR-0240
     #[test]
     fn the_captured_idle_windows_carry_no_stream_events_and_no_progress() {
@@ -5870,8 +5571,7 @@ mod tests {
         );
     }
 
-    /// A message id over the cap (128 bytes) is filtered, not truncated — that message is not streamed and shows as one complete text, and
-    /// no id is carried in the events. An id within the cap streams as is.
+    /// A message id over the cap (128 bytes) is filtered, not truncated — that message is not streamed and shows as one complete text, and no id is carried in the events; an id within the cap streams as is.
     // ADR-0240
     #[test]
     fn a_message_id_over_the_bound_is_filtered_not_truncated() {
@@ -5899,9 +5599,8 @@ mod tests {
         );
     }
 
-    /// Reinforcement of 11: existing fixtures without partial lines give the same event sequence with or without partial message tracking (whole Debug string compared).
-    ///   Passing the existing fixture tests without changing them is the evidence for 11, and this test measures that premise (tracking discards
-    ///   nothing) down to the fields.
+    /// Reinforcement of 11: existing fixtures without partial lines give the same event sequence with or without partial tracking (whole Debug string compared). Passing existing fixture tests unchanged is the evidence for 11; this measures that premise
+    ///   (tracking discards nothing) down to the fields.
     // ADR-0240
     #[test]
     fn fixtures_without_partial_lines_decode_the_same_with_and_without_tracking() {
@@ -5970,8 +5669,7 @@ mod tests {
         }
     }
 
-    /// Interrupt line byte golden (ADR-0238 decision 1 — the shape measurement B2 accepted) · the response to that request id and the two captured responses have no
-    /// events (a response is not 「stopped」).
+    /// Interrupt line byte golden (ADR-0238 decision 1) · the response to that request id and the two captured responses have no events (a response is not 「stopped」).
     // ADR-0238
     #[test]
     fn interrupt_line_bytes_golden_and_its_answer_is_not_translated() {
@@ -6002,9 +5700,8 @@ mod tests {
         }
     }
 
-    /// The two interrupted `result`s (`aborted_streaming` while text streams · `aborted_tools` while a tool runs) → `[Usage?, TurnEnd{Interrupted}]`
-    /// — no `Error`·`MessageDone` · classification `Ended(Other)` · no turn error signal anywhere in the fixture. The normal end of the same fixture is
-    /// `[Usage, done]` as today.
+    /// The two interrupted `result`s (`aborted_streaming` while text streams · `aborted_tools` while a tool runs) → `[Usage?, TurnEnd{Interrupted}]` — no `Error`·`MessageDone` · classification `Ended(Other)` · no turn error signal anywhere in the fixture;
+    /// the same fixture's normal end is `[Usage, done]` as today.
     // ADR-0238
     #[test]
     fn the_spike_s_interrupted_results_end_the_turn_as_interrupted_without_an_error() {
@@ -6042,8 +5739,8 @@ mod tests {
         assert_eq!(failed, 0, "the interruption was read as a turn error");
     }
 
-    /// The tails of the two interrupted turns line by line — the response gives 0 events · the truncated complete line is streamed text, so 0 (ADR-0240) · tool results are `user` as today
-    /// · the synthetic line is an interrupted marker · `result` is the interrupted end · the following `cancelled` is `Dropped` (a no-op on a tombstone — the registry's job).
+    /// The tails of the two interrupted turns line by line — the response gives 0 events · the truncated complete line is streamed text, so 0 (ADR-0240) · tool results are `user` as today · the synthetic line is an interrupted marker · `result` is the
+    /// interrupted end · the following `cancelled` is `Dropped` (a no-op on a tombstone — the registry's job).
     // ADR-0238
     // ADR-0243
     #[test]
@@ -6067,8 +5764,7 @@ mod tests {
         }
     }
 
-    /// S8 — gate trajectory: opening lines = each turn's `started` (2 · 141 · 190) · closing lines = each turn's `result` (138 · 187 · 201). No line opens it outside a turn (the first
-    /// `queued` · the `cancelled`·`completed` after `result` · the next turn's `queued`).
+    /// S8 — gate trajectory: opening lines = each turn's `started` (2 · 141 · 190) · closing lines = each turn's `result` (138 · 187 · 201); no line opens it outside a turn (the first `queued` · the `cancelled`·`completed` after `result` · the next `queued`).
     // ADR-0238
     #[test]
     fn the_turn_gate_opens_at_each_started_line_and_closes_at_each_result() {
@@ -6095,8 +5791,7 @@ mod tests {
         assert!(!was_open, "the gate is closed after the last turn ends");
     }
 
-    /// A user echo · complete `assistant` text · tool call · streamed text delta · `Delivered` line each open the gate, and that turn's
-    /// `result` closes it — the events opening the gate = the turn classifier's progress signals.
+    /// A user echo · complete `assistant` text · tool call · streamed text delta · `Delivered` line each open the gate and that turn's `result` closes it — the gate-opening events = the classifier's progress signals.
     // ADR-0238
     #[test]
     fn every_progress_line_opens_the_gate_and_the_result_closes_it() {
@@ -6133,8 +5828,7 @@ mod tests {
         }
     }
 
-    /// The gate stands closed · lines without a signal (idle `queued` · `system/init`·`status`·`task_notification` · interrupt response · cancel response
-    /// · ack-unavailable init · partial message auxiliary lines · synthetic interrupt line · `cancelled` moved to `Dropped`) do not open it.
+    /// Lines without a signal (idle `queued` · `system/init`·`status`·`task_notification` · interrupt response · cancel response · ack-unavailable init · partial message auxiliary lines · synthetic interrupt line · `cancelled` moved to `Dropped`) do not open a closed gate.
     // ADR-0238
     // ADR-0243
     #[test]
@@ -6200,8 +5894,7 @@ mod tests {
         assert_ne!(ids[0], ids[1]);
     }
 
-    /// An interrupted turn neither sets nor clears the stop after error — the stop of an earlier failed turn remains through two interrupted turns, and the next clean
-    /// turn clears it. No 「in a turn」 remains after an interrupted turn either (ADR-0234 · ADR-0127).
+    /// An interrupted turn neither sets nor clears the stop after error — an earlier failed turn's stop remains through two interrupted turns and the next clean turn clears it; no 「in a turn」 remains after an interrupted turn (ADR-0234 · ADR-0127).
     // ADR-0238
     #[test]
     fn an_interrupted_turn_neither_sets_nor_clears_the_error_halt() {
@@ -6289,8 +5982,7 @@ mod tests {
         }
     }
 
-    /// Unrecognized `user` lines stay as today — an echo (`isReplay:true`) is a bubble even if its text starts with the head · two text blocks ·
-    /// text not starting with the head · a `tool_result` containing the head are `Structured{user}` · a plain-string `content` gives 0 events.
+    /// Unrecognized `user` lines stay as today — an echo (`isReplay:true`) is a bubble even if its text starts with the head · two text blocks · text not starting with the head · a `tool_result` containing the head are `Structured{user}` · a plain-string `content` gives 0 events.
     // ADR-0243
     #[test]
     fn user_lines_that_are_not_the_synthetic_note_stay_as_today() {
@@ -6382,8 +6074,7 @@ mod tests {
         }
     }
 
-    /// An interrupted marker has no signal in the turn classifier — counted as progress, it would turn 「in a turn」 back on when it comes after `result`. Other
-    /// `Structured` are still progress.
+    /// An interrupted marker has no signal in the turn classifier — as progress it would turn 「in a turn」 back on after `result`; other `Structured` are still progress.
     // ADR-0243
     #[test]
     fn the_interrupted_note_is_not_turn_progress_but_other_structured_events_are() {
@@ -6413,8 +6104,7 @@ mod tests {
         );
     }
 
-    /// Production assembly — the link of a JSON spawn reports the interrupt capability, refuses right after spawn since there is no turn to interrupt, and after that incarnation's decoder
-    /// reads a `started` line it accepts the interrupt line (the decoder and the interrupt line function share one gate).
+    /// Production assembly — a JSON spawn's link reports the interrupt capability, refuses right after spawn (no turn to interrupt), and accepts the interrupt line once that incarnation's decoder reads a `started` line (decoder and interrupt line function share one gate).
     // ADR-0238
     #[cfg(windows)]
     #[test]
@@ -6485,9 +6175,8 @@ mod tests {
 
     // ── ADR-0262: decoder · interrupt line function ↔ interrupt episode ──────────────────────────────────────────────────
 
-    /// The gate containing the cleaner and the decoder · interrupt line function sharing it — the `open_spawn` assembly with only the group replaced by an
-    /// already-gone handle. The port cannot be used, so the episode's snapshot is set up as a failure, but the episode stands. The test does not call write confirmation, so
-    /// neither the worker nor the listening thread starts.
+    /// The gate containing the cleaner and the decoder · interrupt line function sharing it — the `open_spawn` assembly with only the group replaced by an already-gone handle. The port cannot be used so the episode's snapshot is a failure, but the episode stands;
+    /// write confirmation is not called, so neither the worker nor the listening thread starts.
     fn cleaned_decoder() -> (ClaudeStreamDecoder, InterruptLine, Arc<GateCell>) {
         use crate::transport::process_group::{ProcessGroup, RetiringSignal};
         let retiring = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -6512,8 +6201,8 @@ mod tests {
     /// The `started` of another input — a second new input reaching an already-open turn.
     const SECOND_STARTED: &str = "{\"type\":\"command_lifecycle\",\"command_uuid\":\"u2\",\"state\":\"started\",\"uuid\":\"x\",\"session_id\":\"s\"}\n";
 
-    /// An interrupt right after spawn · after the turn end has neither a line nor an episode · an interrupt on a gate opened by a progress line gives a line carrying write confirmation and
-    /// opens an episode · progress lines of the same turn do not touch the episode · `result` closes the gate and drops the episode.
+    /// An interrupt right after spawn · after the turn end has neither a line nor an episode · an interrupt on a gate opened by a progress line gives a line carrying write confirmation and opens an episode · same-turn progress lines do not touch the episode · `result`
+    /// closes the gate and drops the episode.
     // ADR-0262
     #[test]
     fn an_interrupt_on_an_open_turn_opens_an_episode_that_the_turn_end_drops() {
@@ -6569,8 +6258,7 @@ mod tests {
         assert!(!has_episode(&gate));
     }
 
-    /// A second new input (`started`) reaching an open turn drops that turn's interrupt episode and keeps the gate open — an interrupt after that opens a new
-    /// episode.
+    /// A second new input (`started`) reaching an open turn drops that turn's interrupt episode and keeps the gate open — an interrupt after that opens a new episode.
     // ADR-0262
     #[test]
     fn a_second_started_drops_the_episode_and_keeps_the_turn_open() {
@@ -6597,8 +6285,7 @@ mod tests {
         );
     }
 
-    /// The `started` that opens a turn announces to the gate once (new input) — 「open」 is not called separately. Even as progress lines continue, the gate
-    /// is called only on closed → open, and closed once per turn end — the fixture's three turns = six times.
+    /// The `started` that opens a turn announces to the gate once (new input), 「open」 not separately; as progress lines continue the gate is called only on closed → open, and closed once per turn end — the fixture's three turns = six times.
     // ADR-0262
     #[test]
     fn the_opening_started_is_one_move_and_progress_moves_only_at_transitions() {
@@ -6664,8 +6351,7 @@ mod tests {
         );
     }
 
-    /// The resume original does not reach the gate — even resuming one turn containing progress and an interrupted `result`, a closed gate stays closed, and an open gate and
-    /// its episode stay as is.
+    /// The resume original does not reach the gate — resuming one turn with progress and an interrupted `result` leaves a closed gate closed and an open gate and its episode as is.
     // ADR-0262
     #[test]
     fn transcript_lines_never_touch_the_gate() {

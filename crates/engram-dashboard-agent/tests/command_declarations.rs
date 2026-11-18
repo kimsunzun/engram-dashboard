@@ -61,10 +61,9 @@ fn the_queued_input_verbs_are_declared_with_their_effect_and_generation() {
     assert_eq!(interrupt.since, 6);
 }
 
-/// The two usage verbs (TRD S21 usage-limit-slot §1-6) — the query is `Read`, the forced refresh is `Write`, and both came into catalog 6.
-/// ★`usage.refresh` being `Write` is a contract★ — delivery holds on to the number by that value (a resend with the same number does not
-/// launch the query again). So the result log after the deadline carries that payload, and the original is stripped there (daemon
-/// `command_delivery`).
+/// The two usage verbs (TRD S21 usage-limit-slot §1-6) — the query is `Read`, the forced refresh is `Write`; both in catalog 6.
+/// ★`usage.refresh` being `Write` is a contract★ — delivery holds the number by that value (a resend with the same number does not launch
+/// the query again), so the result log after the deadline carries that payload and the original is stripped there (daemon `command_delivery`).
 #[test]
 fn the_usage_verbs_are_declared_with_their_effect_and_generation() {
     let get = spec_of("usage.get").expect("declaration");
@@ -82,12 +81,11 @@ fn the_resolve_verb_is_a_read_declared_in_generation_8() {
     let resolve = spec_of("agent.resolve").expect("declaration");
     assert_eq!(resolve.effect, Effect::Read);
     assert_eq!(resolve.since, 8);
-    // The current generation is 8 — `agent.resolve` was added.
     assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 8);
 }
 
-/// ★The list of commands moving input holds only this crate's `Write` declarations★ — if a missing name or a query slipped in, the common entry's
-/// lease check would block the wrong command or miss a command it should block.
+/// ★The input-moving command list holds only this crate's `Write` declarations★ — a missing name or a query slipping in would make the
+/// common entry's lease check block the wrong command or miss one it should block.
 #[test]
 fn every_input_affecting_name_is_a_declared_write_verb() {
     assert!(!INPUT_AFFECTING.is_empty());
@@ -167,7 +165,6 @@ fn every_command_advertises_the_errors_the_table_can_produce() {
     }
 }
 
-/// If the same name is linked twice, it is unknown which contract wins — caught here before the lookup panics.
 #[test]
 fn no_command_name_is_declared_twice_in_this_binary() {
     assert!(
@@ -177,7 +174,6 @@ fn no_command_name_is_declared_twice_in_this_binary() {
     );
 }
 
-/// Catches here what the macro cannot catch at compile time (raw identifiers · broken schemas).
 #[test]
 fn every_declaration_passes_the_schema_lint() {
     for spec in COMMAND_SPECS {
@@ -187,8 +183,8 @@ fn every_declaration_passes_the_schema_lint() {
 
 /// ★Only fields the schema advertised as 「may be absent」 must actually be omittable★ (ADR-0156 — the advertisement is the usage).
 ///
-/// Comparing advertisements list against list makes **both wrong together when the advertisement is wrong** — so real deserialization is
-/// set next to the advertisement, and fields are removed one at a time to see 「whether it blows up only when what is written as required is missing」.
+/// Comparing advertisement lists with each other makes **both wrong together if the advertisement is wrong** — so real deserialization is
+/// set beside it, and fields are removed one at a time to see 「whether it fails only when a required field is missing」.
 #[test]
 fn required_matches_what_deserialization_actually_demands() {
     fn parses<T: serde::de::DeserializeOwned>(args: serde_json::Value) -> bool {
@@ -210,8 +206,8 @@ fn required_matches_what_deserialization_actually_demands() {
         (
             "agent.new",
             parses::<AgentNewArgs>,
-            // Carries both mutually exclusive fields together — what this comparison measures is **deserialization**, and the combination constraint is looked at by the handler
-            //   (the same place as target/cwd of `agent.spawn`).
+            // Carries both mutually exclusive fields — this comparison measures **deserialization**; the combination constraint is the handler's
+            //   (same place as target/cwd of `agent.spawn`).
             json!({
                 "cwd": "C:/work/x",
                 "preset": "bookmark-1",
@@ -291,13 +287,12 @@ fn required_matches_what_deserialization_actually_demands() {
 
 /// ★**The advertisement** carries the way to register without a dialog★ (ADR-0156 — the advertisement is the usage).
 ///
-/// The caller of this command is the LLM, and what it sees is only this schema: that the folder can be decided two ways
-/// (`cwd`·`preset`) and that the other two fields are **closed vocabularies** must be carried there for it to choose its own arguments.
-/// ★Neither of the two folder-deciding fields is required alone★ — 「exactly one」 is not a field but **a combination**, so
-/// the schema cannot express it (the handler carries that decision, and the rejection text points at both fields together).
-/// ★On the other hand `backend` is required alone (2026-09-08)★ — the result of removing the silent claude default, and that fact
-/// must be carried in `required` for the caller to know before calling. The old contract (`required` empty) stood
-/// on that default.
+/// The caller is the LLM and sees only this schema: it must carry that the folder is decided two ways (`cwd`·`preset`) and that the other
+/// two fields are **closed vocabularies**, for it to choose its own arguments.
+/// ★Neither folder-deciding field is required alone★ — 「exactly one」 is a **combination** the schema cannot express (the handler decides;
+/// the rejection text points at both fields).
+/// ★`backend` is required alone (2026-09-08)★ — the silent claude default was removed, and `required` must carry that so the caller knows
+///   before calling.
 #[test]
 fn the_create_verb_advertises_both_ways_to_pick_a_folder_and_its_closed_vocabularies() {
     let schema: serde_json::Value =
@@ -323,8 +318,8 @@ fn the_create_verb_advertises_both_ways_to_pick_a_folder_and_its_closed_vocabula
         "the only field required alone is `backend`: {schema}"
     );
 
-    // A closed vocabulary is carried as **a value list** — if only the name is carried, the caller cannot choose what to put by itself.
-    // ★Both shapes are read★ — a required field is `{"enum":[…]}`, an omittable field is `{"anyOf":[{"enum":[…]},…]}`.
+    // A closed vocabulary is carried as **a value list** — a bare name would not let the caller choose what to put.
+    // ★Both shapes are read★ — required = `{"enum":[…]}`, omittable = `{"anyOf":[{"enum":[…]},…]}`.
     let vocabulary = |field: &str| -> Vec<String> {
         let property = &properties[field];
         let branches = match property.get("anyOf") {
@@ -347,8 +342,8 @@ fn the_create_verb_advertises_both_ways_to_pick_a_folder_and_its_closed_vocabula
     );
 }
 
-/// ★`null` is an instruction to 「detach to root」 and absence is a rejection★ — only when these three split does a single typo field not silently
-/// run as a hierarchy release (the alphabet table of TRD §2-2).
+/// ★`null` means 「detach to root」 and absence is a rejection★ — only with these three split does a single typo field not silently run as a
+/// hierarchy release (the alphabet table of TRD §2-2).
 #[test]
 fn an_absent_option_option_field_is_refused_while_null_is_a_value() {
     let detach: AgentMoveArgs =

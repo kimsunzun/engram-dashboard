@@ -1,5 +1,5 @@
-//! Query test double — a fake [`ProbeSpawner`] that moves by script, and a test temp root. Used by the unit tests of vendor queriers
-//! to measure conversation · deadline · kill without a real CLI.
+//! Query test double — a fake [`ProbeSpawner`] driven by script, and a test temp root. Used by vendor-querier unit tests to measure
+//! conversation · deadline · kill without a real CLI.
 //!
 //! ```ignore
 //! let root = TempRoot::new("vendor-probe");
@@ -19,16 +19,15 @@
 //! assert!(spawner.stdin_closed() && spawner.child_dropped());
 //! ```
 //!
-//! The meaning of the script — it follows the same rules as the real [`super::OsProbeSpawner`]:
-//!   - An action whose deadline has already passed is immediately `Timeout` and is recorded as a 「deadline kill」. Once cut, everything is `Timeout`.
-//!   - 「hang」 (`hang_after_lines` · `block_writes` · `never_exit`) **really sleeps until the deadline** — so a test that measures a hang
-//!     supplies a short deadline (hundreds of ms). ★If the deadline is farther than [`FAKE_HANG_MAX`] it panics★ — the querier
-//!     made a far deadline itself instead of passing `env.deadline`, and left alone the test would hang.
-//!   - A write is always accepted and recorded unless it is a hang or a failure (`fail_writes`) (the test inspects the content with
-//!     [`ScriptedSpawner::written`]). A write after `close_stdin` is `Io`. The script goes on even after stdin is closed — 「a child that ends when closed」 is the script's
-//!     default (immediate EOF · exit), and 「a child that does not end even when closed」 is written as a hang.
-//!   - A `spawn` whose deadline has already passed does not use the script and is `Timeout` (the command is recorded).
-//!   - There is one child — a second `spawn` panics (one child per query).
+//! Script semantics — the same rules as the real [`super::OsProbeSpawner`]:
+//!   - An action past its deadline is immediately `Timeout` and recorded as a 「deadline kill」; once cut, everything is `Timeout`.
+//!   - 「hang」 (`hang_after_lines` · `block_writes` · `never_exit`) **really sleeps until the deadline**, so hang tests supply a short deadline.
+//!     ★A deadline farther than [`FAKE_HANG_MAX`] panics★ — the querier made its own far deadline instead of passing `env.deadline`.
+//!   - A write is accepted and recorded unless hang or failure (`fail_writes`) (inspect with [`ScriptedSpawner::written`]); after
+//!     `close_stdin` it is `Io`. The script continues after stdin closes — 「ends when closed」 is the default (immediate EOF · exit), 「does
+//!     not end when closed」 is a hang.
+//!   - A `spawn` past its deadline skips the script and is `Timeout` (the command is recorded).
+//!   - One child — a second `spawn` panics.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -44,7 +43,6 @@ use super::{ExitInfo, ProbeChild, ProbeCommand, ProbeError, ProbeSpawner};
 /// The longest time a fake child can sleep as a 「hang」.
 pub(crate) const FAKE_HANG_MAX: Duration = Duration::from_secs(5);
 
-/// A temp folder made fresh for each test. Deleted on drop.
 pub(crate) struct TempRoot {
     path: PathBuf,
 }
@@ -113,13 +111,13 @@ impl ChildScript {
         }
     }
 
-    /// One line that `read_line` will return in turn.
     pub(crate) fn line(mut self, line: impl Into<String>) -> Self {
         self.stdout.push_back(Out::Line(line.into()));
         self
     }
 
-    /// A line made at the moment it is read — it receives all the lines the querier has written by then (when the request id has to be echoed back).
+    /// A line made at the moment it is read — it receives all the lines the querier has written by then (when the request id has to be
+    ///   echoed back).
     pub(crate) fn reply(mut self, make: impl FnOnce(&[String]) -> String + Send + 'static) -> Self {
         self.stdout.push_back(Out::Reply(Box::new(make)));
         self
@@ -180,7 +178,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A fake spawner that hands out one child per the script and records the commands received · lines written · cuts.
 pub(crate) struct ScriptedSpawner {
     script: Mutex<Option<Result<ChildScript, ProbeError>>>,
     record: Arc<Mutex<Record>>,
@@ -203,17 +200,14 @@ impl ScriptedSpawner {
         }
     }
 
-    /// The startup specs received (all so far).
     pub(crate) fn commands(&self) -> Vec<ProbeCommand> {
         lock(&self.record).commands.clone()
     }
 
-    /// The lines the querier wrote with `write_line` (without newlines, in the order written).
     pub(crate) fn written(&self) -> Vec<String> {
         lock(&self.record).written.clone()
     }
 
-    /// Whether the querier closed stdin (`close_stdin`).
     pub(crate) fn stdin_closed(&self) -> bool {
         lock(&self.record).stdin_closed
     }
@@ -228,7 +222,6 @@ impl ScriptedSpawner {
         lock(&self.record).exit_judged
     }
 
-    /// Whether the child was dropped (= the tree kill + wait for exit ran).
     pub(crate) fn child_dropped(&self) -> bool {
         lock(&self.record).dropped
     }
@@ -263,7 +256,6 @@ struct ScriptedChild {
 }
 
 impl ScriptedChild {
-    /// The common part of the deadline rule — if `Some`, it ends right away with that error.
     fn gate(&mut self, deadline: Instant) -> Option<ProbeError> {
         if self.cut {
             return Some(ProbeError::Timeout);

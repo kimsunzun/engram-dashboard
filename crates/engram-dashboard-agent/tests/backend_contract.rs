@@ -1,97 +1,72 @@
 //! Backend contract test bench — asks every backend the **same question table** and fills the answers by measurement (S21 TRD §3).
 //!
-//! What this file owns is one question table. When backends grow to a third, [`backend_table`] **gains one row** and
-//! the question functions stay as they are — it is not a structure where files grow.
+//! This file owns one question table. A third backend **adds one row** to [`backend_table`]; the question functions stay as they are.
 //!
-//! **There are two lanes.**
-//! - Not ignored: the declaration checks ([`declaration_table_is_filled_for_every_backend`] and the
-//!   four per-channel checks) and the trust-record checks (`trust_record_*` · `no_trust_record_*`,
-//!   over fixture text). They spawn no process and run as-is in the default regression run and CI.
+//! **Two lanes.**
+//! - Not ignored: the declaration checks ([`declaration_table_is_filled_for_every_backend`] and the four per-channel checks) and the
+//!   trust-record checks (`trust_record_*` · `no_trust_record_*`, over fixture text). They spawn no process and run in the default
+//!   regression run and CI.
 //! - Everything else is `#[ignore]` — it spawns the real CLI and runs only under `-- --ignored`.
 //!
-//! ★Why there are non-ignore items = the price of `#[ignore]`★: an `#[ignore]` suite is green even if it evaporates entirely.
-//!   At least one item guarding the compile and the table's existence must remain so that silence does not arise.
+//! ★Why non-ignore items exist = the price of `#[ignore]`★: an `#[ignore]` suite is green even if it evaporates entirely, so at least one
+//!   item guarding the compile and the table's existence must remain.
 //!
-//! ★Inside the `--ignored` lane a missing binary is a failure, not a skip★: whoever called this lane said "I will
-//!   measure", so a quiet green must not be returned. Besides, on Windows the CLI is launched wrapped as `cmd.exe /c <prog>`,
-//!   so **even without the binary, `cmd.exe` always launches successfully** — "did the spawn happen" can never
-//!   tell presence apart. So [`assert_program_present`] stands before the real spawn.
+//! ★Inside the `--ignored` lane a missing binary is a failure, not a skip★: the caller said "I will measure". On Windows the CLI launches
+//!   wrapped as `cmd.exe /c <prog>`, so **`cmd.exe` always launches even without the binary** and "did the spawn happen"
+//!   cannot tell presence — [`assert_program_present`] stands before the real spawn.
 //!
-//! ★**This file does not write the argv of real spawns — it asks the backend and uses that**★: every real spawn below
-//!   launches as is the argv that [`production_spec`] draws through **the same path as operation** ([`AgentBackend::build_spec`]).
-//!   The old shape wrote the arguments into this file as a string (`-s read-only -a never`), so **this test bench measured
-//!   none of the arguments operation actually uses (`--cd` · `-s workspace-write` · `-a on-request`)** — what was measured
-//!   and what operation launched differed, while the `backend/codex/` header said "the place that measures that again
-//!   is here". Now if the operating argv changes, the real CLI launches **with that changed argv** and this
-//!   lane goes through it — there is no place here where a constant is matched against its copy inside the same file.
+//! ★**This file does not write the argv of real spawns — it asks the backend**★: every real spawn launches the argv [`production_spec`]
+//!   draws through **the same path as operation** ([`AgentBackend::build_spec`]). The old shape hand-wrote arguments (`-s read-only -a never`),
+//!   so the bench measured none of the arguments operation uses (`--cd` · `-s workspace-write` · `-a on-request`). Now a changed operating
+//!   argv is launched **as changed** and this lane goes through it; no constant is matched against its copy inside this file.
 //!
-//! ★**The price of that = the test bench sets up the safety envelope itself**★: the operating argv is `-s workspace-write -a on-request`, so
-//!   the commands the model issues **can write** to the working folder. If the items that put in a prompt (Q4·Q5) launched as is, this test bench
-//!   would run an agent holding write permission. So [`SafetySwap`] overwrites **only the two policy value fields** in the operating argv
-//!   with harmless ones (`read-only` · `never`), and does not launch at all if arguments that bypass the envelope are mixed in.
-//!   ★If the flag to overwrite cannot be found in the argv, it fails right there★ — rather than just launching an argv that cannot be made harmless,
-//!   it stops. The day operation changes `-s` to `--sandbox`, this lane goes red, and it runs only after a person sets up
-//!   the envelope of the new argv again.
+//! ★**The price = the bench sets up the safety envelope itself**★: the operating argv is `-s workspace-write -a on-request`, so commands
+//!   the model issues **can write** to the working folder, and the prompt-sending items (Q4·Q5) would run an agent holding write permission.
+//!   So [`SafetySwap`] overwrites **only the two policy value fields** with harmless ones (`read-only` · `never`) and does not launch at
+//!   all if arguments that bypass the envelope are mixed in. ★If the flag to overwrite is not found in the argv it fails right there★
+//!   — the day operation changes `-s` to `--sandbox` this lane goes red and runs again only after a person sets up the new argv's envelope.
 //!
-//! ★**So what is still unmeasured — stated honestly**★: there is **no observation of a real
-//!   model turn** under `-s workspace-write` · `-a on-request`. That would mean this harness
-//!   running an agent that holds write access, and harmlessness (read-only · no approvals ·
-//!   short prompts · no network work · never this repo as cwd) is this file's premise, so we
-//!   do not trade it away. [`q11_production_argv_is_accepted_and_reaches_a_composer`] measures
-//!   only "the real CLI accepts the production argv carrying those two values and **reaches a
-//!   composer**" — the only keys it sends are the ones that pass the startup screen (the probe
-//!   characters of [`PtySession::pass_startup_modal`], their erasure, and one CR); it submits
-//!   no prompt (without a model turn that permission never gets a chance to be used). "What
-//!   the model can do under that policy" is outside this file, and that cell is empty.
+//! ★**Still unmeasured**★: **no real model turn** under `-s workspace-write` · `-a on-request` — that would mean running an agent holding
+//!   write access, and harmlessness (read-only · no approvals · short prompts · no network work · never this repo as cwd) is this file's
+//!   premise. [`q11_production_argv_is_accepted_and_reaches_a_composer`] measures only that the real CLI accepts the production argv
+//!   carrying those two values and **reaches a composer**; the only keys sent are the ones that pass the startup screen (the probe characters
+//!   of [`PtySession::pass_startup_modal`], their erasure, one CR), no prompt (without a model turn the permission is never used). "What
+//!   the model can do under that policy" is outside this file; that cell is empty.
 //!
-//! ★**Which version was measured is left in the log**★: this CLI updates itself, so an
-//!   observation means something only when tied to a version. [`record_version_once`]
-//!   asks `--version` **through the production argv** and prints it (latest measurement
-//!   = codex-cli 0.163.0, 2026-11-02). ★Not asserting the value is deliberate★ — pinning
-//!   it would turn red on every update, and that is a calendar, not a regression.
+//! ★**The measured version is left in the log**★: this CLI self-updates, so an observation means something only tied to a version.
+//!   [`record_version_once`] asks `--version` **through the production argv** and prints it (latest: codex-cli 0.163.0). ★The value is
+//!   not asserted on purpose★ — pinning it would turn red on every update, a calendar not a regression.
 //!
-//! ★**Markers are matched ignoring whitespace layout**([`mentions`])★ — under load this TUI draws a
-//!   sentence word by word with cursor moves, so the text left after stripping control sequences
-//!   loses its spaces. There `flatten` + `contains` misses the marker, and **the next question then
-//!   dies with "the composer never came up"** — a harness malfunction, not the question's answer,
-//!   yet both are the same red. The evidence and measurements live in that function's comment.
+//! ★**Markers are matched ignoring whitespace layout**([`mentions`])★ — under load this TUI draws a sentence word by word with cursor
+//!   moves, so stripped text loses its spaces; `flatten` + `contains` then misses the marker and **the next question dies with "the composer
+//!   never came up"** — a harness malfunction that is the same red as a real answer. Evidence: that function's comment.
 //!
-//! **§3-5 gate** — if the following go red, Phase 1 wiring does not start: **Q1 · Q4 · Q5 · Q8 · Q10**.
-//! Q3 · Q6 · Q9 are observations, not gates (whichever way they come out, what differs is one argument or a record, not the *shape*
-//! of the wiring). Q7 (human eyes — does it look better in our xterm) is **not covered by this test bench**: whether the bytes
-//! contain an alt-screen sequence (Q6) can be measured, but "so is the screen better" cannot be measured here.
+//! **§3-5 gate** — if these go red Phase 1 wiring does not start: **Q1 · Q4 · Q5 · Q8 · Q10**. Q3 · Q6 · Q9 are observations, not gates
+//!   (either outcome changes one argument or a record, not the *shape* of the wiring). Q7 (does it look better in our xterm) is
+//! **not covered**: whether the bytes contain an alt-screen sequence (Q6) is measurable, "so is the screen better" is not.
 //!
-//! ★A fact the TRD did not know — a first-visit folder shows a **modal**
-//!   first★: a folder-trust prompt is drawn over the composer, and while
-//!   it is up keystrokes go to the modal, not the composer.
-//!   ★When it appears and what it says are per-version★ — measured on 0.163.0: a git-repo cwd
-//!   gets the trust modal, a non-git cwd gets no modal at all, and the wording changed.
-//!   (History: 0.153.4 also showed it for a non-git cwd — the old Q8 record.) So every question
-//!   about the composer or the cwd first goes through [`PtySession::pass_startup_modal`] until
-//!   the composer accepts keys, **modal or not** — that verb never reads the modal's wording.
-//!   ★Q8 being on that list is this file's most expensive lesson★ — while a modal holds the
-//!   process, "still Running after 5 s" **cannot be false**, so the old Q8, which never
-//!   passed the modal, never asked about the cwd policy. That green cell was in fact empty.
-//!   **Our spawn entry accepts any folder, so this is not just the harness's problem** — a
-//!   codex tab started in an unseen cwd takes no input until a person passes the modal.
+//! ★A fact the TRD did not know — a first-visit folder shows a **modal** first★: a folder-trust prompt is drawn over the composer and
+//!   keystrokes go to the modal while it is up. ★When it appears and what it says are per-version★ — 0.163.0: a git-repo cwd gets the trust
+//!   modal, a non-git cwd gets none, and the wording changed (0.153.4 also showed it for a non-git cwd — the old Q8 record). So every
+//!   composer or cwd question first goes through [`PtySession::pass_startup_modal`] until the composer accepts keys, **modal or not**;
+//!   that verb never reads the modal's wording. ★Q8 on that list is this file's most expensive lesson★: while a modal holds the process
+//!   "still Running after 5 s" **cannot be false**, so the old Q8, which never passed the modal, never asked about the cwd policy — a
+//!   green cell that was empty. **Our spawn entry accepts any folder, so this is not only the harness's problem**: a codex tab started in
+//!   an unseen cwd takes no input until a person passes the modal.
 //!
-//! ★**The real user home is never touched**★: passing the modal makes the CLI **write the folder
-//!   trust into its own config file**. Left alone, every harness run would pile dead entries for
-//!   deleted paths into the developer's real `~/.codex/config.toml` (it really did — that is why
-//!   [`LiveProbe::home_redirect`] exists). So every real spawn in this harness redirects the
-//!   CLI's state directory to **a temp home dug fresh per item**, and copies only the files
-//!   needed for auth from the real home. The temp home lives ★outside the system temp dir, on a
-//!   short path★ — codex requires both (evidence = [`Scratch::new_home`]).
-//!   ★That guarantee is measured too★ —
-//!   [`q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process`] asserts
-//!   from both sides that the item's temp path **was written to the temp home and not to the
-//!   real home**. This paragraph used to be only a promise, kept by nobody but a human eye.
+//! ★**The real user home is never touched**★: passing the modal makes the CLI **write the folder trust into its own config file**; left
+//!   alone, every run would pile dead entries for deleted paths into the developer's real `~/.codex/config.toml` (it did — why
+//!   [`LiveProbe::home_redirect`] exists). So every real spawn redirects the CLI's state directory to **a temp home dug fresh per item**,
+//!   copying only the auth files from the real home. The temp home lives ★outside the system temp dir, on a short path★ — codex requires
+//!   both (evidence: [`Scratch::new_home`]). ★Measured too★:
+//!   [`q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process`] asserts from both sides that the item's temp path
+//!   **was written to the temp home, not the real one**.
 //!
 // hangul-ok-begin
 //! It launches real child processes, so it runs with `-- --test-threads=4` (TRD §7 0-2 · `.claude/skill-bindings/qa.md` 「모듈별 명령」).
 // hangul-ok-end
-//!   ★On a PC where a security-software DLL hooks process creation, lower it to 1★ — the same reason as that document's 「if it still
-//!   dies, lower it to 2」 clause, and in this suite one item launches the real CLI several times.
+//!   ★On a PC where a security-software DLL hooks process creation, lower it to 1★ — same reason as that document's 「if it still dies,
+//!   lower it to 2」, and one item here launches the real CLI several times.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -116,83 +91,76 @@ use engram_dashboard_base::testing::wait_until;
 
 // ── Question table ───────────────────────────────────────────────────────────────────
 
-/// Columns compared without running — every value the backend **reports about itself**. A new backend row compiles only if it fills all these fields
-/// (that is the concrete form of "is the table filled").
+/// Columns compared without running — every value the backend **reports about itself**. A new backend row compiles only if it fills all of
+///   them (the concrete form of "is the table filled").
 ///
-/// ★The fields needed to fill a single row do not end with this struct★ — [`BackendRow::can_resume_stored_session`]
-///   and [`BackendRow::session_resume`] also have no default and must be written too for it to compile. They are axes that differ per link, so
-///   they live there, and reading it as 「this struct is filled, so the row is complete」 misses those fields.
+/// ★Filling a row does not end with this struct★ — [`BackendRow::can_resume_stored_session`] and [`BackendRow::session_resume`] have no
+///   default either; they are per-link axes and live there, so 「this struct is filled, the row is complete」 misses them.
 struct Declared {
-    /// ★Mode-independent, so kept as one field★ — today every backend reports the same value on both links, and
-    /// [`declarations_are_the_same_across_a_backend_s_two_channels`] below actually measures that invariant. The day they differ,
-    /// this field too must be split per link like [`BackendRow::can_resume_stored_session`].
+    /// ★Mode-independent, one field★ — every backend reports the same value on both links
+    ///   ([`declarations_are_the_same_across_a_backend_s_two_channels`] measures that invariant); if they ever differ, split it per link
+    ///   like [`BackendRow::can_resume_stored_session`].
     assigns_session_id: bool,
     supports_control_channel: bool,
     accepts_mcp_config: bool,
     /// Does the daemon **write an mcp-config file** for this backend — an axis split from the field above.
     ///
-    /// ★Do not derive it from the field above★: the one above today means 「does it use mail via MCP」, and this field means 「does that program
-    ///   read the file we wrote by path」. A row where the two differ (codex) is why this field was set up, and a row with true
-    ///   receives a plaintext Bearer token JSON on disk at every spawn (that write failing is fail-closed — spawn aborted).
+    /// ★Do not derive it from the field above★: that one means 「does it use mail via MCP」, this one 「does the program read the file we
+    ///   wrote by path」. A row where they differ (codex) is why this field exists, and a true row gets a plaintext Bearer token JSON on
+    ///   disk at every
+    ///   spawn (that write failing is fail-closed — spawn aborted).
     // ADR-0209
     writes_mcp_config_file: bool,
     reads_messages: bool,
-    /// The sending axis — the counterpart of the receiving axis above. ★A row where the two differ is the asymmetric 「can only send」, so that row's reason
+    /// The sending axis — the counterpart of the receiving axis above. ★A row where the two differ is the asymmetric 「can only send」, so
+    ///   that row's reason
     /// must be written in that backend's folder★.
     uses_mail: bool,
     session_snapshot: bool,
-    /// ★This cell has real evidence — it does not stop at matching
-    /// declarations★: it claims "cwd and env are used as given", so
-    /// [`q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process`]
-    /// measures each half with a real process (the working root is set
-    /// by `--cd` · env = the state directory passed in is really used).
+    /// ★This cell has real evidence, beyond matching declarations★: it claims "cwd and env are used as given", and
+    /// [`q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process`] measures each half with a real process (working root
+    ///   set by `--cd` · env = the passed state directory is really used).
     ///
-    /// ★But that ground is attached **only to rows with a real probe**★ — for a row with `probe: None` (claude) this field
-    ///   is still only a declaration comparison, and this file has never measured that row's cwd·env. That row's ground lies outside this test bench
-    ///   (that backend is the row that chose not to launch the real CLI — the [`BackendRow::probe`] comment).
+    /// ★That ground attaches **only to rows with a real probe**★ — for `probe: None` (claude) this stays a declaration comparison and this
+    ///   file never measured that row's cwd·env (the row chose not to launch the real CLI — [`BackendRow::probe`] comment).
     session_cwd_env: bool,
     model_select: bool,
     model_temperature: bool,
     model_max_tokens: bool,
 }
 
-/// The rule that changes **only the policy values** in the operating argv for the test bench. With this, the argv operation actually uses
-/// launches as is while the agent this test bench launches can change nothing.
+/// The rule that changes **only the policy values** in the operating argv for the bench, so the argv operation uses launches as is while
+///   the agent this bench launches can change nothing.
 ///
-/// ★Why this is not 「writing the arguments again」★: what is written here is not **the expected argv** but **the policy the test bench
-///   allows**. Whatever arguments operation issues, the argv itself is given by [`production_spec`], and this table only overwrites
-///   the values of the designated fields in it. So if operation adds or changes arguments, this file **launches them as is without
-///   knowing**, and the real CLI makes the decision — that is the purpose. As this table grows the test bench diverges from operation by that much, so
-///   ★before adding a field, ask 「is this the safety envelope, or an argument I do not want to measure」★.
+/// ★Not 「writing the arguments again」★: what is written is not **the expected argv** but **the policy the bench allows**. The argv itself
+///   comes from [`production_spec`] and this table only overwrites designated fields, so argument changes in operation are **launched
+///   as is without knowing** and the real CLI decides. Growing this table diverges the bench from operation by that much, so ★before
+///   adding a field ask 「is this the safety envelope, or an argument I do not want to measure」★.
 struct SafetySwap {
     /// `(flag, value the test bench uses)`. ★If the argv lacks that flag, it fails right there★ — rather than just launching an argv that
     /// cannot be made harmless, it stops.
     values: &'static [(&'static str, &'static str)],
-    /// Fragments that must not appear anywhere in the argv. Even if one value field is overwritten, **other arguments bypass that wall**
-    /// (arguments that undo the sandbox itself · arguments that pass approval automatically · arguments that turn on the network), so those names are blocked separately.
-    /// Checked as substrings — caught whether they come as a value or as a flag.
+    /// Fragments that must not appear anywhere in the argv — even with one value field overwritten, **other arguments bypass that wall**
+    ///   (undoing the sandbox · passing approval automatically · turning on the network). Checked as substrings, so a value or a flag is caught.
     forbidden: &'static [&'static str],
 }
 
 /// Columns asked of a real process. A row with `None` does not launch at all in the `--ignored` lane.
 struct LiveProbe {
-    /// A bare executable name resolved through PATH. ★No process is launched with this value★ — the spawn argv
-    /// is all received from the backend by [`production_spec`]. The only use left here is **one PATH resolution**
-    /// (the `where` of [`assert_program_present`]), and its result is the premise of Q10 that shows where the shim chain
-    /// starts.
+    /// A bare executable name resolved through PATH. ★No process is launched with this value★ (spawn argv comes from [`production_spec`]);
+    ///   its only use is **one PATH resolution** (`where` in [`assert_program_present`]), the premise of Q10 that shows where the shim
+    ///   chain starts.
     program: &'static str,
     /// ★Interactive arguments are not written here★ — the operating argv is made by [`production_spec`] asking the backend,
     /// and this table has only **the rules that make that argv harmless**. It is not a field for writing expected arguments.
     safety: SafetySwap,
-    /// Q6 — the argument that turns alt-screen off. `None` = a backend without such an argument → **Q6 skips that row**.
+    /// Q6 — the argument that turns alt-screen off. `None` = a backend without it → **Q6 skips that row**.
     ///
-    /// ★Why `Option`★: as a required `&'static str`, a third backend without that argument would have to write
-    ///   **a placeholder string** to fill the row, and Q6 would take it as a real argument and spawn. This file's contract
-    ///   "third backend = one row" would break right there.
+    /// ★Why `Option`★: a required `&'static str` would make a third backend without that argument write **a placeholder** that Q6 would
+    ///   spawn with, breaking the "third backend = one row" contract.
     no_alt_screen_arg: Option<&'static str>,
-    /// Q3 — the **words** that CLI emits when it rejects a piped stdin. The exit code alone cannot tell whether it died "because stdin is not a tty"
-    /// or for another reason (we give all three fds as pipes). `None` = a backend that does not know that phrase
-    /// → only the exit code is looked at.
+    /// Q3 — the **words** that CLI emits when it rejects piped stdin. The exit code alone cannot tell "stdin is not a tty" from another
+    ///   cause (all three fds are pipes). `None` = the backend does not know that phrase → only the exit code is looked at.
     stdin_refusal_marker: Option<&'static str>,
     /// The way to move this CLI's **per-user state directory**. `None` = a backend without such a way → the test bench would touch the real
     /// user settings, so admitting that backend row means taking on the restore responsibility separately.
@@ -207,85 +175,72 @@ struct LiveProbe {
     multiline_parts: &'static [&'static str],
     /// The guidance phrase drawn in place of the composer **when it is empty**.
     ///
-    /// ★Why it is needed★: submitting empties the composer — so if this phrase is **drawn again** after putting in the body, that
-    ///   input was submitted. Without this signal Q5 could only decide by "did characters other than the body come", but
-    ///   the TUI redraws the banner·model name·usage guidance without any input, so those characters **cannot be told apart as
-    ///   a response or its own screen** (measured — that noise falsely fired the gate).
-    /// `None` = a backend without that signal → Q5 only checks whether the screen
-    /// stays static. ★The startup probe ([`PtySession::pass_startup_modal`]) also
-    /// stands on this signal★ — with `None` that verb sends no key at all.
+    /// ★Why★: submitting empties the composer, so this phrase **drawn again** after putting in the body means the input was submitted.
+    ///   Without it Q5 could only ask "did characters other than the body come", but the TUI redraws banner·model name·usage guidance
+    ///   without input,
+    ///   so those cannot be told from a response (measured — that noise falsely fired the gate).
+    /// `None` = no such signal → Q5 only checks the screen stays static. ★The startup probe ([`PtySession::pass_startup_modal`]) stands on
+    ///   this signal too★ — with `None` that verb sends no key.
     composer_idle_marker: Option<&'static str>,
-    /// The **byte sequence** the CLI emits once startup (loading ·
-    /// first-visit modal) is over and the session is up. It is a control
-    /// sequence, not screen text, so rewording does not affect it.
-    /// `None` = a backend without such a signal → [`PtySession::pass_startup_modal`]
-    /// decides from the probe alone and can miss a modal that appears late, after loading.
+    /// The **byte sequence** the CLI emits once startup (loading · first-visit modal) is over and the session is up — a control sequence,
+    ///   not screen text, so rewording does not affect it.
+    /// `None` = no such signal → [`PtySession::pass_startup_modal`] decides from the probe alone and can miss a modal that appears late,
+    ///   after loading.
     ready_signal: Option<&'static [u8]>,
-    /// Q12 — does this CLI **print its own working-root path on screen**. `false` = it does
-    /// not → Q12 skips the screen-side check and looks only at the file-side evidence.
+    /// Q12 — does this CLI **print its own working-root path on screen**. `false` → Q12 skips the screen-side check and looks only at the
+    ///   file-side evidence.
     ///
-    /// ★Why yes/no instead of a marker string★: the label next to that path is
-    ///   per-version (0.153.4 = a `directory:` line in the header box, 0.163.0 = the
-    ///   bare path with no label — measured). The check was never about the label but
-    ///   about **whether the folder on screen is the one given via `--cd`**, so Q12
-    ///   deliberately runs the process in another folder and compares both leaf names.
+    /// ★Yes/no, not a marker string★: the label next to the path is per-version (0.153.4 `directory:` line in the header box, 0.163.0 bare
+    ///   path — measured). The check asks **whether the folder on screen is the one given via `--cd`**, so Q12 runs the process in another
+    ///   folder and
+    ///   compares both leaf names.
     shows_workspace_root: bool,
-    /// Q6 — does `--no-alt-screen` **change the PTY bytes**. A field Phase 0 fills by measurement, and the test
-    /// measures whether the observation equals this declaration.
+    /// Q6 — does `--no-alt-screen` **change the PTY bytes**. A field Phase 0 fills by measurement; the test measures whether the
+    ///   observation equals this declaration.
     ///
-    /// ★Why it is not asserted as 「must differ」★: Q6 is an observation, not a gate, so either value is correct
-    ///   (the reason this row is not in §3-5). Writing the value here makes this item go red the day the value changes, telling you to
-    ///   re-read §4-11's recommendation — pinning it one way would hide the decision inside the test.
+    /// ★Not asserted as 「must differ」★: Q6 is an observation, not a gate (so not in §3-5). A value change turns this item red, telling you
+    ///   to re-read §4-11's recommendation — pinning one way would hide the decision inside the test.
     no_alt_screen_changes_bytes: bool,
 }
 
 /// How to turn the CLI's state directory to a temporary home. With this, the test bench **does not touch the developer's real settings**.
 struct HomeRedirect {
-    /// The name of the environment variable that points at the state directory (codex = `CODEX_HOME`, measured 0.153.4 — when turned to a temporary home
+    /// The name of the environment variable that points at the state directory (codex = `CODEX_HOME`, measured 0.153.4 — when turned to a
+    ///   temporary home
     /// `codex mcp list` does not see the real home's servers).
     env: &'static str,
     /// The default location when that variable is not set (a relative path from the user home). Seed files are scooped from here.
     default_subdir: &'static str,
-    /// Files that must be **copied into the temp home for the CLI to stay logged in**.
-    /// Without them the TUI shows a login screen instead of the composer and everything
-    /// from Q1 on collapses (measured: empty home = `Not logged in`). ★If even one cannot
-    /// be copied, the harness stops before spawning★ ([`sandbox_home`]) — the login
-    /// screen is a cursor-hidden list, i.e. a screen the startup verb could press CR on.
+    /// Files that must be **copied into the temp home for the CLI to stay logged in**. Without them the TUI shows a login screen instead
+    ///   of the composer and everything from Q1 on collapses (measured: empty home = `Not logged in`). ★If even one cannot be copied the
+    ///   harness stops
+    /// before spawning★ ([`sandbox_home`]) — the login screen is a cursor-hidden list, a screen the startup verb could press CR on.
     ///
-    /// ★The copies are credentials★ — [`Scratch`]'s `Drop` deletes **these copies
-    ///   first**, then the folder. If a child still holds a file it retries up to a
-    ///   limit, and if anything is still left it prints the path to stderr. ★Best
-    ///   effort, not a guarantee★ — if the test process is killed, `Drop` never runs and
-    ///   the copy stays under `%LOCALAPPDATA%\ebc\` (not a place `cargo clean` clears).
+    /// ★The copies are credentials★ — [`Scratch`]'s `Drop` deletes **these copies first**, then the folder, retrying up to a limit and
+    ///   printing any remaining path to stderr. ★Best effort, not a guarantee★: if the test process is killed `Drop` never runs and the
+    ///   copy stays
+    ///   under `%LOCALAPPDATA%\ebc\` (not cleared by `cargo clean`).
     seed_files: &'static [&'static str],
-    /// Files **written fresh** into the temp home —
-    /// `(file name, content)`. Applied after the copies.
+    /// Files **written fresh** into the temp home — `(file name, content)`, applied after the copies.
     ///
-    /// ★Why it is needed — measured 2026-09-07★: starting codex 0.153.4 with an empty home shows
-    ///   **one more modal after** the folder-trust modal (`Set up the Codex agent sandbox …`).
-    ///   Its default choice is `1. Set up default sandbox (requires Administrator permissions)`,
-    ///   ★a screen an automated test must never pass with CR★ — passing it requests an
-    ///   elevation. And while it is up the composer takes no keys, so Q4·Q5 get no echo and die
-    ///   (they really did; that failure is this field's evidence).
-    /// ★So we write "the answer the real home already has"★: the developer's real
-    ///   `config.toml` already holds `[windows] sandbox = "unelevated"`, so that
-    ///   modal does not appear. Production spawns meet that same home, so writing it
-    ///   does not dress up the observation — it **matches production conditions**.
-    ///   ★But no folder-trust entry (`[projects.*]`) is written★ — that modal is a
-    ///   screen production's first-visit tab really meets, so passing it is part of
-    ///   what is observed, and the entry's key is chosen by the CLI itself (measured
-    ///   0.163.0: not the `C:\Users\<user>~1\…` we pass but **the lower-case long path
-    ///   of the repo root**, `c:\users\<user>\…`). Pre-writing it would make this file
-    ///   mimic that normalization and need fixing every time the CLI changes it.
+    /// ★Why★: codex 0.153.4 with an empty home shows **one more modal after** the folder-trust modal (`Set up the Codex agent sandbox …`)
+    ///   whose default is `1. Set up default sandbox (requires Administrator permissions)` — ★a screen an automated test must never pass
+    ///   with CR★
+    ///   (it requests elevation); while it is up the composer takes no keys and Q4·Q5 die (they did — this field's evidence).
+    /// ★So we write "the answer the real home already has"★: the developer's real `config.toml` holds `[windows] sandbox = "unelevated"`,
+    ///   so that modal does not appear. Production spawns meet that same home, so this **matches production conditions** rather than
+    ///   dressing up the observation.
+    ///   ★No folder-trust entry (`[projects.*]`) is written★: that modal is a screen production's first-visit tab really meets, so passing
+    ///   it is part of what is observed, and the CLI chooses the entry's key itself (0.163.0: not the `C:\Users\<user>~1\…` we pass but
+    ///   **the lower-case
+    ///   long path of the repo root**); pre-writing would make this file mimic that normalization.
     seed_writes: &'static [(&'static str, &'static str)],
-    /// Whether the temp home holds the **folder-trust decision** for
-    /// `workspace` — if so, that entry as one human-readable line.
+    /// Whether the temp home holds the **folder-trust decision** for `workspace` — if so, that entry as one human-readable line.
     ///
-    /// ★Why it is needed★: the startup verb ([`PtySession::pass_startup_modal`]) presses
-    ///   CR without reading the modal's wording. So whether the screen passed with CR
-    ///   **really was the folder-trust modal** can only be checked by its result — did a
-    ///   trust entry appear. Searching the files for the path text (`find_text_under`)
-    ///   does not do — it also matches when a warning screen logs that path.
+    /// ★Why★: the startup verb ([`PtySession::pass_startup_modal`]) presses CR without reading the modal's wording, so whether the screen
+    ///   passed **really was the folder-trust modal** can only be checked by its result — a trust entry appearing. Searching the files for
+    ///   the path
+    ///   text (`find_text_under`) does not do: a warning screen logging that path matches too.
     trusted_entry: fn(home: &Path, workspace: &Path) -> Option<String>,
 }
 
@@ -294,33 +249,28 @@ struct BackendRow {
     backend: &'static dyn AgentBackend,
     /// A command sample passed when asking the declarations.
     sample: AgentCommand,
-    /// A sample of the **second link** of the same backend. `None` = a backend with only one link.
+    /// A sample of the **second link** of the same backend. `None` = only one link.
     ///
-    /// ★This is where questions grow, not rows★ — the second link is not another program but the same program launched in another
-    ///   shape, so writing another set of `Declared` would copy the same answers into two places. Instead
-    ///   [`declarations_are_the_same_across_a_backend_s_two_channels`] asks **whether the two links' answers do not
-    ///   differ** — the axes that must differ (link shape·encoding·translator) are measured separately by the questions below it.
+    /// ★Questions grow here, not rows★ — the second link is the same program launched in another shape, so another `Declared` set would
+    ///   copy answers into two places; [`declarations_are_the_same_across_a_backend_s_two_channels`] asks **whether the two answers do not
+    ///   differ**, and
+    /// the axes that must differ (link shape·encoding·translator) are measured by the questions below it.
     alt_sample: Option<AgentCommand>,
     declared: Declared,
-    /// The declaration axis written **per link** = 「can it resume with the stored backend sid」. `.0` =
-    /// the answer for [`BackendRow::sample`], `.1` = the answer for [`BackendRow::alt_sample`] (`None` = no second link).
+    /// The declaration axis written **per link** = 「can it resume with the stored backend sid」. `.0` = for [`BackendRow::sample`], `.1` =
+    ///   for [`BackendRow::alt_sample`] (`None` = no second link).
     ///
-    /// ★Today no row has the two links' answers differ — why it is still kept per link★: this axis is a field that **has differed
-    ///   and can differ again**. The codex row was `(false, Some(true))` for a while (back when terminal mode had no resume
-    ///   wiring). Folding it into one field makes such a state **not visible at all** in this table, and moving it to [`Declared`]
-    ///   would make [`declarations_are_the_same_across_a_backend_s_two_channels`] false at that time, so the table would have
-    ///   to be redone. The two fields being the same now is no ground for removing that preparation.
+    /// ★No row differs today — still per link★: this axis **has differed and can again** (the codex row was `(false, Some(true))` while
+    ///   terminal mode had no resume wiring). One field would hide that state, and moving it to [`Declared`] would make
+    ///   [`declarations_are_the_same_across_a_backend_s_two_channels`] false then, forcing a table redo.
     can_resume_stored_session: (bool, Option<bool>),
-    /// The **caps report field** written in the same per-link shape = `capabilities(cmd).session.resume`.
+    /// The **caps report field** in the same per-link shape = `capabilities(cmd).session.resume`.
     ///
-    /// ★Do not fold it into one field with the field just above★ — where it is asked differs: the one above is the axis on which the activation entry decides 「launch with
-    ///   Resume?」, and this field is the value that reports that result to consumers (frontend·wire). Today
-    ///   the two are the same in every row, but if they differ, **a spawn that does not resume is reported as resuming** or the reverse,
-    ///   so that mismatch must be visible in this table.
-    /// ★Why it is not in [`Declared`]★ — it pairs with the field just above, so it is kept in the same shape. If the two fields differ, the one placed in [`Declared`]
-    ///   makes [`declarations_are_the_same_across_a_backend_s_two_channels`] false,
-    ///   and that actually happened in the codex row (the doc of the field above). No row differing now is no ground for reverting
-    ///   this placement — reverting it means redoing the table the next time they differ.
+    /// ★Do not fold it into the field above★ — they are asked in different places: the one above is the axis on which the activation entry
+    ///   decides 「launch with Resume?」, this one reports the result to consumers (frontend·wire). Same in every row today, but if they differ
+    ///   **a non-resuming spawn is reported as resuming** or the reverse, so that mismatch must be visible in this table.
+    /// ★Why not in [`Declared`]★ — it pairs with the field above; differing values in [`Declared`] would make
+    ///   [`declarations_are_the_same_across_a_backend_s_two_channels`] false, as happened in the codex row (the field above's doc).
     session_resume: (bool, Option<bool>),
     probe: Option<LiveProbe>,
 }
@@ -362,9 +312,8 @@ fn backend_table() -> Vec<BackendRow> {
             // Both links resume with `--resume <sid>` (measured).
             can_resume_stored_session: (true, Some(true)),
             session_resume: (true, Some(true)),
-            // The real claude is not launched: this column is already filled by measurement, and the open item where tests depending on the real claude
-            // are **`--skip`ped by fn name** in CI has exactly that shape (TRD §3-2). The test bench does not
-            // grow that list.
+            // The real claude is not launched: this column is already filled by measurement, and the open item where tests depending on
+            //   the real claude are **`--skip`ped by fn name** in CI has exactly that shape (TRD §3-2); the bench does not grow that list.
             probe: None,
         },
         BackendRow {
@@ -379,27 +328,25 @@ fn backend_table() -> Vec<BackendRow> {
                 output_format: AgentOutputFormat::StreamJson,
             }),
             declared: Declared {
-                // ★A value stamped by measurement★ — the issuer of the session id is codex, so the caller cannot decide it
-                //   (`session_id_flag: None` is its counterpart). The canonical reason is in `backend/codex/`.
-                //   ★Do not read this field tied to `reads_messages` below★ — an old comment here attached 「turns cannot
-                //   be observed, so it is removed from the recipient list」, but that axis was a premise ADR-0116 decision 7
-                //   rejected, and now that field is true.
+                // ★A value stamped by measurement★ — codex issues the session id, so the caller cannot decide it (`session_id_flag: None`
+                //   is the counterpart); canonical reason: `backend/codex/`.
+                //   ★Do not read this field tied to `reads_messages` below★ — an old comment tied it to 「turns cannot be observed, so
+                //   removed from the recipient list」, a premise ADR-0116 decision 7 rejected; that field is now true.
                 assigns_session_id: false,
                 supports_control_channel: true,
-                // ★Read by its name, it is a wrong value — codex still cannot take our mcp-config **file**★.
-                //   It is turned on because the daemon derives even the mail channel from this field, and the actual attaching is done
-                //   by the single value `-c mcp_servers.engram={…}`. The canonical reason·price is in `backend/codex/`.
+                // ★By its name this is a wrong value — codex still cannot take our mcp-config **file**★. It is on because the daemon
+                //   derives even the mail channel from this field; the actual attaching is the single `-c mcp_servers.engram={…}`.
+                //   Canonical reason·price: `backend/codex/`.
                 accepts_mcp_config: true,
-                // ★The field above is true but this field is false — that split is this field's reason to exist★: codex has no flag
-                //   pointing at a file we wrote (measured 0.155.0). While it doubled up, this row received a plaintext token file nobody opens
-                //   at every spawn, and that write failing could cut the spawn off. The canonical
-                //   reason is that method's comment in `backend/codex/`.
+                // ★The field above is true, this one false — that split is its reason to exist★: codex has no flag pointing at a file we
+                //   wrote (measured 0.155.0); while doubled up, this row received an unread plaintext token file at every spawn and a
+                //   failed write could cut the
+                //   spawn. Canonical reason: that method's comment in `backend/codex/`.
                 // ADR-0209
                 writes_mcp_config_file: false,
-                // ★Do not revert to false — ADR-0116 decision 7 rejected that reason, 「there is no turn
-                //   signal」★: the terminal claude already receives in the same place (0 signals). The price (stuck in the middle of a turn
-                //   · eaten by a modal widget) is something that decision explicitly accepted, and the canonical one is `backend/codex/`'s
-                //   `reads_messages` doc.
+                // ★Do not revert to false — ADR-0116 decision 7 rejected 「there is no turn signal」★: terminal claude already receives in
+                //   the same place (0 signals); the price (stuck mid-turn · eaten by a modal widget) was explicitly accepted — canonical:
+                //   `backend/codex/`'s `reads_messages` doc.
                 reads_messages: true,
                 // ★The two fields of this row are **open together**★ — sending·receiving must stand together to keep ADR-0209 decision 4's
                 //   「receive first」 order. Reverting only one side revives the asymmetry that decision meant to remove.
@@ -410,21 +357,22 @@ fn backend_table() -> Vec<BackendRow> {
                 model_temperature: false,
                 model_max_tokens: false,
             },
-            // ★The two links give the same answer — only the **means** of resuming differ★: the app-server issues `thread/resume` with the
-            //   thread id it received and wrote down, and terminal mode launches with the same id put in `codex resume <id>`
-            //   (ADR-0208 — that mode's handle is returned by the hook through the control plane).
-            //   The two lines splitting **together** is still the point: if only one side turns on, a new thread that was never resumed
-            //   is reported as 「resumed」. The canonical reason is the comments of those two methods in `backend/codex/`.
+            // ★The two links give the same answer — only the **means** differ★: the app-server issues `thread/resume` with the thread id
+            //   it received and wrote down, and terminal mode launches with the same id in `codex resume <id>` (ADR-0208). The two lines
+            //   splitting
+            //   **together** is the point: one side alone would report a never-resumed thread as 「resumed」. Canonical reason: those two
+            //   methods' comments in `backend/codex/`.
             can_resume_stored_session: (true, Some(true)),
             session_resume: (true, Some(true)),
             probe: Some(LiveProbe {
                 program: "codex",
-                // Operation launches with `-s workspace-write -a on-request` (that argv is received as is).
-                // What changes here is only the **values** of those two fields — `read-only` = run the commands the model issues only in a read-only
-                // sandbox · `never` = do not ask a person for approval (if it asked, the automatic lane would stop).
-                // The deny list is the arguments with which 「the envelope is pierced even if one value field is overwritten」: the two that undo the sandbox
-                // entirely, `--approve-for-me` which automatically bypasses approval via the workspace-write sandbox, and `--search` which turns on
-                // the network (this test bench does no network work). Canonical names = `codex --help` 0.153.4.
+                // Operation launches with `-s workspace-write -a on-request` (received as is); only the **values** of those two fields
+                //   change — `read-only` = commands the model issues run only in a read-only sandbox · `never` = no human approval (asking
+                //   would stop the automatic lane).
+                // The deny list is what 「pierces the envelope even with one value field overwritten」: the two that undo the sandbox
+                //   entirely, `--approve-for-me` (automatically bypasses approval via the workspace-write sandbox) and `--search` (turns
+                //   on the network; this bench does no network
+                // work). Names: `codex --help` 0.153.4.
                 safety: SafetySwap {
                     values: &[("-s", "read-only"), ("-a", "never")],
                     forbidden: &[
@@ -442,21 +390,16 @@ fn backend_table() -> Vec<BackendRow> {
                 home_redirect: Some(HomeRedirect {
                     env: "CODEX_HOME",
                     default_subdir: ".codex",
-                    // Auth alone brings the logged-in state with it
-                    // (measured: in an empty home with only this file copied,
-                    // `codex login status` = `Logged in using ChatGPT`).
-                    // ★`version.json` is not copied★ — if it names a newer release than the
-                    // installed one, 0.163.0 shows an update modal right at start (measured: a
-                    // home with `latest_version` set to 99.0.0 =
-                    // `1. Update now (runs npm install -g @openai/codex)` as the default choice
-                    // · cursor hidden). A CR on that screen runs a global `npm install`.
+                    // Auth alone brings the logged-in state (measured: empty home with only this file copied → `codex login status` =
+                    //   `Logged in using ChatGPT`).
+                    // ★`version.json` is not copied★ — if it names a newer release than installed, 0.163.0 shows an update modal at start
+                    //   (measured: `latest_version` 99.0.0 = `1. Update now (runs npm install -g @openai/codex)` as default · cursor
+                    //   hidden); CR there runs a global `npm install`.
                     seed_files: &["auth.json"],
-                    // `check_for_update_on_startup = false` turns off the update check and
-                    // its modal (measured 0.163.0: even with a `version.json` naming 99.0.0
-                    // no modal appears and the composer comes straight up · without that
-                    // file none is created). `[windows] sandbox` is the real home's value
-                    // as-is — without it a sandbox-setup modal asking for administrator
-                    // rights follows the trust modal (measured — see the field doc).
+                    // `check_for_update_on_startup = false` turns off the update check and its modal (measured 0.163.0: even with a
+                    //   `version.json` naming 99.0.0 no modal, composer comes straight up). `[windows] sandbox` is the real home's value
+                    //   as-is — without it a
+                    // sandbox-setup modal asking for administrator rights follows the trust modal (see the field doc).
                     seed_writes: &[(
                         "config.toml",
                         "check_for_update_on_startup = false\n\n[windows]\nsandbox = \"unelevated\"\n",
@@ -467,18 +410,14 @@ fn backend_table() -> Vec<BackendRow> {
                 submit_body: "say OK",
                 multiline_parts: &["hi", "there"],
                 composer_idle_marker: Some("Ask Codex to do anything"),
-                // Measured 0.163.0 — once the session is up it announces `state=idle`
-                // via OSC 7501 (both alt-screen and `--no-alt-screen`). Not while the
-                // trust modal is up; it comes after the modal is accepted.
+                // Measured 0.163.0 — once the session is up it announces `state=idle` via OSC 7501 (alt-screen and `--no-alt-screen`
+                //   alike), not while the trust modal is up but after it is accepted.
                 ready_signal: Some(b"\x1b]7501;state=idle"),
-                // The working-root path is printed in the header box and the bottom
-                // line (measured 0.163.0). ★The TUI shortens paths to fit the width, so
-                // Q12 measures with **a short leaf name + a wide PTY**★ — at 80 columns
-                // the front is cut to `…` (measured on a 0.153.4 Q8 screen dump).
+                // The working-root path is printed in the header box and the bottom line (0.163.0). ★The TUI shortens paths to fit the
+                //   width, so Q12 measures with **a short leaf name + a wide PTY**★ — at 80 columns the front is cut to `…`.
                 shows_workspace_root: true,
-                // Measured 0.163.0 — the default mode emits alt-screen entry
-                // (`?1049h`) and mouse tracking (`?1003;1006h`), and `--no-alt-screen`
-                // emits neither. So without the flag this version's TUI is alt-screen.
+                // Measured 0.163.0 — the default mode emits alt-screen entry (`?1049h`) and mouse tracking (`?1003;1006h`);
+                //   `--no-alt-screen` emits neither. So without the flag this version's TUI is alt-screen.
                 no_alt_screen_changes_bytes: true,
             }),
         },
@@ -561,17 +500,13 @@ fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentComma
     }
 }
 
-/// ★Does the second link not quietly replace the declarations★ — it is the same program launched in another shape, so mail
-/// eligibility·control channel·session capabilities must stay the same even when the link changes.
+/// ★Does the second link not quietly replace the declarations★ — same program in another shape, so mail eligibility·control
+///   channel·session capabilities must stay the same across links.
 ///
-/// ★What this item actually measures is only the getters that **take a command**★ — a getter that takes no argument is unrelated
-/// to the sample, so it only repeats what [`declaration_table_is_filled_for_every_backend`] above measured and cannot break
-/// separately here. The fields that can actually differ today = `capabilities(sample)` and
-/// `assigns_session_id(sample)`, the two.
-///
-/// ★Axes that differ per link are not here★ — this item's claim is 「the two links' answers are the same」, so putting a differing axis
-///   into [`Declared`] makes this assertion false. That side is
-///   measured per link by [`resume_eligibility_is_declared_per_channel`].
+/// ★Measures only the getters that **take a command**★ — a no-argument getter is unrelated to the sample and repeats
+///   [`declaration_table_is_filled_for_every_backend`]. Fields that can differ today: `capabilities(sample)` and `assigns_session_id(sample)`.
+/// ★Per-link axes are not here★ — this item claims 「the two answers are the same」, so a differing axis in [`Declared`] makes it false;
+///   that side is measured per link by [`resume_eligibility_is_declared_per_channel`].
 #[test]
 fn declarations_are_the_same_across_a_backend_s_two_channels() {
     for row in &backend_table() {
@@ -580,14 +515,12 @@ fn declarations_are_the_same_across_a_backend_s_two_channels() {
     }
 }
 
-/// Compares the axes that differ per link **per link**. ★Without this item, the second link's answer, even if written in the table, is not
-/// called anywhere★ — the two items above look only at [`Declared`], and that column stands on the premise that the two links are the same.
+/// Compares the per-link axes **per link**. ★Without this item the second link's answer, though written in the table, is called nowhere★ —
+///   the two items above look only at [`Declared`], which assumes the two links are the same.
 ///
-/// ★It also catches mismatched pairs★: if a second link is written but its answer left empty (or the reverse), that row is quietly
-///   only half measured.
+/// ★It also catches mismatched pairs★: a second link written with its answer left empty (or the reverse) is quietly half measured.
 /// ★It measures the two fields **together**★ — the decision axis ([`AgentBackend::can_resume_stored_session`]) and the report field
-///   (`capabilities().session.resume`). Measuring only one lets a state where the two differ pass as green, and that state's symptom is
-///   「or the reverse」.
+///   (`capabilities().session.resume`); one alone lets the differing state pass green (symptom: 「or the reverse」).
 #[test]
 fn resume_eligibility_is_declared_per_channel() {
     for row in &backend_table() {
@@ -628,12 +561,10 @@ fn resume_eligibility_is_declared_per_channel() {
     }
 }
 
-/// Prevents **writing down that it has a second link and then writing the same link** — then the item above asks the same sample twice
-/// and measures nothing.
+/// Prevents **writing down a second link and then writing the same link** — the item above would ask the same sample twice and measure nothing.
 ///
-/// ★The values of the codec axes (encoder·translator·link shape) themselves are measured by the declaration table tripwire in `backend/mod.rs`★ —
-/// writing those values again here would make the same fact live in two houses. What this item asks is one thing: **are the two links actually
-/// different**.
+/// ★The codec axis values (encoder·translator·link shape) are measured by the declaration table tripwire in `backend/mod.rs`★ — repeating
+///   them here would put one fact in two houses; this item asks only **are the two links actually different**.
 #[test]
 fn a_second_channel_is_actually_a_different_channel() {
     for row in &backend_table() {
@@ -648,9 +579,8 @@ fn a_second_channel_is_actually_a_different_channel() {
     }
 }
 
-/// A link that launches with pipes **must** come with a translator.
-///
-/// ★Without it, the bytes go to the screen as is with no error or warning★ — the only runtime symptom is a broken screen.
+/// A link that launches with pipes **must** come with a translator. ★Without it the bytes go to the screen as is with no error or warning★
+///   — the only runtime symptom is a broken screen.
 #[test]
 fn every_pipe_channel_declares_an_output_decoder_and_a_non_raw_encoder() {
     for row in &backend_table() {
@@ -767,17 +697,16 @@ const PRE_SUBMIT_WINDOW: Duration = Duration::from_secs(6);
 /// Q6 — the window that collects the initial output of the two modes.
 const CAPTURE_WINDOW: Duration = Duration::from_secs(8);
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
-/// Budget for getting past the startup screen (loading · modal) until the composer takes
-/// keys; probes repeat within it. ★Not a hard cap★ — it is checked only at the head of
-/// each round, and a round already started (probe windows · waiting for quiet · the
-/// post-CR trust-record wait) runs to its end, so a run can overrun it (~54 s observed).
+/// Budget for getting past the startup screen (loading · modal) until the composer takes keys; probes repeat within it. ★Not a hard cap★ —
+///   checked only at the head of each round, and a started round (probe windows · waiting for quiet · post-CR trust-record wait) runs to
+///   its end,
+/// so a run can overrun (~54 s observed).
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
 /// Window in which one probe waits for its echo, and then for the idle
 /// hint to reappear. Missing it is not a failure, just the next probe.
 const PROBE_WINDOW: Duration = Duration::from_secs(2);
-/// Probe characters asking whether the composer takes keys. ★Not hex characters★ — they cannot
-/// collide with a temp path (uuid) on screen. ★No digits★ — in a list modal a digit selects that
-/// numbered choice (trust modal `1. … 2. …`).
+/// Probe characters asking whether the composer takes keys. ★Not hex characters★ — cannot collide with a temp path (uuid) on screen. ★No
+///   digits★ — in a list modal a digit selects that numbered choice (trust modal `1. … 2. …`).
 const COMPOSER_PROBE: &str = "xz";
 /// After the startup verb sends its CR, the limit for its result (the folder-trust entry) to be
 /// written into the temp home.
@@ -789,13 +718,15 @@ const SCRATCH_REMOVE_TIMEOUT: Duration = Duration::from_secs(10);
 const SOCKET_PATH_MAX: usize = 107;
 /// The bound for waiting for the composer to be drawn after passing the modal.
 const COMPOSER_TIMEOUT: Duration = Duration::from_secs(25);
-/// Q4 · Q5 — the bound for waiting for the body put in to be echoed in the composer. ★Why a retry and not a fixed sleep★:
-/// if a single first frame is slow, a fixed wait misjudges right there (the same reason the remaining waits are all
-/// [`wait_until`]). But Q4 still always fills an interval of [`SUBMIT_PACING`] after that — that interval is the contract being measured.
+/// Q4 · Q5 — the bound for waiting for the body put in to be echoed in the composer. ★Retry, not a fixed sleep★: one slow first frame
+///   would misjudge a fixed wait (same reason the other waits are [`wait_until`]). Q4 still always fills an interval of [`SUBMIT_PACING`]
+///   after that —
+/// that interval is the contract being measured.
 const ECHO_TIMEOUT: Duration = Duration::from_secs(10);
 /// The bound given to [`OutputCore::join_pump`] — ADR-0001's 5 seconds.
 const JOIN_PUMP_TIMEOUT: Duration = Duration::from_secs(5);
-/// The bound for reclaiming the pipe reader thread. ★No infinite join★ — even after the direct child ends, **if a grandchild holds the pipe's write end**
+/// The bound for reclaiming the pipe reader thread. ★No infinite join★ — even after the direct child ends, **if a grandchild holds the
+///   pipe's write end**
 /// `read_to_end` never ends (the shim chain always has a grandchild).
 const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -864,11 +795,11 @@ impl StatusSink for NoopStatusSink {
 
 // ── Operating argv — this file does not write it but receives it from the backend ─────────────────────
 
-/// A command with **caller passthrough arguments** put on `sample`. Where those arguments attach in the argv is decided by the backend —
-/// this function only fills the "arguments the user wrote additionally" field.
+/// A command with **caller passthrough arguments** put on `sample`. The backend decides where they attach in the argv; this function only
+///   fills the "arguments the user wrote additionally" field.
 ///
-/// ★The `match` being exhaustive is part of the contract★: when backends grow to a third and one more variant appears, the compiler
-///   stops here — a person decides once where the new row sends the passthrough field.
+/// ★The exhaustive `match` is part of the contract★: a third backend adds a variant and the compiler stops here — a person decides once
+///   where the new row sends the passthrough field.
 fn with_extra(sample: &AgentCommand, extra: &[&str]) -> AgentCommand {
     let mut c = sample.clone();
     let add = |v: &mut Vec<String>| v.extend(extra.iter().map(|s| (*s).to_string()));
@@ -882,12 +813,11 @@ fn with_extra(sample: &AgentCommand, extra: &[&str]) -> AgentCommand {
 
 /// **The spec operation actually launches** — drawn through the same path as operation ([`AgentBackend::build_spec`]).
 ///
-/// ★This function is the only ground on which this file can say it 「measures operation」★. If the arguments were written in this file, the day that
-///   string diverged from operation the test bench would be green while measuring **something else**, and there would be no gate anywhere catching that
-///   mismatch (that actually happened — that paragraph of the header). Receiving it here leaves no place to diverge in the first place.
-/// ★Bonus — the place that hand-copied the console wrapping is gone too★: that wrapping (the platform crate's
-///   `shell::console_command`) is already applied **inside** `build_spec` and returned as `CommandSpec.program`/`args`.
-///   So this file does not need to know that wrapping.
+/// ★The only ground on which this file can say it 「measures operation」★: arguments written in this file would diverge from operation with
+///   the bench green while measuring **something else** and no gate catching it (it happened — that paragraph of the header); receiving
+///   them here leaves no place to diverge.
+/// ★Bonus★: the console wrapping (platform crate `shell::console_command`) is applied **inside** `build_spec` and returned as
+///   `CommandSpec.program`/`args`, so this file need not know it.
 fn production_spec(
     row: &BackendRow,
     cwd: &Path,
@@ -905,9 +835,8 @@ fn production_spec(
     )
 }
 
-/// A spec where **only the policy values** of the operating spec are overwritten with harmless ones. ★Every item that puts in keys launches with this★ —
-/// the only place that launches operation as is is [`q11_production_argv_is_accepted_and_reaches_a_composer`],
-/// and that item puts in no prompt at all.
+/// A spec where **only the policy values** of the operating spec are overwritten with harmless ones. ★Every key-sending item launches with
+///   this★ — the only place launching operation as is is [`q11_production_argv_is_accepted_and_reaches_a_composer`], which sends no prompt.
 fn harnessed_spec(
     row: &BackendRow,
     cwd: &Path,
@@ -965,9 +894,8 @@ struct Captured {
     elapsed: Duration,
 }
 
-/// Runs a child that talks only through pipes. **stdin is always a pipe** — that is the condition Q3 measures, and the remaining
-/// calls too must never inherit the console and wait for human input. Past `timeout` it kills the whole tree and
-/// sets `timed_out` (the return always comes).
+/// Runs a child that talks only through pipes. **stdin is always a pipe** — the condition Q3 measures, and the other calls must not
+///   inherit the console and wait for human input. Past `timeout` it kills the whole tree and sets `timed_out` (always returns).
 fn run_capture(
     program: &str,
     args: &[String],
@@ -991,13 +919,11 @@ fn run_capture(
 
     drop(child.stdin.take());
 
-    // ★Drain the pipes with threads★: for output over 4KB like `--help`, when the pipe buffer fills, the child
-    //   stops at write and the exit polling never ends.
-    //
-    // ★Those threads are not reclaimed with `join()`★: even after the direct child ends, if **a grandchild that inherited the pipe's write end**
-    //   is alive, `read_to_end` never sees EOF — in the shim chain (`cmd.exe → node → codex.exe`)
-    //   there is always a grandchild. So the result is received over a channel and waited for only [`READER_JOIN_TIMEOUT`], and if it does not come, that thread
-    //   is left behind (it disappears together when the test process ends).
+    // ★Drain the pipes with threads★: output over 4KB like `--help` fills the pipe buffer, the child stops at write and exit polling never ends.
+    // ★Those threads are not reclaimed with `join()`★: even after the direct child ends, **a grandchild that inherited the pipe's write
+    //   end** keeps `read_to_end` from EOF — the shim chain (`cmd.exe → node → codex.exe`) always has one. So the result comes over a
+    //   channel waited
+    //   only [`READER_JOIN_TIMEOUT`]; a missing one leaves the thread behind (it disappears with the test process).
     let out_reader = child.stdout.take().map(|s| drain_pipe(s));
     let err_reader = child.stderr.take().map(|s| drain_pipe(s));
 
@@ -1071,9 +997,9 @@ fn kill_tree(pid: u32) {
     }
 }
 
-/// ★A missing binary = a failure of this lane★. Because of the `cmd.exe /c <prog>` wrapping, a successful spawn is no evidence of presence,
-/// so before spawning it asks for the PATH resolution itself. The resolved path is printed as is as evidence — where the shim chain
-/// starts is Q10's premise.
+/// ★A missing binary = a failure of this lane★. With the `cmd.exe /c <prog>` wrapping a successful spawn is no evidence of presence, so it
+///   asks for the PATH resolution itself before spawning and prints the resolved path as evidence — where the shim chain starts is Q10's
+///   premise.
 ///
 fn assert_program_present(row: &BackendRow) {
     let probe = row
@@ -1111,18 +1037,15 @@ fn assert_program_present(row: &BackendRow) {
     record_version_once(row);
 }
 
-/// Leaves in the log **which version this lane measured** — asked by putting `--version` on the operating argv.
+/// Leaves in the log **which version this lane measured** — `--version` on the operating argv.
 ///
-/// ★Why keep the version★: this CLI updates itself, so all the observations below have meaning only when tied to a version. Why it is asked with the
-///   operating argv = it must be the version of exactly what we actually launch.
-/// ★Not asserting the value is intended★ — pinning the version would go red at every update, and that is a calendar, not a regression.
-/// ★Asked only once per process★: in this lane, **how many real child processes it creates** is itself the risk and
-///   the cost.
-///   Asking per item would double the codex process chains across the whole lane, but the version does not change within one process,
-///   so that value **is the same even if asked once** (measured: the edition that asked per item printed the same value 11 times).
-/// ★And 「does this CLI accept the operating argv」 is not this function's job★ —
-///   [`q11_production_argv_is_accepted_and_reaches_a_composer`] measures it much harder with a real PTY. Measuring
-///   the same thing again here would only grow the number of spawns, not the value.
+/// ★Why★: this CLI self-updates, so every observation below means something only tied to a version; asking with the operating argv gives
+///   the version of exactly what we launch. ★Not asserting the value is intended★ — pinning would go red at every update.
+/// ★Asked only once per process★: **how many real child processes this lane creates** is itself the risk and cost; asking per item would
+///   double the codex process chains while the version cannot change within a process (measured: per-item asking printed the same value 11
+///   times).
+/// ★「Does this CLI accept the operating argv」 is not this function's job★ — [`q11_production_argv_is_accepted_and_reaches_a_composer`]
+///   measures it harder with a real PTY.
 fn record_version_once(row: &BackendRow) {
     static PROBED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
     {
@@ -1168,19 +1091,18 @@ enum HomeUse {
     /// May start the TUI/app-server, which opens a Unix socket under the home. Every spawn not
     /// known to be print-only uses this.
     Session,
-    /// `--version` only — assumed to print and exit without starting the app-server.
-    /// ★Unmeasured★. If it does open the socket, an over-limit home path skips the clear
-    /// socket-limit panic; if codex then fails, that shows up only as [`record_version_once`]'s
-    /// generic "did not report a version" panic (exit code not 0 or empty output), in the first
-    /// item of the run to reach it — later items skip the version probe.
+    /// `--version` only — assumed to print and exit without starting the app-server. ★Unmeasured★: if it does open the socket, an
+    ///   over-limit home path skips the clear socket-limit panic; a codex failure then shows only as [`record_version_once`]'s generic
+    ///   "did not report a version"
+    /// panic, in the first item of the run to reach it (later items skip the version probe).
     PrintAndExit,
 }
 
 /// One temporary folder. ★`Drop` deletes it★ — nothing remains even if an assertion is cut off by a panic.
 ///
-/// ★Why one line deleting at the end of the function does not do★: the assertions in this file exist **to fail**, and failure
-///   is an unwind, so it skips that line. It was a structure that left one folder each time the gate went red. Into the temporary home go
-///   auth files copied from the real home, so that leak is also a credential leak.
+/// ★A delete line at the end of the function does not do★: the assertions here exist **to fail** and failure is an unwind that skips it —
+///   the old structure left one folder each time the gate went red. The temp home holds auth files copied from the real home, so that leak is a
+/// credential leak too.
 struct Scratch {
     path: PathBuf,
     /// Credentials copied into this folder — `Drop` deletes them before the folder.
@@ -1188,9 +1110,9 @@ struct Scratch {
 }
 
 impl Scratch {
-    /// ★No real agent is launched with this repository as cwd★ — risks unrelated to what is measured grow. The cwd of real spawns
-    /// is all made under here. ★Each item digs its own folder★ — if the same path were shared, under `-- --test-threads=4`
-    /// one item's `Drop` would delete **the cwd another item is using right now**.
+    /// ★No real agent is launched with this repository as cwd★ — unrelated risks grow. The cwd of real spawns is all made under here.
+    ///   ★Each item digs its own folder★: a shared path would let one item's `Drop` under `-- --test-threads=4` delete **the cwd another
+    ///   item is using**.
     fn new(tag: &str) -> Scratch {
         let path =
             std::env::temp_dir().join(format!("engram-backend-contract-{tag}-{}", Uuid::new_v4()));
@@ -1201,18 +1123,16 @@ impl Scratch {
         }
     }
 
-    /// The test home is never placed under the system temp dir — codex 0.153.4 refuses to
-    /// create its sandbox helper when its home is there and prints a warning (measured).
-    /// ★The path is kept short★ — codex 0.163.0 opens a Unix socket at
-    /// `app-server-control\app-server-control.sock` under its home; if that path exceeds 108 bytes
-    /// (SUN_LEN) the app-server cannot start and neither does codex (measured — the old
-    /// `target/tmp/backend-contract-home-<tag>-<uuid>` gave a 152-char socket path).
-    /// So the home goes to `%LOCALAPPDATA%\ebc\<tag>-<8 chars>` — the parent of temp
-    /// (`%LOCALAPPDATA%\Temp`), hence outside it. On an OS without that variable it is
-    /// `CARGO_TARGET_TMPDIR` (= `target/tmp`).
+    /// The test home is never placed under the system temp dir — codex 0.153.4 refuses to create its sandbox helper there and prints a
+    ///   warning (measured).
+    /// ★The path is kept short★ — codex 0.163.0 opens a Unix socket at `app-server-control\app-server-control.sock` under its home; over
+    ///   108 bytes (SUN_LEN) the app-server cannot start and neither does codex (the old `target/tmp/backend-contract-home-<tag>-<uuid>`
+    ///   gave 152 chars).
+    /// So the home goes to `%LOCALAPPDATA%\ebc\<tag>-<8 chars>` — the parent of temp (`%LOCALAPPDATA%\Temp`), hence outside it; without
+    ///   that variable, `CARGO_TARGET_TMPDIR` (= `target/tmp`).
     ///
-    /// Panics when `use_` is [`HomeUse::Session`] and the socket path would exceed
-    /// [`SOCKET_PATH_MAX`] — such a home would make codex fail to start.
+    /// Panics when `use_` is [`HomeUse::Session`] and the socket path would exceed [`SOCKET_PATH_MAX`] — such a home would make codex fail
+    ///   to start.
     fn new_home(tag: &str, use_: HomeUse) -> Scratch {
         let root = std::env::var_os("LOCALAPPDATA")
             .map(|dir| PathBuf::from(dir).join("ebc"))
@@ -1267,11 +1187,9 @@ fn git_init_at(dir: &Path) {
 }
 
 impl Drop for Scratch {
-    /// ★Credential copies go first, and removal is retried up to a limit★: right after
-    /// teardown a grandchild process still holds files in the home, so
-    /// `remove_dir_all` stops midway and leaves the folder half there (measured
-    /// 0.163.0: Q6's temp home stayed behind with its `auth.json`). Whatever is still
-    /// left is not passed over silently — its path is printed, for a person to delete.
+    /// ★Credential copies go first, and removal is retried up to a limit★: right after teardown a grandchild still holds files in the
+    ///   home, so `remove_dir_all` stops midway (0.163.0: Q6's temp home stayed with its `auth.json`). Whatever is left is not passed over
+    ///   silently — its path is printed for a person to delete.
     fn drop(&mut self) {
         let cleared = wait_until(SCRATCH_REMOVE_TIMEOUT, || {
             for f in &self.secrets {
@@ -1294,13 +1212,12 @@ impl Drop for Scratch {
     }
 }
 
-/// A pair of environment variables that turns this backend's state directory to **a temporary home just for this item**. For a backend without a home it is
-/// an empty list, and then the real user settings are used as is (that fact is the warning of [`LiveProbe::home_redirect`]).
+/// A pair of environment variables that turns this backend's state directory to **a temporary home just for this item**. For a backend
+///   without a home it is an empty list and the real user settings are used as is (the warning of [`LiveProbe::home_redirect`]).
 ///
 /// **The caller must hold** the returned [`Scratch`] — dropping it deletes the home right there.
-/// This CLI's **real user state directory** — that one if the variable is already set, otherwise the default location
-/// under the user home. ★Read only★. The place that scoops the seed files and the place that checks "is the real home not dirtied" must see the same
-/// answer, so they are kept in one function.
+/// This CLI's **real user state directory** — the variable's value if set, else the default under the user home. ★Read only★. The place
+///   that scoops the seed files and the place that checks "is the real home not dirtied" must see the same answer, so they are one function.
 fn real_home(redirect: &HomeRedirect) -> Option<PathBuf> {
     std::env::var_os(redirect.env)
         .map(PathBuf::from)
@@ -1323,9 +1240,8 @@ fn sandbox_home(
 
     let mut home = Scratch::new_home(tag, use_);
 
-    // ★If even one seed file cannot be copied, stop before spawning★ — started without it, the CLI
-    //   shows a login screen first, a screen the startup verb could press CR on
-    //   ([`HomeRedirect::seed_files`]).
+    // ★If even one seed file cannot be copied, stop before spawning★ — without it the CLI shows a login screen first, a screen the startup
+    //   verb could press CR on ([`HomeRedirect::seed_files`]).
     let real = real_home(redirect).unwrap_or_else(|| {
         panic!(
             "the real user state directory (`{}` or ~/{}) does not exist — there is no auth to move into the temporary home",
@@ -1353,24 +1269,21 @@ fn sandbox_home(
     (Some(home), env)
 }
 
-/// codex's folder-trust record for `workspace` in the temp home's `config.toml`
-/// ([`HomeRedirect::trusted_entry`]). Reads the file and resolves `workspace`
-/// to its long canonical form, then defers to [`codex_trust_record`]. `None`
-/// also when the file or the folder cannot be read.
+/// codex's folder-trust record for `workspace` in the temp home's `config.toml` ([`HomeRedirect::trusted_entry`]). Reads the file,
+///   resolves `workspace` to its long canonical form, then defers to [`codex_trust_record`]. `None` also when the file or folder cannot be read.
 fn codex_trusted_entry(home: &Path, workspace: &Path) -> Option<String> {
     let config = std::fs::read_to_string(home.join("config.toml")).ok()?;
     let workspace = dunce::canonicalize(workspace).ok()?;
     codex_trust_record(&config, &workspace.to_string_lossy())
 }
 
-/// The header line of the `[projects.'<path>']` table in `config` whose path equals `workspace` and
-/// that holds `trust_level = "trusted"`; `None` when there is no such table.
+/// The header line of the `[projects.'<path>']` table in `config` whose path equals `workspace` and holds `trust_level = "trusted"`;
+///   `None` when there is no such table.
 ///
-/// ★Paths are compared case-insensitively★ — 0.163.0 writes the lower-case long path
-///   (`c:\users\<user>\…`), not the 8.3 short form we pass (`C:\Users\<user>~1\…`) (measured). The
-///   caller passes the long form.
-/// ★Only this one shape is read★ (the shape 0.163.0 writes — measured). A version that writes
-///   another shape yields `None`, so the startup verb stops loudly instead of passing silently.
+/// ★Paths are compared case-insensitively★ — 0.163.0 writes the lower-case long path (`c:\users\<user>\…`), not the 8.3 short form we pass
+///   (`C:\Users\<user>~1\…`); the caller passes the long form.
+/// ★Only this one shape is read★ (what 0.163.0 writes) — another shape yields `None`, so the startup verb stops loudly instead of passing
+///   silently.
 fn codex_trust_record(config: &str, workspace: &str) -> Option<String> {
     let want = workspace.to_lowercase();
     let project_key = |head: &str| -> Option<String> {
@@ -1398,10 +1311,8 @@ fn codex_trust_record(config: &str, workspace: &str) -> Option<String> {
     None
 }
 
-/// Result of trying to get past the startup screen. ★Why not a `bool`★: "there
-/// was no modal" and "this backend has no way to ask" are not the same value —
-/// the first is an observation, the second means there was nothing to ask.
-/// ★Whether the composer came up is not here★ — [`Startup::composer`] holds that.
+/// Result of trying to get past the startup screen. ★Not a `bool`★: "there was no modal" (an observation) and "this backend has no way to
+///   ask" (nothing to ask) are different values. ★Whether the composer came up is not here★ — [`Startup::composer`] holds that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModalOutcome {
     /// The table has no idle composer hint for this backend —
@@ -1448,14 +1359,12 @@ impl StartupStall {
 /// The result of [`PtySession::pass_startup_modal`].
 struct Startup {
     outcome: ModalOutcome,
-    /// Where the output **without** the consumed modal starts — the accumulated length right before
-    /// the CR if one was sent, else 0. The modal's text also contains the workspace path (measured
-    /// 0.163.0), so matching the workspace folder on screen looks only past this point (Q12).
+    /// Where the output **without** the consumed modal starts — the accumulated length right before the CR if one was sent, else 0. The
+    ///   modal's text also contains the workspace path (0.163.0), so matching the workspace folder on screen looks only past this point (Q12).
     settled_from: usize,
-    /// `Ok` = the composer took keys; the value is the accumulated length right
-    /// before the passing probe wrote its erasure (after it the idle composer
-    /// hint was drawn again). `Err` = not reached in time. When the table has
-    /// no composer hint (`NotDeclared`) it is the end position at that moment.
+    /// `Ok` = the composer took keys; the value is the accumulated length right before the passing probe wrote its erasure (afterwards the
+    ///   idle composer hint is drawn again). `Err` = not reached in time. With no composer hint (`NotDeclared`) it is the end position at
+    ///   that moment.
     composer: Result<usize, StartupStall>,
     /// The folder-trust entry that appeared in the temp home after the CR
     /// ([`HomeRedirect::trusted_entry`]).
@@ -1508,10 +1417,10 @@ impl PtySession {
 
     /// Calls the same two verbs **while timing each**. Returns `(shutdown duration, join_pump duration)`. `None` if already brought down.
     ///
-    /// ★Why time it — this is the only window observing Q10's second verb★: [`OutputCore::join_pump`]
-    ///   returns `()` and **discards** the result of `recv_timeout` inside (`src/output_core.rs:383-392`). So
-    ///   "the pump ended" and "it just waited 5 seconds" **look the same** to the caller. Only the duration tells the two
-    ///   apart — if it stuck to the bound, the pump did not end.
+    /// ★Why time it — the only window observing Q10's second verb★: [`OutputCore::join_pump`] returns `()` and **discards** the
+    ///   `recv_timeout` result inside (`src/output_core.rs:383-392`), so "the pump ended" and "it just waited 5 seconds" **look the
+    ///   same**; only the
+    /// duration tells them apart — sticking to the bound means the pump did not end.
     fn teardown_measured(&mut self) -> Option<(Duration, Duration)> {
         if self.down {
             return None;
@@ -1545,56 +1454,39 @@ impl PtySession {
         wait_until(timeout, || mentions(&self.tail_text(from), needle))
     }
 
-    /// Goes past the startup screen (loading · first-visit modal) **until the composer
-    /// takes keys**. If a modal is up, it is passed once with its default choice.
+    /// Goes past the startup screen (loading · first-visit modal) **until the composer takes keys**. If a modal is up, it is passed once
+    ///   with its default choice.
     ///
-    /// ★The modal's wording is never read★: it changed across versions (0.153.4 `Do you trust …`
-    ///   → 0.163.0 `Trust this folder?`) — relying on it would turn this harness red on every
-    ///   update and make a person fix the marker. So only three wording-free signals are used.
-    ///   ① **Is startup over** = [`LiveProbe::ready_signal`]. ★The probe alone
-    ///      cannot tell this★ — the composer takes keys even while loading, and
-    ///      the trust modal appears **after** loading ends (measured 0.163.0: the
-    ///      modal came up after the probe had passed, and Q4's body went into it).
-    ///   ② **Does the composer take keys** = type the probe characters
-    ///      ([`COMPOSER_PROBE`]), see the echo, and check that the idle composer hint is
-    ///      drawn again **after** erasing them. A modal does not draw those characters
-    ///      into the composer, so this holds only when the composer is in front.
-    ///   ③ **Is something covering the composer** = the screen went quiet
-    ///      with the cursor hidden. Measured 0.163.0: loading · composer =
-    ///      cursor shown (`?25h`), folder-trust modal = hidden (`?25l`).
-    /// When ③ holds a CR is sent — the folder-trust modal's default choice is to accept
-    ///   (measured 0.153.4 `1. Yes, continue` · 0.163.0 `1. Trust and continue`). After
-    ///   it, ① is looked for again **in the output after the CR**.
+    /// ★The modal's wording is never read★: it changed across versions (0.153.4 `Do you trust …` → 0.163.0 `Trust this folder?`) and
+    ///   relying on it would turn this harness red on every update. Only three wording-free signals are used.
+    ///   ① **Is startup over** = [`LiveProbe::ready_signal`]. ★The probe alone cannot tell★ — the composer takes keys even while loading
+    ///   and the trust modal appears **after** loading ends (0.163.0: the modal came up after the probe passed and Q4's body went into it).
+    ///   ② **Does the composer take keys** = type the probe characters ([`COMPOSER_PROBE`]), see the echo, and check the idle composer
+    ///   hint is drawn again **after** erasing them; a modal does not draw them into the composer.
+    ///   ③ **Is something covering the composer** = the screen went quiet with the cursor hidden (0.163.0: loading · composer = shown
+    ///   `?25h`, folder-trust modal = hidden `?25l`).
+    /// When ③ holds a CR is sent — the folder-trust modal's default is accept (0.153.4 `1. Yes, continue` · 0.163.0 `1. Trust and
+    ///   continue`); afterwards ① is looked for again **in the output after the CR**.
     ///
-    /// ★What is guarded and what is not★ — the CR is pressed
-    /// **before the screen is recognised**. So:
-    /// - **Guarded (environment)**: the other cursor-hiding first screens we know of are kept
-    ///   from appearing in the temp home at all — the update modal
-    ///   (`check_for_update_on_startup = false` · `version.json` not copied), the administrator
-    ///   sandbox-setup modal (`[windows] sandbox`), the login screen (if the auth copy fails,
-    ///   nothing is spawned). Evidence = the two seed fields of [`HomeRedirect`].
-    /// - **Guarded (post-check)**: within [`TRUST_RECORD_TIMEOUT`] after the CR
-    ///   a folder-trust entry for `workspace` must appear in the temp home
-    ///   ([`HomeRedirect::trusted_entry`]). If not, the run stops right there
-    ///   and says so — every item that calls this verb goes through this check.
-    /// - **Only one CR** — a second covering screen gets no key. The composer does not come up and
-    ///   [`Startup::composer`] comes back `Err`.
-    /// - **Not guarded**: a first screen the environment does not block — the CLI
-    ///   showing a login screen because the copied auth expired, an update check
-    ///   re-enabled under another key, or any **new** screen — gets the CR, and whatever
-    ///   its default choice runs has already happened with that CR. The post-check
-    ///   reports it (stops the run and prints the screen) but cannot undo it.
-    /// ★Cost★: that choice leaves a folder-trust entry in the CLI's config file — so the CR is
-    ///   sent only when there is a temp home (`home`). The real user config is never changed.
+    /// ★What is guarded and what is not★ — the CR is pressed **before the screen is recognised**:
+    /// - **Guarded (environment)**: other cursor-hiding first screens are kept out of the temp home — the update modal
+    ///   (`check_for_update_on_startup = false` · `version.json` not copied), the administrator sandbox-setup modal (`[windows] sandbox`),
+    ///   the login screen (failed auth copy
+    ///   spawns nothing). Evidence: the two seed fields of [`HomeRedirect`].
+    /// - **Guarded (post-check)**: within [`TRUST_RECORD_TIMEOUT`] after the CR a folder-trust entry for `workspace` must appear in the
+    ///   temp home ([`HomeRedirect::trusted_entry`]); if not the run stops and says so — every item calling this verb goes through it.
+    /// - **Only one CR** — a second covering screen gets no key; the composer does not come up and [`Startup::composer`] is `Err`.
+    /// - **Not guarded**: a first screen the environment does not block (expired auth login screen · update check re-enabled under another
+    ///   key · any **new** screen) gets the CR and whatever its default runs has already happened; the post-check reports it but cannot undo it.
+    /// ★Cost★: that choice leaves a folder-trust entry in the CLI's config, so the CR is sent only with a temp home (`home`); the real
+    ///   user config is never changed.
     ///
-    /// `workspace` = the folder the CLI will use as its working root (= the folder
-    /// the trust entry must point at). It can differ from the process cwd (Q12).
+    /// `workspace` = the folder the CLI uses as its working root (= where the trust entry must point); it can differ from the process cwd (Q12).
     ///
-    /// Why the position in [`Startup::composer`] is needed: this TUI draws the modal
-    /// **over** the composer, so the idle composer hint is on screen **before** the
-    /// modal (measured on a 0.153.4 Q8 screen dump). Searching for the hint including
-    /// that earlier stretch would mean "saw the composer hidden behind the modal",
-    /// not "passed the modal and the composer came up" — a check that asks nothing.
+    /// Why [`Startup::composer`] needs the position: this TUI draws the modal **over** the composer, so the idle composer hint is on
+    ///   screen **before** the modal (0.153.4 Q8 dump); searching including that earlier stretch would mean "saw the composer hidden
+    ///   behind the modal", not
+    /// "passed the modal and the composer came up".
     fn pass_startup_modal(
         &self,
         probe: &LiveProbe,
@@ -1658,10 +1550,9 @@ impl PtySession {
         startup
     }
 
-    /// One probe — the accumulated length right before the erasure if the composer
-    /// took the keys, else the missing signal. ★The erasure is always sent, echo or
-    /// not★: if the echo arrives after the window, the characters stay in the
-    /// composer, the next probe's erasure falls short, and the hint never comes back.
+    /// One probe — the accumulated length right before the erasure if the composer took the keys, else the missing signal. ★The erasure is
+    ///   always sent, echo or not★: an echo arriving after the window leaves the characters in the composer, the next probe's erasure
+    ///   falls short and the hint never comes back.
     fn probe_composer(&self, marker: &str) -> Result<usize, StartupStall> {
         let typed_at = self.sink.len();
         self.write(COMPOSER_PROBE.as_bytes());
@@ -1679,8 +1570,10 @@ impl PtySession {
         Ok(erase_at)
     }
 
-    /// The real TUI keeps redrawing for a while even after it launches. If input is put in after seeing only the first byte, the composer may not
-    /// exist yet, so it waits **until the output stops** before going to the next step. Returns = the cumulative length at the moment it stopped.
+    /// The real TUI keeps redrawing for a while even after it launches. If input is put in after seeing only the first byte, the composer
+    ///   may not
+    /// exist yet, so it waits **until the output stops** before going to the next step. Returns = the cumulative length at the moment it
+    ///   stopped.
     fn wait_quiet(&self) -> usize {
         let deadline = Instant::now() + SETTLE_TIMEOUT;
         let mut last = self.sink.len();
@@ -1705,14 +1598,13 @@ impl Drop for PtySession {
     }
 }
 
-/// Did the startup verb **reach the composer** — if not, stop right here, printing which signal was
-/// missing and the screen. No further waiting (the startup verb's budget already spent it). Returns
-/// `Some(true)` for a backend whose table has a composer hint, else `None`.
+/// Did the startup verb **reach the composer** — if not, stop here printing which signal was missing and the screen (no more waiting — the
+///   verb's budget is spent). `Some(true)` for a backend whose table has a composer hint, else `None`.
 ///
-/// ★Before asking about the composer, ask whether there is a composer★: otherwise the key input goes to something that is not the composer (the next modal·
-///   loading screen), and the "there is no echo" that comes out then is **not this question's answer but a harness malfunction**, yet both
-///   are equally red. In fact codex showed one more modal in an empty home, and then Q5 died saying 「the fragments are not visible in the
-///   composer」 — that is, as if it knew the answer. This gate tells the two apart.
+/// ★Ask whether there is a composer before asking about it★: otherwise keys go to something else (the next modal·loading screen) and the
+///   resulting "no echo" is **a harness malfunction, not this question's answer**, yet the same red. Codex showed one more modal in an
+///   empty home and
+/// Q5 died saying 「the fragments are not visible in the composer」 as if it knew the answer; this gate tells them apart.
 fn assert_composer(
     s: &PtySession,
     probe: &LiveProbe,
@@ -1785,31 +1677,28 @@ fn flatten(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The place where `parts` appear **one after another with nothing between them**. Returns = an excerpt with a little of what is before and after attached.
+/// The place where `parts` appear **one after another with nothing between them**. Returns an excerpt with a little context.
 ///
-/// ★This is exactly what Q5 measures★: the fragments all being visible somewhere on the screen and being **joined in the composer**
-///   are different facts. The former is true even if each line was submitted and scattered between responses, so that decision
-///   cannot claim "the multiple lines went in whole" — if they had been submitted split, model responses·spinners·
-///   prompt markers would be drawn **between** the fragments and break the adjacency. The measured conclusion (`› hi there`) is the shape of this predicate.
+/// ★This is what Q5 measures★: fragments all visible somewhere on the screen and **joined in the composer** are different facts — the
+///   former holds even if each line was submitted and scattered between responses; had they been submitted split, model
+///   responses·spinners·prompt
+/// markers would be drawn **between** the fragments and break adjacency. The measured conclusion (`› hi there`) is this predicate's shape.
 ///
-/// ★The limit, written honestly — 「is it the same screen row」 cannot be measured with this byte stream★: the TUI moves rows not with line-break
-///   characters but with CSI cursor moves, so the `\n` of [`visible_text`] **does not correspond to screen rows** (measured:
-///   what was drawn on one row as `› hi there` was cut into two lines in the text). Restoring screen rows needs a terminal
-///   emulator. So this predicate measures not 「the same row」 but **「nothing else in between」**.
-/// Does `haystack` say `needle` — ★looks at it ignoring the placement of whitespace★. Every marker comparison uses this.
+/// ★Limit★: 「the same screen row」 cannot be measured with this byte stream — the TUI moves rows with CSI cursor moves, not line breaks, so
+///   [`visible_text`]'s `\n` **does not correspond to screen rows** (what was one row `› hi there` was cut into two lines); restoring rows
+///   needs a
+/// terminal emulator. So this measures **「nothing else in between」**.
+/// Does `haystack` say `needle` — ★ignoring the placement of whitespace★. Every marker comparison uses this.
 ///
-/// ★Why [`flatten`] + `contains` is not enough — measured 2026-09-08★: this TUI draws the
-///   same sentence **two ways**. When idle it writes real spaces between words; under load
-///   it **moves the cursor for each word**. In the latter the text left after stripping
-///   control sequences has no spaces at all (`Doyoutrustthecontents…`), so the marker
-///   (`Do you trust`) misses. Back when [`PtySession::pass_startup_modal`] found the modal
-///   by its wording, it then read "no modal", sent no CR, and the next question died on the
-///   screen the modal still held with "the composer never came up" — ★a harness malfunction,
-///   not the question's answer, yet both are the same red★. That is exactly the trap the
-///   [`assert_composer`] comment warned about, and we fell in: the same lane lost 3 items to
-///   it in one run and was all green in another (what varied between runs = machine load).
-/// ★Removing whitespace does not blunt the marker★: what remains is in the same character order, so to match by accident it would have to be the same
-///   sentence differing only in whitespace. [`contiguous_echo`] already looks at both joins `" "` and `""` for the same reason.
+/// ★Why [`flatten`] + `contains` is not enough★: this TUI draws the same sentence **two ways** — idle it writes real spaces, under load it
+///   **moves the cursor for each word**, leaving stripped text with no spaces (`Doyoutrustthecontents…`) so the marker (`Do you trust`)
+///   misses. When
+/// [`PtySession::pass_startup_modal`] found the modal by wording it then read "no modal", sent no CR and the next question died on the
+///   still-held screen with "the composer never came up" — ★a harness malfunction, not the answer, the same red★ (the trap the
+///   [`assert_composer`] comment
+/// warned of; the same lane lost 3 items in one run and was green in another — machine load).
+/// ★Removing whitespace does not blunt the marker★: what remains has the same character order, so an accidental match would need the same
+///   sentence differing only in whitespace ([`contiguous_echo`] looks at both joins `" "` and `""` for the same reason).
 fn mentions(haystack: &str, needle: &str) -> bool {
     let squash = |t: &str| -> String { t.chars().filter(|c| !c.is_whitespace()).collect() };
     squash(haystack).contains(&squash(needle))
@@ -1817,7 +1706,8 @@ fn mentions(haystack: &str, needle: &str) -> bool {
 
 fn contiguous_echo(text: &str, parts: &[&str]) -> Option<String> {
     let flat = flatten(text);
-    // Whether the composer joins the fragments with a space (when the line break was folded into a space) or puts them together, both are "nothing in between".
+    // Whether the composer joins the fragments with a space (when the line break was folded into a space) or puts them together, both are
+    //   "nothing in between".
     for sep in [" ", ""] {
         let joined = parts.join(sep);
         if joined.is_empty() {
@@ -1906,14 +1796,12 @@ fn pid_alive(pid: u32) -> bool {
     engram_dashboard_platform::process::pid_alive(pid)
 }
 
-/// Everything among `known` and `root` that is still alive — ★walks again under what is alive★ to catch even descendants born **after** the
-/// preceding enumeration.
+/// Everything among `known` and `root` that is still alive — ★walks again under what is alive★ to catch descendants born **after** the
+///   preceding enumeration.
 ///
-/// ★Why re-checking the snapshot is not enough★: looking again only at the list counted once just before shutdown, a grandchild born after that
-///   enumeration **survives with nobody looking**. What Q10 measures is "is the tree empty", and through that hole a non-empty
-///   tree becomes green.
-/// ★The remaining limit is written down★: an orphan whose parent already died cannot be found by this tree walk — this predicate sees only
-///   descendants whose chain is unbroken.
+/// ★Re-checking the snapshot is not enough★: a grandchild born after the enumeration just before shutdown **survives with nobody
+///   looking**, and Q10 ("is the tree empty") would go green through that hole.
+/// ★Remaining limit★: an orphan whose parent already died is not found by this walk — it sees only descendants with an unbroken chain.
 fn alive_survivors(root: u32, known: &[u32]) -> Vec<u32> {
     let mut seen: Vec<u32> = std::iter::once(root).chain(known.iter().copied()).collect();
     let mut i = 0usize;
@@ -2013,7 +1901,8 @@ fn q3_non_tty_stdin_is_refused() {
 
         let cwd = Scratch::new("q3").git_init();
         let (_home, env) = sandbox_home(probe, "q3", HomeUse::Session);
-        // ★Asked with the operating argv as is (only the policy values made harmless)★ — the axis of this question is stdin, but the answer must be
+        // ★Asked with the operating argv as is (only the policy values made harmless)★ — the axis of this question is stdin, but the
+        //   answer must be
         //   the answer under the argv we actually launch.
         let spec = harnessed_spec(&row, cwd.path(), &env, &[]);
         let out = run_capture(
@@ -2045,11 +1934,11 @@ fn q3_non_tty_stdin_is_refused() {
             "{}: it accepted non-TTY stdin as success — the premise that the PTY is the only interactive path wavers",
             row.name
         );
-        // ★The exit code alone cannot decide this question★: we give **all** three fds as pipes, so a nonzero
-        //   exit could be "because stdin is not a tty", or an auth failure·configuration error·panic. In the old shape either way
-        //   was equally green. The words that CLI says itself are the only evidence that tells the two apart.
-        //   ★The remaining confound is written down★ — stdout/stderr are pipes too, so isolating "stdin only" needs a separate harness
-        //   giving those two as a PTY. This assertion does not go that far and pins the axis by the **phrase**.
+        // ★The exit code alone cannot decide this question★: all three fds are pipes, so a nonzero exit could be "stdin is not a tty" or
+        //   an auth failure·configuration error·panic (the old shape was green either way); the words that CLI says itself are the only
+        //   evidence.
+        //   ★Remaining confound★ — stdout/stderr are pipes too, so isolating "stdin only" needs a separate harness giving those two as a
+        //   PTY; this assertion pins the axis by the **phrase**.
         if let Some(marker) = probe.stdin_refusal_marker {
             assert!(
                 said.contains(marker),
@@ -2097,9 +1986,9 @@ fn q4_body_pause_cr_reads_as_submit() {
             mentions(&s.tail_text(body_mark), probe.submit_body)
         });
         let echo_text = s.tail_text(body_mark);
-        // ★The operating contract as is — the interval between the body write and the submit write★. If the echo wait above already
-        //   exceeded that interval it sleeps no more, filling only what is short. What is measured is 「body + **interval** + CR」, so this lower bound
-        //   cannot be reduced (the measurement in the `SUBMIT_PACING` comment is its ground).
+        // ★The operating contract as is — the interval between the body write and the submit write★. If the echo wait already exceeded it,
+        //   no more sleep, only the shortfall is filled. What is measured is 「body + **interval** + CR」, so this lower bound cannot be reduced
+        //   (ground: the `SUBMIT_PACING` comment).
         if let Some(rest) = SUBMIT_PACING.checked_sub(wrote_at.elapsed()) {
             std::thread::sleep(rest);
         }
@@ -2110,13 +1999,14 @@ fn q4_body_pause_cr_reads_as_submit() {
             .expect("the Raw encoder has no submit bytes");
         s.write(submit);
 
-        // ★The decision is 「is the composer empty」 — not 「was something newly drawn」★: the TUI redraws the banner·
-        //   model name·usage even without any input (the `idle_noise` just above prints that value), so the latter is no evidence
-        //   of a submission. A submission empties the composer, and the guidance phrase is drawn **again** in the empty composer's place — that phrase's
-        //   reappearance is the fact this question actually observed, and the same thing as the recorded conclusion ("the composer became empty").
+        // ★The decision is 「is the composer empty」, not 「was something newly drawn」★: the TUI redraws banner·model name·usage without
+        //   input (`idle_noise` just above), so the latter is no evidence of submission. A submission empties the composer and the
+        //   guidance phrase is drawn
+        //   **again** in its place — that reappearance is the fact observed and the recorded conclusion ("the composer became empty").
         let cleared = match probe.composer_idle_marker {
             Some(m) => s.wait_for_text(cr_mark, m, RESPONSE_TIMEOUT),
-            // A backend without that signal falls back to the weak decision — did characters other than the body come. As the noise item above says,
+            // A backend without that signal falls back to the weak decision — did characters other than the body come. As the noise item
+            //   above says,
             // this decision wavers, so that fact is not passed over quietly but written in the output below.
             None => wait_until(RESPONSE_TIMEOUT, || {
                 !printable_residue(&s.tail_text(cr_mark), &[probe.submit_body]).is_empty()
@@ -2195,15 +2085,15 @@ fn q5_multiline_body_enters_whole() {
         std::thread::sleep(PRE_SUBMIT_WINDOW);
         let after_bytes = s.sink.len().saturating_sub(after_mark);
         let after = s.tail_text(after_mark);
-        // ★The unit of 「static」 is not bytes but **readable characters**★: measured in bytes, pure control sequences like cursor blinking
-        //   are caught as "the screen moved" (measured — 48 bytes came in this window, of which 0 were characters).
-        //   What is evidence of a submission is newly **drawn characters**, not the fact that the cursor blinked. The body itself is
-        //   taken out as a needle — the body reappearing while the composer is redrawn is counter-evidence of a submission.
+        // ★The unit of 「static」 is **readable characters**, not bytes★: in bytes, pure control sequences like cursor blinking count as
+        //   "the screen moved" (48 bytes came in this window, 0 characters). Evidence of submission is newly **drawn characters**; the
+        //   body itself is a needle — it
+        //   reappearing while the composer is redrawn is counter-evidence.
         let after_visible = printable_residue(&after, probe.multiline_parts);
-        // ★The promised fallback is actually implemented★: for a backend without the empty composer guidance, the comment of
-        //   [`LiveProbe::composer_idle_marker`] promises 「it looks only at whether the screen is static」, but `is_some_and` is **unconditionally
-        //   false** in that case, so that backend's Q5 was permanently green. Writing down that a signal is absent, and writing that it looks
-        //   at something else when absent and then looking at nothing, are different.
+        // ★The promised fallback is actually implemented★: for a backend without the empty-composer guidance,
+        //   [`LiveProbe::composer_idle_marker`] promises 「it looks only at whether the screen is static」 but `is_some_and` was
+        //   **unconditionally false**, so that backend's Q5 was permanently green.
+        //   Writing that a signal is absent, and that it looks at something else then, then looking at nothing, are different.
         let submitted = match probe.composer_idle_marker {
             Some(m) => mentions(&after, m),
             None => !after_visible.is_empty(),
@@ -2239,10 +2129,10 @@ fn q5_multiline_body_enters_whole() {
              bracketed-paste markers into the injection path must come first",
             row.name
         );
-        // ★The recorded conclusion is 「the screen was static」, and that is guarded too★ — leaving only the assertion just above guards only as far as "the empty composer guidance
-        //   was not visible". Even if that phrase is not visible, if **other** characters were newly drawn, something
-        //   happened, and then the recorded ground no longer holds. If this goes red, it is not that the gate flipped but that
-        //   the ground of the conclusion changed, so a person must read the screen below and set up §3-3's indirect decision again.
+        // ★The recorded conclusion is 「the screen was static」 — guarded too★: the assertion above guards only "the empty composer guidance
+        //   was not visible"; **other** characters newly drawn mean something happened and the recorded ground no longer holds. If this
+        //   goes red the
+        //   conclusion's ground changed, not the gate: a person must read the screen below and set up §3-3's indirect decision again.
         assert!(
             after_visible.is_empty(),
             "{}: without CR, {} new characters were drawn during {PRE_SUBMIT_WINDOW:?} ({after_bytes} bytes). The empty composer \
@@ -2275,11 +2165,11 @@ fn q6_no_alt_screen_changes_the_bytes() {
             continue;
         };
 
-        // ★The two captures must differ **only by the flag**★: in the old shape the two runs used the same fixed path, so the first
-        //   drew the folder trust modal and the second did not — on a cold PC that difference was recorded wholesale as the effect of
-        //   `--no-alt-screen`. Now each capture has **a new cwd + a new temporary home**, so both are first visits, and if the modal
-        //   results differ, the comparison itself stops below.
-        //   (While a start modal is up the mode switch may not have happened yet, so it measures after both have passed.)
+        // ★The two captures must differ **only by the flag**★: with the old fixed path the first run drew the folder trust modal and the
+        //   second did not, and on a cold PC that was recorded as the effect of `--no-alt-screen`. Now each capture has **a new cwd + a
+        //   new temporary home**,
+        //   so both are first visits and differing modal results stop the comparison below. (While a start modal is up the mode switch may
+        //   not have happened, so it measures after both passed.)
         let mut seen: Vec<(bool, Vec<String>, usize, ModalOutcome)> = Vec::new();
         for extra in [Vec::new(), vec![flag]] {
             let cwd = Scratch::new("q6").git_init();
@@ -2289,9 +2179,8 @@ fn q6_no_alt_screen_changes_the_bytes() {
             s.wait_quiet();
             let startup = s.pass_startup_modal(probe, home.as_ref(), cwd.path());
             let modal = startup.outcome;
-            // ★Both captures must have finished startup for the comparison
-            //   to hold★ — if one is captured still in loading or a modal,
-            //   that difference gets recorded as the effect of `{flag}`.
+            // ★Both captures must have finished startup for the comparison to hold★ — one captured in loading or a modal would record that
+            //   difference as the effect of `{flag}`.
             assert_composer(&s, probe, &startup, &format!("{} {extra:?}", row.name));
             std::thread::sleep(CAPTURE_WINDOW);
             let raw = s.sink.snapshot();
@@ -2303,9 +2192,8 @@ fn q6_no_alt_screen_changes_the_bytes() {
                 row.name
             );
             let alt = ALT_SCREEN_ENTERS.iter().any(|e| contains_seq(&raw, e));
-            // ★Compared as sets★ — `private_modes` holds them **in the order they appeared**, so matching the `Vec` as is
-            //   becomes "different" from merely a changed frame order. What this question asks is which modes it uses,
-            //   not in which order it emits them.
+            // ★Compared as sets★ — `private_modes` holds them **in order of appearance**, so matching the `Vec` would call a changed frame
+            //   order "different"; the question is which modes it uses, not their order.
             let mut modes = private_modes(&raw);
             modes.sort();
             modes.dedup();
@@ -2370,15 +2258,14 @@ fn q8_non_git_cwd_is_accepted() {
         let got_first = s.wait_first_bytes();
         s.wait_quiet();
 
-        // ★This is the whole item★: while a modal holds the process, "still Running after 5 s"
-        //   **cannot be false**. Measured in that state, "codex does not refuse a non-git cwd"
-        //   becomes an unfalsifiable claim and this gate row stays green while asking nothing.
-        //   Only checking **that the composer really takes keys** asks about the cwd policy.
-        // ★Acceptance has two shapes★ — the composer directly with no modal, or the composer
-        //   after the folder-trust modal (which version shows which: file header). A refusal or
-        //   warning screen must be neither: if the screen passed with CR was not the folder-trust
-        //   modal (no trust entry for this cwd appears in the temp home), the startup verb stops
-        //   right there, and if the composer is not reached the gate below stops.
+        // ★This is the whole item★: while a modal holds the process "still Running after 5 s" **cannot be false**, so "codex does not
+        //   refuse a non-git cwd" is unfalsifiable and the gate row stays green asking nothing. Only checking **that the composer really
+        //   takes keys** asks about the
+        //   cwd policy.
+        // ★Acceptance has two shapes★ — the composer directly with no modal, or after the folder-trust modal (which version shows which:
+        //   file header). A refusal or warning screen must be neither: if the screen passed with CR was not the folder-trust modal (no
+        //   trust entry for this cwd in the
+        //   temp home) the startup verb stops there, and if the composer is not reached the gate below stops.
         let startup = s.pass_startup_modal(probe, home.as_ref(), cwd.path());
         let modal = startup.outcome;
         let composer_ready = probe.composer_idle_marker.map(|_| startup.composer);
@@ -2430,7 +2317,8 @@ fn q9_caller_cannot_choose_the_session_id() {
 
         let cwd = Scratch::new("q9");
         let (_home, env) = sandbox_home(probe, "q9", HomeUse::Session);
-        // Asked by putting `--help` on the operating argv — help short-circuits at the parsing stage, so the same text comes out even with the preceding
+        // Asked by putting `--help` on the operating argv — help short-circuits at the parsing stage, so the same text comes out even with
+        //   the preceding
         // arguments in place (measured 0.153.4). It is the value that keeps this file's way of calling that CLI to one.
         let spec = harnessed_spec(&row, cwd.path(), &env, &["--help"]);
         let help_run = run_capture(
@@ -2496,10 +2384,10 @@ fn q10_shutdown_empties_the_process_tree() {
         s.wait_quiet();
 
         let root = s.child_pid.expect("did not get the PTY's direct child PID");
-        // What is assigned to the Job Object is the direct child (`cmd.exe`), and the real CLI is its grandchild·great-grandchild. That depth
-        // must be checked to actually exist first so that "the tree is empty" does not become an empty assertion.
-        // ★The seen list is **accumulated as a union**★ — holding only a snapshot taken once, a middle link born and dead in between
-        //   drops out of the list, and even if that link's child remains, nobody looks.
+        // The Job Object is assigned the direct child (`cmd.exe`); the real CLI is its grandchild·great-grandchild. That depth must be
+        //   checked to exist first so "the tree is empty" is not an empty assertion.
+        // ★The seen list is **accumulated as a union**★ — a single snapshot would drop a middle link born and dead in between, and even if
+        //   its child remains nobody looks.
         let mut tree_before: Vec<u32> = Vec::new();
         let deep = wait_until(Duration::from_secs(15), || {
             for p in descendants(root) {
@@ -2543,13 +2431,12 @@ fn q10_shutdown_empties_the_process_tree() {
 
         // ── From here on is the second verb ──────────────────────────────────────────────────
         //
-        // ★The PID disappearing only measured `shutdown()`★. ADR-0001's causality does not end there —
-        //   master drop → reader EOF → pump break → `core.finish` → done_tx follow after it, and what emits the terminal
-        //   transition is **the pump alone** (ADR-0005 · `docs/reference/architecture.md` 「Runtime invariants」: finalize exactly once ·
-        //   division of status notifications). So the observable result that the pump actually ended is **did status move to terminal**:
-        //   if it did not, `finish` was not called = the loop did not break.
-        // ★`finalized` cannot be seen directly★ (there is no public accessor). But `finish` writes status only on the winner path
-        //   that passed that swap, so a terminal status is the same fact as that flag having been set.
+        // ★The PID disappearing only measured `shutdown()`★. ADR-0001's causality continues: master drop → reader EOF → pump break →
+        //   `core.finish` → done_tx, and what emits the terminal transition is **the pump alone** (ADR-0005 ·
+        //   `docs/reference/architecture.md` 「Runtime invariants」). So the observable result that the pump ended is **did status move to
+        //   terminal** — if not, `finish` was not called = the loop did not break.
+        // ★`finalized` cannot be seen directly★ (no public accessor), but `finish` writes status only on the winner path that passed that
+        //   swap, so a terminal status is the same fact as that flag being set.
         assert!(
             !status_after.is_live(),
             "{}: the process is gone but status is still {status_after:?} — meaning the pump did not break the loop or \
@@ -2557,9 +2444,9 @@ fn q10_shutdown_empties_the_process_tree() {
              the **second verb** of the kill causality (ADR-0001) does not hold",
             row.name
         );
-        // ★Did it stick to the bound★ — `join_pump` discards the result of `recv_timeout` (`output_core.rs:383-392`), so
-        //   "waited and failed" and "ended right away" look like the same `()` to the caller. Only the duration tells the two apart.
-        //   Why the margin is large = what this assertion measures is not "is it fast" but "did it go up to the bound".
+        // ★Did it stick to the bound★ — `join_pump` discards the `recv_timeout` result (`output_core.rs:383-392`), so "waited and failed"
+        //   and "ended right away" look the same to the caller; only the duration tells. The margin is large because this measures "did it
+        //   go up to the bound", not "is it fast".
         assert!(
             join_took < JOIN_PUMP_TIMEOUT.mul_f32(0.9),
             "{}: join_pump took {join_took:?} — meaning it stuck to the bound ({JOIN_PUMP_TIMEOUT:?}), so \
@@ -2586,7 +2473,8 @@ fn q11_production_argv_is_accepted_and_reaches_a_composer() {
         let spec = production_spec(&row, cwd.path(), &env, &[]);
         assert_no_forbidden(&spec.args, &probe.safety, row.name);
 
-        // ★But is that argv really different from the swapped one★: if it is the same, this item measures exactly the same thing as the questions above,
+        // ★But is that argv really different from the swapped one★: if it is the same, this item measures exactly the same thing as the
+        //   questions above,
         //   and its reason to exist, 「the place that measures the operating policy」, quietly disappears. That silence is caught here.
         let swapped = safe_args(&spec.args, &probe.safety, row.name);
         assert_ne!(
@@ -2602,15 +2490,12 @@ fn q11_production_argv_is_accepted_and_reaches_a_composer() {
             row.name, spec.program, spec.args
         );
 
-        // ★No prompt is ever submitted★ — the only keys sent are the probe characters,
-        //   their erasure and one CR that pass the startup screen
-        //   ([`PtySession::pass_startup_modal`]). Without a model turn the write access
-        //   that policy grants never gets a chance to be used, and that is the only
-        //   reason this item is harmless while running the production policy as-is.
-        // ★That verb also carries the startup-path guarantee★ — if another first
-        //   screen appears under the production policy values, its post-CR check
-        //   (did a folder-trust entry for this cwd appear in the temp home) stops
-        //   the run. That is why this item has no modal assertion of its own.
+        // ★No prompt is ever submitted★ — the only keys sent are the probe characters, their erasure and one CR passing the startup screen
+        //   ([`PtySession::pass_startup_modal`]). Without a model turn the write access that policy grants is never used — the only reason
+        //   this item is harmless
+        //   running the production policy as is.
+        // ★That verb also carries the startup-path guarantee★ — another first screen under the production policy values is stopped by its
+        //   post-CR check (a folder-trust entry for this cwd in the temp home), so this item has no modal assertion of its own.
         let mut s = PtySession::open(&spec, 100, 24);
         let got_first = s.wait_first_bytes();
         s.wait_quiet();
@@ -2652,10 +2537,10 @@ fn q11_production_argv_is_accepted_and_reaches_a_composer() {
             row.name
         );
 
-        // ★This is all of this item — the remaining field is written down★: under this policy, **what the model can actually
-        //   do** is not measured. Measuring it needs putting in a prompt and running a turn, and that means running an agent holding write
-        //   permission in this test bench. The test bench's harmlessness weighs more than that, so they were not traded, and so
-        //   that field **is empty**. Do not read this item's green as 「the whole operating policy was verified」.
+        // ★This is all of this item — the remaining field is written down★: **what the model can actually do** under this policy is not
+        //   measured (it needs a prompt and a turn, i.e. an agent holding write permission in this bench; the bench's harmlessness weighs
+        //   more), so that field
+        //   **is empty**. Do not read this item's green as 「the whole operating policy was verified」.
     }
 }
 
@@ -2669,9 +2554,9 @@ fn short_tag(prefix: &str) -> String {
 
 /// In which file body under `root` (recursively) does `needle` appear — returns the first place.
 ///
-/// ★Why the file name is not pinned★: **in which file** that CLI writes the folder trust is a matter of the version, and what this
-///   question asks is 「was that decision written **inside** the state directory we passed」. Pinning the name would make the observation quietly
-///   an empty field the day that CLI moves the file.
+/// ★The file name is not pinned★: **which file** the CLI writes the folder trust in is version-specific, and the question is 「was that
+///   decision written **inside** the state directory we passed」; pinning the name would quietly make the observation an empty field the
+///   day the CLI moves the file.
 fn find_text_under(root: &Path, needle: &str) -> Option<PathBuf> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -2707,7 +2592,8 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
         let probe = row.probe.as_ref().unwrap();
         assert_program_present(&row);
 
-        // ★The declaration and the observation are tied here★ — this item runs as the ground of the `session.cwd_env` field. If that field flips to false,
+        // ★The declaration and the observation are tied here★ — this item runs as the ground of the `session.cwd_env` field. If that field
+        //   flips to false,
         //   the claim to measure itself is gone, so what follows cannot be left as is.
         assert!(
             row.backend.capabilities(&row.sample).session.cwd_env,
@@ -2715,7 +2601,8 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
             row.name
         );
 
-        // Two folders are dug: the **work root** the operating spec designates by argument, and **another folder** to actually launch the process in.
+        // Two folders are dug: the **work root** the operating spec designates by argument, and **another folder** to actually launch the
+        //   process in.
         let root_box = Scratch::new("q12r");
         let away_box = Scratch::new("q12a");
         let root_leaf = short_tag("root");
@@ -2724,27 +2611,23 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
         let away = away_box.path().join(&away_leaf);
         std::fs::create_dir_all(&root).expect("failed to create the work root folder");
         std::fs::create_dir_all(&away).expect("failed to create the process cwd folder");
-        // ★Both folders are made git repos★ — the trust record that is the evidence for
-        //   (b) below is written only by passing the trust modal, and a non-git folder
-        //   gets no modal (file header; measured 0.163.0: such a folder goes straight to
-        //   the composer and its path is written nowhere in the home). The process-cwd
-        //   side must be a repo too, so that "a record appeared for it" is something that
-        //   **can happen** — only then does that absence assertion measure anything.
-        // ★A run where that side wins is usually caught first by the startup
-        //   verb★ — it requires a trust entry for the **working root** after
-        //   the CR, so it stops if the modal offered to trust the process cwd.
-        //   The absence assertion below catches a run where both got written.
+        // ★Both folders are made git repos★ — the trust record that is evidence for (b) is written only by passing the trust modal, and a
+        //   non-git folder gets no modal (0.163.0: straight to the composer, path written nowhere in the home). The process-cwd side must
+        //   be a repo too so "a record
+        //   appeared for it" **can happen** — only then does the absence assertion measure anything.
+        // ★A run where that side wins is usually caught first by the startup verb★ — it requires a trust entry for the **working root**
+        //   after the CR, so it stops if the modal offered to trust the process cwd; the absence assertion below catches a run where both
+        //   got written.
         git_init_at(&root);
         git_init_at(&away);
 
         let (home, env) = sandbox_home(probe, "q12", HomeUse::Session);
         let mut spec = harnessed_spec(&row, &root, &env, &[]);
-        // ★Then only the process cwd is turned elsewhere★: if the two fields have the same value, 「did the work root come from the argument」
-        //   cannot be asked — because even if that argument were ignored entirely, the process cwd would produce **the same answer**.
-        //   This one line makes an unfalsifiable observation falsifiable, and that is all of this item.
-        // ★To that extent this is not the operating shape★ — operation gives the two the same value (`build_spec`). Splitting them
-        //   here is to experience 「which field decides the work root」, and the answer being **the argument side**
-        //   is the ground that operation can pass the cwd as is.
+        // ★Then only the process cwd is turned elsewhere★: with equal values 「did the work root come from the argument」 cannot be asked —
+        //   even if the argument were ignored the process cwd would produce **the same answer**. This line makes an unfalsifiable
+        //   observation falsifiable.
+        // ★Not the operating shape★ — operation gives both the same value (`build_spec`); splitting them shows 「which field decides the
+        //   work root」, and the answer being **the argument side** is the ground that operation can pass the cwd as is.
         spec.cwd = away.clone();
 
         let root_str = root.to_string_lossy().into_owned();
@@ -2771,11 +2654,10 @@ fn q12_working_root_comes_from_the_spawn_argument_and_env_reaches_the_process() 
         let modal = startup.outcome;
         let composer = assert_composer(&s, probe, &startup, row.name);
 
-        // ★Only the output after the startup screen is looked at★ — the consumed
-        //   trust modal's text also contains the working-root path (measured
-        //   0.163.0 `Trusting will apply to the repository root: …\root-…`).
-        //   Matching the whole accumulated screen would stay green thanks to
-        //   that sentence even if the working-root display disappeared.
+        // ★Only the output after the startup screen is looked at★ — the consumed trust modal's text also contains the working-root path
+        //   (0.163.0 `Trusting will apply to the repository root: …\root-…`); matching the whole accumulated screen would stay green on
+        //   that sentence even if the
+        //   working-root display disappeared.
         let settled = s.tail_text(startup.settled_from);
         let says_root = mentions(&settled, &root_leaf);
         let says_away = mentions(&settled, &away_leaf);

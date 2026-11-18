@@ -1,8 +1,8 @@
-//! Pickup block — does not let through the usage observations emitted by the decoder of an agent that is not the default account.
+//! Pickup block — lets through no usage observation emitted by the decoder of an agent that is not the default account.
 //!
-//! ★Why block it★: the receiving side's usage entry is the single `(vendor, default account)`. If observations of an agent spawned with another account
-//!   were let through, that account's values would mix into the default-account entry. Which env tells accounts apart is vendor knowledge, so the decision is made by
-//!   each vendor backend, and this module has only the wrapper that applies that decision and the env comparison.
+//! ★Why block★: the receiving side's usage entry is the single `(vendor, default account)`; observations of an agent spawned with another
+//!   account would mix into it. Which env tells accounts apart is vendor knowledge, decided by each vendor backend; this module has only
+//!   the wrapper applying that decision and the env comparison.
 
 use std::ffi::OsStr;
 
@@ -11,14 +11,12 @@ use crate::types::OutputEvent;
 
 use super::UsageObservation;
 
-/// A decoder wrapper that blocks usage — [`OutputDecoder::take_usage`] is always an empty vector, and output events pass
-/// through as they are. The decoder of an agent that picks up is not wrapped — only an agent decided not to pick up is wrapped (decision =
-/// `gate_decoder` of each vendor backend).
+/// A decoder wrapper that blocks usage — [`OutputDecoder::take_usage`] is always empty and output events pass through. Only an agent
+/// decided not to pick up is wrapped (decision = each vendor backend's `gate_decoder`).
 ///
-/// ★Forward **all** the trait's methods inward — even those with a default body★: a method not forwarded
-///   compiles but turns into the default behavior the moment it is wrapped. The damage reaches only agents that are not the default account
-///   (since only they are wrapped). Today's list = `decode` · `flush` · `take_usage`. When the trait gains a method,
-///   add the forwarding here too.
+/// ★Forward **all** the trait's methods inward — even those with a default body★: an unforwarded method compiles but silently takes the
+///   default behavior once wrapped, damaging only non-default-account agents (the only wrapped ones). Today = `decode` · `flush` ·
+///   `take_usage`; add forwarding when the trait gains a method.
 pub struct UsageGate {
     inner: Box<dyn OutputDecoder>,
 }
@@ -39,7 +37,7 @@ impl OutputDecoder for UsageGate {
     }
 
     fn take_usage(&mut self) -> Vec<UsageObservation> {
-        // Even when blocking, it empties the inside — if not emptied, the inner vector grows for the whole life of the agent.
+        // Empty the inner buffer even when blocking — otherwise it grows for the agent's whole life.
         drop(self.inner.take_usage());
         Vec::new()
     }
@@ -47,17 +45,14 @@ impl OutputDecoder for UsageGate {
 
 /// Does the spawn spec's env set `key` **differently** from the daemon's own value — the neutral part of the pickup decision on the account env.
 ///
-/// - `spec_env` = env **added** for the child (the child inherits the rest from the daemon). If the same key appears several times the last
-///   one wins (spawn applies them in order).
-/// - `daemon_value` = the daemon process's own value of that env. The caller reads and passes it — this function does not
-///   read the process env.
-/// - Result: `false` if the spec has no such key (inherited) · `false` if present and equal to the daemon value · `true` if absent from the daemon but
-///   present in the spec, or the value differs.
+/// - `spec_env` = env **added** for the child (the rest inherited from the daemon); for a repeated key the last wins (spawn applies in order).
+/// - `daemon_value` = the daemon process's own value, read and passed by the caller (this function does not read the process env).
+/// - Result: `false` if the spec has no such key (inherited) · `false` if present and equal to the daemon value · `true` if absent from
+///   the daemon but present in the spec, or the value differs.
 ///
-/// ★Keys are compared ASCII case-insensitively and values byte for byte★ — if it errs, we chose to err toward 「different」.
-///   The cost on that side is only not picking up a few observations of that agent, but on the other side another account's
-///   values mix into the default entry. So we do neither path normalization (trailing separator · case) nor folding an empty value into 「absent」.
-///   (On Windows env names are case-insensitive — on POSIX this comparison just catches more.)
+/// ★Keys compare ASCII case-insensitively and values byte for byte★ — erring toward 「different」 costs only a few of that agent's
+///   observations, while the other way mixes another account into the default entry. So no path normalization (trailing separator · case)
+///   and no folding an empty value into 「absent」. (Windows env names are case-insensitive; on POSIX this just catches more.)
 pub fn env_overrides_daemon(
     spec_env: &[(String, String)],
     key: &str,
@@ -94,8 +89,8 @@ mod tests {
         }
     }
 
-    /// A decoder that makes its own output per method — if the wrapper fails to forward any one inward, that output disappears.
-    /// The accumulated observations (`pending`) are visible from outside too — that is where we measure whether the wrapper emptied the inside.
+    /// A decoder that makes its own output per method — if the wrapper fails to forward one inward, that output disappears. The
+    /// accumulated observations (`pending`) are visible from outside — that is where we measure whether the wrapper emptied the inside.
     struct Distinct {
         decoded: Arc<Mutex<Vec<u8>>>,
         pending: Arc<Mutex<Vec<UsageObservation>>>,

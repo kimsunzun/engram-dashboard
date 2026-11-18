@@ -1,5 +1,5 @@
-//! Lookup of the target of `cmd.exe /c <target>` — the Windows branch of [`super::MissingProgramCheck`]. It looks by the same rules as cmd (working folder →
-//! `PATH`, extension = `PATHEXT`), and a lookup for the same target runs once at a time across the whole process ([`LookupGate`]).
+//! Lookup of the target of `cmd.exe /c <target>` — the Windows branch of [`super::MissingProgramCheck`]. Same rules as cmd (working folder
+//!   → `PATH`, extension = `PATHEXT`); a lookup for the same target runs once at a time process-wide ([`LookupGate`]).
 // ADR-0266
 
 use std::collections::BTreeSet;
@@ -27,7 +27,7 @@ const CMD_BUILTINS: &[&str] = &[
     "rmdir", "set", "setlocal", "shift", "start", "time", "title", "type", "ver", "verify", "vol",
 ];
 
-/// The target of `cmd.exe … /c <target> …` — only when it is a one-word program name (`None` for spaces, cmd special characters or an internal command).
+/// The target of `cmd.exe … /c <target> …` — only a one-word program name (`None` for spaces, cmd special characters or an internal command).
 fn cmd_target<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
     if !is_cmd_shell(program) {
         return None;
@@ -45,8 +45,8 @@ fn cmd_target<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
     (plain && !builtin).then_some(target)
 }
 
-/// The value of the env the child will receive — in the order `env_set` (the last wins) → `env_remove` → this process's own value. Case-insensitive,
-/// per Windows name rules.
+/// The value of the env the child will receive — order `env_set` (last wins) → `env_remove` → this process's own value; case-insensitive
+///   per Windows name rules.
 fn child_env(env_set: &[(String, String)], env_remove: &[String], key: &str) -> Option<OsString> {
     if let Some((_, value)) = env_set
         .iter()
@@ -61,7 +61,8 @@ fn child_env(env_set: &[(String, String)], env_remove: &[String], key: &str) -> 
     std::env::var_os(key)
 }
 
-/// Lookup of the target of `cmd.exe /c <target>` — the env the child received (`PATH` · `PATHEXT`) and the working folder are captured at startup.
+/// Lookup of the target of `cmd.exe /c <target>` — the env the child received (`PATH`, `PATHEXT`) and the working folder are captured at
+///   startup.
 #[derive(Clone)]
 pub(super) struct CmdLookup {
     target: String,
@@ -95,8 +96,8 @@ impl CmdLookup {
         })
     }
 
-    /// ★Remote entries are skipped★ ([`is_remote`]) — a program that exists only in a skipped entry is decided 「missing」. We chose that over
-    ///   a slow remote entry holding up the decision (it is wrong **only when the program in that entry failed**).
+    /// ★Remote entries are skipped★ ([`is_remote`]) — a program only in a skipped entry is decided "missing"; chosen over a slow remote
+    ///   entry holding up the decision (wrong **only when the program in that entry failed**).
     fn resolve(&self, deadline: Instant) -> TargetLookup {
         let pathext = self
             .pathext
@@ -166,12 +167,11 @@ impl CmdLookup {
 /// The production lookup list — one across the whole process ([`run_bounded`]).
 pub(super) static LOOKUPS_IN_FLIGHT: LookupGate = LookupGate::new();
 
-/// The list of target lookups in progress — ★a lookup for the same target runs once at a time; different targets do not block each other★. The target name's
-/// ASCII case is ignored (Windows names are case-insensitive — non-ASCII is not folded).
-///
-/// ★Do not merge it into a one-per-process marker★ — decisions run side by side (the agent usage query decides separately per vendor).
-///   If both targets are missing, two shells fail together within a few ms, and the later decision is blocked by the earlier lookup and becomes 「unknown」 instead of
-///   「missing」.
+/// The target lookups in progress — ★a lookup for one target runs at a time; different targets do not block each other★. Target ASCII case
+///   is ignored (Windows names are case-insensitive; non-ASCII not folded).
+/// ★Do not merge into a one-per-process marker★ — decisions run side by side (the agent usage query decides per vendor); if both targets
+///   are missing, two shells fail within a few ms and the later decision would be blocked by the earlier
+/// lookup and become "unknown" instead of "missing".
 pub(super) struct LookupGate(Mutex<BTreeSet<String>>);
 
 impl LookupGate {
@@ -179,8 +179,8 @@ impl LookupGate {
         Self(Mutex::new(BTreeSet::new()))
     }
 
-    /// Did it claim the slot for `target` — false if one is already running. ★If the lock is poisoned (an earlier panic), it counts as running★ —
-    /// it does not spread the panic and leaves the decision 「unknown」. The poison is not cleared — afterwards decisions on this list are always 「unknown」.
+    /// Did it claim the slot for `target` — false if one is already running. ★A poisoned lock counts as running★ — the panic is not spread
+    ///   and the decision stays "unknown"; the poison is never cleared, so decisions on this list are then always "unknown".
     fn claim(&self, target: &str) -> bool {
         match self.0.lock() {
             Ok(mut running) => running.insert(target.to_ascii_lowercase()),
@@ -195,7 +195,7 @@ impl LookupGate {
             .remove(&target.to_ascii_lowercase());
     }
 
-    /// Each test gets its own list — so tests running in parallel do not see each other's lookups as 「running」 (production has one list).
+    /// Each test gets its own list so parallel tests do not see each other's lookups as "running" (production has one list).
     #[cfg(test)]
     pub(super) fn own() -> &'static Self {
         Box::leak(Box::new(Self::new()))
@@ -214,12 +214,11 @@ impl Drop for InFlight {
     }
 }
 
-/// Runs `resolve` on another thread and waits only until the deadline — even if one file-system query blocks for a long time on a remote entry
-/// (a network drive that cannot be told apart etc.), the decision does not go past the deadline. The stuck thread ends by itself when that query is released.
-///
-/// ★While a lookup for `target` is running, it does not launch a new one but is [`TargetLookup::Busy`] right away★ ([`LookupGate`]) — if failed lookups
-///   repeat while a thread left past the deadline is stuck, one stuck thread would pile up per lookup. The decision in between
-///   is 「unknown」, so it does not fold into 「missing」.
+/// Runs `resolve` on another thread and waits only until the deadline — even if one file-system query blocks long on a remote entry (e.g.
+///   an undetectable network drive) the decision does not pass the deadline; the stuck thread ends by itself
+/// when the query is released. ★While a lookup for `target` runs, no new one is launched and the result is [`TargetLookup::Busy`] at once★
+///   ([`LookupGate`]) — repeated failures with a thread stuck past the deadline would pile up one stuck thread
+/// per lookup; the decision in between is "unknown", so it does not fold into "missing".
 fn run_bounded(
     deadline: Instant,
     gate: &'static LookupGate,
@@ -240,7 +239,8 @@ fn run_bounded(
             move || {
                 let release = InFlight { gate, target };
                 let found = resolve();
-                // Free it before sending the result — so that even if the receiver makes the next decision right away it does not look like 「still running」.
+                // Free it before sending the result — so that even if the receiver makes the next decision right away it does not look
+                //   like 「still running」.
                 drop(release);
                 let _ = tx.send(found);
             }
@@ -259,9 +259,9 @@ fn remaining(deadline: Instant) -> Option<Duration> {
         .filter(|left| !left.is_zero())
 }
 
-/// A location that may be remote — UNC (`\\server\share` · `\\?\UNC\…`) and non-drive device namespaces (`\\.\…` · `\\?\…`).
-/// ★A network drive connected by drive letter cannot be told apart★ — the API that tells them apart (`GetDriveTypeW`) lives in the `windows` feature
-///   (`Win32_Storage_FileSystem`), which this crate does not turn on. If such an entry blocks, the deadline of [`CmdLookup::run_within`] cuts it.
+/// A location that may be remote — UNC (`\\server\share`, `\\?\UNC\…`) and non-drive device namespaces (`\\.\…`, `\\?\…`). ★A network
+///   drive connected by drive letter cannot be told apart★ — `GetDriveTypeW` lives in the `windows` feature
+///   (`Win32_Storage_FileSystem`) this crate does not turn on; if such an entry blocks, the deadline of [`CmdLookup::run_within`] cuts it.
 fn is_remote(path: &Path) -> bool {
     use std::path::{Component, Prefix};
     match path.components().next() {
@@ -514,8 +514,8 @@ mod tests {
         assert_eq!(lookup.run_within(far(), gate), TargetLookup::Missing);
     }
 
-    /// ★A lookup for the same target runs once at a time★ — while a lookup stuck past the deadline remains, a decision on the same target (ASCII case
-    /// ignored) does not look anew and is 「unknown」. Other targets are still looked up in the meantime.
+    /// ★A lookup for one target runs at a time★ — while a lookup stuck past the deadline remains, a decision on the same target (ASCII
+    ///   case ignored) does not look anew and is "unknown"; other targets are still looked up.
     #[test]
     fn a_lookup_still_in_flight_keeps_a_second_one_for_the_same_target_from_starting() {
         let gate = LookupGate::own();
@@ -561,8 +561,8 @@ mod tests {
         });
     }
 
-    /// ★Different targets are looked up at the same time★ — even if two decisions overlap with both targets missing, both reach 「missing」. If each lookup
-    /// waited until the other was done running, one being blocked would make the other 「unknown」 at the deadline too.
+    /// ★Different targets are looked up at the same time★ — overlapping decisions with both targets missing both reach "missing"; if each
+    ///   waited for the other to finish, one blocked would make the other "unknown" at the deadline too.
     #[test]
     fn lookups_for_different_targets_run_side_by_side() {
         let gate = LookupGate::own();

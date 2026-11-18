@@ -1,9 +1,8 @@
-//! OS rules for handling files — opening while blocking others' writes and classifying its failures · deciding failures caused by someone briefly holding a file and
-//! retrying · folder sync. Uses only std — `OpenOptionsExt::share_mode` goes straight down to the share mode of `CreateFileW`
-//! and gets the same kernel behavior without unsafe, so no `windows` bindings are needed.
+//! OS rules for handling files — opening while blocking others' writes and classifying its failures · deciding failures caused by someone
+//!   briefly holding a file and retrying · folder sync. Uses only std —
+//! `OpenOptionsExt::share_mode` goes straight to `CreateFileW`'s share mode, so no `windows` bindings or unsafe.
 
-// ADR-0266
-// ADR-0291
+// ADR-0266, ADR-0291
 
 use std::fs::File;
 use std::io;
@@ -14,24 +13,19 @@ const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_SHARING_VIOLATION: i32 = 32;
 const ERROR_LOCK_VIOLATION: i32 = 33;
 
-/// Opens for read+write, creating the file if missing. Existing content is not truncated.
-///
-/// While this handle is open, other opens are shared **read only** — an open requesting write · delete (including rename)
-/// fails with a sharing violation ([`is_sharing_violation`]). Conversely, if someone already has this file open with write access
-/// or open while blocking write sharing, this open fails with a sharing violation. A read open where the other side shares writing
-/// (the default of Rust `std::fs::read`) opens alongside this handle. A read open that shares only reading collides with this
-/// handle's write access and is a sharing violation (measured 2026-08-14 — ADR-0135).
-///
-/// A file with the read-only **attribute** fails not with a sharing violation but with access denied ([`is_access_denied`]).
-///
-/// Outside Windows = fails with `ErrorKind::Unsupported` without trying to open — there is no means to put this sharing restriction in place.
-/// That error has no OS error code (`raw_os_error() == None`) — that is how it is told apart from an `Unsupported`
-/// the OS emitted while trying to open.
+/// Opens for read+write, creating the file if missing; existing content is not truncated. While this handle is open, other opens are
+///   shared **read only** — an open requesting write or delete (rename included) fails with a sharing violation
+/// ([`is_sharing_violation`]); conversely, if someone already has the file open with write access or blocking write sharing, this open
+///   fails with a sharing violation. A read open where the other side shares writing (the default of `std::fs::read`)
+/// opens alongside; a read open sharing only reading collides with this handle's write access (measured 2026-08-14 — ADR-0135). A
+///   read-only-**attribute** file fails with access denied ([`is_access_denied`]), not a sharing violation.
+/// Outside Windows = fails with `ErrorKind::Unsupported` without trying (no means to apply this sharing restriction); that error has no OS
+///   error code (`raw_os_error() == None`), which tells it from an OS-emitted `Unsupported`.
 #[cfg(windows)]
 pub fn open_deny_write(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
-    // `FILE_SHARE_READ` alone. Adding `WRITE` or `DELETE` would let others' write opens · deletes succeed as is, and what this function
-    //   blocks would vanish.
+    // `FILE_SHARE_READ` alone — adding `WRITE` or `DELETE` would let others' write opens and deletes succeed and what this function blocks
+    //   would vanish.
     const FILE_SHARE_READ: u32 = 1;
     std::fs::OpenOptions::new()
         .read(true)
@@ -45,32 +39,27 @@ pub fn open_deny_write(_path: &Path) -> io::Result<File> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-/// Was it blocked by the sharing restriction of a handle someone else holds (Windows `ERROR_SHARING_VIOLATION`). Once that handle closes, the same open
-/// can succeed. Outside Windows = always false.
-///
-/// std classifies this code as `ErrorKind::Uncategorized`, so it cannot be told apart by `kind()` (measured 2026-08-14).
+/// Was it blocked by the sharing restriction of a handle someone else holds (Windows `ERROR_SHARING_VIOLATION`); once that handle closes
+///   the same open can succeed. Outside Windows = always false.
+/// std classifies this code as `ErrorKind::Uncategorized`, so `kind()` cannot tell it (measured 2026-08-14).
 pub fn is_sharing_violation(e: &io::Error) -> bool {
     cfg!(windows) && e.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
 }
 
-/// Was access itself denied (Windows `ERROR_ACCESS_DENIED` — ACL denial, and when opening a file with the read-only attribute
-/// for writing). Unlike a sharing violation, it does not clear when someone else's handle closes. Outside Windows = always false — other OSes'
-/// `PermissionDenied` does not count as this.
+/// Was access itself denied (Windows `ERROR_ACCESS_DENIED` — ACL denial, and opening a read-only-attribute file for writing). Unlike a
+///   sharing violation it does not clear when another handle closes. Outside Windows = always false —
+/// other OSes' `PermissionDenied` does not count.
 pub fn is_access_denied(e: &io::Error) -> bool {
     cfg!(windows) && e.raw_os_error() == Some(ERROR_ACCESS_DENIED)
 }
 
-/// Is it a failure caused by someone briefly holding the file — when antivirus · indexers hold it, open · read · rename fail like this, and once they let go
-/// the same attempt can succeed. [`retry_busy`] uses this to decide whether to retry.
-///
-/// What counts = `ErrorKind::PermissionDenied` (all OSes — Windows `ERROR_ACCESS_DENIED` is this kind too) · Windows's
-/// `ERROR_SHARING_VIOLATION`(32) · `ERROR_LOCK_VIOLATION`(33).
-///
-/// ★Unlike [`is_access_denied`], access denied counts as locked★ — denials that never clear, like the read-only attribute · ACLs, are
-/// mixed in too, so such failures come back late, by [`retry_busy`]'s budget.
-///
-/// ★32 · 33 cannot be caught by kind★ — Rust std maps only 5 to `PermissionDenied` and leaves those two as an unnamed kind.
-/// So it looks at the OS code. On other OSes those numbers are different errors (Linux 32 = `EPIPE`).
+/// Is it a failure caused by someone briefly holding the file — antivirus/indexers make open, read and rename fail like this and the same
+///   attempt can succeed after they let go; [`retry_busy`] uses this. Counts: `ErrorKind::PermissionDenied`
+/// (all OSes; Windows `ERROR_ACCESS_DENIED` is this kind too) · Windows `ERROR_SHARING_VIOLATION`(32) · `ERROR_LOCK_VIOLATION`(33).
+/// ★Unlike [`is_access_denied`], access denied counts as locked★ — never-clearing denials (read-only attribute, ACLs) are mixed in, so
+///   those failures come back late, by [`retry_busy`]'s budget.
+/// ★32 and 33 cannot be caught by kind★ — std maps only 5 to `PermissionDenied`, leaving those two unnamed, so the OS code is read. On
+///   other OSes those numbers are different errors (Linux 32 = `EPIPE`).
 // ADR-0291: the lock decision · retry are a single platform policy.
 pub fn is_busy(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::PermissionDenied
@@ -81,25 +70,23 @@ pub fn is_busy(e: &io::Error) -> bool {
             ))
 }
 
-/// The budget of [`retry_busy`] — retries up to `retries` times after the first attempt, waiting `pause` before each retry.
-/// The extra waiting time in the worst case = `retries × pause`.
+/// The budget of [`retry_busy`] — up to `retries` retries after the first attempt, waiting `pause` before each; worst-case extra wait =
+///   `retries × pause`.
 #[derive(Clone, Copy, Debug)]
 pub struct Retry {
     pub retries: u32,
     pub pause: Duration,
 }
 
-/// Does `attempt` once, and if [`is_busy`], sleeps `retry.pause` and does it again — at most
-/// `retry.retries + 1` times including the first attempt.
-///
-/// Success and non-lock errors are returned right away. It does not sleep after the last attempt. When the budget runs out, it is the last lock error
-/// as is. It emits no logs (header rule 4).
+/// Does `attempt` once and, if [`is_busy`], sleeps `retry.pause` and retries — at most `retry.retries + 1` attempts. Success and non-lock
+///   errors return at once; no sleep after the last attempt; on budget exhaustion the last lock error
+/// is returned as is. No logs (header rule 4).
 pub fn retry_busy<T>(retry: Retry, attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     retry_busy_with(retry, attempt, std::thread::sleep)
 }
 
-/// Same as [`retry_busy`] but calls `pause` instead of sleeping — passing `retry.pause` before each retry. The seam that lets a test
-/// count retries without actually sleeping.
+/// Same as [`retry_busy`] but calls `pause` instead of sleeping (passing `retry.pause` before each retry) — the seam letting a test count
+///   retries without sleeping.
 pub fn retry_busy_with<T>(
     retry: Retry,
     mut attempt: impl FnMut() -> io::Result<T>,
@@ -117,11 +104,9 @@ pub fn retry_busy_with<T>(
     }
 }
 
-/// Persists one rename inside a folder to disk — called after the rename of an atomic write.
-///
-/// Outside Windows = opens the folder and `sync_all` (a missing folder = `NotFound`). Windows = does nothing and `Ok` — `Ok` even if the folder
-/// is missing.
-// ADR-0291: the OS split of folder sync is only here, with `#[cfg]`.
+/// Persists one rename inside a folder to disk — called after an atomic write's rename. Outside Windows = opens the folder and `sync_all`
+///   (missing folder = `NotFound`); Windows = nothing, `Ok` even if the folder is missing.
+// ADR-0291
 #[cfg(windows)]
 pub fn sync_dir(_dir: &Path) -> io::Result<()> {
     // std `File::open` cannot open folders on Windows (`PermissionDenied` · raw 5 — measured 2026-10-10 · rustc 1.95).

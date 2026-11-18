@@ -1,28 +1,27 @@
 //! Can a folder really be written to — creates a file in it, loads bytes, and deletes it (write probe).
 //!
-//! ★Several processes · several calls may check the same folder at the same time★ — the probe name differs per process ·
-//! call. A race where the folder vanishes mid-check is not retried by [`probe_write_in`] itself — the
-//! caller wraps it in [`retry_if_vanished`] to try once more. Whether to create the folder and which error to fold a failure into is
-//! also the caller's call.
+//! ★Several processes · calls may check the same folder at once★ — the probe name differs per process · call. A race where the folder
+//!   vanishes mid-check is not retried by [`probe_write_in`] itself; the caller wraps it in [`retry_if_vanished`] to try once more.
+//! Whether to create the folder and which error to fold a failure into is also the caller's call.
 // ADR-0269
 // ADR-0282
 
 use std::path::{Path, PathBuf};
 
-/// The leading part of the write-probe file name. A **tail that differs per process · call** follows — a file in the folder
-/// that starts with this prefix is probe residue.
+/// The leading part of the write-probe file name. A **tail that differs per process · call** follows — a file in the folder starting with
+///   this prefix is probe residue.
 ///
-/// ★Do not use a fixed name (do not revive it)★: several processes may probe the same folder at the same time, and if the name is
-/// the same the loser fails at `create_new` and **decides a healthy folder is "not writable"**. On top of that, under an
-/// ACL that blocks only deletion, one leftover file permanently blocks every later probe.
+/// ★Do not use a fixed name (do not revive it)★: several processes may probe the same folder at once, and with one name the loser fails at
+///   `create_new` and **decides a healthy folder is "not writable"**;
+/// under an ACL that blocks only deletion, one leftover file would block every later probe.
 pub const WRITE_PROBE_PREFIX: &str = ".engram-write-probe-";
 
-/// ★Do not write with 0 bytes★: even when the disk is full or the quota is exhausted, creating a zero-length file often
-/// succeeds — then the probe passes and the first real write fails. The check only counts if bytes are actually loaded.
+/// ★Do not write with 0 bytes★: even on a full disk or exhausted quota creating a zero-length file often succeeds — the probe would pass
+///   and the first real write fail; it only counts if bytes are actually loaded.
 const WRITE_PROBE_PAYLOAD: &[u8] = b"engram-write-probe";
 
-/// ★It goes all the way to sync_all★: a write that only sits in the cache passes straight through a full disk · an exhausted quota —
-/// only when the bytes actually land is "can write" true.
+/// ★It goes all the way to sync_all★: a write sitting in the cache passes through a full disk · exhausted quota — "can write" is true only
+///   when the bytes actually land.
 fn write_probe_payload(mut f: std::fs::File) -> std::io::Result<()> {
     use std::io::Write;
     f.write_all(WRITE_PROBE_PAYLOAD)?;
@@ -42,17 +41,17 @@ fn probe_path(dir: &Path) -> PathBuf {
 /// The probe file is created with `create_new` — it never overwrites an existing file of the same name. If it already exists,
 /// it is a trace of a failed cleanup last time, so it is deleted and tried once more (existence itself is not a failure reason).
 ///
-/// ★It may be left behind (contract)★: the created file is deleted, but in a folder that allows creation and blocks deletion **the deletion fails and
+/// ★It may be left behind (contract)★: the created file is deleted, but in a folder that allows creation and blocks deletion **the
+///   deletion fails and
 /// the file remains**. Then a warning log is left and it is treated as success — that it can be written has already been proven.
 pub fn probe_write_in(dir: &Path) -> std::io::Result<()> {
     probe_write_at(&probe_path(dir))
 }
 
-/// The body that takes the probe path as an argument — for a test to deterministically reproduce the failure branch "cannot create a file with that name",
-/// the name must be settable. The only production entry point is [`probe_write_in`].
+/// The body that takes the probe path as an argument — so a test can deterministically reproduce the "cannot create a file with that name"
+///   branch. The only production entry point is [`probe_write_in`].
 ///
-/// ★Why it returns `io::Result`★: the caller must see the `ErrorKind` — a `NotFound` where the folder vanished mid-check
-/// is a race, not "cannot write", and lumping the two here would remove any way to tell them apart.
+/// ★Why `io::Result`★: the caller must see the `ErrorKind` — a `NotFound` where the folder vanished mid-check is a race, not "cannot write".
 fn probe_write_at(probe: &Path) -> std::io::Result<()> {
     let create = |p: &Path| {
         std::fs::OpenOptions::new()
@@ -83,12 +82,11 @@ fn probe_write_at(probe: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// If `once` fails with `NotFound`, it is called **just once** more and that result is returned. Any other result is the first result
-/// as is.
+/// If `once` fails with `NotFound`, it is called **just once** more and that result is returned; any other result is the first result as is.
 ///
-/// ★Why it is needed (a real race)★: when two checks that revert a folder they made overlap, right after B sees the folder A made as
-/// "existing", A deletes it and B's probe falls over with `NotFound`. That is timing, not a permission problem, so
-/// a healthy folder must not be decided "not writable".
+/// ★Why it is needed (a real race)★: when two checks that revert a folder they made overlap, A deletes the folder right after B saw it as
+///   "existing" and B's probe falls over with `NotFound` — timing, not permission,
+/// so a healthy folder must not be decided "not writable".
 pub fn retry_if_vanished(mut once: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
     match once() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => once(),
@@ -114,9 +112,9 @@ mod tests {
         dir
     }
 
-    /// ★It aims at the reason the probe exists★: the folder exists but **a file cannot be created** in it. A check that only
-    /// looks at folder creation passes here. To reproduce deterministically without ACL manipulation, the probe name is injected and
-    /// that name is pre-claimed as a folder — a file can neither be created nor deleted with that name (measured: both code 5).
+    /// ★It aims at the reason the probe exists★: the folder exists but **a file cannot be created** in it (a folder-creation-only check
+    ///   passes here). Without ACL manipulation, the probe name is injected and pre-claimed as a folder —
+    /// a file can neither be created nor deleted with that name (measured: both code 5).
     #[test]
     fn writable_probe_rejects_a_name_it_cannot_create() {
         let dir = fresh_probe_dir("nofile");
@@ -150,7 +148,8 @@ mod tests {
         assert!(!still_there, "the leftover probe must be cleaned up too");
     }
 
-    /// Decision table — each line = the results `once` yields in turn (`None` = success) · the expected call count · the expected error. The overlapping-check
+    /// Decision table — each line = the results `once` yields in turn (`None` = success) · the expected call count · the expected error.
+    ///   The overlapping-check
     /// race test (consumer side) passes through this table only probabilistically, so it is measured deterministically here.
     #[test]
     fn retry_if_vanished_calls_again_only_after_not_found_and_only_once() {

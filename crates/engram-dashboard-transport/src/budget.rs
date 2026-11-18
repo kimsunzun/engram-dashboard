@@ -1,39 +1,28 @@
 //! Byte tally of what has been received — ★driving layer★ (TRD 3 §3-0 ① · ADR-0310 decision 17).
 //!
-//! One tally per supervisor ([`Ledger`]). The moment the read task reads a frame off the link, it adds that payload length
-//! ([`Ledger::charge`]); that share ([`Charge`]) travels with the item through the read-ahead queue → ordering area → upward queue (it may
-//! be held by the resume window along the way) and is subtracted when it drops — when the receiver takes it out, or when the supervisor discards it (a reply · an overlapping
-//! fragment · a fragment the window drops when the answer arrives). ★So one tally covers the three layers and the window★ — measuring each layer separately would let each fill up to its own cap
-//! so the sum grows as a product (read-ahead queue 512 entries × the one-message cap is that shape).
+//! One tally per supervisor ([`Ledger`]). When the read task reads a frame it adds the payload length ([`Ledger::charge`]); that share ([`Charge`]) travels with the item through the read-ahead queue →
+//! ordering area → upward queue (possibly held by the resume window) and is subtracted when it drops — taken out by the receiver, or discarded by the supervisor (a reply · an overlapping fragment · a fragment
+//! the window drops when the answer arrives). ★One tally covers the three layers and the window★ — per-layer caps would let each fill to its own cap and the sum grow as a product (512 read-ahead entries ×
+//! the one-message cap). ★The share rides on the item, not a layer★: it holds the tally of the supervisor that put it in while crossing read-ahead queue · ordering area · inbox ([`crate::Inbox`]); dropping the
+//! inbox drops the shares with the items.
 //!
-//! ★The share rides on the item, not on a layer★ — while an item crosses the read-ahead queue · ordering area · inbox ([`crate::Inbox`]),
-//! it must hold the tally of the supervisor that put it in, so that one tally covers all three layers. Dropping the inbox
-//! drops the shares along with the items it holds.
+//! ★The window share is counted separately inside the tally★ — bytes of stream fragments the resume window holds; added on holding ([`Charge::hold`]), subtracted on release or discard; the fill level is
+//! unchanged. Budget B splits into a read share and a window cap.
+//! - Read gate — if 「fill level − window share」 ≥ the read share, the read task stops reading. It decides by 「the fill level before adding」 (as net `CONN_RX_MAX_BYTES`), so while open one frame gets in
+//!   whatever its size. ★Subtracting the window share at the gate is the point★ — held fragments must not stop reading, or the replay that would fill their hole is unread and, arriving late after the deadline
+//!   close, dropped as a past number: a fillable hole becomes a permanent loss.
+//! - Window cap — the window share never exceeds the cap, even by one frame; a fragment that would is not held and the window closes as truncated (`Supervisor::route`).
 //!
-//! ★The window share is counted separately inside the tally★ — it is the bytes of stream fragments the resume window holds. The supervisor adds it when holding
-//! ([`Charge::hold`]) and subtracts it when releasing from the window or discarding. The whole tally (fill level) stays the same. Budget B is
-//! split into a read share and a window cap, and each gets its own cap.
-//! - Read gate — if 「fill level minus window share」 is at least the read share, the read task stops reading the link. The decision uses 「the fill level before adding」 (the same rule as net `CONN_RX_MAX_BYTES`), so while the gate is open one frame gets in whatever its size.
-//!   ★Subtracting the window share at the gate is the point★ — if held fragments stopped reading, the replay that would fill their hole could not be read, and
-//!   a replay arriving late, after the window closed at its deadline, is discarded as a past number. A hole that could have been filled becomes a permanent loss.
-//! - Window cap — the window share never goes over the cap, not even by one frame. A fragment that would exceed it is not held and the window
-//!   is closed as truncated (`Supervisor::route`).
+//! ★Splitting starts at the first stream fragment ([`Ledger::use_streams`])★: before, read share = B · window cap = 0; after, half and half ([`split`]). A non-stream peer (ADR-0310 decision 16 — both Wires'
+//! `stream_mark` is always `None`) has nothing for the window, so splitting from the start would only halve the read gate. `Wire` has no announcing field (adding one breaks every consumer — `wire.rs`),
+//! so it is learned from the first fragment.
 //!
-//! ★Splitting starts when the first stream fragment is seen ([`Ledger::use_streams`])★ — before that, read share = B · window cap = 0,
-//! and after that it is half and half ([`split`]). A peer that does not use the stream layer (ADR-0310 decision 16 — both Wires' `stream_mark` is
-//! always `None`) never has anything for the window to hold — splitting in half from the start would leave the window share at 0 and only halve the read gate. `Wire` has
-//! no field that announces in advance whether streams are used (adding one would break every consumer — `wire.rs`), so it is learned from the first fragment seen.
+//! ★Ceiling of the whole tally = read share + window cap + one message = B + M★ (TRD 3 §3-0 ①): only a read grows the tally, and only while the gate is open (fill level < read share + window cap), one frame
+//! at a time; window put/take does not change the fill level. It also holds when splitting starts (the read share only drops, so the gate only moves toward closing). The one-message cap is the adapter's
+//! (crate header 「known limits」).
 //!
-//! So the ceiling of the whole tally = read share + window cap + one message = B + M (TRD 3 §3-0 ①). Only a read grows the tally,
-//! and a read happens only while the gate is open (fill level < read share + window cap at that moment), one frame at a time — putting into or taking out of the window does not
-//! change the fill level, and even if a share taken out of the window after the gate was seen open but before that one frame is read closes the gate again, the fill level stays the same.
-//! It also holds at the moment splitting starts — the read share only drops from B to half, so the gate moves only toward closing, and what is held
-//! until then is below B + M. The cap for one message is set by the adapter (crate header 「known limits」).
-//!
-//! ★The tally is changed under one lock★ — three tasks open and close the gate: the read task (adds, then closes) · the supervisor (puts into the window and
-//! opens, takes out and closes, discards and opens) · the receiver (takes out and opens). Along with the gate state, the lock records the time the gate closed and the stretches where it
-//! closed and reopened ([`Ledger::take_shut`]), so that even if the supervisor notices a hold late, it does not lose the time that hold began, and
-//! even if the gate closed and reopened while the supervisor was waiting to write, it does not lose that time.
+//! ★One lock guards the tally★ — three tasks open/close the gate (read task: adds then closes · supervisor: window put/take/discard · receiver: takes out). Beside the gate state it records when the gate closed and
+//! the closed-and-reopened stretches ([`Ledger::take_shut`]), so a supervisor noticing a hold late, or one that missed a close/reopen while waiting to write, does not lose that time.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -42,32 +31,26 @@ use tokio::sync::Notify;
 
 use crate::clock::Clock;
 
-/// Splits the budget B of a stream-using supervisor into (read share, window cap). The read share never becomes 0 — at 0 the gate would never
-/// open.
-///
-/// Why half and half = the two must sum to B so that the ceiling of the whole tally is B + M (ADR-0310 decision 17), and half and half is the
-/// simplest value that starves neither side (an internal value set by the main session — there is no measured basis).
+/// Splits the budget B of a stream-using supervisor into (read share, window cap). The read share is never 0 (the gate would never open). Half and half: the two must sum to B for the B + M ceiling
+/// (ADR-0310 decision 17), and it is the simplest split that starves neither (an internal value, no measured basis).
 pub(crate) const fn split(budget: usize) -> (usize, usize) {
     let read = if budget / 2 == 0 { 1 } else { budget / 2 };
     (read, budget.saturating_sub(read))
 }
 
-/// Tally of payload bytes held by one supervisor — the window share is counted separately inside it (this file's header).
 pub(crate) struct Ledger {
     counts: Mutex<Counts>,
     /// Budget B — the read share and window cap are derived by [`Ledger::caps`] depending on whether streams are used.
     budget: usize,
-    /// Clock that records the time the gate closed — it must be the supervisor's own clock to agree with the supervisor's deadline calculation.
+    /// Clock recording when the gate closed — must be the supervisor's own so it agrees with its deadline calculation.
     clock: Arc<dyn Clock>,
     /// The read gate opened — the read task's share.
     reader_room: Notify,
-    /// The same fact, the supervisor's share. ★The wake-up handle is split in two★ — `notify_one` wakes only one waiter and stores
-    /// only one leftover permit, so if the two shared one handle, one side would eat the other's permit and the other would not wake.
+    /// The same fact, the supervisor's share. ★The wake-up handle is split in two★ — `notify_one` wakes one waiter and stores one permit, so a shared handle would let one side eat the other's permit.
     holder_room: Notify,
 }
 
 struct Counts {
-    /// Whole tally (fill level) — includes the window share.
     level: usize,
     held: usize,
     /// Whether a stream fragment has been seen — after that the budget is split in half ([`Ledger::use_streams`]).
@@ -99,7 +82,6 @@ impl Closed {
     }
 }
 
-/// Answer of [`Ledger::take_shut`] — how long the read gate was closed since the last query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Shut {
     /// The time it closed, if it is closed now.
@@ -125,8 +107,7 @@ impl Ledger {
         })
     }
 
-    /// (read share, window cap) — before streams are used, the whole budget is the read share (this file's header). Either way the sum is at most
-    /// the budget, so the ceiling B + M holds (at budget 0 the read share is 1 — so the gate never stays shut forever).
+    /// (read share, window cap) — before streams, the whole budget is the read share. The sum is at most the budget so B + M holds (budget 0 → read share 1, so the gate never stays shut forever).
     fn caps(&self, streams: bool) -> (usize, usize) {
         if streams {
             split(self.budget)
@@ -135,12 +116,11 @@ impl Ledger {
         }
     }
 
-    // Inside the lock there is only addition · subtraction · reading the time, so the tally stays intact even when poisoned.
+    // Inside the lock there is only add · subtract · read time, so the tally stays intact even when poisoned.
     fn counts(&self) -> MutexGuard<'_, Counts> {
         self.counts.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Whole tally — includes the window share.
     #[cfg(test)]
     pub(crate) fn level(&self) -> usize {
         self.counts().level
@@ -157,9 +137,8 @@ impl Ledger {
         self.counts().shut_at.is_some()
     }
 
-    /// If the read gate is closed now, returns the time it closed and the stretches that closed and reopened since the last call, and
-    /// forgets those stretches (times by this tally's clock). Called when the supervisor counts how long it held (`Supervisor::track_pause`) — with two
-    /// callers, one would not see the stretches the other took.
+    /// If the gate is closed now, returns when it closed and the closed-and-reopened stretches since the last call, and forgets those stretches (tally's clock). Used by `Supervisor::track_pause`
+    /// — with two callers one would not see what the other took.
     pub(crate) fn take_shut(&self) -> Shut {
         let mut c = self.counts();
         Shut {
@@ -168,14 +147,12 @@ impl Ledger {
         }
     }
 
-    /// A stream fragment was seen — from here on the budget is split in half into read share and window cap (this file's header). Never undone.
-    /// The read share only shrinks, so the gate may close but never opens because of this.
+    /// A stream fragment was seen — the budget is split from here (header); never undone. The read share only shrinks, so the gate may close but never opens because of this.
     pub(crate) fn use_streams(&self) {
         self.update(|c| c.streams = true);
     }
 
-    /// Whether these bytes can still be held in the window — the window cap decision. Unlike the read gate, it measures 「after adding」 — the window share never goes
-    /// over the cap, not even by one frame. Before [`Ledger::use_streams`] the cap is 0, so this is always false.
+    /// Whether these bytes can still be held in the window. Unlike the read gate it measures 「after adding」 — never over the cap, even by one frame. Before [`Ledger::use_streams`] the cap is 0, so always false.
     pub(crate) fn window_fits(&self, bytes: usize) -> bool {
         let c = self.counts();
         c.held.saturating_add(bytes) <= self.caps(c.streams).1
@@ -193,14 +170,13 @@ impl Ledger {
         }
     }
 
-    /// Waits until the read gate opens — called by the read task before its next read.
     pub(crate) async fn reader_room(&self) {
         while self.over() {
             self.reader_room.notified().await;
         }
     }
 
-    /// The supervisor's share of the same wait. ★Cancel-safe — hang it on a `select!` arm★: it checks the gate first on every poll.
+    /// The supervisor's share of the same wait. ★Cancel-safe — usable on a `select!` arm★ (checks the gate first on every poll).
     pub(crate) async fn holder_room(&self) {
         while self.over() {
             self.holder_room.notified().await;
@@ -225,9 +201,8 @@ impl Ledger {
                 _ => false,
             }
         };
-        // ★Wake on every gate opening★ — the woken side looks at the gate again and sleeps again if it is closed (the `while` above). So
-        //   however many times the gate opens and closes while it sleeps, one leftover permit is enough, and if the gate opened before the wait, that permit ends the next wait
-        //   at once. The wake happens outside the lock — the woken side takes that lock right away.
+        // ★Wake on every gate opening★ — the woken side re-checks and sleeps again if closed (the `while` above), so one leftover permit suffices however often it opens and closes meanwhile and ends the next
+        //   wait at once if the gate opened before it. The wake is outside the lock (the woken side takes it right away).
         if opened {
             self.reader_room.notify_one();
             self.holder_room.notify_one();
@@ -257,8 +232,7 @@ impl Charge {
         self.bytes
     }
 
-    /// Counts this share as a window share — called when the supervisor holds a fragment in the resume window. The fill level stays the same and the read gate
-    /// may open (then it wakes). If it is already a window share or an empty share, nothing changes.
+    /// Counts this share as a window share — when the supervisor holds a fragment in the resume window. The fill level is unchanged and the read gate may open (waking); no change if already a window share or empty.
     pub(crate) fn hold(&mut self) {
         if let (Some(ledger), false) = (&self.ledger, self.held) {
             let bytes = self.bytes;
@@ -291,7 +265,6 @@ impl Drop for Charge {
     }
 }
 
-/// An item that crosses holding its share.
 pub(crate) struct Charged<T> {
     pub item: T,
     pub charge: Charge,
@@ -305,7 +278,6 @@ impl<T> Charged<T> {
         }
     }
 
-    /// Takes it out — the share drops here (the receiver took it out).
     pub(crate) fn into_item(self) -> T {
         let Self { item, charge } = self;
         drop(charge);
@@ -386,7 +358,7 @@ mod tests {
         assert_eq!(ledger.level(), 0);
     }
 
-    // ★The gate opens while both sides are asleep★ — if it were before going to sleep, the gate check would release them first and the wake-up could not be measured.
+    // ★The gate opens while both sides are asleep★ — opened before they sleep, the gate check releases them first and the wake-up goes unmeasured.
     #[tokio::test]
     async fn opening_the_gate_wakes_both_the_reader_and_the_holder() {
         let (ledger, _clock) = ledger();
@@ -429,8 +401,7 @@ mod tests {
         );
     }
 
-    // ★A fragment counted as a window share does not stop the read gate★ — this is the concrete case of held fragments not blocking the read of the replay that would fill
-    //   their hole. The fill level stays the same (one tally).
+    // ★A fragment counted as a window share does not stop the read gate★ — held fragments must not block reading the replay that would fill their hole; the fill level is unchanged.
     #[tokio::test]
     async fn holding_a_charge_takes_it_out_of_the_gate_but_not_out_of_the_level() {
         let (ledger, _clock) = ledger();
@@ -505,8 +476,8 @@ mod tests {
         drop(small);
     }
 
-    // ★Gather the stretches that closed and reopened until the supervisor asks★ — if the gate opens and closes while the supervisor waits to write, the start of the
-    //   loop sees only an open gate. If that time were lost, it would be counted toward the window deadline and a hole that could have been filled would fold into truncation.
+    // ★Gather closed-and-reopened stretches until the supervisor asks★ — if the gate opens and closes while it waits to write, the loop start sees only an open gate; lost time would count toward the window
+    //   deadline and fold a fillable hole into truncation.
     #[test]
     fn the_gate_adds_up_every_interval_it_was_shut_until_asked() {
         let (ledger, clock) = ledger();
@@ -557,8 +528,8 @@ mod tests {
         );
     }
 
-    // ★Before a stream fragment is seen, the whole budget is the read share and the window cap is 0★ — the read gate of a peer that does not use streams (ADR-0310
-    //   decision 16) is not halved. Once a fragment is seen the budget is split in half, and if more than half is already held, the gate closes on the spot.
+    // ★Before a stream fragment the whole budget is the read share and the window cap is 0★ (ADR-0310 decision 16): a non-stream peer's gate is not halved. After the first fragment it halves, and if more than half
+    //   is already held the gate closes at once.
     #[test]
     fn the_whole_budget_is_the_read_share_until_streams_are_used() {
         let clock = ManualClock::new();

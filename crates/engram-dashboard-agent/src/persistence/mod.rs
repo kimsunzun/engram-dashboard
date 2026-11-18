@@ -1,19 +1,17 @@
-//! Profile and preset persistence — the store for `agents.json` and `presets.json`. Both files call this module's one internal store
+//! Profile and preset persistence — the store for `agents.json` and `presets.json`. Both files use this module's one internal store
 //! (same rules, same implementation).
 //!
-//! The rules are the data-file rules of base `file` (ADR-0291):
-//! - Writes are atomic (temp in the same folder → rename) — even on a crash no half file is left.
-//! - ★「may it be overwritten」 is decided on every save by re-reading the current file right before it★ — a file written by a newer edition or a file that cannot be read
-//!   is neither overwritten nor copied aside, and that save is refused. A damaged file is copied aside to `<name>.corrupt` before overwriting, and if the copy-aside
-//!   fails that save fails too (original left as is). Loading does not change the file.
-//! - ★If the load decision is a refusal (newer edition · unreadable), nothing is saved for the whole run★ — the in-memory registry did not come from
-//!   that file, so even if the file later becomes readable and the re-decision answers 「writable」, writing an empty registry over it would lose
-//!   the whole registry.
+//! The rules are base `file`'s data-file rules (ADR-0291):
+//! - Writes are atomic (temp in the same folder → rename) — no half file on a crash.
+//! - ★「may it be overwritten」 is decided on every save by re-reading the current file right before it★ — a file from a newer edition or an
+//!   unreadable file is neither overwritten nor copied aside, and that save is refused. A damaged file is copied aside to `<name>.corrupt`
+//!   before overwriting; if the copy-aside fails, that save fails too (original left as is). Loading does not change the file.
+//! - ★A load-time refusal (newer edition · unreadable) means nothing is saved for the whole run★ — the in-memory registry did not come
+//!   from that file, so even if the file later becomes readable, writing an empty registry over it would lose the whole registry.
 //!
-//! ★Serializing saves is the caller's job★ — the registry saves while holding its own map lock (ADR-0071), and in production
-//! the registry is the only one calling the store. The only lock this module holds is one leaf (the store-state field), and while holding it it does no IO, logging or
-//! outside calls — lock order = `latch → expected field → profiles|presets → store-state field`.
-// ADR-0291
+//! ★Serializing saves is the caller's job★ — the registry saves while holding its own map lock (ADR-0071) and is the only production caller.
+//! This module holds one leaf lock (the store-state field) and does no IO, logging or outside calls under it — lock order =
+//! `latch → expected field → profiles|presets → store-state field`.
 
 use std::fs;
 use std::io;
@@ -46,13 +44,13 @@ const PROFILES: FileKind = FileKind {
     spec: file::Spec {
         version_key: "schema_version",
         current: 1,
-        // ADR-0291 R6: about ten thousand times the measured size (1,747 B on this PC) — never reached in normal use, a line that protects memory from garbage files.
+        // ADR-0291 R6: about ten thousand times the measured size (1,747 B on this PC) — never reached in normal use, a line that protects
+        //   memory from garbage files.
         cap: 16 * 1024 * 1024,
         shape: profiles_shape,
     },
 };
 
-/// Write-side disk representation — always carries the version key (reading looks only at the list field via [`read_list`]).
 #[derive(Serialize)]
 struct ProfilesFile<'a> {
     schema_version: u64,
@@ -96,8 +94,7 @@ fn profiles_shape(version: u64, doc: &Map<String, Value>) -> Result<(), String> 
     list_shape::<AgentProfile>(&PROFILES, version, doc)
 }
 
-/// Warns if env has keys that look like credentials (security). Does not block persisting, but tells about the plaintext storage risk
-/// in the log. Ideally a secret exclusion list, but visibility comes first.
+/// Warns if env has keys that look like credentials (security). Does not block persisting; the log tells about the plaintext storage risk.
 fn warn_if_secret(profiles: &[AgentProfile]) {
     const NEEDLES: [&str; 4] = ["KEY", "TOKEN", "SECRET", "PASSWORD"];
     for p in profiles {
@@ -116,16 +113,15 @@ fn warn_if_secret(profiles: &[AgentProfile]) {
 
 // ── OS share ────────────────────────────────────────────────────────────────────────
 
-/// Save · re-decision right before saving · copy aside — the data-file budget (a constant of base `file`).
 const DATA_HOOKS: OsHooks = OsHooks {
     retry: retry_data,
     sync_dir,
 };
 
 /// Load read — uses a separate long budget.
-// ADR-0291 R14 (D7): a lock still held there makes this run read-only for its whole duration (R17), so it is kept long so that one brief hold does not bind
-//   the whole run. The upper end is set by the shell's daemon-discovery deadline (5 seconds — on failure `Down` without retry): loading comes before the connection info
-//   is published, so with a worst case of about 2 seconds for both files together the rest of startup's share remains.
+// ADR-0291 R14 (D7): a lock still held there makes this run read-only for its whole duration (R17), so it is kept long so that one brief
+//   hold does not bind the whole run. The upper end is the shell's daemon-discovery deadline (5 s — on failure `Down` without retry):
+//   loading comes before the connection info is published, and a worst case of ~2 s for both files leaves the rest of startup its share.
 const LOAD_HOOKS: OsHooks = OsHooks {
     retry: retry_load,
     sync_dir,
@@ -155,20 +151,16 @@ fn retry_load(attempt: &mut dyn FnMut() -> io::Result<()>) -> io::Result<()> {
 
 // ── Common store ──────────────────────────────────────────────────────────────────
 
-/// The share of one file — the owner module keeps it as a constant.
 #[derive(Clone, Copy)]
 struct FileKind {
-    /// File name — also the `file` field of logs.
     name: &'static str,
-    /// The fixed temp name old builds used. `file::sweep_temps` leaves unnumbered names alone as possibly someone else's, so
-    /// the store removes this name itself (ADR-0291 R12).
+    /// The fixed temp name old builds used. `file::sweep_temps` leaves unnumbered names alone as possibly someone else's, so the store
+    ///   removes it itself (ADR-0291 R12).
     legacy_tmp: &'static str,
-    /// The top-level field carrying the list.
     list_key: &'static str,
     spec: file::Spec,
 }
 
-/// The common store for `agents.json` · `presets.json` — the state set is [`StoreStatus`].
 struct FileStore {
     dir: PathBuf,
     kind: FileKind,
@@ -178,12 +170,11 @@ struct FileStore {
 }
 
 struct StoreState {
-    /// Whether the first [`FileStore::load`] has run — the load refusal and its `Claim` are set only then.
     loaded: bool,
     /// The refusal of the load decision — stays for the whole run (R17).
     load_refusal: Option<Refusal>,
-    /// The re-decision refusal of the last save — erased before writing when the next re-decision accepts (D6 — a write failure after that is not
-    /// a refusal). While the same reason continues, the log level is lowered (R15).
+    /// The re-decision refusal of the last save — erased before writing when the next re-decision accepts (D6 — a later write failure is not a
+    /// refusal). While the same reason continues, the log level is lowered (R15).
     last_refusal: Option<Refusal>,
     /// `NotYet` before the first load, or if the load found nothing or damage and nothing has been written yet (D14).
     claim: Claim,
@@ -218,15 +209,14 @@ impl FileStore {
 
     /// Reads the file and returns the list — an empty list if missing, damaged or refused. Does not change the file.
     ///
-    /// ★The load refusal and `Claim` are set only on the first call★ — later calls only read and return, and do not lower a `Claim` raised
-    /// by an earlier successful write either. The first call also sweeps leftover temp files — it removes this process's too, so it must be called when
-    /// no save of the same file is in progress (when the registry is created).
+    /// ★The load refusal and `Claim` are set only on the first call★ — later calls only read, and do not lower a `Claim` raised by an
+    /// earlier successful write. The first call also sweeps leftover temp files (this process's too), so call it when no save of the same
+    ///   file is in progress (registry creation).
     fn load<T: DeserializeOwned>(&self) -> Vec<T> {
         let first = !std::mem::replace(&mut sync::lock(&self.state).loaded, true);
         if first {
-            // Assumes one store per path in a process (production = daemon assembly creates one per path).
-            //   If a second store is created on the same path, its first load can remove the temp file the first store is writing (in this pid's
-            //   numbered form).
+            // Assumes one store per path in a process (production: the daemon assembly creates one per path). A second store on the same
+            //   path could have its first load remove the temp file the first store is writing (this pid's numbered form).
             self.sweep_temps();
         }
         let name = self.kind.name;
@@ -241,8 +231,8 @@ impl FileStore {
             Loaded::Parsed(Parsed::Usable { doc, .. }) => match read_list(&doc, self.kind.list_key)
             {
                 Ok(items) => (items, LoadVerdict::Adopted),
-                // The shape check already passed the same function — getting here means the two disagree, so the file is not claimed
-                //   as ours (it is copied aside before the first save overwrites it).
+                // The shape check already passed the same function — getting here means the two disagree, so the file is not claimed as ours
+                //   (copied aside before the first save overwrites it).
                 Err(reason) => {
                     tracing::error!(
                         file = name,
@@ -306,9 +296,9 @@ impl FileStore {
         items
     }
 
-    /// Re-decides the current file right before writing, then writes. [`StoreError::ReadOnly`] on a load refusal · [`StoreError::Refused`] on a re-decision
-    /// refusal (does not write) · [`StoreError::Io`] on a serialization, cap, copy-aside or write failure (file left as is).
-    /// Logs are emitted here.
+    /// Re-decides the current file right before writing, then writes. [`StoreError::ReadOnly`] on a load refusal · [`StoreError::Refused`]
+    /// on a re-decision refusal (no write) · [`StoreError::Io`] on a serialization, cap, copy-aside or write failure (file left as is).
+    ///   Logs are emitted here.
     // ADR-0291 R8 · R15 · R16 · R17
     fn save(&self, count: usize, payload: &impl Serialize) -> Result<(), StoreError> {
         let name = self.kind.name;
@@ -344,8 +334,8 @@ impl FileStore {
         if let WritePolicy::Refuse(refused) = policy {
             return Err(self.refused(refused, &current));
         }
-        // ★If the re-decision accepted, the refusal marker is cleared before writing★ — a later copy-aside or write failure is `Io`, not a refusal, so
-        //   if it were cleared only on write success, `agent.list` would keep showing an already-cleared refusal (`Refusing`) during that failure (D6).
+        // ★If the re-decision accepted, the refusal marker is cleared before writing★ — a later copy-aside or write failure is `Io`, not a
+        //   refusal; clearing only on write success would leave `agent.list` showing a stale `Refusing` during that failure (D6).
         self.accepted();
         if policy == WritePolicy::CopyAsideFirst {
             let what = match current {
@@ -383,7 +373,7 @@ impl FileStore {
         }
     }
 
-    /// Leaves the re-decision refusal in the state field and logs — debug while the same reason continues (R15).
+    // ADR-0291 R15
     fn refused(&self, refused: Refused, current: &Loaded) -> StoreError {
         let name = self.kind.name;
         let refusal = match refused {
@@ -462,7 +452,8 @@ impl FileStore {
     }
 }
 
-/// The owner's shape check (`Spec::shape`) — loading gets the value through the same [`read_list`], so the two definitions of damage do not diverge.
+/// The owner's shape check (`Spec::shape`) — loading gets the value through the same [`read_list`], so the two definitions of damage
+///   cannot diverge.
 // ADR-0291 R7 (D1)
 fn list_shape<T: DeserializeOwned>(
     kind: &FileKind,
@@ -492,9 +483,8 @@ fn read_list<T: DeserializeOwned>(doc: &Map<String, Value>, key: &str) -> Result
         .enumerate()
         .map(|(index, item)| {
             T::deserialize(item).map_err(|e| {
-                // The serde_json error text is not carried — it copies field values like 「invalid type: string "…"」, so if this
-                //   reason goes out to the log, values like the profile env leak. Line and column are read from the value tree and are always 0, so the item
-                //   number is carried instead.
+                // The serde_json error text is not carried — it copies field values (「invalid type: string "…"」), so logging it would leak
+                //   values like the profile env. Line and column are always 0 (read from the value tree), so the item number is carried instead.
                 format!(
                     "could not read item {index} of `{key}` (category {:?})",
                     e.classify()
@@ -542,11 +532,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// ★A binary reverted to the previous release must be able to read this file★: that struct declares `epoch` as a **required**
-    /// field, so without the key parsing breaks with `missing field`, and that release's persistence moves the file
-    /// to `.corrupt-<ts>` and starts with an empty list, after which the next save overwrites with that empty list and the profiles, session ids and tree
-    /// parents disappear wholesale.
-    /// The value carried is not the live marker but a fixed `0` (the "no respawn" state of the old counter — see the `AgentProfile::epoch` comment).
+    /// ★A binary reverted to the previous release must be able to read this file★: that struct declares `epoch` as **required**, so
+    /// without the key parsing fails with `missing field`, that release moves the file to `.corrupt-<ts>` and starts empty, and the next
+    /// save overwrites it — profiles, session ids and tree parents disappear wholesale. The value carried is a fixed `0` (the old
+    ///   counter's "no respawn" state — see the `AgentProfile::epoch` comment), not the live marker.
     #[test]
     fn agents_json_carries_a_zero_epoch_key_for_older_readers() {
         let dir = temp_dir("epoch-key");
@@ -624,8 +613,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// ★Does not keep holding the load decision★ — if it did, after the first save it would copy aside our healthy file on every save and erase the real damaged
-    /// copy.
+    /// ★Does not keep holding the load decision★ — otherwise, after the first save, every save would copy aside our healthy file and erase
+    ///   the real damaged copy.
     #[test]
     fn after_the_first_save_the_file_is_not_copied_aside_again() {
         let dir = temp_dir("corrupt-once");
@@ -697,7 +686,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Puts a folder where the file goes to make reading fail (Windows = access denied → retried for the load budget and fails as is).
     #[test]
     fn an_unreadable_file_keeps_the_store_read_only_even_after_it_goes_away() {
         let dir = temp_dir("unreadable");
@@ -745,8 +733,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// ★A write failure after the re-decision accepted is not a refusal★ — the refusal marker is cleared at that re-decision and does not stay
-    ///   as `Refusing` during `Io` (D6). Puts a folder at the copy-aside location to make the copy-aside of the damaged file fail.
+    /// ★A write failure after the re-decision accepted is not a refusal★ — the marker is cleared at that re-decision and does not stay
+    ///   `Refusing` during `Io` (D6). A folder placed at the copy-aside location makes the damaged file's copy-aside fail.
     // ADR-0291 R17 (D6)
     #[test]
     fn an_io_failure_after_an_accepting_rejudge_does_not_leave_the_store_refusing() {
@@ -778,7 +766,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// If someone restored a file that was missing at load while the run was going, the first save copies it aside before overwriting — only once.
+    /// If someone restored a file that was missing at load while the run was going, the first save copies it aside before overwriting —
+    ///   only once.
     #[test]
     fn a_usable_file_placed_after_a_missing_load_is_copied_aside_once() {
         let dir = temp_dir("not-yet");
@@ -844,7 +833,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The shape-failure reason goes out to the log — it must not copy field values (things like the profile env).
     #[test]
     fn a_shape_failure_reason_does_not_echo_field_values() {
         let mut doc: Value = serde_json::from_str(&file_text(&[sample()])).unwrap();

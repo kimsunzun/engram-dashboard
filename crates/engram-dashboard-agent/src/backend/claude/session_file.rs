@@ -1,24 +1,23 @@
 //! Observing the claude session file — the claude implementation of the [`SessionIdSource`] port (ADR-0004).
 //!
-//! This file owns three things: the **path convention** of `~/.claude/sessions/<PID>.json` · the **JSON
-//! schema** of that file · the **scan** that recovers the PID mismatch caused by the shim. The runner ([`crate::session_tracker`])
-//! holds only the period · registry · callback and knows none of these three.
+//! This file owns three things: the **path convention** of `~/.claude/sessions/<PID>.json` · the **JSON schema** of that file · the
+//! **scan** that recovers the PID mismatch caused by the shim. The runner ([`crate::session_tracker`]) knows none of these.
 //!
 //! ## Why observe
-//! The sid we assign with `--session-id` at spawn **changes while the process stays the same** through `/clear` · `/resume`
-//! (measured in a spike). claude writes the changed value into the file above in real time, so reading that file by our child PID
-//! tells us the current sid deterministically. If we do not keep up, the next restore revives the old session.
+//! The sid we assign with `--session-id` at spawn **changes while the process stays the same** through `/clear` · `/resume` (measured in a
+//! spike). claude writes the changed value into that file in real time, so reading it by our child PID gives the current sid
+//! deterministically; missing it makes the next restore revive the old session.
 //!
 //! ## Grade: best-effort — do not hang correctness on this
-//! This is an unofficial internal claude file, so its format and existence may change with each version. Even if it cannot be read, the path that resumes from the first assigned sid
-//! survives as it is, degrading without damage. So:
-//! - It uses **polling** instead of a directory watch (file handle loss) — simple and robust.
-//! - The runner's feature toggle can turn it off without a code deploy even if a claude update breaks the format.
+//! An unofficial internal claude file: its format and existence may change per version. If unreadable, resuming from the first assigned
+//! sid survives as is. So:
+//! - **Polling** instead of a directory watch (file handle loss) — simple and robust.
+//! - The runner's feature toggle turns it off without a code deploy if a claude update breaks the format.
 //!
 //! ## PID shim bypass (H-1.1)
-//! On Windows, if `claude` goes through a shim (`claude.cmd`→cmd→node), our child PID ≠ the file's PID.
-//! So it looks at `<child_pid>.json` first, and if that does not match, it scans all of `sessions/*.json` for the file with the sid we assigned
-//! (unique) and **learns the actual PID** (not a guess — deterministic).
+//! On Windows, `claude` behind a shim (`claude.cmd`→cmd→node) makes our child PID ≠ the file's PID. So it reads `<child_pid>.json` first,
+//! and on a mismatch scans `sessions/*.json` for the file with the sid we assigned (unique) and **learns the actual PID** (deterministic,
+//!   not a guess).
 // ADR-0004
 
 use std::fs;
@@ -34,13 +33,12 @@ use crate::types::AgentId;
 
 /// Number of polls before giving up when the session file is not visible (≈ the observation window of runner period × N).
 const MAX_RESOLVE_ATTEMPTS: u32 = 15;
-/// Number of short retries on a file read sharing violation (while claude is writing).
+/// Short retries on a file read sharing violation (while claude is writing).
 const READ_RETRIES: u32 = 3;
 
 // ── Session file representation (lenient parsing) ────────────────────────────────────────────────
 
-/// A partial representation of `sessions/<pid>.json`. It is an unofficial file, so every field is optional
-/// and unknown fields are ignored (serde default).
+/// A partial representation of `sessions/<pid>.json` — unofficial, so every field is optional and unknown fields are ignored (serde default).
 #[derive(Debug, Deserialize)]
 struct SessionFile {
     #[serde(default)]
@@ -59,7 +57,6 @@ fn parse_session_json(bytes: &[u8]) -> Option<SessionFile> {
     serde_json::from_slice::<SessionFile>(bytes).ok()
 }
 
-/// `None` if absent; transient errors such as a sharing violation are retried briefly.
 fn read_session_path(path: &Path) -> Option<SessionFile> {
     for attempt in 0..READ_RETRIES {
         match fs::read(path) {
@@ -92,9 +89,8 @@ enum ResolveOutcome {
     NotFound,
 }
 
-/// Finds the real session file's PID deterministically by the (unique) `expected` sid we assigned.
-/// A scan of the whole directory differs from the "guess the latest file" that §8 forbids — our sid is unique, so
-/// the match is deterministic.
+/// Finds the real session file's PID by the (unique) `expected` sid we assigned. A whole-directory scan is not the "guess the latest file"
+/// that §8 forbids — our sid is unique, so the match is deterministic.
 fn resolve_in_dir(dir: &Path, child_pid: u32, expected: Uuid) -> ResolveOutcome {
     let direct = dir.join(format!("{child_pid}.json"));
     if let Some(sf) = read_session_path(&direct) {
@@ -124,7 +120,6 @@ fn resolve_in_dir(dir: &Path, child_pid: u32, expected: Uuid) -> ResolveOutcome 
 
 // ── Observer ─────────────────────────────────────────────────────────────────────
 
-/// Observation state of one agent's claude session file.
 pub(super) struct ClaudeSessionIdSource {
     dir: PathBuf,
     /// Only a correlation key for diagnostic logs — not used to choose what to read.
@@ -134,9 +129,8 @@ pub(super) struct ClaudeSessionIdSource {
     expected_sid: Uuid,
     /// The actual file PID learned through the PID shim bypass. None means not yet resolved.
     resolved_pid: Option<u32>,
-    /// The sid last observed (initially = expected). A difference from it counts as a change.
+    /// The sid last observed (initially = `expected_sid`) — a difference from it counts as a change.
     last_seen_sid: Uuid,
-    /// Number of attempts in the unresolved state (for the give-up decision).
     attempts: u32,
 }
 
@@ -296,7 +290,8 @@ mod tests {
 
         let mut source = source_in(&dir, 1000, sid1);
 
-        // ADR-0226: if the first poll emits the baseline value (the minted id) as `Changed`, the tracker persists a 0-turn id right away and D1 leaks — do not weaken.
+        // ADR-0226: if the first poll emits the baseline value (the minted id) as `Changed`, the tracker persists a 0-turn id right away
+        //   and D1 leaks — do not weaken.
         assert_eq!(source.poll(), SessionIdPoll::Unchanged);
         assert_eq!(source.resolved_pid, Some(1000));
 

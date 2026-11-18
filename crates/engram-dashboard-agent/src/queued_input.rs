@@ -1,18 +1,18 @@
 //! # Pending-input registry — the list of an incarnation's 「inputs not yet delivered」
 //!
-//! It reduces the [`QueuedInputEvent`] standing in the ring in ring order and holds the list (items) and tombstones. Since the core
-//! feeds it inside the replay lock, **registry state = the reduced value of the ring prefix** — we do not make another way to change the registry (the session's cancel · classification
-//! only emit events too).
+//! Reduces the [`QueuedInputEvent`]s standing in the ring, in ring order, into the list (items) and tombstones. The core feeds it inside
+//!   the replay lock, so **registry state = the reduced value of the ring prefix**; there is no other way to change it (the session's
+//!   cancel · classification only emit events).
 //!
-//! - ★Pure · leaf★: the reducer calls nothing outside — in the lock order `input_order → replay → registry (this module) → waiting-list
-//!   table (`inputs_pending`)` the registry and the table are both leaves under replay (the registry guard is released before writing the table —
-//!   `OutputCore::record_list_event`).
-//! - ★The rules stand on the current state, not on history★ — since it does not trace back 「what came before」, the same event sequence always
-//!   lands in the same state. The two fields of cancel-pending (`answer` · `vendor_closed`) are state too.
-//! - ★It is a set with the frontend accumulator★: the same rules are rewritten in TS, and both feed on the golden `queued_input_golden.json` (next to this
-//!   file). When a rule changes, the golden and the TS edition are fixed in the same change — if they diverge, one side goes red.
-//! - ★Tombstones are a second defense against producer defects★: in a normal ring, the terminal of the same id does not come
-//!   before `Queued`. So even if the tombstone sets of the registry (the whole incarnation) and the accumulator (the ring window) differ, the reduction result does not diverge.
+//! - ★Pure · leaf★: the reducer calls nothing outside; in the lock order `input_order → replay → registry (this module) → waiting-list
+//!   table (`inputs_pending`)` the registry and the table are both leaves under replay (the registry guard is released before writing the
+//!   table — `OutputCore::record_list_event`).
+//! - ★Rules stand on the current state, not history★: the same event sequence always lands in the same state; the two cancel-pending
+//!   fields (`answer` · `vendor_closed`) are state too.
+//! - ★A set with the frontend accumulator★: the same rules are rewritten in TS and both feed on the golden `queued_input_golden.json`
+//!   (next to this file); a rule change fixes the golden and the TS edition together, or one side goes red.
+//! - ★Tombstones are a second defense against producer defects★: a normal ring never has an id's terminal before its `Queued`, so
+//!   differing tombstone sets (registry = whole incarnation, accumulator = ring window) do not diverge the reduction.
 // ADR-0231
 
 use std::collections::{HashMap, VecDeque};
@@ -22,13 +22,13 @@ use engram_dashboard_base::sync;
 
 use crate::types::{DeliveredCopy, DropCause, QueuedInputEvent};
 
-/// The per-incarnation tombstone cap — on overflow, the tombstone that entered first is dropped first (FIFO).
-/// ★The same value is in the golden file header (`tombstone_cap`)★ — the TS edition checks its own constant against it.
+/// The per-incarnation tombstone cap — on overflow the earliest tombstone is dropped first (FIFO). ★The same value is in the golden file
+///   header (`tombstone_cap`)★ — the TS edition checks its own constant against it.
 // ADR-0231
 pub const TOMBSTONE_CAP: usize = 1024;
 
-/// The 「answer」 field of a cancel-pending item — what happened to our cancel request.
-/// 「removed」 (`removed:true`) does not stay in the field — that response closes it as cancelled right away.
+/// The 「answer」 of a cancel-pending item — what happened to our cancel request. 「Removed」 (`removed:true`) never stays in the field — that
+///   response closes the item as cancelled at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelAnswer {
     /// No response yet.
@@ -49,15 +49,15 @@ pub enum RowPhase {
     },
 }
 
-/// One list line — it carries the registry's reduction state without omission. That way the result of re-reducing later events on top of a snapshot
-/// equals the registry (if the two fields of cancel-pending were missing, the outcome of late-arriving responses · findings would diverge).
+/// One list line — carries the registry's reduction state without omission, so re-reducing later events on a snapshot equals the registry
+///   (missing cancel-pending fields would diverge the outcome of late responses · findings).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedRow {
     pub id: String,
     pub text: String,
     pub phase: RowPhase,
-    /// The path handed it to the vendor (the value of the last `HandedOver`) — it stands apart from the stage (`phase`): a ✕ that came after handing over is both cancel-pending and
-    ///   a handed-over row. It is not an outcome (the row stays until receipt · reaping).
+    /// The path handed it to the vendor (the last `HandedOver`) — apart from the stage (`phase`): a ✕ after hand-over is both
+    ///   cancel-pending and a handed-over row. Not an outcome (the row stays until receipt · reaping).
     pub sent: bool,
 }
 
@@ -73,8 +73,8 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    /// ★Revival definition — one set★: if the terminal cause is `Unknown`, it is a revivable tombstone. It does not matter which event
-    /// produced that unknown (vendor closing · cancel response · acceptance unknown) — 「a fact the vendor gave beats unknown」.
+    /// ★Revival definition — one set★: a terminal cause of `Unknown` is a revivable tombstone, whichever event produced the unknown
+    ///   (vendor closing · cancel response · acceptance unknown) — 「a fact the vendor gave beats unknown」.
     fn resurrectable(self) -> bool {
         self == Verdict::Discarded(DropCause::Unknown)
     }
@@ -87,16 +87,14 @@ impl Verdict {
     }
 }
 
-/// The registry body — items (non-terminal · in entry order) + tombstones + two incarnation fields.
-///
-/// The slot of one id is one of three: **item** · **tombstone** (terminal — no body, just the id and one 「revivable」 flag)
-/// · **unknown** (neither).
+/// The registry body — items (non-terminal · entry order) + tombstones + two incarnation fields. One id's slot is one of **item** ·
+///   **tombstone** (terminal — no body, the id and one 「revivable」 flag) · **unknown** (neither).
 #[derive(Debug, Default)]
 pub struct Registry {
     items: Vec<QueuedRow>,
     tombstones: Tombstones,
-    /// The 「acceptance-impossible finding」 marker — `AckUnavailable` was reduced. ★The reduction rules do not read this field★ — it is only the material
-    /// for the core to rewrite a `Queued` that stood late after the finding.
+    /// The 「acceptance-impossible finding」 marker — `AckUnavailable` was reduced. ★The reduction rules do not read it★ — it only lets the
+    ///   core rewrite a `Queued` that stood late after the finding.
     ack_unavailable_seen: bool,
     /// The seq of the last list event reduced (including dropped events — those also entered the ring prefix).
     as_of_seq: Option<u64>,
@@ -107,12 +105,11 @@ impl Registry {
         Self::default()
     }
 
-    /// Reduce one event standing at the ring's `seq` slot. Returns = the id whose outcome was settled by this event and that outcome (in reduction order).
+    /// Reduce one event standing at the ring's `seq` slot. Returns the ids whose outcome this event settled, with the outcome (reduction order).
     ///
-    /// ★It does not return only item closures★ — a terminal that left only a tombstone on an unknown id, a revival (`Delivered`), and the re-reading
-    /// of a rejection after receipt (`Discarded(Rejected)`) are also returned as outcomes. Whether an item existed is told apart by the caller from the pre-reduction
-    /// state.
-    /// ★Call precondition = `seq` grows with every call (ring order)★.
+    /// ★Not only item closures★ — a terminal leaving only a tombstone on an unknown id, a revival (`Delivered`) and re-reading a rejection
+    ///   after receipt (`Discarded(Rejected)`) are returned too; the caller tells whether an item existed from the pre-reduction state.
+    /// ★Precondition: `seq` grows with every call (ring order)★.
     pub(crate) fn reduce(&mut self, seq: u64, event: &QueuedInputEvent) -> Vec<(String, Verdict)> {
         debug_assert!(
             self.as_of_seq.is_none_or(|last| seq > last),
@@ -139,7 +136,6 @@ impl Registry {
         closed
     }
 
-    /// Open items (in entry order — the oldest first).
     pub fn rows(&self) -> &[QueuedRow] {
         &self.items
     }
@@ -152,13 +148,12 @@ impl Registry {
         self.ack_unavailable_seen
     }
 
-    /// `None` = not a single list event of this incarnation has been reduced yet.
     pub fn as_of_seq(&self) -> Option<u64> {
         self.as_of_seq
     }
 
-    /// Copies of the bodies of the items `AckUnavailable` closes with a receipt (= all open items) — used when filling in that event's `delivered`
-    /// before writing it into the ring (the decoder emits it empty).
+    /// Copies of the bodies of the items `AckUnavailable` closes with a receipt (= all open items) — to fill that event's `delivered`
+    ///   before writing it into the ring (the decoder emits it empty).
     pub fn open_copies(&self) -> Vec<DeliveredCopy> {
         self.items
             .iter()
@@ -182,7 +177,6 @@ impl Registry {
         self.items.iter().position(|row| row.id == id)
     }
 
-    /// Delete the item and fold it into a tombstone — the body is not held for the whole incarnation lifetime.
     fn close(&mut self, at: usize, verdict: Verdict, closed: &mut Vec<(String, Verdict)>) {
         let row = self.items.remove(at);
         self.tombstones.insert(&row.id, verdict.resurrectable());
@@ -190,8 +184,7 @@ impl Registry {
     }
 
     fn on_queued(&mut self, id: &str, text: &str) {
-        // If it is already an item, a no-op (no re-emit — a second defense) · if a tombstone, dropped (so a late `Queued` does not create a permanent
-        // item).
+        // Already an item → no-op (no re-emit — a second defense); a tombstone → dropped (a late `Queued` creates no permanent item).
         if self.position(id).is_some() || self.tombstones.get(id).is_some() {
             return;
         }
@@ -203,8 +196,8 @@ impl Registry {
         });
     }
 
-    /// Hand-over marker — if an item, only the marker is swapped regardless of stage (no outcome). An unknown id · tombstone (a marker that came late after receipt) is
-    /// a no-op — a marker does not invent a row.
+    /// Hand-over marker — on an item, only the marker is swapped regardless of stage (no outcome). An unknown id · tombstone (a late
+    ///   marker after receipt) is a no-op — a marker invents no row.
     fn on_handed_over(&mut self, id: &str, sent: bool) {
         if let Some(at) = self.position(id) {
             self.items[at].sent = sent;
@@ -223,8 +216,8 @@ impl Registry {
         }
     }
 
-    /// `removed:true` = the vendor took that text out of its own queue — it cannot be drained again, so we close it without waiting for the lifecycle line.
-    /// If we waited, on the day that line never comes, the cancelled item would stay holding the list and block mail.
+    /// `removed:true` = the vendor took the text out of its own queue (it cannot be drained again), so close it without waiting for the
+    ///   lifecycle line — waiting, a cancelled item would hold the list and block mail on the day that line never comes.
     fn on_removed(&mut self, id: &str, closed: &mut Vec<(String, Verdict)>) {
         if let Some(at) = self.position(id) {
             if matches!(self.items[at].phase, RowPhase::Cancelling { .. }) {
@@ -233,8 +226,8 @@ impl Registry {
         }
     }
 
-    /// `removed:false` · request failure. ★It is not returned to waiting★ — the answer field (`NotRemoved`) tells apart the cause of the vendor closing that follows
-    /// (drawing renders this row without a ✕ like a handed-over row — ADR-0235).
+    /// `removed:false` · request failure. ★Not returned to waiting★ — the answer field (`NotRemoved`) tells the cause of the vendor
+    ///   closing that follows (drawing renders the row without ✕ like a handed-over row — ADR-0235).
     fn on_not_removed(&mut self, id: &str, closed: &mut Vec<(String, Verdict)>) {
         let Some(at) = self.position(id) else {
             return;
@@ -334,10 +327,10 @@ impl Registry {
         }
     }
 
-    /// Close all open items with a receipt at that ring slot — the vendor already received them and the slot is only the moment of finding. Cancel-pending
-    /// does not wait for a response either: an old CLI may silently drop a cancel line, so if we waited, that item would remain until the agent ends
-    /// and block mail. The copy's id is reduced the same as the `Delivered` that follows (what was an item has just been closed so
-    /// a no-op · an unknown id gets only a tombstone).
+    /// Close all open items with a receipt at that ring slot — the vendor already received them; the slot is only the moment of finding.
+    ///   Cancel-pending does not wait for a response either (an old CLI may silently drop a cancel line, leaving the item until the agent
+    ///   ends and blocking mail). The copy's id reduces like the
+    /// following `Delivered` (just-closed → no-op · unknown id → only a tombstone).
     fn on_ack_unavailable(
         &mut self,
         delivered: &[DeliveredCopy],
@@ -385,8 +378,8 @@ impl Tombstones {
     }
 }
 
-/// One incarnation's registry — the core owns this Arc, and the session reaches it through the core (`AgentSession::queued_inputs()`).
-/// The reading side (list query · cancel validation) takes only this one lock.
+/// One incarnation's registry — the core owns this Arc; the session reaches it through the core (`AgentSession::queued_inputs()`). The
+///   reading side (list query · cancel validation) takes only this lock.
 // ADR-0231
 #[derive(Debug, Default)]
 pub struct QueuedInputs {
@@ -398,17 +391,16 @@ impl QueuedInputs {
         Self::default()
     }
 
-    /// ★Do not emit, do IO, or take other locks while holding this guard★ — it is a leaf of the lock order.
-    /// Poison is unwrapped: the reducer calls nothing outside so the only way poison gets in is the reducer's own panic, and at that price there is no reason
-    /// to kill the callers that read the list.
-    /// ★Not opened outside the crate (`reduce` too)★ — if the reducer is reached through the guard, the registry can be changed outside the replay lock,
-    /// which breaks 「registry = the reduced value of the ring prefix」. Outside, read with [`Self::snapshot`].
+    /// ★Do not emit, do IO, or take other locks holding this guard★ — a leaf of the lock order. Poison is unwrapped: the reducer calls
+    ///   nothing outside, so poison can only be the reducer's own panic, and killing list-reading callers for it is pointless.
+    /// ★Not opened outside the crate (`reduce` too)★ — reaching the reducer through the guard would change the registry outside the replay
+    ///   lock and break 「registry = reduced value of the ring prefix」. Outside, read with [`Self::snapshot`].
     pub(crate) fn lock(&self) -> MutexGuard<'_, Registry> {
         sync::lock(&self.registry)
     }
 
-    /// Read the list rows and the seq of the last list event those rows reduced together **under one lock** — rows = the reduced value of the ring prefix
-    /// `as_of_seq`. seq is compared only within one incarnation.
+    /// Read the list rows and the seq of the last list event they reduced together **under one lock** — rows = the reduced value of the
+    ///   ring prefix `as_of_seq` (seq compared only within one incarnation).
     pub fn snapshot(&self) -> (Vec<QueuedRow>, Option<u64>) {
         let registry = self.lock();
         (registry.items.clone(), registry.as_of_seq)
@@ -425,12 +417,12 @@ impl CancelAnswer {
     }
 }
 
-/// The row state the list query carries — the registry state ([`RowPhase`]) with the path's acceptance-unknown marker laid on top.
+/// The row state the list query carries — the registry state ([`RowPhase`]) with the path's acceptance-unknown marker on top.
 ///
-/// ★`Unconfirmed` is not a reduction state★ — it is the path state at the query moment (`AgentTransport::unconfirmed_inputs`), so
-/// it is not one atom with the row snapshot (`as_of_seq`). The reattach comparison reads it as `Queued`.
-/// `Sent` = a `Queued` row where the hand-over marker (`QueuedRow::sent`) stands — it is a reduction state, so it is one atom with `as_of_seq`. ★The marker of a cancel-pending row
-///   is not carried★ (the `cancelling` word wins — the price of not growing the row shape).
+/// ★`Unconfirmed` is not a reduction state★ — it is the path state at the query moment (`AgentTransport::unconfirmed_inputs`), not atomic
+///   with the row snapshot (`as_of_seq`); reattach comparison reads it as `Queued`.
+/// `Sent` = a `Queued` row with the hand-over marker (`QueuedRow::sent`) — a reduction state, atomic with `as_of_seq`. ★A cancel-pending
+///   row's marker is not carried★ (the `cancelling` word wins — the price of not growing the row shape).
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListedState {
@@ -444,7 +436,6 @@ pub enum ListedState {
 }
 
 impl ListedState {
-    /// The `state` word of the list query response.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
@@ -455,7 +446,6 @@ impl ListedState {
     }
 }
 
-/// One line of the list query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedRow {
     pub id: String,
@@ -471,12 +461,11 @@ pub struct QueuedListing {
     /// The seq of the last list event the rows reduced. `None` = this incarnation has no list event yet. Compared only within `epoch`.
     pub as_of_seq: Option<u64>,
     pub epoch: u32,
-    /// Exactly the turn observation table's `last_end_failed` — false if the table has no entry.
     pub stopped_after_error: bool,
 }
 
-/// Lay the acceptance-unknown marker on registry rows — only `Queued` rows change (cancel-pending wins · a row with a hand-over marker stays `Sent` —
-/// the reduction state beats the marker at the query moment). An id not in the registry is dropped (no row is invented).
+/// Lay the acceptance-unknown marker on registry rows — only `Queued` rows change (cancel-pending wins · a row with a hand-over marker
+///   stays `Sent`: reduction state beats the query-moment marker). An id not in the registry is dropped (no row invented).
 pub(crate) fn overlay_unconfirmed(rows: Vec<QueuedRow>, unconfirmed: &[String]) -> Vec<ListedRow> {
     rows.into_iter()
         .map(|row| {
@@ -536,8 +525,7 @@ mod tests {
         }
     }
 
-    /// The golden's events are in the wire `op` shape as is (the `kind` discriminator) — domain types carry no serde, so here
-    /// we carry them over by hand.
+    /// The golden's events are in the wire `op` shape (the `kind` discriminator); domain types carry no serde, so they are carried over by hand.
     fn event_of(v: &Value) -> QueuedInputEvent {
         match v["kind"].as_str().expect("kind") {
             "Queued" => QueuedInputEvent::Queued {
@@ -582,8 +570,8 @@ mod tests {
         }
     }
 
-    /// A row's JSON shape = the same words as the list query response row (`state` · `cancel`). The hand-over marker is carried as `"sent": true` only on
-    /// standing rows (golden `_format`) — a shape chosen so cases without the marker need not be changed.
+    /// A row's JSON shape = the list query response row's words (`state` · `cancel`). The hand-over marker is `"sent": true` only on
+    ///   standing rows (golden `_format`), so cases without it need no change.
     fn row_json(row: &QueuedRow) -> Value {
         let (state, cancel) = match row.phase {
             RowPhase::Queued => ("queued", Value::Null),
@@ -683,7 +671,6 @@ mod tests {
         assert_eq!(golden["tombstone_cap"].as_u64(), Some(TOMBSTONE_CAP as u64));
     }
 
-    /// The golden feeds the vocabulary at least once without omission — it blocks a new event · cause from entering without a golden.
     #[test]
     fn the_golden_feeds_every_event_kind_and_cause() {
         let golden: Value = serde_json::from_str(GOLDEN).expect("golden JSON");
@@ -768,8 +755,8 @@ mod tests {
         );
     }
 
-    /// Dropped events also entered the ring prefix — the snapshot seq goes up to that slot (the reattach comparison re-reduces only events after this seq,
-    /// so stopping at a dropped event would reduce that event twice).
+    /// Dropped events also entered the ring prefix — the snapshot seq goes up to that slot (reattach re-reduces only events after this
+    ///   seq; stopping at a dropped event would reduce it twice).
     #[test]
     fn an_ignored_event_still_advances_the_snapshot_seq() {
         let mut registry = Registry::new();
@@ -872,7 +859,6 @@ mod tests {
         assert_eq!(listed[1].text, "text of held");
     }
 
-    /// The words are spelled the same as the golden rows (`row_json`) — the list query response carries these words.
     #[test]
     fn the_listing_words_are_pinned() {
         assert_eq!(ListedState::Queued.as_str(), "queued");

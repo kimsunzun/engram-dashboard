@@ -3,17 +3,13 @@
 // Verifies the single point of failure for daemonization success (daemon-design.md §4·§6).
 //
 // Assumptions to verify:
-//   A. If a child is spawned from inside the parent (= the current shell/IDE) Job with CREATE_BREAKAWAY_FROM_JOB|DETACHED_PROCESS,
-//      does the child break away from the parent Job?
-//      → if IsProcessInJob(child) == false, the breakaway succeeded.
-//   B. Even if the parent is put in a KILL_ON_JOB_CLOSE Job and kills itself, does the child that broke away survive?
-//      → if the child leaves "SURVIVED" in the marker file, survival is proven.
-//   C. When breakaway fails (the parent Job does not allow JOB_OBJECT_LIMIT_BREAKAWAY_OK),
-//      does a spawn through the fallback `cmd /c start /b` succeed in breaking away?
+//   A. A child spawned from inside the parent (= current shell/IDE) Job with CREATE_BREAKAWAY_FROM_JOB|DETACHED_PROCESS breaks away
+//      (IsProcessInJob(child) == false).
+//   B. Even if the parent is in a KILL_ON_JOB_CLOSE Job and kills itself, the broken-away child survives (marker file says "SURVIVED").
+//   C. When breakaway fails (the parent Job lacks JOB_OBJECT_LIMIT_BREAKAWAY_OK), a spawn through the fallback `cmd /c start /b` breaks away.
 //
-// In daemon mode the daemon puts the PTY child directly into its own Job (KILL_ON_JOB_CLOSE), so
-// "Job ownership transfer" is not under verification (design §4: deleted as an illusion). This spike looks only at
-// the single point of breakaway, "detaching the daemon from its parent so it survives".
+// In daemon mode the daemon puts the PTY child directly into its own Job (KILL_ON_JOB_CLOSE), so "Job ownership transfer" is not verified
+// (design §4: deleted as an illusion). This spike looks only at "detaching the daemon from its parent so it survives".
 //
 // Run (orchestration is done by scripts):
 //   cargo run --example spike_breakaway -- diag        # tests A·C diagnosis (read the output)
@@ -44,19 +40,16 @@ mod win {
         GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    /// job=None → "any job".
     pub fn is_in_any_job(process: HANDLE) -> windows::core::Result<bool> {
         let mut result = BOOL(0);
         unsafe { IsProcessInJob(process, None, &mut result)? };
         Ok(result.as_bool())
     }
 
-    /// Pseudo-handle of the current process (no need to close it).
     pub fn current_process() -> HANDLE {
         unsafe { GetCurrentProcess() }
     }
 
-    /// The caller is responsible for CloseHandle — this is a spike and the OS cleans up at process exit, so the explicit close is omitted.
     pub fn open_for_query(pid: u32) -> windows::core::Result<HANDLE> {
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
     }
@@ -80,7 +73,6 @@ mod win {
         unsafe { AssignProcessToJobObject(job, process) }
     }
 
-    /// hjob=None → the calling process's current Job.
     pub fn current_job_limit_flags() -> windows::core::Result<u32> {
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         let mut ret_len: u32 = 0;
@@ -113,8 +105,7 @@ fn main() {
     }
 }
 
-/// Child body. Appends ALIVE to the marker right at start and SURVIVED 6 seconds later.
-/// Even if the parent dies in between, SURVIVED is written if it broke away.
+/// Child body. Appends ALIVE to the marker at start and SURVIVED 6 seconds later (written only if it broke away and the parent died meanwhile).
 fn run_child(marker: &str) {
     let pid = std::process::id();
     append_line(marker, &format!("ALIVE pid={pid}"));
@@ -128,7 +119,6 @@ fn append_line(path: &str, line: &str) {
     }
 }
 
-/// Tests A·C: diagnosis. Parent Job state + whether the child breaks away via breakaway spawn + fallback.
 fn run_diag() {
     println!("=== spike_breakaway: DIAG ===");
 
@@ -240,7 +230,6 @@ fn run_diag() {
     }
 }
 
-/// Print whether the given pid belongs to (any) Job. For checking whether a process launched via WMI broke away.
 fn run_checkjob(pid_str: &str) {
     #[cfg(not(windows))]
     {
@@ -257,10 +246,9 @@ fn run_checkjob(pid_str: &str) {
     }
 }
 
-/// Test D: WMI bypass. The parent puts itself in a KILL_ON_JOB_CLOSE Job and launches the child via WMI
-/// (Win32_Process.Create). WmiPrvSE becomes the parent and does not inherit the caller's Job, so
-/// even if the parent kills itself (TerminateJobObject), the WMI child should survive and leave SURVIVED.
-/// The last workaround for the worst-case Job where breakaway · start/b are blocked.
+/// Test D: WMI bypass. The parent puts itself in a KILL_ON_JOB_CLOSE Job and launches the child via WMI (Win32_Process.Create); WmiPrvSE
+/// becomes the parent and does not inherit the caller's Job, so the child should survive the parent's TerminateJobObject and leave
+/// SURVIVED. The last workaround for a worst-case Job where breakaway · start/b are blocked.
 fn run_wmikill(marker: &str) {
     let _ = std::fs::remove_file(marker);
 
@@ -309,8 +297,8 @@ fn run_wmikill(marker: &str) {
     }
 }
 
-/// Test B: the parent puts itself in a KILL_ON_JOB_CLOSE Job, spawns the child with breakaway, then kills itself with
-/// TerminateJobObject. Only the child that broke away should survive and leave SURVIVED.
+/// Test B: the parent puts itself in a KILL_ON_JOB_CLOSE Job, spawns the child with breakaway, then kills itself with TerminateJobObject.
+/// Only the broken-away child should survive and leave SURVIVED.
 fn run_selfkill(marker: &str) {
     let _ = std::fs::remove_file(marker);
 
@@ -351,11 +339,9 @@ fn run_selfkill(marker: &str) {
             }
         }
 
-        // Time for the child to write ALIVE.
         std::thread::sleep(Duration::from_millis(800));
         println!("[B] now parent suicide (TerminateJobObject) — confirm the marker from outside");
         let _ = win::terminate(job, 1); // Terminate every process in the job (= the parent). The breakaway child is excluded.
-                                        // May not be reached (it terminates itself).
         std::thread::sleep(Duration::from_secs(2));
         println!("[B] (if this prints, suicide failed — the parent may not have joined the job)");
     }
