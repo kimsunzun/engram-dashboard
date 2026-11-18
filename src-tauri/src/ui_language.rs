@@ -1,17 +1,8 @@
-//! Applying a `ui.language` change to the shell-made text — automatic tab names · OS window titles (the layout) and the tray
-//! menu. The settings write calls it through `SettingsEvents::ui_language_changed`; the Tauri side supplies the ports. [`current`] is the
-//! one Tauri-facing helper here: the effective language for shell text built after boot.
-//!
-//! - ★One hook at a time, and it reads the value itself★ — [`LanguageHook::apply`] runs under one mutex and reads the effective
-//!   setting there instead of trusting the value it was called for. Two writes whose hooks run in the reverse order therefore
-//!   both apply the last stored value (the later hook may apply the same value twice — harmless).
-//! - ★Order inside: layout (under its lock: set the language, bump, collect the windows) → release → announce → tray★. The tray
-//!   is touched only after the layout lock is released.
-//! - ★The tray relabel is posted, not waited for★ — the production port hands it to the main thread and returns, so a settings
-//!   reply (human command or LLM bus) is never held by a busy main thread. Last value still wins: the posts are made in gate
-//!   order, each carries the value read under the gate, and the main thread runs them first in, first out.
-//! - The hook is never called on the main thread (ADR-0373) — its callers run on the blocking pool because the write waits for the
-//!   disk, and the ordering above relies on it too: on the main thread a post runs in place, ahead of posts already queued.
+//! Applying a `ui.language` change to the shell-made text — automatic tab names · OS window titles (the layout) and the tray menu. The settings write calls it through `SettingsEvents::ui_language_changed`; the Tauri side supplies the ports. [`current`] is the one Tauri-facing helper: the effective language for shell text built after boot.
+//! - One hook at a time, and it reads the value itself: [`LanguageHook::apply`] runs under one mutex and reads the effective setting there instead of trusting the value it was called for, so two writes whose hooks run in reverse order both apply the last stored value (the later hook may apply the same value twice — harmless).
+//! - Order inside: layout (under its lock: set the language, bump, collect the windows) → release → announce → tray; the tray is touched only after the layout lock is released.
+//! - The tray relabel is posted, not waited for: the production port hands it to the main thread and returns, so a settings reply (human command or LLM bus) is never held by a busy main thread. Last value still wins: posts are made in gate order, each carries the value read under the gate, and the main thread runs them first in, first out.
+//! - The hook is never called on the main thread (ADR-0373): its callers run on the blocking pool because the write waits for the disk, and the ordering above relies on it too — on the main thread a post runs in place, ahead of posts already queued.
 // ADR-0373
 
 use std::sync::{Arc, Mutex};
@@ -24,22 +15,18 @@ use crate::layout::LayoutState;
 use crate::settings::SettingsService;
 use crate::ui_text::Lang;
 
-/// The tray menu's text — production = the four item handles (`tray`), tests = a fake. Failure is the implementation's to log.
 pub(crate) trait TrayMenuText: Send + Sync {
-    /// Relabels the menu in `lang`, or hands that to the thread that owns the menu without waiting for it — calls must take effect
-    /// in call order.
+    /// Relabels the menu in `lang`, or hands that to the thread that owns the menu without waiting — calls must take effect in call order.
     fn relabel(&self, lang: Lang);
 }
 
-/// One per shell (managed in the builder) — every settings write path must reach the same instance, or two hooks run at once.
 #[derive(Default)]
 pub(crate) struct LanguageHook {
     gate: Mutex<()>,
 }
 
 impl LanguageHook {
-    /// Applies the effective `ui.language` of `settings` to the layout and the tray. A failed layout lock is logged and the tray
-    /// is still relabelled.
+    /// Applies the effective `ui.language` of `settings` to the layout and the tray. A failed layout lock is logged and the tray is still relabelled.
     pub(crate) fn apply(
         &self,
         settings: &SettingsService,
@@ -101,8 +88,7 @@ mod tests {
         }
     }
 
-    /// Records each relabel and whether the layout lock was free at that moment. The first call can be held: it signals
-    /// `entered` and waits for `go` before it records.
+    /// Records each relabel and whether the layout lock was free at that moment. The first call can be held: it signals `entered` and waits for `go` before recording.
     struct Tray {
         layout: LayoutState,
         seen: Mutex<Vec<(Lang, bool)>>,
@@ -158,7 +144,7 @@ mod tests {
         hook.apply(&svc, &layout, &titles, &tray);
 
         assert_eq!(sync::lock(&layout.0).language(), Lang::Ko);
-        assert_eq!(main_title(&layout), "빈 칸 - Engram:1");
+        assert_eq!(main_title(&layout), "빈 칸 - Engram:1"); // hangul-ok: the Korean UI table
         assert_eq!(tray.langs(), [Lang::Ko]);
         assert!(
             tray.always_after_the_layout_lock(),
@@ -169,7 +155,7 @@ mod tests {
             announced,
             [(
                 MAIN_WINDOW_LABEL.to_string(),
-                "빈 칸 - Engram:1".to_string(),
+                "빈 칸 - Engram:1".to_string(), // hangul-ok: the Korean UI table
                 1
             )]
         );

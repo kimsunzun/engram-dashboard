@@ -1,38 +1,26 @@
-//! Window argument resolver (TRD S26-window-chrome §4-5) — resolves one window argument received by a bus verb · invoke shell to the label of a window in the current model.
-//! Accepted forms = `main` · persistent id (the same window across restarts) · label of this run. A window number is not
-//! accepted — numbers of closed windows are reused, so a number held could point to a different window.
-//!
-//! It only reads the model (`ViewManager`) and knows nothing of Tauri. The caller briefly takes the layout lock and hands it over — the lock is released before calling the apply
-//! service with the resolved label, so if the window closes in between, the apply service rejects with 「창 없음」(no such window).
+//! Window argument resolver (TRD S26-window-chrome §4-5) — resolves one window argument received by a bus verb · invoke shell to the label of a window in the current model. Accepted = `main` · persistent id (the same window across restarts) · label of this run; a window number is not accepted — numbers of closed windows are reused, so a held number could point to a different window. It only reads the model (`ViewManager`) and knows nothing of Tauri; the caller briefly takes the layout lock and hands it over, and the lock is released before calling the apply service with the resolved label, so if the window closes in between, the apply service rejects with 「window not found」.
 
 use uuid::Uuid;
 
 use super::manager::{ViewManager, WindowLabel, MAIN_WINDOW_LABEL};
 
-/// Why the window argument could not be resolved. The caller converts it to a code — on the bus `NumberGiven` = `INVALID_ARGUMENT` · `NotFound` =
-/// `CONFLICT` (the same code as a layout apply failure).
+/// Why the window argument could not be resolved. The caller converts it to a code — on the bus `NumberGiven` = `INVALID_ARGUMENT` · `NotFound` = `CONFLICT` (the same code as a layout apply failure).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WindowArgError {
-    /// An argument given as digits only — read as a window number.
-    #[error("창 번호는 창 인자로 받지 않는다 — 번호는 다시 쓰인다. window.list 의 details 에서 그 번호의 window_id 를 찾아 넘기거나, layout.get 줄의 window(label)를 넘기라")]
+    #[error("a window number is not accepted as a window argument — numbers are reused. Find that number's window_id in the details of window.list and pass it, or pass the window (label) of a layout.get row")]
     NumberGiven,
     /// No such window in the current model — persistent id of a closed window · label of a previous run · label of a closed window · unknown word. Carries the argument received.
-    #[error("window 없음: {0} — window.list 의 창 label 이나 그 창의 window_id 를 넘기라(label 은 그 실행 안에서만 맞는다)")]
+    #[error("window not found: {0} — pass a window label from window.list or that window's window_id (a label is valid only within that run)")]
     NotFound(String),
 }
 
 /// Resolves window argument `arg` (leading and trailing whitespace trimmed) to the label of a window in the model.
-///
-/// - `main` → `main`.
-/// - Digits only (`"2"`) → [`WindowArgError::NumberGiven`] — decided before persistent id · label.
-/// - If the spelling equals the persistent id of a window in the model, that window's label. A saved id is read from `state.json` without validation and may not be in canonical UUID
-///   spelling — the spelling comparison comes first so that giving back an id the app handed out (`window.list` · creation reply) always resolves.
-/// - If it reads as a UUID (also other spellings such as case · braces) → the label of the window whose persistent id has the same UUID value. If there is no such
-///   window, it moves on to the next branch — a UUID-shaped label also resolves as a label.
-/// - Otherwise → if the model has a window with that label, as is (alias within the same run). The production labels are only `main` and the popout prefix
-///   (`slot-popup-`), so this branch is the 「접두 label」(prefix label) branch of the table. If a persistent id and a label have the same spelling, the id wins.
-/// - If it is nowhere → `NotFound` — the id · label of a closing window is not in the model either, so it lands here.
-// ADR-0302 — window state command
+/// - `main` → `main`. Digits only (`"2"`) → [`WindowArgError::NumberGiven`] — decided before persistent id · label.
+/// - A spelling equal to the persistent id of a window in the model → that window's label. A saved id is read from `state.json` without validation and may not be canonical UUID spelling — the spelling comparison comes first so giving back an id the app handed out (`window.list` · creation reply) always resolves.
+/// - Reads as a UUID (also other spellings — case · braces) → the label of the window whose persistent id has the same UUID value; with no such window it moves on — a UUID-shaped label also resolves as a label.
+/// - Otherwise → the model's window with that label, as is (alias within the same run). Production labels are only `main` and the popout prefix (`slot-popup-`), so this is the 「prefix label」 branch of the table. If a persistent id and a label have the same spelling, the id wins.
+/// - Nowhere → `NotFound` — the id · label of a closing window is not in the model either, so it lands here.
+// ADR-0302
 pub fn resolve(mgr: &ViewManager, arg: &str) -> Result<WindowLabel, WindowArgError> {
     let arg = arg.trim();
     if arg == MAIN_WINDOW_LABEL {
@@ -61,8 +49,7 @@ pub fn resolve(mgr: &ViewManager, arg: &str) -> Result<WindowLabel, WindowArgErr
     Err(WindowArgError::NotFound(arg.to_string()))
 }
 
-/// Rejects an argument that is digits only. It is opened separately so that branches outside the resolver also make the same rejection first (TRD §4-5 verb order ① —
-/// `window.close { if_empty }`).
+/// Rejects an argument that is digits only — separate so branches outside the resolver make the same rejection first (TRD §4-5 verb order ① — `window.close { if_empty }`).
 pub fn reject_number(arg: &str) -> Result<(), WindowArgError> {
     let arg = arg.trim();
     if !arg.is_empty() && arg.bytes().all(|b| b.is_ascii_digit()) {
@@ -98,12 +85,12 @@ mod tests {
         assert_eq!(
             resolve(&mgr, &id.to_uppercase()),
             Ok(LIVE.to_string()),
-            "다른 철자도 같은 창"
+            "another spelling is the same window"
         );
         assert_eq!(
             resolve(&mgr, &format!("{{{id}}}")),
             Ok(LIVE.to_string()),
-            "중괄호 철자"
+            "braced spelling"
         );
     }
 
@@ -120,7 +107,7 @@ mod tests {
         assert_eq!(
             resolve(&mgr, "w-0"),
             Ok(LIVE.to_string()),
-            "UUID 가 아닌 저장 id"
+            "a stored id that is not a UUID"
         );
     }
 
@@ -136,7 +123,7 @@ mod tests {
     fn the_window_id_of_a_closed_window_is_not_found() {
         let (mut mgr, id) = model();
         mgr.close_window(LIVE).unwrap();
-        assert_eq!(mgr.closing_numbers(), [2], "번호는 아직 쥐고 있다");
+        assert_eq!(mgr.closing_numbers(), [2], "the number is still held");
         assert_eq!(
             resolve(&mgr, &id),
             Err(WindowArgError::NotFound(id.clone()))
@@ -144,7 +131,7 @@ mod tests {
         assert_eq!(
             resolve(&mgr, LIVE),
             Err(WindowArgError::NotFound(LIVE.to_string())),
-            "닫힌 창의 label"
+            "the label of a closed window"
         );
     }
 
@@ -166,11 +153,11 @@ mod tests {
     fn a_window_id_wins_over_an_identical_label() {
         let (mut mgr, id) = model();
         mgr.create_window(&id).unwrap();
-        assert_eq!(resolve(&mgr, &id), Ok(LIVE.to_string()), "정확한 철자");
+        assert_eq!(resolve(&mgr, &id), Ok(LIVE.to_string()), "exact spelling");
         assert_eq!(
             resolve(&mgr, &id.to_uppercase()),
             Ok(LIVE.to_string()),
-            "UUID 값 일치"
+            "UUID values match"
         );
     }
 

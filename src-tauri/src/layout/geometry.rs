@@ -1,12 +1,5 @@
-//! Shell geometry — pure computation that converts a layout tree into view-normalized rectangles (boundary form) and integer CSS px (ADR-0227).
-//! It has no dependency on Tauri, locks or I/O, so it becomes a standalone headless test (ADR-0012 isolation).
-//!
-//! This is the area and split geometry that the shell and the screen use together. Entry points = `compute` (tree → area and split rectangles) ·
-//! `frame_px`/`px_edge` (normalized → integer px) · `content_rect` (frame − inner margin).
-//!
-//! ★Invariant — touching boundaries are bit-for-bit equal★: a child copies the parent's boundary values as they are, and the only
-//! value computed anew is the split boundary `at`. The end boundary of a and the start boundary of b are the same `at`, so
-//! `==` holds regardless of depth. Do not rebuild a boundary as `x + w` — it diverges in the floating-point last digits and leaves a hairline gap on screen.
+//! Shell geometry — pure computation converting a layout tree into view-normalized rectangles (boundary form) and integer CSS px (ADR-0227). No Tauri, locks or I/O dependency, so a standalone headless test (ADR-0012). The area and split geometry the shell and the screen use together. Entry points: `compute` (tree → area and split rectangles) · `frame_px`/`px_edge` (normalized → integer px) · `content_rect` (frame − inner margin).
+//! Invariant — touching boundaries are bit-for-bit equal: a child copies the parent's boundary values as they are, and the only value computed anew is the split boundary `at`; the end boundary of a and the start boundary of b are the same `at`, so `==` holds at any depth. Do not rebuild a boundary as `x + w` — it diverges in the last floating-point digits and leaves a hairline gap on screen.
 
 use ts_rs::TS;
 use uuid::Uuid;
@@ -42,14 +35,12 @@ pub struct SplitRect {
     pub at: f64,
 }
 
-/// Result of `compute`. Both lists are in tree preorder (node → a subtree → b subtree) — sorting by id is the consumer's job.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutGeometry {
     pub slots: Vec<SlotRect>,
     pub splits: Vec<SplitRect>,
 }
 
-/// Integer CSS px boundary form (relative to the canvas origin). Width = `x1 - x0` — the difference of two rounded boundaries.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PxRect {
     pub x0: u32,
@@ -69,7 +60,6 @@ pub struct Insets {
     pub l: f64,
 }
 
-/// f64 boundary-form rectangle (`x0 <= x1`, `y0 <= y1`). The unit is set by the function that makes it — `content_rect` gives CSS px.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RectF64 {
     pub x0: f64,
@@ -78,8 +68,7 @@ pub struct RectF64 {
     pub y1: f64,
 }
 
-/// Root area = (0,0,1,1). Tree ratios are read clamped to `[RATIO_MIN, RATIO_MAX]`, and NaN is read as 0.5
-/// (±∞ is sent to the limit by the clamp). So every coordinate is finite and inside [0,1].
+/// Root area = (0,0,1,1). Tree ratios are read clamped to `[RATIO_MIN, RATIO_MAX]` and NaN is read as 0.5 (±∞ goes to the limit by the clamp), so every coordinate is finite and inside [0,1].
 pub fn compute(node: &LayoutNode) -> LayoutGeometry {
     let mut out = LayoutGeometry {
         slots: Vec::new(),
@@ -137,12 +126,10 @@ fn walk(node: &LayoutNode, r: RectF64, out: &mut LayoutGeometry) {
     }
 }
 
-/// Boundary coordinate that splits the axis interval `[lo, hi]` by ratio `ratio` (a's share) — exactly the formula `compute` uses for every split.
-/// The split guard also calls this when it measures a new boundary ahead of time, so it never differs from the real computation by even one bit.
+/// Boundary coordinate splitting the axis interval `[lo, hi]` by ratio `ratio` (a's share) — exactly the formula `compute` uses for every split. The split guard also calls it to measure a new boundary ahead of time, so it never differs from the real computation by even one bit.
 // ADR-0227
 pub fn boundary(lo: f64, hi: f64, ratio: f64) -> f64 {
-    // Even though the write path guarantees limits and finiteness, values planted directly in the tree are also filtered here — 0.0 etc. are cut so they do not make
-    // zero-size leaves, and NaN passes the clamp unchanged and spreads to all descendant coordinates, so it is read as a halving.
+    // Though the write path guarantees limits and finiteness, values planted directly in the tree are filtered here too — 0.0 etc. are cut so they make no zero-size leaves, and NaN passes the clamp unchanged and spreads to all descendant coordinates, so it is read as a halving.
     let t = if ratio.is_nan() {
         0.5
     } else {
@@ -151,18 +138,13 @@ pub fn boundary(lo: f64, hi: f64, ratio: f64) -> f64 {
     lo + (hi - lo) * t
 }
 
-/// Strictly `x0 < x1` · `y0 < y1` on both axes. A zero-size area arises only in a tree
-/// deep enough for the f64 boundary to collapse.
+/// Strictly `x0 < x1` · `y0 < y1` on both axes. A zero-size area arises only in a tree deep enough for the f64 boundary to collapse.
 // ADR-0227
 pub(crate) fn has_area(r: &SlotRect) -> bool {
     r.x0 < r.x1 && r.y0 < r.y1
 }
 
-/// Normalized boundary `e` as an integer px boundary on canvas axis length `canvas` = `round(canvas · e)`.
-///
-/// Ties go to the side farther from 0 — since the input is non-negative, this equals CSS `round(nearest)` (toward +∞). Area width is got from the difference
-/// of two such values and the width is not rounded separately — so the px boundaries of neighboring areas are always the same integer.
-/// An out-of-range `e` follows the `as` cast saturation (negative·NaN → 0, over `u32` → `u32::MAX`).
+/// Normalized boundary `e` as an integer px boundary on canvas axis length `canvas` = `round(canvas · e)`. Ties go away from 0 — for non-negative input equal to CSS `round(nearest)` (toward +∞). Area width is the difference of two such values and the width is not rounded separately, so neighboring areas' px boundaries are always the same integer. An out-of-range `e` follows the `as` cast saturation (negative·NaN → 0, over `u32` → `u32::MAX`).
 pub fn px_edge(canvas: u32, e: f64) -> u32 {
     (f64::from(canvas) * e).round() as u32
 }
@@ -176,8 +158,7 @@ pub fn frame_px(canvas_w: u32, canvas_h: u32, r: &SlotRect) -> PxRect {
     }
 }
 
-/// Content region (CSS px) of the frame shrunk by the margin. Width and height do not go below 0 (`x1 >= x0`, `y1 >= y0`).
-/// If the frame is narrower than the sum of margins, `x0` stays `frame.x0 + l` as is, so it can lie beyond the frame's right boundary.
+/// Content region (CSS px) of the frame shrunk by the margin; width and height do not go below 0 (`x1 >= x0`, `y1 >= y0`). If the frame is narrower than the sum of margins, `x0` stays `frame.x0 + l`, so it can lie beyond the frame's right boundary.
 pub fn content_rect(frame: &PxRect, insets: &Insets) -> RectF64 {
     let x0 = f64::from(frame.x0) + insets.l;
     let y0 = f64::from(frame.y0) + insets.t;
@@ -220,14 +201,14 @@ mod tests {
         *g.slots
             .iter()
             .find(|s| s.slot_id == id(n))
-            .expect("슬롯 있어야")
+            .expect("the slot must exist")
     }
 
     fn split_of(g: &LayoutGeometry, n: u128) -> SplitRect {
         *g.splits
             .iter()
             .find(|s| s.split_id == id(n))
-            .expect("분할 있어야")
+            .expect("the split must exist")
     }
 
     fn same(a: f64, b: f64) -> bool {
@@ -274,11 +255,11 @@ mod tests {
         let g = compute(&split(100, SplitDir::LeftRight, 0.25, slot(1), slot(2)));
         let a = slot_of(&g, 1);
         let b = slot_of(&g, 2);
-        assert_eq!((a.x0, a.y0, a.x1, a.y1), (0.0, 0.0, 0.25, 1.0), "a = 왼쪽");
+        assert_eq!((a.x0, a.y0, a.x1, a.y1), (0.0, 0.0, 0.25, 1.0), "a = left");
         assert_eq!(
             (b.x0, b.y0, b.x1, b.y1),
             (0.25, 0.0, 1.0, 1.0),
-            "b = 오른쪽"
+            "b = right"
         );
         assert_eq!(
             split_of(&g, 100),
@@ -299,11 +280,11 @@ mod tests {
         let g = compute(&split(100, SplitDir::TopBottom, 0.75, slot(1), slot(2)));
         let a = slot_of(&g, 1);
         let b = slot_of(&g, 2);
-        assert_eq!((a.x0, a.y0, a.x1, a.y1), (0.0, 0.0, 1.0, 0.75), "a = 위");
-        assert_eq!((b.x0, b.y0, b.x1, b.y1), (0.0, 0.75, 1.0, 1.0), "b = 아래");
+        assert_eq!((a.x0, a.y0, a.x1, a.y1), (0.0, 0.0, 1.0, 0.75), "a = top");
+        assert_eq!((b.x0, b.y0, b.x1, b.y1), (0.0, 0.75, 1.0, 1.0), "b = bottom");
         let s = split_of(&g, 100);
         assert_eq!(s.dir, SplitDir::TopBottom);
-        assert_eq!(s.at, 0.75, "위아래 분할의 at 은 y 축 값");
+        assert_eq!(s.at, 0.75, "the at of a top-bottom split is a y-axis value");
     }
 
     // ── neighbor boundaries bit-identical · split boxes ───────────────────────
@@ -319,14 +300,10 @@ mod tests {
             slot_of(&g, 5),
         );
 
-        // Root LR boundary: right end of the left column = left end of the right column.
         assert!(same(s1.x1, s4.x0) && same(s1.x1, s5.x0));
-        assert!(same(s3.x1, s4.x0), "깊은 잎의 오른쪽 끝도 같은 값");
-        // TB(0.7) boundary: bottom of s1 = top of s2·s3.
+        assert!(same(s3.x1, s4.x0), "the right end of a deep leaf is the same value too");
         assert!(same(s1.y1, s2.y0) && same(s1.y1, s3.y0));
-        // LR(0.35) boundary.
         assert!(same(s2.x1, s3.x0));
-        // TB(0.45) boundary.
         assert!(same(s4.y1, s5.y0));
         // The parent's end boundary is copied — a leaf three levels down also has exactly the view end (1.0).
         assert!(same(s2.y1, 1.0) && same(s3.y1, 1.0) && same(s5.y1, 1.0));
@@ -356,17 +333,16 @@ mod tests {
         assert_eq!(g.slots.len() as u128, DEPTH + 1);
         for i in 0..DEPTH as usize {
             let (a, b) = (g.slots[i], g.slots[i + 1]);
-            assert!(same(a.x1, b.x0), "{i} 단 경계가 갈렸다");
+            assert!(same(a.x1, b.x0), "the boundary of level {i} diverged");
             assert!(same(g.splits[i].at, a.x1));
-            assert!(a.x0 < a.x1, "{i} 단 잎 폭이 양수여야");
+            assert!(a.x0 < a.x1, "the leaf width of level {i} must be positive");
         }
         assert!(same(g.slots[DEPTH as usize].x1, 1.0));
     }
 
     #[test]
     fn lists_are_in_tree_pre_order() {
-        // Shallow leaves (s2·s3) come after deep leaves (s1·s4) and ids are not monotonic either — if it regressed to breadth-first, id order, reverse id order or
-        // postorder, at least one of the two lists would be off.
+        // Shallow leaves (s2·s3) come after deep leaves (s1·s4) and ids are not monotonic either — a regression to breadth-first, id order, reverse id order or postorder would put at least one of the two lists off.
         let g = compute(&split(
             103,
             SplitDir::LeftRight,
@@ -410,9 +386,7 @@ mod tests {
         }
     }
 
-    // Includes a split inside a non-square box and a same-direction split (103) inside a box whose origin is not 0 — a mistake of computing `at` with
-    // the other axis's length·origin or dropping the origin shows up in the values. The ratios are values with an
-    // exact binary representation, so they are asserted with `==`.
+    // Includes a split inside a non-square box and a same-direction split (103) inside a box whose origin is not 0 — computing `at` with the other axis's length·origin or dropping the origin shows up in the values. The ratios have exact binary representations, so they are asserted with `==`.
     #[test]
     fn nested_left_right_exact_values() {
         let g = compute(&split(
@@ -511,7 +485,7 @@ mod tests {
             assert_eq!(f1.y1, f2.y0);
             assert_eq!(f4.y1, f5.y0);
             assert_eq!((f1.x0, f1.y0), (0, 0));
-            assert_eq!((f5.x1, f5.y1), (w, h), "폭 합 = 캔버스");
+            assert_eq!((f5.x1, f5.y1), (w, h), "sum of widths = canvas");
         }
     }
 
@@ -552,8 +526,8 @@ mod tests {
         ));
         let f = |n| frame_px(2, 1, &slot_of(&g, n));
         let (f1, f2, f3) = (f(1), f(2), f(3));
-        assert_eq!(f2.x1 - f2.x0, 1, "1px 틀");
-        assert_eq!(f3.x1 - f3.x0, 0, "0px 틀");
+        assert_eq!(f2.x1 - f2.x0, 1, "1px frame");
+        assert_eq!(f3.x1 - f3.x0, 0, "0px frame");
         assert_eq!(f1.x1, f2.x0);
         assert_eq!(f2.x1, f3.x0);
         for fr in [f1, f2, f3] {
@@ -569,8 +543,8 @@ mod tests {
         };
         for fr in [f1, f2, f3] {
             let c = content_rect(&fr, &border);
-            assert_eq!(c.x1 - c.x0, 0.0, "폭 0 — 음수 아님");
-            assert_eq!(c.y1 - c.y0, 0.0, "높이 0 — 음수 아님");
+            assert_eq!(c.x1 - c.x0, 0.0, "width 0 — not negative");
+            assert_eq!(c.y1 - c.y0, 0.0, "height 0 — not negative");
         }
     }
 
@@ -589,7 +563,7 @@ mod tests {
             let g = compute(&split(100, SplitDir::LeftRight, ratio, slot(1), slot(2)));
             assert_eq!(split_of(&g, 100).at, want, "ratio {ratio}");
             let (a, b) = (slot_of(&g, 1), slot_of(&g, 2));
-            assert!(a.x0 < a.x1 && b.x0 < b.x1, "ratio {ratio}: 면적 0 잎 없음");
+            assert!(a.x0 < a.x1 && b.x0 < b.x1, "ratio {ratio}: no zero-area leaf");
         }
     }
 

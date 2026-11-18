@@ -11,6 +11,6 @@ restored_windows: number,
 /**
  * A `state.json` carrying that answer was published within the deadline. `false` = it could not be confirmed that it attached to disk within the deadline —
  * the next boot may ask again. If there is no recorder (guard) it always asks again, and on a write failure · deadline overrun the recorder may attach it in a later write
- * while holding that hash (`saver` header 「해결 칸」).
+ * while holding that hash (`saver` header 「resolution field」).
  */
 durable: boolean, };

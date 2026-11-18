@@ -1,7 +1,4 @@
-//! discovery commands — thin wrappers by which the LLM/frontend calls daemon discovery (§5 control surface).
-//!
-//! ADR-0029: mode removed → no AppState. data_dir is computed with `default_data_dir()` (no arguments, debug=repo root
-//! walk-up / release=`data` under the exe folder) — it looks at the same folder as the daemon (daemon.json shared).
+//! discovery commands — thin wrappers by which the LLM/frontend calls daemon discovery (§5 control surface). ADR-0029: mode removed → no AppState; data_dir comes from `default_data_dir()` (no arguments; debug = repo root walk-up, release = `data` under the exe folder), the same folder as the daemon (daemon.json shared).
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -13,27 +10,9 @@ use crate::daemon_client::shutdown::{StopOrigin, StopOutcome, StopPlan, StopReas
 use crate::daemon_client::{ConnectionStatus, DaemonClient};
 use crate::discovery::{self, locate_daemon_exe};
 
-// The ensure (spawn included) serialization lock — process-global (OnceLock+tokio async Mutex).
-//
-// ★Why it is needed★: a window's WebView calls discover_daemon/daemon_start (=ensure_internal) at boot and
-// StrictMode calls it twice, so the calls overlap (more with several windows). daemon.json
-// does not exist yet so each call WMI-spawns a daemon on its own → the daemon lock keeps only 1 alive and the rest exit at once.
-// A debug daemon is a console app so several console windows flash (the losers).
-//
-// If the ensure section is serialized with this lock, only the first call does spawn + publishes daemon.json, and the calls that follow thanks to serialization
-// find the existing daemon.json in ensure_daemon and attach without spawning → the losers spawn itself
-// never happens. The result (1 live daemon) is the same, only the multiple WMI spawns disappear. If one is already alive, ensure
-// returns attach immediately so the lock is held briefly. (Being an async Mutex, awaiting while holding the lock is OK — awaiting spawn_blocking
-// inside the lock does not block the executor.)
-//
-// ★Scope limit (load-bearing)★: this lock serializes **the command path only (discover_daemon/daemon_start=ensure_internal)**.
-// The tray's start-daemon item (`tray/mod.rs` spawn_daemon_action) is a synchronous spawn_blocking worker so
-// it does not go through this async lock and calls `discovery::ensure_daemon` directly — that is, if tray-start and the boot ensure
-// happen at the same time they are outside serialization so multiple spawns can occur. **Even so, consistency is guaranteed down to the final 1 by the daemon's single-instance lock
-// (holding daemon.json in the data folder, daemon instance.rs — ADR-0134/0135)** — this lock is not a
-// consistency mechanism but an addendum that removes the console flicker (UX) of simultaneous multi-WebView ensure at boot. To bind the tray
-// path too, push the lock down into ensure_daemon (`crate::discovery`) or route the tray through the command — the cost is large against the benefit
-// (tray start is a one-off user click so it is separated in time from the boot race), so for now we delegate to that lock.
+// The ensure (spawn included) serialization lock — process-global (OnceLock + tokio async Mutex).
+// Why: a window's WebView calls discover_daemon/daemon_start (=ensure_internal) at boot, and StrictMode calls it twice, so calls overlap (more with several windows). With no daemon.json yet each call WMI-spawns a daemon on its own → the daemon lock keeps only 1 alive and the rest exit at once; a debug daemon is a console app, so the losers flash several console windows. Serialized by this lock, only the first call spawns + publishes daemon.json and later calls find it in `ensure_daemon` and attach without spawning. The result (1 live daemon) is the same; only the multiple WMI spawns disappear. If one is already alive, ensure returns attach at once so the lock is held briefly (an async Mutex, so awaiting `spawn_blocking` inside it does not block the executor).
+// Scope limit (load-bearing): it serializes only the command path (discover_daemon/daemon_start=ensure_internal). The tray's start-daemon item (`tray/mod.rs` spawn_daemon_action) is a synchronous `spawn_blocking` worker calling `discovery::ensure_daemon` directly, so tray-start and boot ensure occurring together are outside serialization and may multi-spawn. Even so, consistency down to the final 1 is guaranteed by the daemon's single-instance lock (holding daemon.json in the data folder, daemon instance.rs — ADR-0134/0135): this lock is not a consistency mechanism but an addendum removing the console flicker (UX) of simultaneous multi-WebView ensure at boot. Binding the tray path too would mean pushing the lock into `crate::discovery::ensure_daemon` or routing the tray through the command — large cost for a one-off user click separated in time from the boot race, so for now it is delegated to that lock.
 fn ensure_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -64,8 +43,7 @@ impl From<engram_dashboard_protocol::DaemonInfo> for DaemonInfoDto {
     }
 }
 
-// Discovers the daemon (WMI spawn if absent) and returns the connection info.
-// 5 seconds if timeout_ms is unspecified. Console visibility is daemon_start (console=true).
+// Discovers the daemon (WMI spawn if absent) and returns the connection info; 5 s if timeout_ms is unspecified. Console visibility is daemon_start (console=true).
 #[tauri::command]
 pub async fn discover_daemon(timeout_ms: Option<u64>) -> Result<DaemonInfoDto, String> {
     ensure_internal(timeout_ms, false, || {}).await
@@ -79,10 +57,7 @@ pub struct DaemonStatusDto {
     pub port: Option<u16>,
 }
 
-// ADR-0021 §5: explicit daemon start (ensure). If already alive, attach (return its connection info), otherwise spawn.
-// If `console=true`, spawn together with a console window (making debug logs visible).
-// ★Separated from reconnect★: only this command triggers a spawn — the frontend reconnect loop does not call it.
-// From the main window it is also the boot start the shell's band hold waits for (`BootStartWatch`).
+// ADR-0021 §5: explicit daemon start (ensure): attach (return its connection info) if alive, else spawn; `console=true` spawns with a console window (debug logs visible). Separated from reconnect: only this command triggers a spawn — the frontend reconnect loop does not call it. From the main window it is also the boot start the shell's band hold waits for (`BootStartWatch`).
 #[tauri::command]
 pub async fn daemon_start(
     window: tauri::Window,
@@ -99,32 +74,26 @@ pub async fn daemon_start(
     started
 }
 
-/// What a window's boot start tells the shell's band hold (TRD S21 trd-3-2-u5 R20 · R24) — ★only the main window's★:
-/// a popout's or the spare's start says nothing about the cold boot. The search's start bounds the hold; a failed
-/// `daemon_start` or a returned `daemon_connect` ends it, before the answer reaches the window.
+/// What a window's boot start tells the shell's band hold (TRD S21 trd-3-2-u5 R20 · R24) — only the main window's: a popout's or the spare's start says nothing about the cold boot. The search's start bounds the hold; a failed `daemon_start` or a returned `daemon_connect` ends it, before the answer reaches the window.
 pub(crate) struct BootStartWatch<'a>(Option<&'a DaemonClient>);
 
 impl<'a> BootStartWatch<'a> {
-    /// `label` = the calling window; `client` = the shell's client, if setup built one.
     pub(crate) fn of(label: &str, client: Option<&'a DaemonClient>) -> Self {
         Self(client.filter(|_| label == crate::layout::MAIN_WINDOW_LABEL))
     }
 
-    /// The daemon search runs now, with `timeout`.
     pub(crate) fn search_began(&self, timeout: Duration) {
         if let Some(client) = self.0 {
             client.boot_start_began(timeout);
         }
     }
 
-    /// `daemon_start` answered — only a failure ends the hold (a success is followed by `daemon_connect`).
     pub(crate) fn start_answered<T>(&self, started: &Result<T, String>) {
         if let (Some(client), Err(_)) = (self.0, started) {
             client.boot_start_answered("the main window's daemon_start failed");
         }
     }
 
-    /// `daemon_connect` returned, whatever its answer.
     pub(crate) fn connect_answered(&self) {
         if let Some(client) = self.0 {
             client.boot_start_answered("the main window's daemon_connect answered");
@@ -147,23 +116,14 @@ pub fn daemon_status() -> Result<DaemonStatusDto, String> {
     })
 }
 
-// Reads the live daemon's address from daemon.json. ★Never spawns★ (ADR-0021: reconnect never wakes a daemon — it
-// only follows a daemon that moved to its new address). No daemon or a dead one → None.
-//
-// ★For hot-swap tracking on reconnect★: when a stop → daemon_start (full replacement) or a crash respawn brings the
-// daemon up on a new port, the frontend reconnect loop (wsTransport) re-reads the current daemon.json through this
-// command instead of its cached old address and attaches at the new one. Read-only, so it is kept apart from
-// discover_daemon (which spawns).
-//
-// daemon.json missing/broken/dead PID/version mismatch → Ok(None) (conservative). A live compatible daemon → Ok(Some(DTO)).
+// Reads the live daemon's address from daemon.json. Never spawns (ADR-0021: reconnect never wakes a daemon — it only follows one that moved to a new address). No daemon or a dead one → None. For hot-swap tracking on reconnect: when stop → daemon_start (full replacement) or a crash respawn brings the daemon up on a new port, the frontend reconnect loop (wsTransport) re-reads daemon.json through this command instead of its cached old address. Read-only, so apart from discover_daemon (which spawns). daemon.json missing/broken/dead PID/version mismatch → Ok(None) (conservative); a live compatible daemon → Ok(Some(DTO)).
 #[tauri::command]
 pub fn read_daemon_info() -> Result<Option<DaemonInfoDto>, String> {
     let data_dir = discovery::default_data_dir();
     Ok(discovery::read_live_daemon(&data_dir).map(DaemonInfoDto::from))
 }
 
-// ★T7c: the TauriTransport.start() entry point (spawn allowed)★.
-// The frontend TauriTransport.start() calls it with invoke (corresponds to WsTransport.openSocket(true)).
+// T7c: the TauriTransport.start() entry point (spawn allowed) — the frontend calls it with invoke (corresponds to WsTransport.openSocket(true)).
 #[tauri::command]
 pub async fn daemon_connect(
     window: tauri::Window,
@@ -174,8 +134,7 @@ pub async fn daemon_connect(
     answer.map_err(|e| e.to_string())
 }
 
-// ★T7c: the TauriTransport.ensureReady() entry point (attach-only, no-spawn)★.
-// The frontend TauriTransport.ensureReady() calls it with invoke (corresponds to WsTransport.ensureReady()).
+// T7c: the TauriTransport.ensureReady() entry point (attach-only, no-spawn) — the frontend calls it with invoke (corresponds to WsTransport.ensureReady()).
 #[tauri::command]
 pub async fn daemon_ensure(
     client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>,
@@ -183,22 +142,12 @@ pub async fn daemon_ensure(
     client.ensure().await.map_err(|e| e.to_string())
 }
 
-// ★T7c: the TauriTransport.close() entry point★.
 #[tauri::command]
 pub fn daemon_close(client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>) {
     client.close();
 }
 
-// ★Reload self-heal pull (Fix-D)★.
-//
-// ★Why it is needed★: the Rust DaemonClient emits `daemon-connection-state` only on status *changes* — a
-// connect()/ensure() on an already connected link answers Ok with no emit (the driver's routing emits on changes
-// only). So after a webview reload (TauriTransport recreated, _state='down') the new window has no way to learn "already
-// connected", cannot register its output Channel, and replay/live are cut off (a per-window blind spot). The frontend
-// self-heal pulls this command once after registering its listeners to read the current status.
-//
-// ★Same value★: the `daemon-connection-state` payload itself (`ConnectionStatus`), so the frontend feeds it through the
-// event handler's path.
+// Reload self-heal pull (Fix-D). The Rust DaemonClient emits `daemon-connection-state` only on status changes — connect()/ensure() on an already connected link answers Ok with no emit (the driver's routing emits on changes only). So after a webview reload (TauriTransport recreated, _state='down') the new window cannot learn "already connected", cannot register its output Channel, and replay/live are cut off (a per-window blind spot); the frontend self-heal pulls this command once after registering its listeners. It returns the `daemon-connection-state` payload itself (`ConnectionStatus`), so the frontend feeds it through the event handler's path.
 #[tauri::command]
 pub fn daemon_connection_state(client: tauri::State<'_, Arc<DaemonClient>>) -> ConnectionStatus {
     client.status()
@@ -223,9 +172,7 @@ impl From<StopResult> for DaemonShutdownReply {
     }
 }
 
-// The user's daemon stop from the LLM `daemon.stop` — the shell's one stop path (`daemon_client::shutdown`, plan
-// `User`: graceful, then the identity-checked kill). Joins a stop already in flight. No confirm (TRD S21 trd-3-2-u5
-// D5); the band has no stop button (ADR-0356).
+// The user's daemon stop from the LLM `daemon.stop` — the shell's one stop path (`daemon_client::shutdown`, plan `User`: graceful, then the identity-checked kill). Joins a stop already in flight. No confirm (TRD S21 trd-3-2-u5 D5); the band has no stop button (ADR-0356).
 #[tauri::command]
 pub async fn daemon_shutdown(
     client: tauri::State<'_, Arc<DaemonClient>>,
@@ -244,31 +191,25 @@ async fn ensure_internal(
 ) -> Result<DaemonInfoDto, String> {
     let data_dir = discovery::default_data_dir();
     let exe = locate_daemon_exe().map_err(|e| {
-        tracing::error!("데몬 실행 파일을 찾지 못함: {e}");
+        tracing::error!("daemon executable not found: {e}");
         e.to_string()
     })?;
     let timeout = search_timeout(timeout_ms);
 
-    // ★Multi-spawn serialization★: lines up simultaneous multi-WebView ensure with a process-global lock (see the ensure_lock
-    // comment). The lock covers only the ensure (spawn included) section — the first call spawns + publishes daemon.json, and the calls that follow
-    // only attach (no spawn). Unrelated to ADR-0024 C1 (no direct daemon spawn) — the WMI path is unchanged.
+    // Multi-spawn serialization: lines up simultaneous multi-WebView ensure with a process-global lock (see `ensure_lock`); it covers only the ensure (spawn included) section — the first call spawns + publishes daemon.json, later calls only attach. Unrelated to ADR-0024 C1 (no direct daemon spawn) — the WMI path is unchanged.
     let _guard = ensure_lock().lock().await;
     on_search();
 
-    // blocking (including polling · sleep) — to protect the async executor use the tauri runtime's spawn_blocking
-    // (via tauri::async_runtime, without a direct tokio dependency).
+    // Blocking (polling · sleep): use the tauri runtime's spawn_blocking (via tauri::async_runtime, no direct tokio dependency) to protect the async executor.
     tauri::async_runtime::spawn_blocking(move || {
         discovery::ensure_daemon(&data_dir, &exe, timeout, console)
     })
     .await
-    .map_err(|e| format!("discover_daemon join 실패: {e}"))?
+    .map_err(|e| format!("discover_daemon join failed: {e}"))?
     .map(DaemonInfoDto::from)
-    // Security: the error message has no token (DiscoveryError does not include token).
-    //
-    // ★Do not stop at passing only a string to the frontend★: then in release the cause exists only as a banner,
-    //   and disappears the moment the banner is closed. Leave it at the default level so the log file explains that banner instead.
+    // Security: the error message has no token (DiscoveryError does not include it). Do not stop at passing only a string to the frontend: in release the cause would exist only as a banner and vanish when the banner closes — leave it at the default level so the log file explains the banner.
     .map_err(|e| {
-        tracing::warn!("데몬 ensure 실패 — 프론트에 문자열로 전달: {e}");
+        tracing::warn!("daemon ensure failed — passing the string to the frontend: {e}");
         e.to_string()
     })
 }
@@ -295,8 +236,7 @@ mod tests {
         assert_eq!(dto.protocol_version, 7);
     }
 
-    // ADR-0310: D23 ① — pins the three commands' return type to `DaemonInfoDto`; returning anything else (e.g. the
-    // protocol `DaemonInfo`, which serializes the token) stops this module from compiling.
+    // ADR-0310: D23 ① — pins the three commands' return type to `DaemonInfoDto`; returning anything else (e.g. the protocol `DaemonInfo`, which serializes the token) stops this module compiling.
     #[test]
     fn the_three_commands_return_the_tokenless_dto() {
         fn returns_dto<A, Fut>(_: impl Fn(Option<u64>, A) -> Fut)
@@ -354,8 +294,7 @@ mod tests {
         }
     }
 
-    // ADR-0310: D23 ① — all three commands (`discover_daemon` · `daemon_start` · `read_daemon_info`) return this DTO,
-    // so its serialized form is what the WebView receives.
+    // ADR-0310: D23 ① — all three commands (`discover_daemon` · `daemon_start` · `read_daemon_info`) return this DTO, so its serialized form is what the WebView receives.
     #[test]
     fn serialized_dto_carries_no_token() {
         let token = "c".repeat(64);

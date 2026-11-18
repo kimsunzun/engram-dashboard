@@ -1,14 +1,7 @@
-//! The consumer of one handle's inbox (TRD S21 trd-3 §6-2 U2 · D24 ②): forwards every item, tagged with its key and
-//! handle, to the driver's channel, drains the inbox to its end (transport invariant 5) and then reports the end.
-//!
-//! - ★Forward only★ — routing runs on the driver's task ([`super::route`]), one inbox per handle, so items of one
-//!   handle keep their order and an old handle's tail can be told apart by its token.
-//! - ★Backpressure is the point★ — while the driver lags, `send` waits, the inbox fills and the transport stops reading
-//!   this daemon instead of losing frames. So the driver task never awaits anything that needs this inbox drained
-//!   (transport invariant 1): `Peer::request` (the reply could be stuck behind this pump), a `Peer::close_after_flush`
-//!   future or `Registry::close_all` (their end waits for the drain).
-//! - When the driver's receiver is gone — also while the inbox is quiet — the pump closes the inbox (the supervisor
-//!   folds at once, though the registry still holds a `Peer` clone) and discards what is left until the end.
+//! The consumer of one handle's inbox (TRD S21 trd-3 §6-2 U2 · D24 ②): forwards every item, tagged with its key and handle, to the driver's channel, drains the inbox to its end (transport invariant 5) and then reports the end.
+//! - Forward only: routing runs on the driver's task ([`super::route`]), one inbox per handle, so items of one handle keep their order and an old handle's tail can be told apart by its token.
+//! - Backpressure is the point: while the driver lags, `send` waits, the inbox fills and the transport stops reading this daemon instead of losing frames — so the driver task never awaits anything needing this inbox drained (transport invariant 1): `Peer::request` (the reply could be stuck behind this pump), a `Peer::close_after_flush` future or `Registry::close_all` (their end waits for the drain).
+//! - When the driver's receiver is gone — also while the inbox is quiet — the pump closes the inbox (the supervisor folds at once though the registry still holds a `Peer` clone) and discards what is left until the end.
 // ADR-0310
 
 use engram_dashboard_transport::{Inbox, Incoming};
@@ -18,20 +11,16 @@ use tokio::task::JoinHandle;
 use super::wire::ShellWire;
 use super::{DaemonKey, HandleToken};
 
-/// What the pump hands the driver.
 pub enum Routable {
-    /// One inbox item and the key and handle it came from — for [`super::route::route`].
     Item {
         key: DaemonKey,
         token: HandleToken,
         item: Incoming<ShellWire>,
     },
-    /// The handle's inbox ended (`None`); always the last one of the handle — for [`super::route::route_end`].
     Ended { key: DaemonKey, token: HandleToken },
 }
 
-/// Spawns the pump on the current tokio runtime. ★Spawn it in the same driver step as the `Registry::add` and
-/// `RouteState::adopt` of `token`★ (see `adopt`). The task ends after the inbox's end, or once the driver is gone.
+/// Spawns the pump on the current tokio runtime — in the same driver step as the `Registry::add` and `RouteState::adopt` of `token` (see `adopt`). The task ends after the inbox's end, or once the driver is gone.
 pub fn spawn_pump(
     mut inbox: Inbox<ShellWire>,
     key: DaemonKey,

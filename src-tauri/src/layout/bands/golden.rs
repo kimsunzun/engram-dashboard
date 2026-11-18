@@ -1,37 +1,11 @@
-//! Golden `src-tauri/src/layout/bands_golden.json` — binds the docking band · new window size rules (`layout::bands` · `layout::drag_size`) to
-//! the web mirror (`dock/bands.ts` · `dockedTree.ts` · `judge.ts` · `dragSize.ts` — TS test `dock/testing/bandsGolden.ts`)
-//! (TRD S21-slot-docking §4-5 · §8-1 ⑩ · precedent `queued_input_golden.json`).
-//!
-//! - Capturing = the `#[ignore]` test [`regenerate_bands_golden`] — `cargo test -p engram-dashboard --test lib_unit --
-//!   --ignored regenerate_bands_golden`. With the same rule, capturing twice gives the same bytes. It is not hand-edited.
-//! - Assertions = the remaining tests — they rerun the current Rust rule on the golden's inputs and compare one by one with the recorded answers. If the rule · constants are changed
-//!   and it is not recaptured, these and the TS tests turn red together.
-//!
-//! Form (the same text is carried in the golden head `_format` — so the TS side need not read this file):
-//!
-//! - `_constants` = the same object as `DOCK_CONSTANTS` of the generated `DockConstants.ts` (keys = Rust constant names).
-//! - `ratio_limits` = `{min, max}` — the split ratio limits the rule ran with (`tree::RATIO_MIN` · `RATIO_MAX` = snapshot `ratio_min` ·
-//!   `ratio_max`).
-//! - `bands[]` — one per window.
-//!   - Input: `name` · `canvas {w, h}` (integer CSS px) · `canvas_origin {x, y}` · `tab_bar {x0, y0, x1, y1} | null` (viewport
-//!     CSS px — the base rectangle of [`strip_zone`]. The golden's value is in the tab drag area form — the base the web now passes is from the left of the first head ~
-//!     the right end of `+` × the title row (the tab bar row if none), and the rule takes the base as it is, so the golden does not change · TRD
-//!     S26-window-chrome §7-9) · `layout` (the `LayoutNode` wire form of the visible tab) · `shape` (the dragged tab's layout — the shape
-//!     string of the drag MIME: in preorder `l` = area · `h<비율>_` = left-right split · `v<비율>_` = top-bottom split (the bracketed part is the ratio), with two children after a split. Area ids are made
-//!     as new values not in `layout`) · `original {w, h} | null` (the dragged tab's original size — `null` = unknown → the length is
-//!     treated as NaN = the share is `ATTACH_SHARE_MAX`).
-//!   - Answer: `zone` = `zone_in_canvas(strip_zone(tab_bar), canvas_origin)` | `null` · `blocked` = every `{anchor, side}` where inserting would
-//!     create a new zero-area area (`docked_tree` failure) (outer edges first · areas in preorder · edges in `SIDE_ORDER` · share =
-//!     `attach_share(original, side, 칸 틀 또는 캔버스 전체)`, the last argument being the area frame or the whole canvas) · `bands` = in `effective_bands` order as is, `{anchor
-//!     ("outer" | 칸 id), side, band, areas, share, landing}` · `slots` = areas in preorder, `{id, frame, zones: {slot, centre}
-//!     | null}` (`zones` = the zone lines drawn when the cursor is over that area · `null` if there is no valid area band) · `points` = `[x, y,
-//!     pick, zones]` (canvas CSS px): `pick` = `"strip"` if inside the tab bar zone (half-open) · otherwise the place in `bands` chosen at that point
-//!     (`choose`) · `null` if none / `zones` = the place in `slots` whose zone lines are drawn at that point
-//!     (`null` over the tab bar · outer band · outside the canvas · an area with no valid area band). The other two of the guide come from `pick` — preview = the chosen band's
-//!     `landing` · the layout frame (whole canvas) only when the chosen band is an outer band.
-//!   - All rectangles are in `{x0, y0, x1, y1}` bounds form · half-open.
-//! - `drag_size[]` — inputs of `drag_sizes` `restored {w, h} | null` · `maximized` · `insets {t, r, b, l}` · `viewport` ·
-//!   `work` · `chrome` · `single` → answer `size {w, h} | null` · `original {w, h}`.
+//! Golden `src-tauri/src/layout/bands_golden.json` — binds the docking band · new window size rules (`layout::bands` · `layout::drag_size`) to the web mirror (`dock/bands.ts` · `dockedTree.ts` · `judge.ts` · `dragSize.ts` — TS test `dock/testing/bandsGolden.ts`) (TRD S21-slot-docking §4-5 · §8-1 ⑩ · precedent `queued_input_golden.json`).
+//! - Capturing = the `#[ignore]` test [`regenerate_bands_golden`] — `cargo test -p engram-dashboard --test lib_unit -- --ignored regenerate_bands_golden`; the same rule captures the same bytes twice. Never hand-edited.
+//! - Assertions = the remaining tests rerun the current Rust rule on the golden's inputs and compare with the recorded answers; changing the rule · constants without recapturing turns these and the TS tests red together.
+//! Form (the same text is in the golden head `_format`, so the TS side need not read this file):
+//! - `_constants` = the same object as `DOCK_CONSTANTS` of the generated `DockConstants.ts` (keys = Rust constant names). `ratio_limits` = `{min, max}` — the split ratio limits the rule ran with (`tree::RATIO_MIN` · `RATIO_MAX` = snapshot `ratio_min` · `ratio_max`).
+//! - `bands[]` — one per window. Input: `name` · `canvas {w, h}` (integer CSS px) · `canvas_origin {x, y}` · `tab_bar {x0, y0, x1, y1} | null` (viewport CSS px — the base rectangle of [`strip_zone`]; the golden's value is in the tab drag area form while the web now passes from the left of the first head to the right end of `+` × the title row (the tab bar row if none) — the rule takes the base as is, so the golden is unchanged · TRD S26-window-chrome §7-9) · `layout` (the `LayoutNode` wire form of the visible tab) · `shape` (the dragged tab's layout — the drag MIME's shape string, preorder: `l` = area · `h<ratio>_` = left-right split · `v<ratio>_` = top-bottom split, two children after a split; area ids are new values not in `layout`) · `original {w, h} | null` (the dragged tab's original size — `null` = unknown → length treated as NaN = share `ATTACH_SHARE_MAX`).
+//!   Answer: `zone` = `zone_in_canvas(strip_zone(tab_bar), canvas_origin)` | `null` · `blocked` = every `{anchor, side}` whose insertion would create a new zero-area area (`docked_tree` failure; outer edges first · areas in preorder · edges in `SIDE_ORDER` · share = `attach_share(original, side, area frame or whole canvas)`) · `bands` = `effective_bands` order as is, `{anchor ("outer" | area id), side, band, areas, share, landing}` · `slots` = areas in preorder, `{id, frame, zones: {slot, centre} | null}` (zone lines drawn when the cursor is over that area; `null` with no valid area band) · `points` = `[x, y, pick, zones]` (canvas CSS px): `pick` = `"strip"` inside the tab bar zone (half-open), else the place in `bands` chosen by `choose` at that point (`null` if none) / `zones` = the place in `slots` whose zone lines draw at that point (`null` over the tab bar · outer band · outside the canvas · an area with no valid area band). The guide's other two come from `pick` — preview = the chosen band's `landing`, the layout frame (whole canvas) only when the chosen band is an outer band. All rectangles are `{x0, y0, x1, y1}` bounds form · half-open.
+//! - `drag_size[]` — inputs of `drag_sizes`: `restored {w, h} | null` · `maximized` · `insets {t, r, b, l}` · `viewport` · `work` · `chrome` · `single` → answer `size {w, h} | null` · `original {w, h}`.
 
 use std::fmt::Write as _;
 
@@ -97,7 +71,6 @@ struct Canvas {
     h: u32,
 }
 
-/// The input of one `bands[]` row of the golden.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BandsInput {
     name: String,
@@ -109,7 +82,6 @@ struct BandsInput {
     original: Option<Size>,
 }
 
-/// One `bands[]` row of the golden — input + recorded answer.
 #[derive(Deserialize)]
 struct BandsCase {
     name: String,
@@ -140,7 +112,6 @@ impl BandsCase {
     }
 }
 
-/// The input of one `drag_size[]` row of the golden.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DragSizeInput {
     name: String,
@@ -191,7 +162,7 @@ fn parse_shape(shape: &str) -> LayoutNode {
                 }
             }
             "h" | "v" => {
-                let (ratio, after) = tail.split_once('_').expect("비율 뒤 `_`");
+                let (ratio, after) = tail.split_once('_').expect("`_` after the ratio");
                 *rest = after;
                 let split_id = fresh();
                 let a = node(rest, next);
@@ -203,18 +174,18 @@ fn parse_shape(shape: &str) -> LayoutNode {
                     } else {
                         SplitDir::TopBottom
                     },
-                    ratio: ratio.parse().expect("비율"),
+                    ratio: ratio.parse().expect("ratio"),
                     a: Box::new(a),
                     b: Box::new(b),
                 }
             }
-            other => panic!("모양 문자 {other:?}"),
+            other => panic!("shape character {other:?}"),
         }
     }
     let mut rest = shape;
     let mut next = 0;
     let tree = node(&mut rest, &mut next);
-    assert!(rest.is_empty(), "모양 {shape:?} 뒤에 남은 것 {rest:?}");
+    assert!(rest.is_empty(), "leftover after shape {shape:?}: {rest:?}");
     tree
 }
 
@@ -322,10 +293,9 @@ const RATIO_LIMITS: RatioLimits = RatioLimits {
 };
 
 fn value(v: &impl Serialize) -> Value {
-    serde_json::to_value(v).expect("직렬화")
+    serde_json::to_value(v).expect("serialization")
 }
 
-/// One window run with the current rule.
 struct Eval<'a> {
     targets: WindowTargets<'a>,
     bands: Vec<BandHit>,
@@ -441,7 +411,7 @@ impl<'a> Eval<'a> {
             return (pick, Value::Null);
         };
         let (slot, frame) = frame_at(self.targets.layout, self.targets.canvas, p)
-            .expect("선을 그린 점 = 캔버스 안");
+            .expect("a point where a line is drawn = inside the canvas");
         assert_eq!(self.zones_of(slot, frame), Some(drawn), "{p:?}");
         let at = self.frames.iter().position(|(s, _)| *s == slot).unwrap();
         (pick, json!(at))
@@ -468,7 +438,7 @@ fn drag_size_line(input: &DragSizeInput) -> DragSizeLine<'_> {
 // ── assertions (§8-1 ⑩) ────────────────────────────────────────────────────────────
 
 fn golden() -> Golden {
-    serde_json::from_str(GOLDEN).expect("골든이 읽혀야")
+    serde_json::from_str(GOLDEN).expect("the golden must be readable")
 }
 
 #[test]
@@ -477,7 +447,7 @@ fn the_golden_constants_are_the_current_pub_consts() {
     assert_eq!(
         g.constants,
         serde_json::to_value(current_constants()).unwrap(),
-        "상수를 바꿨으면 골든을 다시 뜬다(regenerate_bands_golden)"
+        "if a constant changed, regenerate the golden (regenerate_bands_golden)"
     );
     assert_eq!(g.ratio_limits, value(&RATIO_LIMITS));
 }
@@ -485,19 +455,19 @@ fn the_golden_constants_are_the_current_pub_consts() {
 #[test]
 fn every_band_case_of_the_golden_holds() {
     let g = golden();
-    assert!(g.bands.len() >= 10, "골든 창 {} 개", g.bands.len());
+    assert!(g.bands.len() >= 10, "{} golden windows", g.bands.len());
     let mut points = 0;
     for case in &g.bands {
         let name = &case.name;
         let input = case.input();
         let incoming = parse_shape(&case.shape);
-        assert_eq!(encode_shape(&incoming), case.shape, "{name}: 모양 왕복");
+        assert_eq!(encode_shape(&incoming), case.shape, "{name}: shape round trip");
         let e = Eval::new(&input, &incoming);
         assert_eq!(value(&e.zone()), case.zone, "{name}: zone");
         assert_eq!(value(&e.blocked()), value(&case.blocked), "{name}: blocked");
         assert_eq!(value(&e.bands()), value(&case.bands), "{name}: bands");
         assert_eq!(value(&e.slots()), value(&case.slots), "{name}: slots");
-        assert!(!case.points.is_empty(), "{name}: 점이 있어야");
+        assert!(!case.points.is_empty(), "{name}: must have points");
         for (x, y, pick, zones) in &case.points {
             assert_eq!(
                 e.point(*x, *y),
@@ -507,13 +477,13 @@ fn every_band_case_of_the_golden_holds() {
             points += 1;
         }
     }
-    assert!(points > 1000, "점 {points} 개");
+    assert!(points > 1000, "{points} points");
 }
 
 #[test]
 fn every_drag_size_case_of_the_golden_holds() {
     let g = golden();
-    assert!(g.drag_size.len() >= 8, "골든 크기 {} 개", g.drag_size.len());
+    assert!(g.drag_size.len() >= 8, "{} golden sizes", g.drag_size.len());
     for case in &g.drag_size {
         let line = drag_size_line(&case.input);
         assert_eq!(
@@ -890,7 +860,7 @@ fn probe_points(e: &Eval) -> Vec<(f64, f64)> {
 }
 
 fn line(v: &impl Serialize) -> String {
-    serde_json::to_string(v).expect("직렬화")
+    serde_json::to_string(v).expect("serialization")
 }
 
 // One `"key": [` line · one line per element · `]` — if empty, `"key": []`.
@@ -959,13 +929,13 @@ fn render_golden() -> String {
 }
 
 #[test]
-#[ignore = "골든을 다시 뜬다 — 규칙을 일부러 바꿨을 때만 돌린다"]
+#[ignore = "regenerates the golden — run only when the rules were changed on purpose"]
 fn regenerate_bands_golden() {
     let text = render_golden();
-    assert_eq!(text, render_golden(), "두 번 뜨면 같은 바이트");
-    let parsed: Value = serde_json::from_str(&text).expect("뜬 골든은 JSON");
+    assert_eq!(text, render_golden(), "two renderings give the same bytes");
+    let parsed: Value = serde_json::from_str(&text).expect("the rendered golden is JSON");
     assert!(parsed["bands"].as_array().is_some_and(|b| !b.is_empty()));
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/layout/bands_golden.json");
-    std::fs::write(path, text).expect("골든 쓰기");
+    std::fs::write(path, text).expect("golden write");
 }

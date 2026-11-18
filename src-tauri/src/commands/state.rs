@@ -1,5 +1,5 @@
-//! The human path of the crash copy 「복원할까요?」 — two invoke shells that call the same restore
-//! coordinator as the bus `restore.status` · `restore.answer` (`layout::commands`) (TRD S21-storage §6-7 · ADR-0081 decision 3 「두 껍데기, 서비스 하나」). When the state changes,
+//! The human path of the crash copy 「Restore?」 — two invoke wrappers that call the same restore
+//! coordinator as the bus `restore.status` · `restore.answer` (`layout::commands`) (TRD S21-storage §6-7 · ADR-0081 decision 3 「two thin wrappers, one service」). When the state changes,
 //! the coordinator's service emits `restore:changed` to main.
 
 use std::sync::Arc;
@@ -28,6 +28,6 @@ pub async fn restore_answer(
     let restore = Arc::clone(&restore);
     match tauri::async_runtime::spawn_blocking(move || restore.answer(accept)).await {
         Ok(answered) => answered.map_err(|e| e.to_string()),
-        Err(e) => Err(format!("복원 답이 끝나지 못했다: {e}")),
+        Err(e) => Err(format!("restore answer did not finish: {e}")),
     }
 }

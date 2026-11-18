@@ -1,33 +1,15 @@
-//! Daemon → shell inbound command receiver — applies a received envelope **outside the connection task**.
+//! Daemon → shell inbound command receiver — applies a received envelope outside the connection task.
 //!
-//! ★The reason for this file's existence is that one line★ (ADR-0155 decision 4 · ADR-0081 「relay 적용은 액터 밖(비블로킹)」):
-//! if the connection task `.await`s the envelope inline, a composite command (`agent.spawnInto` — its handler calls
-//! `DaemonClient::send_command().await` from inside itself) **cannot fetch its own answer**. That answer is resolved only in the same connection
-//! task's read loop, and that loop is now waiting for this handler (self-deadlock).
-//! [`InboundReceiver::on_command`] therefore **pushes onto a queue and returns immediately**, and the actual execution runs in a separate task
-//! launched by [`TaskSpawner`].
+//! Why this file exists (ADR-0155 decision 4 · ADR-0081 「relay application runs outside the actor (non-blocking)」): if the connection task `.await`s the envelope inline, a composite command (`agent.spawnInto` — its handler calls `DaemonClient::send_command().await` from inside) cannot fetch its own answer, which is resolved only in the same connection task's read loop, now waiting for this handler (self-deadlock). [`InboundReceiver::on_command`] therefore pushes onto a queue and returns at once, and the execution runs in a separate task launched by [`TaskSpawner`].
 //!
-//! The delivery rule uses the same 3 steps at every hop (`engram_dashboard_command::route` — ADR-0155 decision 3): is it in my
-//! table → is it in the registry → error. The shell's step 2 is **the webview's share** ([`ViewCommandPort`]) — a name not in the table goes down to
-//! that window, and if it is not there either, it goes out as `UNKNOWN_COMMAND`.
+//! The delivery rule is the same 3 steps at every hop (`engram_dashboard_command::route` — ADR-0155 decision 3): is it in my table → is it in the registry → error. The shell's step 2 is the webview's part ([`ViewCommandPort`]) — a name not in the table goes down to that window, and if not there either, goes out as `UNKNOWN_COMMAND`.
 //!
 //! ## Wiring
-//! The caller is the connection driver (`connection.rs` `accept_inbound`, for a daemon `CommandRequest`); the wire
-//! frames are `AgentEvent::CommandRequest` (daemon → shell) and `AgentCommand::CommandOutcome` (shell → daemon). The
-//! shell's own names go onto the daemon's roster on every connect (`connection.rs` `register_commands`, packet =
-//! [`registration_command`]).
-//! The sending side exists now too — the daemon finds the owner in its own registry and writes the envelope onto that connection
-//! (`engram_dashboard_daemon::command_delivery` · ADR-0154). A name not in the shell table goes one hop further down from here
-//! and reaches the webview ([`ViewCommandPort`] · the real thing = `crate::view_commands`).
+//! The caller is the connection driver (`connection.rs` `accept_inbound`, for a daemon `CommandRequest`); the wire frames are `AgentEvent::CommandRequest` (daemon → shell) and `AgentCommand::CommandOutcome` (shell → daemon). The shell's own names go onto the daemon's roster on every connect (`connection.rs` `register_commands`, packet = [`registration_command`]). The sending side exists too — the daemon finds the owner in its registry and writes the envelope onto that connection (`engram_dashboard_daemon::command_delivery` · ADR-0154); a name not in the shell table goes one hop further down to the webview ([`ViewCommandPort`] · real = `crate::view_commands`).
 //!
-//! ★But **the opposite direction does not reach yet**★: the reply of the daemon→shell round trip (`AgentEvent::CommandReply`) is not yet separated by the webview's
-//! `handleEvent` (`src/api/protocolClient.ts`), so the promise of a command issued by the webview does not resolve
-//! (the source of truth for that fact = the `AgentEvent::CommandReply` comment of `engram_dashboard_protocol`). It is a separate bridge from the direction this module runs
-//! (daemon→shell).
+//! The opposite direction does not reach yet: the reply of the daemon→shell round trip (`AgentEvent::CommandReply`) is not separated by the webview's `handleEvent` (`src/api/protocolClient.ts`), so the promise of a webview-issued command does not resolve (source of truth: the `AgentEvent::CommandReply` comment of `engram_dashboard_protocol`) — a separate bridge from this module's daemon→shell direction.
 //!
-//! ★Where it is verified★: `tests/layout_commands.rs` drives the receiver, the outcome writer and the registration
-//! packet without a connection (its residue list is canonical); the driver's suite (`connection/tests.rs`) drives the
-//! driver's arm on a memory network.
+//! Verified in `tests/layout_commands.rs` (drives the receiver, the outcome writer and the registration packet without a connection; its residue list is canonical) and `connection/tests.rs` (the driver's arm on a memory network).
 // ADR-0155
 // ADR-0081
 
@@ -43,22 +25,14 @@ use engram_dashboard_protocol::{AgentCommand, RequestId};
 
 use super::protocol_state;
 
-/// One task — it has no output (the reply is carried by [`ReplySink`]).
 pub type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// The seam for **where the application runs**.
-///
-/// ★Why it is injected★: 「연결 태스크를 안 막는다」 (does not block the connection task) is not caught by counting but only by **when it runs**. The harness directly sees
-/// whether `on_command` had already returned while the fake implementation held the task (ADR-0012).
-/// An implementation **may drop the task** (runtime shutdown, etc.) — in that case the reply is emitted by the `Drop` of [`ReplySink`].
+/// The seam for where the application runs. Injected because "does not block the connection task" is caught not by counting but only by when it runs — the harness sees whether `on_command` had already returned while the fake held the task (ADR-0012). An implementation may drop the task (runtime shutdown, etc.) — the reply is then emitted by the `Drop` of [`ReplySink`].
 pub trait TaskSpawner: Send + Sync {
     fn spawn(&self, task: BoxedTask);
 }
 
-/// Production implementation — launches on **the very runtime** the connection task runs on.
-///
-/// The point is not to create a new runtime: for the application to do a daemon round trip (`agent.spawnInto`), it must
-/// interleave with the socket task of the same runtime.
+/// Production implementation — launches on the very runtime the connection task runs on: no new runtime, since the application doing a daemon round trip (`agent.spawnInto`) must interleave with the socket task of the same runtime.
 pub struct RuntimeSpawner(pub tokio::runtime::Handle);
 
 impl TaskSpawner for RuntimeSpawner {
@@ -67,22 +41,11 @@ impl TaskSpawner for RuntimeSpawner {
     }
 }
 
-/// Where the shell hands **a name not in its own table** — today that place is one webview (hop ③ of TRD §3-8).
-///
-/// ★Why three endpoints are bundled in one trait★: all three read the same one state (which window reported what). If the registry and the
-/// link were injected separately, the assembly part would have to guard every time that the two are the same real object.
-/// ★Why it is injected★: the real object reaches `AppHandle::emit_to` and cannot be stood up without a window (ADR-0012). The real object is
-/// `crate::view_commands::ViewCommandBridge`.
-/// ★[`ViewCommandPort::declarations`] must not carry names held by the shell table★ — even if it does, delivery does not diverge
-/// (`route` looks at the table first), but instead **one more name that cannot be called appears in the registration packet**. The place to filter is the implementation side
-/// (the reserved-name filter of `view_commands`) — if filtered once more here, the same decision lives in two places, and the moment the two use different
-/// criteria (declared / plugged in), it becomes impossible to tell which one is real.
+/// Where the shell hands a name not in its own table — today one webview (hop ③ of TRD §3-8). Three endpoints are bundled in one trait because all read the same state (which window reported what); injected separately, the assembly would have to guard each time that the registry and link are the same real object. Injected for testability: the real object reaches `AppHandle::emit_to` and cannot be stood up without a window (ADR-0012); real = `crate::view_commands::ViewCommandBridge`.
+/// [`ViewCommandPort::declarations`] must not carry names held by the shell table — delivery would not diverge (`route` looks at the table first), but one more uncallable name would appear in the registration packet. The filter lives on the implementation side (the reserved-name filter of `view_commands`); filtering again here would put the same decision in two places that could use different criteria (declared / plugged in).
 pub trait ViewCommandPort: Send + Sync {
-    /// The webview's share to put on the registration packet.
     fn declarations(&self) -> Vec<CommandDecl>;
-    /// 「이 이름을 지금 웹뷰가 받을 수 있나」 (can the webview receive this name now) — step 2 of the 3-step delivery.
     fn lookup(&self, name: &str) -> OwnerLookup;
-    /// Send the envelope down to the webview and wait for the reply.
     fn dispatch(&self, env: CommandEnvelope) -> Pin<Box<dyn Future<Output = CommandReply> + Send>>;
 }
 
@@ -98,8 +61,7 @@ impl ViewCommandPort for NoViewCommands {
         OwnerLookup::Unknown
     }
 
-    /// ★The `lookup` above is always `Unknown`, so this is not reached★ — even so, answering with a value rather than a panic is
-    /// a contract (a command handler does not blow up and die — TRD §4-⑨).
+    /// The `lookup` above is always `Unknown`, so this is not reached — answering with a value rather than a panic is still a contract (a command handler does not blow up and die — TRD §4-⑨).
     fn dispatch(&self, env: CommandEnvelope) -> Pin<Box<dyn Future<Output = CommandReply> + Send>> {
         let request_id = env.request_id;
         let name = env.name;
@@ -115,7 +77,6 @@ impl ViewCommandPort for NoViewCommands {
     }
 }
 
-/// Provides the two endpoints `route` requires (`OwnerLookupSource`·`CommandLink`) from one port.
 struct ViewHop(Arc<dyn ViewCommandPort>);
 
 impl OwnerLookupSource for ViewHop {
@@ -130,10 +91,8 @@ impl CommandLink for ViewHop {
     }
 }
 
-/// Everything this hop uses for delivery — it must move into a task, so it is bundled in one `Arc`.
 struct Hop {
     table: CommandTable,
-    /// Steps 2·3 of the 3-step delivery — provides the registry (which name is the webview's) and its link together.
     view: ViewHop,
 }
 
@@ -145,15 +104,11 @@ pub struct InboundReceiver {
 }
 
 impl InboundReceiver {
-    /// `catalog_version` = the generation of the declaration block that built the table (`CATALOG_VERSION`). The registration packet carries it for diagnostics
-    /// (it is wrong if the receiving side compares it with its own number and rejects — TRD §4-①).
-    ///
-    /// Stands without the webview's share — delivers only the shell's own table.
+    /// `catalog_version` = the generation of the declaration block that built the table (`CATALOG_VERSION`). The registration packet carries it for diagnostics (the receiving side comparing it with its own number and rejecting would be wrong — TRD §4-①). Stands without the webview's part — delivers only the shell's own table.
     pub fn new(table: CommandTable, spawn: Arc<dyn TaskSpawner>, catalog_version: u32) -> Self {
         Self::with_view(table, spawn, catalog_version, Arc::new(NoViewCommands))
     }
 
-    /// An assembly that carries the webview's share too — used by the production path (`DaemonClient::install_command_table`).
     pub fn with_view(
         table: CommandTable,
         spawn: Arc<dyn TaskSpawner>,
@@ -170,12 +125,7 @@ impl InboundReceiver {
         }
     }
 
-    /// What goes on the registration packet — ★it advertises **what is actually plugged into the table**, not the declaration★ (if a name that cannot be called is registered,
-    /// an envelope the daemon delivered bounces back as `UNKNOWN_COMMAND`).
-    ///
-    /// The webview's share is appended after — to the daemon's eyes the two layers are indistinguishable, and need not be (the 2-hop delivery splits them again
-    /// in the shell — TRD §3-7 clause 2). ★So this list is **re-read every time**★: the webview comes up late regardless of the socket,
-    /// so if it were built once and cached, a reconnect would send the old list again.
+    /// What goes on the registration packet — advertises what is actually plugged into the table, not the declaration (a registered uncallable name would bounce an envelope the daemon delivered back as `UNKNOWN_COMMAND`). The webview's part is appended after — to the daemon the two layers are indistinguishable and need not be (the 2-hop delivery splits them again in the shell — TRD §3-7 clause 2). Re-read every time: the webview comes up late regardless of the socket, so a once-built cached list would resend the old one on reconnect.
     pub fn declarations(&self) -> Vec<CommandDecl> {
         let mut decls = self.hop.table.decls();
         decls.extend(self.hop.view.0.declarations());
@@ -186,14 +136,7 @@ impl InboundReceiver {
         self.catalog_version
     }
 
-    /// The **single entry point** the connection loop calls — receives the envelope and returns the reply through `deliver`.
-    ///
-    /// ★The point is that it does not take the correlation key as an argument★: it takes `request_id` **directly** from the envelope and builds the reply
-    /// slot, so the caller has no way to send another request's key (that mistake would attach an answer to someone else's round trip).
-    /// `deliver` is called **exactly once** — whether an answer was given (`send`) or the task vanished without one (the `Drop` of
-    /// [`ReplySink`] emits an error reply). So the caller does not handle 「답이 안 올 수도 있다」 (the answer may not come).
-    /// ★`deliver` runs on the apply task, not on the connection driver's actor★ — it writes through a registry clone
-    /// on the connection the request came on (`link::route::send_command_outcome`).
+    /// The single entry point the connection loop calls — receives the envelope and returns the reply through `deliver`. It does not take the correlation key as an argument: it takes `request_id` directly from the envelope and builds the reply slot, so the caller has no way to send another request's key (which would attach an answer to someone else's round trip). `deliver` is called exactly once — whether an answer was given (`send`) or the task vanished without one (the `Drop` of [`ReplySink`] emits an error reply), so the caller need not handle "the answer may not come". `deliver` runs on the apply task, not the driver's actor — it writes through a registry clone on the connection the request came on (`link::route::send_command_outcome`).
     pub fn accept(
         &self,
         env: CommandEnvelope,
@@ -205,8 +148,7 @@ impl InboundReceiver {
 }
 
 impl InboundCommands for InboundReceiver {
-    /// ★All that is done here is one queue push★ — the caller (the connection read loop) waits for nothing inside this function. If it is reverted
-    /// to inline execution, the self-deadlock of the header above revives as it was.
+    /// All that is done here is one queue push — the connection read loop waits for nothing inside it; reverting to inline execution revives the self-deadlock of the header.
     fn on_command(&self, env: CommandEnvelope, reply: ReplySink) {
         let hop = Arc::clone(&self.hop);
         self.spawn.spawn(Box::pin(async move {
@@ -216,14 +158,7 @@ impl InboundCommands for InboundReceiver {
     }
 }
 
-/// The receiver place that is filled late.
-///
-/// ★Why a slot — because of a cycle★: the table's spawn port holds `DaemonClient` (`agent.spawnInto` is a daemon round trip)
-/// and that client's connection task holds this receiver. So the assembly order is only **client → table → receiver → fill the
-/// slot**, and the connection task may find the slot empty when it comes up (an envelope arriving then gets `None` from `get` below and the
-/// call site emits an error reply — it is not quietly discarded). It has the same form as the daemon-side `CommandTableSlot`.
-/// ★Only the first winner wins★ — a second `set` is ignored. If a path to swap the table were made, at that moment it would be impossible to know
-/// which table is running (a reconnect does not rebuild the table — it only resends the registration).
+/// The receiver place that is filled late — a slot because of a cycle: the table's spawn port holds `DaemonClient` (`agent.spawnInto` is a daemon round trip) and that client's connection task holds this receiver, so assembly order is client → table → receiver → fill the slot, and the connection task may find it empty when it comes up (an envelope then gets `None` from `get` and the call site emits an error reply — not discarded quietly). Same form as the daemon-side `CommandTableSlot`. Only the first winner wins — a second `set` is ignored; a swap path would make it unknowable which table is running (a reconnect does not rebuild the table, it only resends the registration).
 pub struct InboundSlot(OnceLock<Arc<InboundReceiver>>);
 
 impl InboundSlot {
@@ -233,7 +168,7 @@ impl InboundSlot {
 
     pub fn set(&self, receiver: Arc<InboundReceiver>) {
         if self.0.set(receiver).is_err() {
-            tracing::warn!("인바운드 수신기가 이미 꽂혀 있다 — 두 번째 설치는 무시한다");
+            tracing::warn!("the inbound receiver is already plugged in — ignoring the second install");
         }
     }
 
@@ -249,32 +184,16 @@ impl Default for InboundSlot {
 }
 
 // ── Registering its own names ────────────────────────────────────────────────────────
-//
-// ★The `owner` of the registration packet is an **advertisement**★ — the daemon does not use this value but derives the owner token from **the connection that packet
-//   came on** (protocol `AgentCommand::RegisterCommands` doc · daemon `note_claimed_owner`). So whatever is
-//   written here, the registry's owner does not change — its only use is for a human to recognize who this connection is in the daemon log.
-// ★Do not imitate the daemon's token prefix (`conn-`)★ — if that form is written, the daemon sees it as 「남의 주인 토큰을 적은 등록」 (a registration that wrote someone else's owner token) and
-//   leaves a warning (the prefix branch of `note_claimed_owner`).
-//
-// ★★Do not promote this value to a 「클라이언트가 만든 식별자」 (client-made identifier) (ADR-0150 decision 1)★★ — that identifier must be **unique per
-//   connection** but this literal is fixed, so two shells use the same value. The daemon registry overwrites registration last-wins per name and removes on disconnect
-//   per owner (ADR-0150 decision 3), so that promotion would become behavior where **two shells steal each other's names and erase each other**.
-//   When introducing an identifier, do not edit this constant but create a new value per connection.
+// The `owner` of the registration packet is an advertisement: the daemon does not use it but derives the owner token from the connection the packet came on (protocol `AgentCommand::RegisterCommands` doc · daemon `note_claimed_owner`), so whatever is written here the registry's owner does not change — its only use is a human recognizing the connection in the daemon log. Do not imitate the daemon's token prefix (`conn-`): the daemon would see a registration that wrote someone else's owner token and warn (the prefix branch of `note_claimed_owner`).
+// Do not promote this value to a client-made identifier (ADR-0150 decision 1): such an identifier must be unique per connection but this literal is fixed, so two shells would use the same value, and since the daemon registry overwrites registration last-wins per name and removes on disconnect per owner (ADR-0150 decision 3), two shells would steal and erase each other's names. When introducing an identifier create a new per-connection value; do not edit this constant.
 const SHELL_OWNER_ADVERT: &str = "engram-dashboard-shell";
 
-/// The advertisement string shared by the registration and delta packets — ★do not build it separately in two places★. If they diverge, two packets of the same
-/// shell look like strangers in the daemon log (the registry's owner decision is independent of this value — see the comment above).
+/// The advertisement string shared by the registration and delta packets — do not build it in two places: diverging, two packets of the same shell look like strangers in the daemon log (the registry's owner decision is independent of this value).
 pub fn shell_owner_advert() -> engram_dashboard_protocol::OwnerToken {
     engram_dashboard_protocol::OwnerToken::new(SHELL_OWNER_ADVERT)
 }
 
-/// The registration packet this client sends — `None` when there is nothing to register or the declarations do not fit
-/// the raw slot (error log · ADR-0272).
-///
-/// ★Why `pub` and apart from the send★: sending needs a connection (the driver queues it on every connect), but
-/// **what is sent** (the advertised names · the catalog version · the owner string) does not. Apart, a harness asserts
-/// the very packet that goes out (`tests/layout_commands.rs`) — a packet rebuilt by hand would stay green when the two
-/// drift.
+/// The registration packet this client sends — `None` when there is nothing to register or the declarations do not fit the raw slot (error log · ADR-0272). `pub` and apart from the send because sending needs a connection (queued by the driver on every connect) while what is sent (advertised names · catalog version · owner string) does not: a harness asserts the very packet that goes out (`tests/layout_commands.rs`); a hand-rebuilt packet would stay green when the two drift.
 pub fn registration_command(receiver: &InboundReceiver) -> Option<AgentCommand> {
     let decls = receiver.declarations();
     if decls.is_empty() {
@@ -285,7 +204,7 @@ pub fn registration_command(receiver: &InboundReceiver) -> Option<AgentCommand> 
         Err(e) => {
             tracing::error!(
                 names = decls.len(),
-                "등록 항목 목록을 원문 칸으로 싸지 못했다 — 이 연결에서는 등록하지 않는다: {e}"
+                "could not wrap the registration entry list into a raw-text field — not registering on this connection: {e}"
             );
             return None;
         }

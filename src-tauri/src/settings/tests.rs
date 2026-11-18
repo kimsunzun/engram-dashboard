@@ -13,7 +13,7 @@ fn service(files: &MemFiles) -> SettingsService {
 }
 
 fn value_of(svc: &SettingsService, key: &str) -> String {
-    svc.effective(key).expect("표에 있는 키")
+    svc.effective(key).expect("a key in the table")
 }
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -22,7 +22,7 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("시계")
+            .expect("clock")
             .as_nanos()
     ))
 }
@@ -87,7 +87,7 @@ fn writes_are_refused_until_enabled() {
     {
         let disk = files.disk();
         assert_eq!(disk.writes, 0);
-        assert_eq!(disk.copies, 0, "관문 전엔 떠 두지도 않는다");
+        assert_eq!(disk.copies, 0, "nothing is copied aside before the gate either");
     }
     assert_eq!(svc.get(None).unwrap().rev, 0);
 
@@ -139,7 +139,7 @@ fn setting_the_default_on_a_default_key_is_not_written() {
     assert!(!out.changed);
     assert_eq!(out.rev, 0);
     assert_eq!(files.disk().writes, 0);
-    assert_eq!(files.text(), None, "파일을 만들지 않는다");
+    assert_eq!(files.text(), None, "does not create the file");
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn set_argument_errors() {
     match svc.set("chat.style.fontSize", "48rem") {
         Err(SettingsError::InvalidArgument(msg)) => {
             assert!(msg.starts_with("chat.style.fontSize: "), "{msg}");
-            assert!(msg.contains("범위"), "{msg}");
+            assert!(msg.contains("range"), "{msg}");
         }
         other => panic!("{other:?}"),
     }
@@ -313,7 +313,7 @@ fn reset_by_prefix_lists_every_key_but_only_reports_actual_changes() {
     let out = svc.reset("chat.style.").unwrap();
     assert_eq!(out.rev, 1);
     assert_eq!(out.reset.len(), 11);
-    assert_eq!(out.reset[0], "chat.style.railRowPt", "표 순서");
+    assert_eq!(out.reset[0], "chat.style.railRowPt", "table order");
     assert_eq!(
         out.changed,
         vec![SettingItem {
@@ -396,7 +396,7 @@ fn schema_describes_each_key() {
             choices: Some(vec!["dark".into(), "light".into(), "e-ink".into()]),
             min: None,
             max: None,
-            description: "창별 덮어쓰기가 없는 창의 테마".into(),
+            description: "theme of windows without a per-window override".into(),
         }]
     );
     let font = &svc.schema(Some("chat.style.fontSize")).unwrap()[0];
@@ -437,7 +437,6 @@ fn outcomes_serialize_with_snake_case_fields() {
 #[derive(Default)]
 struct Heard {
     changed: Mutex<Vec<SettingsSnapshot>>,
-    /// Notification order — `theme` and `language` must come after `changed`.
     order: Mutex<Vec<&'static str>>,
 }
 
@@ -511,7 +510,7 @@ fn setting_the_default_value_announces_it_as_default() {
     assert_eq!(
         heard.order(),
         vec!["changed"],
-        "테마 키가 아니면 테마 밀기는 없다"
+        "no theme push unless it is a theme key"
     );
 }
 
@@ -625,12 +624,12 @@ fn real_disk_round_trip_creates_the_folder_only_on_the_first_write() {
     let dir = root.join("shell").join("config");
 
     let svc = SettingsService::load_from_dir(&dir);
-    assert!(!root.exists(), "적재는 폴더를 만들지 않는다");
+    assert!(!root.exists(), "loading does not create the folder");
     svc.enable_writes();
     svc.set("theme.default", "light").unwrap();
 
     let path = dir.join("settings.json");
-    let text = std::fs::read_to_string(&path).expect("파일");
+    let text = std::fs::read_to_string(&path).expect("file");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&text).unwrap(),
         serde_json::json!({"$version": 1, "theme.default": "light"})
@@ -642,7 +641,7 @@ fn real_disk_round_trip_creates_the_folder_only_on_the_first_write() {
     assert_eq!(
         names,
         vec!["settings.json".to_string()],
-        "임시 파일이 남았다"
+        "a temporary file remained"
     );
 
     let reloaded = SettingsService::load_from_dir(&dir);
@@ -673,7 +672,7 @@ fn real_disk_corrupt_file_is_kept_on_load_and_copied_aside_on_first_write() {
     assert_eq!(
         std::fs::read(&copy).unwrap(),
         b"\xff\xfe not utf-8",
-        "앞서 떠 둔 사본은 덮인다"
+        "the copy made earlier is overwritten"
     );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap())
@@ -699,7 +698,7 @@ fn real_disk_oversized_file_counts_as_unusable() {
     assert_eq!(
         value_of(&svc, "theme.default"),
         "dark",
-        "상한 초과는 통째로 못 쓴다"
+        "exceeding the limit cannot be written at all"
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), big);
 
@@ -848,7 +847,7 @@ fn a_replace_that_keeps_failing_keeps_one_copy_of_the_broken_file() {
     assert_eq!(
         files.disk().corrupt.as_deref(),
         Some("{broken"),
-        "갈아끼운 뒤의 쓰기가 사본을 새 파일로 덮지 않는다"
+        "a write after the swap does not overwrite the copy with the new file"
     );
     assert_eq!(
         files.json(),
@@ -971,8 +970,8 @@ fn an_unreadable_file_falls_back_to_memory_for_the_write_decision() {
 
     let err = svc.set("theme.default", "e-ink").unwrap_err();
     assert!(
-        matches!(&err, SettingsError::Unreadable(message) if message.contains("못 읽어") && !message.contains("못 썼다")),
-        "읽기 실패를 쓰기 실패로 말하지 않는다: {err:?}"
+        matches!(&err, SettingsError::Unreadable(message) if message.contains("could not read") && !message.contains("could not write")),
+        "a read failure is not reported as a write failure: {err:?}"
     );
     assert_eq!(value_of(&svc, "theme.default"), "light");
 }
@@ -1003,7 +1002,7 @@ fn a_newer_version_file_refuses_writes_with_conflict_and_is_left_alone() {
     assert_eq!(
         value_of(&svc, "theme.default"),
         "dark",
-        "새 판은 읽지 않는다"
+        "a newer version is not read"
     );
 
     assert!(matches!(
@@ -1050,8 +1049,7 @@ fn a_file_that_turns_newer_while_running_is_refused_until_it_is_replaced() {
 
 // ── locks — reads do not wait for writes, and notifications go out in rev order ──
 
-/// A disk that signals `entered` at every write and stops until it receives one from `release` (it does not stop
-/// when the sender is gone).
+/// A disk that signals `entered` at every write and stops until it receives one from `release` (it does not stop when the sender is gone).
 struct GatedFiles {
     inner: MemFiles,
     entered: Sender<()>,
@@ -1078,7 +1076,6 @@ impl SettingsFiles for GatedFiles {
     }
 }
 
-/// (signal that a write was entered, the handle that releases the write, the service whose write is open).
 fn gated_service() -> (Receiver<()>, Sender<()>, Arc<SettingsService>) {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -1112,7 +1109,7 @@ fn readers_do_not_wait_for_a_write_in_flight() {
     // A bound reached only on failure — if a read queues behind a write, it cuts here and releases the write.
     let read = read_rx.recv_timeout(Duration::from_secs(10));
     release.send(()).unwrap();
-    let (snapshot, effective) = read.expect("읽기가 진행 중인 쓰기의 디스크 대기를 기다렸다");
+    let (snapshot, effective) = read.expect("the read waited for the in-progress write's disk wait");
 
     assert_eq!(snapshot.rev, 0);
     assert_eq!(snapshot.items[0].value, "dark");
@@ -1121,15 +1118,11 @@ fn readers_do_not_wait_for_a_write_in_flight() {
     assert_eq!(svc.get(None).unwrap().rev, 1);
 }
 
-/// Inside `changed` it reads the service again and records which locks are held at that point.
 struct ReadingEvents {
     svc: Arc<SettingsService>,
-    /// (notification rev, the `get` rev at that point, the effective value at that point, whether the notification order lock was held, whether the write serialization lock was
-    /// held).
+    /// (notification rev, the `get` rev at that point, the effective value at that point, whether the notification order lock was held, whether the write serialization lock was held).
     seen: Mutex<Vec<(u64, u64, Option<String>, bool, bool)>>,
-    /// At the theme push point, were (the notification order lock, the write serialization lock, the state lock) held.
     theme: Mutex<Vec<(bool, bool, bool)>>,
-    /// The same three at the language hook, and the effective `ui.language` it read there.
     language: Mutex<Vec<(bool, bool, bool, Option<String>)>>,
 }
 
@@ -1189,12 +1182,12 @@ fn a_notification_may_read_the_service_and_sees_its_own_write() {
             (1, 1, Some("light".to_string()), true, false),
             (2, 2, Some("dark".to_string()), true, false),
         ],
-        "알림은 알림 순서 락만 쥔 채 나가고, 그 자리에서 읽으면 자기 쓰기가 보인다"
+        "the notification goes out holding only the notification-order lock, and reading there shows its own write"
     );
     assert_eq!(
         *events.theme.lock().unwrap(),
         vec![(false, false, false); 2],
-        "테마 밀기는 락을 하나도 쥐지 않은 채 불린다"
+        "the theme push is called while holding no lock at all"
     );
 }
 
@@ -1244,8 +1237,7 @@ impl SettingsEvents for HoldingEvents {
     fn ui_language_changed(&self) {}
 }
 
-/// ★It does not catch the regression every time★ — if the order lock is missing, B's notification may go out before A is released or after.
-/// (the scheduler's call). With the fixed code it is always green.
+/// Does not catch the regression every time: with the order lock missing, B's notification may go out before A is released or after (scheduler's call); with the fixed code it is always green.
 #[test]
 fn notifications_leave_in_rev_order_across_writers() {
     let (entered, release, svc) = gated_service();
@@ -1287,7 +1279,6 @@ struct Line {
     fields: Vec<(String, String)>,
 }
 
-/// Collects all events emitted on this thread.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<Line>>>);
 
@@ -1363,7 +1354,7 @@ fn load_notes_wait_for_enable_writes_and_carry_no_values() {
     });
     assert!(
         captured.lines().is_empty(),
-        "적재는 로그를 내지 않는다(로거가 아직 없다): {:?}",
+        "loading emits no log (there is no logger yet): {:?}",
         captured.lines()
     );
 
@@ -1388,7 +1379,7 @@ fn load_notes_wait_for_enable_writes_and_carry_no_values() {
     assert_eq!(
         summary.len(),
         1,
-        "두 번째 부름은 다시 내지 않는다: {lines:?}"
+        "the second call does not emit again: {lines:?}"
     );
     assert_eq!(field(summary[0], "overrides"), Some("1"));
     assert_eq!(field(summary[0], "unknown"), Some("1"));
@@ -1453,7 +1444,7 @@ fn the_settings_module_names_neither_tauri_nor_tokio() {
     let mut pending = vec![root];
     let mut scanned = Vec::new();
     while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).expect("settings 폴더") {
+        for entry in std::fs::read_dir(&dir).expect("settings folder") {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 pending.push(path);
@@ -1468,7 +1459,7 @@ fn the_settings_module_names_neither_tauri_nor_tokio() {
                 for needle in needles {
                     assert!(
                         !code.contains(needle),
-                        "{}:{}: `{needle}` — 설정 모듈은 셸 런타임을 모른다",
+                        "{}:{}: `{needle}` — the settings module knows nothing of the shell runtime",
                         path.display(),
                         number + 1
                     );
@@ -1479,6 +1470,6 @@ fn the_settings_module_names_neither_tauri_nor_tokio() {
     }
     assert!(
         scanned.iter().any(|path| path.ends_with("mod.rs")) && scanned.len() >= 4,
-        "훑은 파일이 없다 — 폴더가 옮겨졌나: {scanned:?}"
+        "no files were scanned — was the folder moved: {scanned:?}"
     );
 }

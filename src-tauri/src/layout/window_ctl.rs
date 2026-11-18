@@ -1,17 +1,8 @@
-//! Window state service (TRD S26-window-chrome §5-2 · §5-4 · §5-5 · §6-2 · §6-3) — minimize · maximize · restore size · bring to front ·
-//! close join · close if empty · OS state of the window list. The bus verbs and the invoke shell land on the same function (ADR-0081).
-//!
-//! - ★Zero Tauri★ — it reaches the OS window only through two ports: [`WindowControl`] (the service calls it · the real one runs one action as one main-thread
-//!   job) and [`WindowOps`] (OS operations on one window, used inside that job). The decision is the pure [`plan`] and the body of the job is
-//!   [`run_action`] · [`show_one_no_steal`], so it is measured without a window.
-//! - ★Reading · deciding · applying is one main-thread job★ (§5-2) — the first-paint show reads and withdraws the maximize table deferred on the main thread.
-//!   If another thread reads the state and the main thread writes the deferral, the show can slip through in between, leaving the deferral alone, and meanwhile that window's
-//!   placement recording (`state::placement::record`) stops.
-//! - ★Do not call a port while holding the layout lock★ (`super::apply` header 「락 규율」) — the real job takes the same lock again (a non-reentrant
-//!   mutex). The service resolves the window argument inside the lock, releases it, and then calls the port. [`run_action`] takes the lock briefly only to write the model's maximize marker
-//!   and does not call [`WindowOps`] while holding it.
-//! - ★Do not reveal a window waiting for first paint (a window placed on the first-paint gate)★ (§2-4 invariant 5) — what shows that window is only the first-paint gate and a person's
-//!   tray click.
+//! Window state service (TRD S26-window-chrome §5-2 · §5-4 · §5-5 · §6-2 · §6-3) — minimize · maximize · restore size · bring to front · close · close if empty · OS state of the window list. Bus verbs and the invoke shell land on the same function (ADR-0081).
+//! - Zero Tauri: the OS window is reached only through [`WindowControl`] (the service calls it; the real one runs one action as one main-thread job) and [`WindowOps`] (OS operations on one window inside that job). The decision is the pure [`plan`]; the job body is [`run_action`] · [`show_one_no_steal`], so it is measured without a window.
+//! - Reading · deciding · applying is one main-thread job (§5-2): the first-paint show reads and withdraws the deferred-maximize table on the main thread, so with another thread reading state while the main thread writes the deferral, the show could slip between and leave the deferral alone — meanwhile that window's placement recording (`state::placement::record`) stops.
+//! - Do not call a port while holding the layout lock (`super::apply` header 「lock discipline」): the real job takes it again (non-reentrant mutex). The service resolves the window argument inside the lock, releases it, then calls the port; [`run_action`] takes the lock briefly only to write the model's maximize marker and calls no [`WindowOps`] under it.
+//! - Do not reveal a window waiting for first paint (§2-4 invariant 5): only the first-paint gate and a person's tray click show it.
 
 use super::apply::{self, SubscriptionSync, WindowHost};
 use super::manager::{WindowLabel, MAIN_WINDOW_LABEL};
@@ -28,25 +19,20 @@ pub enum WindowAction {
 }
 
 /// Branches of show-all-windows (TRD §6-2) — both skip the prewarmed window.
-///
-/// - `TrayClick` = only a person's hand (tray icon click · the second launch of the single instance). It also withdraws the wait of a window waiting for first paint,
-///   shows it and gives focus per window (main last — the click grants foreground permission).
-/// - `NoSteal` = everything else (bus `window.showAll` · `window.raise` of a hidden window · invoke `show_main_ui`). It skips windows waiting for first paint
-///   and runs [`show_one_no_steal`] per window — focus goes only to main, and only when our process already holds the foreground.
-// ADR-0302 — window state command
+/// - `TrayClick` = only a person's hand (tray icon click · the single instance's second launch): also withdraws the wait of a window waiting for first paint, shows it and focuses per window (main last — the click grants foreground permission).
+/// - `NoSteal` = everything else (bus `window.showAll` · `window.raise` of a hidden window · invoke `show_main_ui`): skips windows waiting for first paint and runs [`show_one_no_steal`] per window — focus goes only to main, and only when our process already holds the foreground.
+// ADR-0302
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Activation {
     TrayClick,
     NoSteal,
 }
 
-/// The answer of one action — bus `window.maximize` · `window.unmaximize` carry `deferred`, and `window.raise` carries the other three.
-///
-/// - `deferred` = the window is not visible, so without touching the OS window the desired maximize state (maximize · restore size) was written down — it is applied
-///   when that window is shown.
-/// - `pending` = it is a window waiting for first paint, so nothing was done (the first-paint gate will show it soon).
-/// - `shown_all` = it is a hidden window, so all windows were shown first.
-/// - `focused` = after finishing, that window is the OS foreground window — as is, in fact (if another app is in the foreground it is only raised to the top, and this is false · AC9).
+/// The answer of one action — bus `window.maximize` · `window.unmaximize` carry `deferred`, `window.raise` the other three.
+/// - `deferred` = the window is not visible, so the desired maximize state was written down without touching the OS window; applied when it is shown.
+/// - `pending` = a window waiting for first paint, so nothing was done (the first-paint gate shows it soon).
+/// - `shown_all` = a hidden window, so all windows were shown first.
+/// - `focused` = afterwards that window is the OS foreground window as is (with another app in front it is only raised and this is false — AC9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Applied {
     pub deferred: bool,
@@ -56,12 +42,9 @@ pub struct Applied {
 }
 
 /// Snapshot of the OS state of one window. All false (`Default`) = the OS window could not be read (`window.list` row — TRD §6-3).
-///
-/// - `maximized` = false while minimized — tao 0.35.3 clears the maximize flag at the minimize `WM_SIZE`
-///   (`platform_impl/windows/event_loop.rs`). So whether a minimized window comes back maximized when restored cannot be known from this value.
-/// - `focused` = that window is the OS foreground window — on Windows it is not Tauri `is_focused` (it is false while the webview holds keyboard focus
-///   — TRD §6-2 「앞 창 판정」).
-/// - `awaiting_first_paint` = it is placed on the first-paint gate (`first_paint` — that gate will show it soon). This window stays hidden.
+/// - `maximized` = false while minimized — tao 0.35.3 clears the maximize flag at the minimize `WM_SIZE` (`platform_impl/windows/event_loop.rs`), so whether a minimized window returns maximized cannot be known from it.
+/// - `focused` = that window is the OS foreground window — on Windows not Tauri `is_focused` (false while the webview holds keyboard focus — TRD §6-2 「foreground window decision」).
+/// - `awaiting_first_paint` = placed on the first-paint gate (`first_paint`, which will show it soon); stays hidden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OsWindowState {
     pub visible: bool,
@@ -71,48 +54,35 @@ pub struct OsWindowState {
     pub awaiting_first_paint: bool,
 }
 
-/// Why minimizing a non-visible window is rejected — becomes the message of [`Plan::Refuse`] (bus `CONFLICT`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Unseen {
-    #[error("아직 첫 화면 전인 창 — 첫 화면을 그리면 곧 보인다")]
+    #[error("a window still before its first paint — it will be shown soon after it paints")]
     AwaitingFirstPaint,
-    #[error("숨은 창 — 먼저 window.raise 또는 window.showAll")]
+    #[error("a hidden window — first window.raise or window.showAll")]
     Hidden,
 }
 
-/// Decision of [`plan`] — [`run_action`] applies it as is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan {
-    /// It is already in that state.
     Noop,
     Minimize,
-    /// A visible window — maximize via the OS and withdraw the desire written down. [`Self::Unmaximize`] is the same.
     Maximize,
     Unmaximize,
-    /// A non-visible window — write down the desired maximize state (true = maximized) and set the model marker to that value. The OS window is not touched (the path
-    /// that shows that window applies it).
+    /// A non-visible window — write down the desired maximize state (true = maximized) and set the model marker to it; the OS window is untouched (the path that shows the window applies it).
     Defer(bool),
-    /// The window is, or will be, shown in that maximize state already — withdraw the desire written down and set the model marker to that value. If not withdrawn,
-    /// the opposite desire written earlier is applied when it is shown and reverses this action (a visible window can also have a leftover desire because applying failed). The OS
-    /// window is not touched.
+    /// The window is, or will be, shown in that maximize state already — withdraw the desire written down and set the model marker. Left in place, an opposite desire written earlier would apply on show and reverse this action (a visible window can keep one after a failed apply). The OS window is untouched.
     Settle(bool),
-    /// Bring a visible window to the front (§6-2 ⓐ–ⓒ).
     Raise,
-    /// A hidden window — show all windows without stealing focus, then bring that window to the front.
     ShowAllThenRaise,
     /// A window waiting for first paint — do nothing.
     Pending,
     Refuse(Unseen),
 }
 
-/// Decision table (TRD S26-window-chrome §5-2) — windows are told apart in the order waiting for first paint → visible → hidden. What is decided outside the table:
-///
-/// - If a visible window is already in that maximize state, the OS window is not touched and only the desire is withdrawn ([`Plan::Settle`]). Restoring size of a visible minimized
-///   window is a no-op — `maximized` is false while minimized ([`OsWindowState`] · `window.raise` first).
-/// - Maximizing · restoring size of a non-visible window is not rejected — touching the OS window makes tao reveal the window ([`WindowOps`]), so the desired
-///   state is written down and applied when shown. If it is clear it will be shown in that state already (not minimized), only the desire written down is withdrawn. For a minimized window it is always
-///   written down — we do not know which size it will return to when restored.
-// ADR-0302 — window state command
+/// Decision table (TRD S26-window-chrome §5-2) — order: waiting for first paint → visible → hidden. Outside the table:
+/// - A visible window already in that maximize state: OS untouched, only the desire withdrawn ([`Plan::Settle`]). Restoring a visible minimized window is a no-op (`maximized` is false while minimized — [`OsWindowState`], `window.raise` first).
+/// - Maximizing · restoring a non-visible window is not rejected: touching the OS window makes tao reveal it ([`WindowOps`]), so the desire is written down and applied on show. If it is clear the window will be shown in that state already (not minimized), only the written desire is withdrawn; for a minimized window it is always written, since the restore size is unknown.
+// ADR-0302
 pub fn plan(action: WindowAction, s: OsWindowState) -> Plan {
     let unseen = if s.awaiting_first_paint {
         Some(Unseen::AwaitingFirstPaint)
@@ -141,88 +111,53 @@ pub fn plan(action: WindowAction, s: OsWindowState) -> Plan {
     }
 }
 
-/// OS operations on one window used inside one main-thread job — [`run_action`] · [`show_one_no_steal`] call them. The real one (the Tauri adapter) calls
-/// the Tauri window · platform `window` · the first-paint gate (`first_paint`) · the deferred maximize table (`state::placement::DeferredMaximize` — one desired
-/// maximize state per label) (TRD §6-2).
-///
-/// - All methods are called inside that job (main thread), without holding the layout lock. The real one may take that lock briefly (as long as it does not
-///   call the OS while holding it — the placement recording is like that).
-/// - If there is no OS window for that label, `Result` methods give `Err` and the rest do nothing.
+/// OS operations on one window used inside one main-thread job ([`run_action`] · [`show_one_no_steal`]). The real one (Tauri adapter) calls the Tauri window · platform `window` · the first-paint gate (`first_paint`) · the deferred maximize table (`state::placement::DeferredMaximize`, one desire per label) (TRD §6-2).
+/// - All methods run inside that job (main thread) without the layout lock; the real one may take it briefly (never calling the OS while holding it — placement recording is like that).
+/// - With no OS window for the label, `Result` methods give `Err` and the rest do nothing.
 pub trait WindowOps {
-    /// Current state — `None` = no OS window for that label. For the meaning of the fields see [`OsWindowState`].
     fn read(&self, label: &str) -> Option<OsWindowState>;
-    /// Called only for visible windows (minimize · maximize · restore of a hidden window makes tao reveal the window).
     fn minimize(&self, label: &str) -> Result<(), String>;
-    /// Called only for visible windows.
     fn maximize(&self, label: &str) -> Result<(), String>;
-    /// Called only for visible windows.
     fn unmaximize(&self, label: &str) -> Result<(), String>;
-    /// Writes down the desired maximize state (overwriting what was written earlier) — the path that shows that window applies it with [`Self::apply_deferred`]. The model's
-    /// maximize marker is written by [`run_action`] — the real one does not touch the model.
+    /// Writes down the desired maximize state (overwriting an earlier one); the path that shows the window applies it via [`Self::apply_deferred`]. The model marker is written by [`run_action`] — the real one does not touch the model.
     fn defer_maximized(&self, label: &str, maximized: bool);
-    /// Withdraws the desire written down (no-op if none). The model marker is the same as [`Self::defer_maximized`].
     fn drop_deferred(&self, label: &str);
-    /// ⓐ Only z to the top without activation — a hidden window stays hidden (platform `place_window(.., ZOrder::Top, show: false, activate: false)`).
     fn raise_without_activation(&self, label: &str);
-    /// ⓑ Tauri `show` — ★do not show it with raw Win32★: if tao's visible flag stays false, the next hide does
-    /// nothing. Not called for a window waiting for first paint.
+    /// ⓑ Tauri `show` — never raw Win32: if tao's visible flag stays false, the next hide does nothing. Not called for a window waiting for first paint.
     fn show(&self, label: &str) -> Result<(), String>;
-    /// ⓑ Tauri `unminimize`.
     fn unminimize(&self, label: &str) -> Result<(), String>;
-    /// ⓑ Called after showing · restoring — if a desire is written down, apply it (true = maximize · false = restore size) and withdraw it. If it cannot be applied, leave it, and
-    /// if there is none, do nothing. The real one's other show paths (first-paint show · tray show) must also do the same after showing · restoring —
-    /// applying before restoring loses the false desire of a minimized window (`maximized` of [`OsWindowState`] · `bring_up` header).
+    /// ⓑ After showing · restoring: if a desire is written down, apply it (true = maximize · false = restore size) and withdraw it; if it cannot be applied leave it; none → nothing. The real one's other show paths (first-paint show · tray show) must do the same after showing · restoring — applying before restoring loses a minimized window's false desire (`maximized` of [`OsWindowState`] · `bring_up` header).
     fn apply_deferred(&self, label: &str);
-    /// ⓒ Does our process hold the foreground now — `state::placement::foreground_is_ours`.
     fn foreground_is_ours(&self) -> bool;
-    /// ⓒ Tauri `set_focus` — called only when [`Self::foreground_is_ours`] is true (if another app is in the foreground, tao takes it with a fake Alt).
     fn set_focus(&self, label: &str);
-    /// Shows all windows without stealing focus — the body of [`Activation::NoSteal`] (the window order of `tray::actions` · skipping the prewarmed window as is,
-    /// [`show_one_no_steal`] per window · only main gets `focus`). Bringing a hidden window to the front calls it inside the same job.
+    /// Shows all windows without stealing focus — the body of [`Activation::NoSteal`] (the window order of `tray::actions`, prewarmed window skipped, [`show_one_no_steal`] per window, only main gets `focus`). Bringing a hidden window to the front calls it inside the same job.
     fn show_all_no_steal(&self);
 }
 
-/// Window state port — the service calls it. The real one (`commands::window_ctl`) runs `apply` · `show_all` · `hide_all` each as one main-thread job
-/// (`run_on_main_thread`) and waits for its answer (TRD §5-2 · §6-2). The bus runs the verbs that call this port in the blocking pool
-/// (`offloaded_handler` of `super::commands`).
-///
-/// - ★Do not call it while holding the layout lock★ — that job takes the same lock again (a non-reentrant mutex — called from the main thread,
-///   the same thread locks twice, and from another thread the caller waits for the job while the job waits for the lock).
-/// - Calling from the main thread is not a deadlock — tauri-runtime-wry 2.11.3 `send_user_message` runs a job passed from the main thread
-///   on the spot. So the real one receives the answer through a buffered channel (`mpsc::channel()` · `sync_channel(1)`) — with a zero-capacity channel, the send of a job that runs on that
-///   spot waits forever for a receive that has not come yet.
-/// - The real one waits with `recv_timeout` — if the main thread stalls, it does not hold the calling thread, and after the deadline `apply` = `Err` ·
-///   `show_all` = false · `hide_all` = ends as a no-op.
-// ADR-0302 — window state command
+/// Window state port the service calls. The real one (`commands::window_ctl`) runs `apply` · `show_all` · `hide_all` each as one main-thread job (`run_on_main_thread`) and waits for the answer (TRD §5-2 · §6-2); the bus runs the verbs calling it in the blocking pool (`offloaded_handler` of `super::commands`).
+/// - Do not call it while holding the layout lock: the job takes the same lock again (non-reentrant — from the main thread the same thread locks twice; from another thread the caller waits for the job while the job waits for the lock).
+/// - Calling from the main thread is not a deadlock: tauri-runtime-wry 2.11.3 `send_user_message` runs a job passed from the main thread on the spot. So the real one receives the answer through a buffered channel (`mpsc::channel()` · `sync_channel(1)`) — with a zero-capacity channel the send of a job running on that spot waits forever for a receive not yet issued.
+/// - The real one waits with `recv_timeout` so a stalled main thread does not hold the calling thread; after the deadline `apply` = `Err` · `show_all` = false · `hide_all` = no-op.
+// ADR-0302
 pub trait WindowControl: Send + Sync {
-    /// Runs [`run_action`] as one main-thread job. `Err` = that message (bus `CONFLICT`).
     fn apply(&self, label: &str, action: WindowAction) -> Result<Applied, String>;
-    /// Shows all windows — real = one show of `tray::actions` (the `how` branch). Answer = after that, main is the OS foreground window.
     fn show_all(&self, how: Activation) -> bool;
-    /// Hides all windows — real = `tray::actions::hide_main_ui` (ADR-0229 — the same path as main's close · tray hide).
+    /// ADR-0229
     fn hide_all(&self);
-    /// Snapshot for `window.list` — `None` = no OS window for that label.
     fn state(&self, label: &str) -> Option<OsWindowState>;
-    /// Is it a window outside the model — a `label` not in the model whose popout OS window is open now and is not a window of the prewarmed window pool (TRD
-    /// S26-window-chrome §6-2 「모델 밖 창」 — an old popout on the boot failure screen, etc.). The service checks first whether it is in the model. Default =
-    /// false (does not know windows outside the model).
+    /// Is it a window outside the model — a `label` not in the model whose popout OS window is open and not a prewarm pool window (TRD S26-window-chrome §6-2 「window outside the model」 — e.g. an old popout on the boot failure screen). The service checks the model first. Default false.
     fn is_unmodeled(&self, _label: &str) -> bool {
         false
     }
-    /// Runs [`run_unmodeled_action`] on a window outside the model as one main-thread job — same as `apply` but does not touch the model. `Err` =
-    /// that message. Default = an `Err` saying there is no OS window.
+    /// Runs [`run_unmodeled_action`] on a window outside the model as one main-thread job — like `apply` but does not touch the model. `Err` = that message. Default: an `Err` saying there is no OS window.
     fn apply_unmodeled(&self, label: &str, _action: WindowAction) -> Result<Applied, String> {
         Err(no_os_window(label))
     }
 }
 
-/// Applies `action` to window `label` — read → [`plan`] → apply. This is the body that the real [`WindowControl::apply`] calls inside one main-thread
-/// job (TRD §5-2).
-///
-/// - `Err` = no OS window · rejected because it is minimizing a non-visible window (the message of [`Unseen`]) · the OS call failed · the window is not in the model
-///   or the lock is poisoned so the maximize marker could not be written (the deferred maximize table stays as it was then).
-/// - Writing · withdrawing a desire writes the model marker first and then changes the table. That write takes the `layout` lock briefly, so ★the caller does not
-///   hold that lock★.
+/// Applies `action` to window `label` — read → [`plan`] → apply; the body the real [`WindowControl::apply`] calls inside one main-thread job (TRD §5-2).
+/// - `Err` = no OS window · rejected minimizing of a non-visible window ([`Unseen`] message) · OS call failed · the window is not in the model or the lock is poisoned so the maximize marker could not be written (the deferred table then stays as it was).
+/// - Writing · withdrawing a desire writes the model marker first, then the table; that takes the `layout` lock briefly, so the caller must not hold it.
 pub fn run_action<O: WindowOps + ?Sized>(
     ops: &O,
     layout: &LayoutState,
@@ -232,10 +167,7 @@ pub fn run_action<O: WindowOps + ?Sized>(
     run(ops, Some(layout), label, action)
 }
 
-/// Applies `action` to window `label` outside the model ([`WindowControl::is_unmodeled`]) — the same read → [`plan`] → apply as [`run_action`],
-/// but ★it does not write the model's maximize marker★ (that window is not in the model · the deferred maximize table belongs to the OS window, so it is used as is). Bringing to the front is
-/// not accepted (`Err` — the service does not send that action down this path · for a hidden window it is an action that goes all the way to showing all windows).
-/// This is the body that the real [`WindowControl::apply_unmodeled`] calls inside one main-thread job (TRD S26-window-chrome §6-2).
+/// Applies `action` to a window outside the model ([`WindowControl::is_unmodeled`]) — the same read → [`plan`] → apply as [`run_action`] but without writing the model's maximize marker (the window is not in the model; the deferred table belongs to the OS window and is used as is). Bringing to the front is not accepted (`Err` — the service does not send it down this path; for a hidden window it would go all the way to show-all). The body the real [`WindowControl::apply_unmodeled`] calls inside one main-thread job (TRD S26-window-chrome §6-2).
 pub fn run_unmodeled_action<O: WindowOps + ?Sized>(
     ops: &O,
     label: &str,
@@ -243,7 +175,7 @@ pub fn run_unmodeled_action<O: WindowOps + ?Sized>(
 ) -> Result<Applied, String> {
     if action == WindowAction::Raise {
         return Err(format!(
-            "window 없음: {label} — 모델 밖 창은 앞으로 내지 않는다"
+            "window not found: {label} — a window outside the model is not brought to the front"
         ));
     }
     run(ops, None, label, action)
@@ -321,10 +253,7 @@ fn run<O: WindowOps + ?Sized>(
 }
 
 // ADR-0299
-/// The one-window part of a show that does not steal focus (TRD §6-2 ⓐ–ⓒ) — the show-all-windows of [`Activation::NoSteal`] calls it per window.
-/// A window waiting for first paint · a window with no OS window is not touched and gives `false`. After showing, applies the desire written down ([`WindowOps::apply_deferred`]).
-/// `focus` = asks for ⓒ (focus is given only when our process holds the foreground now). If showing · restoring fails, it logs and gives
-/// `false`.
+/// The one-window part of a show that does not steal focus (TRD §6-2 ⓐ–ⓒ), called per window by [`Activation::NoSteal`]'s show-all. A window waiting for first paint or without an OS window is untouched and gives `false`. After showing, applies the desire written down ([`WindowOps::apply_deferred`]). `focus` asks for ⓒ (focus only when our process holds the foreground now). A failed show · restore logs and gives `false`.
 pub fn show_one_no_steal<O: WindowOps + ?Sized>(ops: &O, label: &str, focus: bool) -> bool {
     let Some(state) = ops.read(label) else {
         return false;
@@ -335,14 +264,13 @@ pub fn show_one_no_steal<O: WindowOps + ?Sized>(ops: &O, label: &str, focus: boo
     match bring_up(ops, label, state, focus) {
         Ok(()) => true,
         Err(e) => {
-            tracing::warn!(label, error = %e, "포커스를 빼앗지 않는 보이기 — 창을 보이지 못했다");
+            tracing::warn!(label, error = %e, "show without stealing focus — could not show the window");
             false
         }
     }
 }
 
-// ADR-0299 · TRD §6-2 ⓐ → ⓑ → ⓒ. ⓑ applies the desire after restoring — if you apply and then restore (`SW_RESTORE`), it returns to the pre-minimize size and the desire is
-//   overwritten. A window waiting for first paint is not touched once more here even if the caller already filtered it (invariant 5).
+// ADR-0299 · TRD §6-2 ⓐ → ⓑ → ⓒ. ⓑ applies the desire after restoring — applying then restoring (`SW_RESTORE`) returns to the pre-minimize size and overwrites the desire. A window waiting for first paint is not touched here even if the caller already filtered it (invariant 5).
 fn bring_up<O: WindowOps + ?Sized>(
     ops: &O,
     label: &str,
@@ -371,7 +299,7 @@ fn is_foreground<O: WindowOps + ?Sized>(ops: &O, label: &str) -> bool {
 }
 
 fn no_os_window(label: &str) -> String {
-    format!("window 없음: {label} — OS 창이 열려 있지 않다")
+    format!("window not found: {label} — no OS window is open")
 }
 
 fn set_model_maximized(layout: &LayoutState, label: &str, maximized: bool) -> Result<(), String> {
@@ -391,10 +319,7 @@ pub enum WindowCtlError {
     NotApplied(String),
 }
 
-/// Resolves window argument `window` (TRD §4-5) and applies `action` to that window. The argument is resolved inside the layout lock and the port is called after releasing it — if the
-/// window closes in between and there is no OS window, the port rejects. If an argument not in the model is the label of a window outside the model ([`unmodeled`]), minimize · maximize ·
-/// restore size are applied directly to that OS window ([`WindowControl::apply_unmodeled`] — the model is not changed). Bringing to the front is still
-/// 「창 없음」 (no such window).
+/// Resolves window argument `window` (TRD §4-5) and applies `action`. The argument is resolved inside the layout lock and the port called after releasing it — if the window closes in between, the port rejects for lack of an OS window. If an argument not in the model is the label of a window outside the model ([`unmodeled`]), minimize · maximize · restore size apply directly to that OS window ([`WindowControl::apply_unmodeled`], model unchanged); bringing to the front stays 「window not found」.
 pub fn act(
     state: &LayoutState,
     control: &dyn WindowControl,
@@ -417,9 +342,7 @@ pub fn act(
         .map_err(WindowCtlError::NotApplied)
 }
 
-// Window outside the model (TRD S26-window-chrome §6-2 · main decision M34) — the rejection that the window argument is not in the model (`NotFound`), and if that exact spelling is
-//   the label of a window outside the model, that label. The command that the window buttons of the boot failure screen (`list_tabs` failure — an old popout not in the model, etc.) send with that window's
-//   label lives here. The port is asked outside the layout lock (after `resolve` released it).
+// Window outside the model (TRD S26-window-chrome §6-2 · main decision M34): the `NotFound` rejection whose exact spelling is the label of such a window yields that label. The commands the window buttons of the boot failure screen (`list_tabs` failure — e.g. an old popout not in the model) send land here. The port is asked outside the layout lock (after `resolve` released it).
 fn unmodeled(control: &dyn WindowControl, error: &WindowCtlError) -> Option<String> {
     match error {
         WindowCtlError::Arg(WindowArgError::NotFound(arg)) if control.is_unmodeled(arg) => {
@@ -440,9 +363,7 @@ pub enum CloseOutcome {
     Kept,
 }
 
-/// Closes a window (TRD §5-4) — order: ① an argument of digits only is `NumberGiven` (even with `if_empty`) ② with `if_empty`, [`close_if_empty`] (argument =
-/// persistent id · does not go through the resolver — that window is usually already not in the model) ③ resolve the argument; if main, hide all windows; if a popout,
-/// `apply::close_window`. If an argument not in the model is the label of a window outside the model, [`close_unmodeled`] closes that window and gives `Closed`.
+/// Closes a window (TRD §5-4) — order: ① digits-only argument → `NumberGiven` (even with `if_empty`) ② with `if_empty`, [`close_if_empty`] (argument = persistent id, bypasses the resolver — that window is usually already not in the model) ③ resolve the argument; main → hide all windows, popout → `apply::close_window`. An argument not in the model that is the label of a window outside the model is closed by [`close_unmodeled`] and gives `Closed`.
 pub fn close(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -473,14 +394,9 @@ pub fn close(
     Ok(CloseOutcome::Closed)
 }
 
-// Closing a window outside the model (TRD S26-window-chrome §6-2 「모델 밖 창」) — the model decision is redone inside one layout lock (the port
-//   was asked outside the lock — in between, the commit of a new-window move may have put this window into the model). If it is in, the model part of closing a model window; if not,
-//   a tombstone is set on the label (`ViewManager::mark_closed` — the tombstone that `commands::popout::drop_window_in_model` of a popout close request sets), then the lock is released and the OS window is withdrawn
-//   (`host.close` — inside the lock it would deadlock · `WindowHost` header).
-//   ★Do not defer the tombstone until after `host.close` or leave it to the `Destroyed` cleanup★ — destroy waits in the event loop, so if in between
-//   a slot detach · the commit of dropping into a new window (`attach_view_as_new_window` · `dock`) attaches with this label, the later `Destroyed` cleanup deletes the window along with the tab that was moved
-//   in. If the tombstone is set first, that commit is rejected with `WindowClosed` and goes through rollback, and the tab stays at the source.
-// ADR-0302 — window state command
+// Closing a window outside the model (TRD S26-window-chrome §6-2): the model decision is redone inside one layout lock (the port was asked outside it, so a new-window move's commit may have put this window into the model meanwhile). In the model → the model part of closing a model window; not → tombstone the label (`ViewManager::mark_closed`, as `commands::popout::drop_window_in_model` does on a popout close request), release the lock and withdraw the OS window (`host.close` — inside the lock it would deadlock, `WindowHost` header).
+// Do not defer the tombstone until after `host.close` or leave it to the `Destroyed` cleanup: destroy waits in the event loop, so a slot detach · new-window drop commit (`attach_view_as_new_window` · `dock`) attaching with this label in between would have the later `Destroyed` cleanup delete the window with the moved tab. With the tombstone first, that commit is rejected with `WindowClosed` and rolls back, leaving the tab at the source.
+// ADR-0302
 fn close_unmodeled(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -503,10 +419,8 @@ fn close_unmodeled(
     Ok(CloseOutcome::Closed)
 }
 
-/// Self-close at 0 tabs (TRD §5-5) — `Kept` if the window of persistent id `window_id` is in the model (that window has at least 1 tab), if it is not in the model and is a closing
-/// window whose OS window is open, closes it and gives `Closed`; `Kept` if neither. The model decision is inside one lock, so there is no gap for a tab to come in in between
-/// (if one comes in, it is the first branch). It picks by persistent id only, so it does not touch other windows. `Err` = lock poisoned.
-// ADR-0302 — window state command
+/// Self-close at 0 tabs (TRD §5-5): `Kept` if the window of persistent id `window_id` is in the model (so it has ≥1 tab); if not in the model but a closing window whose OS window is open, closes it → `Closed`; else `Kept`. The model decision is inside one lock, leaving no gap for a tab to come in (that would be the first branch). Picks by persistent id only, so other windows are untouched. `Err` = lock poisoned.
+// ADR-0302
 pub fn close_if_empty(
     state: &LayoutState,
     host: &dyn WindowHost,
@@ -539,8 +453,7 @@ pub struct ListedWindow {
     pub os: OsWindowState,
 }
 
-/// All windows in the model — in number order. Model rows are taken inside the lock and the OS state is read outside the lock and paired (a snapshot). A row with no OS window has all state
-/// false. A closing window is not in the model, so it is not included. `Err` = lock poisoned.
+/// All windows in the model, in number order. Model rows are taken inside the lock and OS state read outside it and paired (snapshot); a row with no OS window has all states false. A closing window is not in the model, so it is not included. `Err` = lock poisoned.
 pub fn list(state: &LayoutState, control: &dyn WindowControl) -> Result<Vec<ListedWindow>, String> {
     let mut rows: Vec<(WindowLabel, String, u32)> = {
         let mgr = state.0.lock().map_err(|e| e.to_string())?;
@@ -608,8 +521,7 @@ mod tests {
         let awaiting = |min, max| os(false, min, max, true);
         let awaiting_refused = Plan::Refuse(Unseen::AwaitingFirstPaint);
         let hidden_refused = Plan::Refuse(Unseen::Hidden);
-        // (action, state (minimized, maximized), decision) — 27 rows in total. A minimized window reads maximized as false (`OsWindowState`) — the state where both are
-        // true is not listed.
+        // (action, state (minimized, maximized), decision) — 27 rows. A minimized window reads maximized as false ([`OsWindowState`]), so the both-true state is not listed.
         let rows = [
             // visible
             (Minimize, visible(false, false), Plan::Minimize),
@@ -648,7 +560,7 @@ mod tests {
                 focused: true,
                 ..state
             };
-            assert_eq!(plan(action, focused), want, "앞 창이어도 같다 — {action:?}");
+            assert_eq!(plan(action, focused), want, "the same even for the foreground window — {action:?}");
         }
     }
 
@@ -663,7 +575,7 @@ mod tests {
         assert_eq!(plan(WindowAction::Raise, held), Plan::Pending);
     }
 
-    // ── imitating the main-thread queue (§5-2 「시험」) ──
+    // ── imitating the main-thread queue (§5-2 「test」) ──
 
     #[derive(Debug, Clone, Copy, Default)]
     struct FakeWindow {
@@ -674,17 +586,13 @@ mod tests {
         held: bool,
     }
 
-    /// OS stand-in holding windows · the deferred maximize table · the foreground. It blows up if OS minimize · maximize · restore comes to a hidden window or a waiting window is shown — with the real thing,
-    /// that is where the window would be revealed.
+    /// OS stand-in holding windows · the deferred maximize table · the foreground. It blows up if OS minimize · maximize · restore reaches a hidden window or a waiting window is shown — where the real thing would reveal it.
     #[derive(Default)]
     struct FakeOps {
         windows: RefCell<BTreeMap<String, FakeWindow>>,
         deferred: RefCell<BTreeMap<String, bool>>,
-        /// OS foreground window — `None` = another app.
         foreground: RefCell<Option<String>>,
-        /// Show-all-windows first places this window on the first-paint gate again.
         hold_on_show_all: RefCell<Option<String>>,
-        /// Applying the desire fails — the desire stays.
         fail_apply: RefCell<bool>,
         calls: RefCell<Vec<String>>,
     }
@@ -721,10 +629,10 @@ mod tests {
         fn change(&self, label: &str, call: &str, edit: impl FnOnce(&mut FakeWindow)) {
             self.note(call, label);
             let mut windows = self.windows.borrow_mut();
-            let window = windows.get_mut(label).expect("OS 창");
+            let window = windows.get_mut(label).expect("OS window");
             assert!(
                 window.visible,
-                "숨은 창 {label} 에 OS {call} — 창이 드러난다"
+                "OS {call} on hidden window {label} — the window gets revealed"
             );
             edit(window);
         }
@@ -733,7 +641,7 @@ mod tests {
         fn first_paint_show(&self, label: &str) {
             self.note("first_paint", label);
             let mut windows = self.windows.borrow_mut();
-            let window = windows.get_mut(label).expect("OS 창");
+            let window = windows.get_mut(label).expect("OS window");
             if !window.held {
                 return;
             }
@@ -797,8 +705,8 @@ mod tests {
         fn show(&self, label: &str) -> Result<(), String> {
             self.note("show", label);
             let mut windows = self.windows.borrow_mut();
-            let window = windows.get_mut(label).expect("OS 창");
-            assert!(!window.held, "첫 화면 대기 창 {label} 을 드러냈다");
+            let window = windows.get_mut(label).expect("OS window");
+            assert!(!window.held, "revealed window {label} that is waiting for first paint");
             window.visible = true;
             Ok(())
         }
@@ -808,7 +716,7 @@ mod tests {
             self.windows
                 .borrow_mut()
                 .get_mut(label)
-                .expect("OS 창")
+                .expect("OS window")
                 .minimized = false;
             Ok(())
         }
@@ -838,7 +746,7 @@ mod tests {
             self.note("show_all", "*");
             if let Some(label) = self.hold_on_show_all.borrow_mut().take() {
                 let mut windows = self.windows.borrow_mut();
-                let window = windows.get_mut(&label).expect("OS 창");
+                let window = windows.get_mut(&label).expect("OS window");
                 window.held = true;
                 window.visible = false;
             }
@@ -850,7 +758,6 @@ mod tests {
         }
     }
 
-    /// One main-thread queue — runs one at a time in the order added.
     enum Job {
         FirstPaintShow(&'static str),
         Act(&'static str, WindowAction),
@@ -866,7 +773,6 @@ mod tests {
             self
         }
 
-        /// Runs until the queue is empty — answer = the answer of the `Act` job (in the order added).
         fn run(&mut self, ops: &FakeOps, layout: &LayoutState) -> Vec<Result<Applied, String>> {
             let mut answers = Vec::new();
             while let Some(job) = self.0.pop_front() {
@@ -933,7 +839,7 @@ mod tests {
         assert!(ops.window(POP).maximized);
         assert!(
             ops.deferred().is_empty(),
-            "미룸이 남으면 자리 기록이 멈춘다"
+            "while a deferral remains, place recording stops"
         );
     }
 
@@ -955,7 +861,7 @@ mod tests {
         );
         assert_eq!(ops.deferred(), [(POP.to_string(), true)]);
         assert!(model_maximized(&layout, POP));
-        assert!(!ops.window(POP).visible, "대기 창은 숨은 채다");
+        assert!(!ops.window(POP).visible, "the waiting window stays hidden");
 
         main_thread
             .push(Job::FirstPaintShow(POP))
@@ -964,8 +870,7 @@ mod tests {
         assert!(ops.deferred().is_empty());
     }
 
-    // A waiting window built maximized (a desire stands) — if restore size comes first, only the desire is withdrawn and it shows at normal size; if the show comes first, it is restored via the OS.
-    // In both orders the OS window is already that size, so there is no deferral.
+    // A waiting window built maximized (a desire stands): restore size first only withdraws the desire and it shows at normal size; show first restores via the OS. Either order leaves the OS window at that size, so no deferral.
     #[test]
     fn unmaximize_drops_the_wish_before_the_show_and_unmaximizes_after_it() {
         for show_first in [false, true] {
@@ -992,13 +897,12 @@ mod tests {
             assert!(!ops.window(POP).maximized, "show_first={show_first}");
             assert!(ops.deferred().is_empty(), "show_first={show_first}");
             if !show_first {
-                assert!(!model_maximized(&layout, POP), "모델 표식도 내린다");
+                assert!(!model_maximized(&layout, POP), "the model mark is lowered too");
             }
         }
     }
 
-    // A hidden window — minimize is rejected, maximize is deferred, and bringing to the front first does a show-all-windows that does not steal focus, and that show
-    // applies the deferred maximize. The foreground is held by our window (POP2) — so it asks for focus.
+    // A hidden window: minimize is rejected, maximize deferred, bringing to the front first does a no-steal show-all that applies the deferred maximize. The foreground is ours (POP2), so it asks for focus.
     #[test]
     fn a_hidden_window_refuses_minimize_defers_maximize_and_raise_shows_all_first() {
         let ops = FakeOps::with(&[(MAIN_WINDOW_LABEL, HIDDEN), (POP, HIDDEN), (POP2, SHOWN)]);
@@ -1047,12 +951,11 @@ mod tests {
                 format!("top:{POP}"),
                 format!("focus:{POP}"),
             ],
-            "모든 창 보이기는 main 에만 포커스를 청하고, 그 뒤 그 창을 맨 위로 올려 포커스를 청한다"
+            "show-all asks for focus only on main, and after that raises that window to the top and asks for focus"
         );
     }
 
-    // A window maximized, then minimized and hidden — even if maximize reads as false, restore size is written down as a deferral, and the show applies that desire after restoring (it comes back maximized)
-    // and ends at normal size.
+    // A window maximized, then minimized and hidden: though maximize reads false, restore size is written as a deferral, the show applies it after restoring (it returns maximized) and ends at normal size.
     #[test]
     fn unmaximize_of_a_hidden_maximized_then_minimized_window_is_deferred_and_the_show_unmaximizes_it(
     ) {
@@ -1092,8 +995,7 @@ mod tests {
         assert!(ops.deferred().is_empty());
     }
 
-    // If the opposite desire was written first on a non-visible window, after the OS window is already that size the later action withdraws that desire — if left, the later
-    // action is reversed when it is shown.
+    // With the opposite desire written first on a non-visible window, once the OS window is already that size the later action withdraws it — left in, the later action would be reversed on show.
     #[test]
     fn a_later_action_on_a_hidden_window_overrides_an_earlier_wish() {
         // (OS maximize of a hidden window, earlier action, later action) — maximize of the window shown at the end = the later action
@@ -1131,8 +1033,7 @@ mod tests {
         }
     }
 
-    // A desire left on a visible window (it stayed because applying failed) is withdrawn even by an action whose size is already that — if left, the next hide · show would apply it
-    // and reverse that action.
+    // A desire left on a visible window (apply failed) is withdrawn even by an action whose size is already that — left in, the next hide · show would apply it and reverse the action.
     #[test]
     fn a_no_op_action_on_a_visible_window_drops_a_stale_wish_and_writes_the_model() {
         let ops = FakeOps::with(&[(MAIN_WINDOW_LABEL, SHOWN), (POP, SHOWN)]);
@@ -1150,11 +1051,10 @@ mod tests {
         assert_eq!(answers, [Ok(Applied::default())]);
         assert!(ops.deferred().is_empty());
         assert!(!model_maximized(&layout, POP));
-        assert!(!ops.window(POP).maximized, "OS 창은 그대로다");
+        assert!(!ops.window(POP).maximized, "the OS window stays as it is");
     }
 
-    // After the restore-size desire of a hidden maximized window could not be applied at show and stayed, the maximize of the visible window (already maximized — no-op) withdraws that
-    // desire. Even if it is hidden and shown again after that, it is not reversed to restore size.
+    // After a hidden maximized window's restore-size desire could not be applied at show and stayed, the visible window's maximize (already maximized — no-op) withdraws it, so a later hide · show does not reverse to restore size.
     #[test]
     fn a_wish_left_by_a_failed_apply_is_dropped_by_a_later_visible_action() {
         let hidden_maximized = FakeWindow {
@@ -1181,7 +1081,7 @@ mod tests {
         assert_eq!(
             ops.deferred(),
             [(POP.to_string(), false)],
-            "못 입힌 바람은 남는다"
+            "a wish that could not be applied remains"
         );
         *ops.fail_apply.borrow_mut() = false;
 
@@ -1218,7 +1118,7 @@ mod tests {
             })]
         );
         let held = ops.window(POP);
-        assert!(held.held && !held.visible, "대기 창은 손대지 않는다");
+        assert!(held.held && !held.visible, "the waiting window is not touched");
         assert!(
             !ops.calls().iter().any(|call| call.ends_with(POP)),
             "{:?}",
@@ -1261,7 +1161,7 @@ mod tests {
         assert!(ops.window(MAIN_WINDOW_LABEL).visible);
         assert!(ops.window(POP2).visible);
         let held = ops.window(POP);
-        assert!(held.held && !held.visible, "대기 창은 손대지 않는다");
+        assert!(held.held && !held.visible, "the waiting window is not touched");
         assert!(
             !ops.calls().iter().any(|call| call.ends_with(POP)),
             "{:?}",
@@ -1269,7 +1169,7 @@ mod tests {
         );
         assert!(
             !ops.calls().iter().any(|call| call.starts_with("focus:")),
-            "남의 앱이 전경이면 포커스를 주지 않는다"
+            "no focus is given when another app is in the foreground"
         );
 
         MainThread::default()
@@ -1324,8 +1224,7 @@ mod tests {
         assert!(err.contains(POP), "{err}");
     }
 
-    // Window outside the model (an old popout on the boot failure screen) — if visible, applied directly to the OS window; if already that size, only the desire is withdrawn; if hidden,
-    //   the desire is written down. No branch touches the model (it was an empty model, so trying to write would have been `Err`).
+    // Window outside the model (an old popout on the boot failure screen): visible → applied directly to the OS window; already that size → only the desire withdrawn; hidden → desire written. No branch touches the model (an empty model, where writing would be `Err`).
     #[test]
     fn an_unmodeled_window_gets_the_os_action_without_the_model() {
         let ops = FakeOps::with(&[(MAIN_WINDOW_LABEL, SHOWN), (POP, SHOWN), (POP2, HIDDEN)]);
@@ -1339,7 +1238,7 @@ mod tests {
         assert_eq!(
             run_unmodeled_action(&ops, POP, WindowAction::Maximize),
             Ok(Applied::default()),
-            "이미 최대화 — 바람만 거둔다"
+            "already maximized — only the wish is withdrawn"
         );
         assert_eq!(
             run_unmodeled_action(&ops, POP, WindowAction::Unmaximize),
@@ -1368,7 +1267,7 @@ mod tests {
                 deferred: true,
                 ..Applied::default()
             }),
-            "숨은 창은 OS 창을 건드리지 않고 바람을 적는다"
+            "a hidden window records the wish without touching the OS window"
         );
         assert_eq!(ops.deferred(), [(POP2.to_string(), true)]);
         assert!(!ops.window(POP2).visible);
@@ -1395,15 +1294,14 @@ mod tests {
         ops.deferred.borrow_mut().insert(POP.to_string(), true);
         assert!(
             run_action(&ops, &layout, POP, WindowAction::Unmaximize).is_err(),
-            "이미 보통 크기 — 바람만 거둘 자리"
+            "already normal size — only the wish is left to withdraw"
         );
         assert_eq!(ops.deferred(), [(POP.to_string(), true)]);
     }
 
     // ── service (window argument · port outside the lock) ──
 
-    /// Recording window state port — on every call it checks whether it is outside the layout lock. `unmodeled` = the label to answer as a window outside the model · `admits` = the label that enters the model right after
-    /// it answered that it is a window outside the model (the commit of a new-window move lands in that gap — once).
+    /// Recording window state port — checks on every call that it is outside the layout lock. `unmodeled` = labels to answer as windows outside the model; `admits` = the label that enters the model right after it answered "outside the model" (a new-window move's commit lands in that gap — once).
     struct Control {
         layout: LayoutState,
         calls: Mutex<Vec<String>>,
@@ -1434,7 +1332,7 @@ mod tests {
         fn outside(&self, call: String) {
             assert!(
                 !matches!(self.layout.0.try_lock(), Err(TryLockError::WouldBlock)),
-                "{call} 는 레이아웃 락 밖에서 불려야 한다"
+                "{call} must be called outside the layout lock"
             );
             self.calls.lock().unwrap().push(call);
         }
@@ -1479,7 +1377,6 @@ mod tests {
         }
     }
 
-    /// Window port stand-in — only windows in `opened` are open (main is always open).
     struct Host {
         layout: LayoutState,
         opened: Mutex<BTreeSet<String>>,
@@ -1506,17 +1403,17 @@ mod tests {
 
     impl WindowHost for Host {
         fn open(&self, _label: &str) -> Result<(), String> {
-            unreachable!("이 시험은 창을 열지 않는다")
+            unreachable!("this test does not open windows")
         }
 
         fn open_at(&self, _label: &str, _at: &WindowPlace, _activate: bool) -> Result<(), String> {
-            unreachable!("이 시험은 창을 열지 않는다")
+            unreachable!("this test does not open windows")
         }
 
         fn close(&self, label: &str) {
             assert!(
                 !matches!(self.layout.0.try_lock(), Err(TryLockError::WouldBlock)),
-                "WindowHost::close 는 레이아웃 락 밖에서 불려야 한다"
+                "WindowHost::close must be called outside the layout lock"
             );
             self.opened.lock().unwrap().remove(label);
             self.closed.lock().unwrap().push(label.to_string());
@@ -1527,7 +1424,7 @@ mod tests {
         }
 
         fn move_window(&self, _label: &str, _at: &WindowPlace) -> Result<(), MoveFailed> {
-            unreachable!("이 시험은 창을 옮기지 않는다")
+            unreachable!("this test does not move windows")
         }
 
         fn claim_spare(&self) -> Option<SpareClaim> {
@@ -1577,12 +1474,11 @@ mod tests {
         assert_eq!(
             control.calls()[2..],
             ["is_unmodeled:slot-popup-9".to_string()],
-            "거절된 인자는 동작 포트까지 가지 않는다 — 모델에 없는 인자만 모델 밖 창인지 묻는다"
+            "a refused argument does not reach the action port — only an argument not in the model is asked whether it is a window outside the model"
         );
     }
 
-    // Window buttons of a window outside the model (an old popout on the boot failure screen) — minimize · maximize · restore size go by that label to the outside-model action,
-    //   and bringing to the front is still 「창 없음」 (no such window). The model is unchanged.
+    // Window buttons of a window outside the model (an old popout on the boot failure screen): minimize · maximize · restore size go by label to the outside-model action; bringing to the front stays 「window not found」. The model is unchanged.
     #[test]
     fn act_on_an_unmodeled_window_reaches_its_os_window_outside_the_lock() {
         let layout = layout_with_popouts(&[]);
@@ -1610,7 +1506,7 @@ mod tests {
             Err(WindowCtlError::Arg(WindowArgError::NotFound(
                 POP2.to_string()
             ))),
-            "OS 창이 없는(모델 밖 창이 아닌) label 은 그대로 「창 없음」"
+            "a label with no OS window (not a window outside the model) stays 「window not found」"
         );
         let calls = control.calls();
         assert_eq!(
@@ -1628,12 +1524,11 @@ mod tests {
         assert_eq!(
             layout.0.lock().unwrap().windows.len(),
             1,
-            "모델은 main 하나 그대로"
+            "the model stays as just main"
         );
     }
 
-    // Closing a window outside the model — set a tombstone on the label, withdraw that OS window, then `Closed` (nothing to change in the model's window entries). A label that is not
-    //   a window outside the model is still 「창 없음」 (no such window).
+    // Closing a window outside the model: tombstone the label, withdraw the OS window, then `Closed` (model window entries unchanged). A label that is not such a window stays 「window not found」.
     #[test]
     fn closing_an_unmodeled_window_closes_its_os_window() {
         let layout = layout_with_popouts(&[]);
@@ -1649,7 +1544,7 @@ mod tests {
         assert_eq!(
             layout.0.lock().unwrap().create_window(POP),
             Err(LayoutError::WindowClosed(POP.to_string())),
-            "그 label 로는 모델 창이 서지 않는다"
+            "no model window stands under that label"
         );
         assert_eq!(
             close(&layout, &Subs, &host, &control, POP2, false),
@@ -1666,9 +1561,7 @@ mod tests {
         layout.0.lock().unwrap().assert_number_invariants();
     }
 
-    /// A window port where, right after a new window is opened · before it is put into the model (phase B), that window's web close button sends `window.close <label>` —
-    /// that window is still a window outside the model (boot failure screen). `close` only queues the destroy, so its `Destroyed` cleanup does not come inside this test —
-    /// the commit stands before that cleanup.
+    /// Window port where right after a new window opens, before it enters the model (phase B), that window's web close button sends `window.close <label>` — the window is still outside the model (boot failure screen). `close` only queues the destroy, so its `Destroyed` cleanup does not run inside this test; the commit stands before it.
     struct ClosesOnOpen<'a> {
         host: Host,
         control: &'a Control,
@@ -1702,7 +1595,7 @@ mod tests {
         }
 
         fn move_window(&self, _label: &str, _at: &WindowPlace) -> Result<(), MoveFailed> {
-            unreachable!("이 시험은 창을 옮기지 않는다")
+            unreachable!("this test does not move windows")
         }
 
         fn claim_spare(&self) -> Option<SpareClaim> {
@@ -1729,9 +1622,7 @@ mod tests {
         fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
     }
 
-    // The close of a window outside the model gets caught in the gap of a new-window move — the tombstone stands before the OS window is withdrawn, so the commit of slot detach · dropping into a new window is
-    //   rejected with `WindowClosed`, and the slot · tab that was to be moved stays at the source (if the tombstone were left to the `Destroyed` cleanup, the commit would stand and that cleanup would delete the
-    //   tab along with the moved one · TRD S26-window-chrome §6-2 「모델 밖 창」).
+    // A close of a window outside the model caught in a new-window move's gap: the tombstone stands before the OS window is withdrawn, so the slot detach · new-window drop commit is rejected with `WindowClosed` and the slot · tab stays at the source (left to the `Destroyed` cleanup, the commit would stand and that cleanup would delete the tab with the moved one — TRD S26-window-chrome §6-2).
     #[test]
     fn closing_an_unmodeled_window_refuses_a_move_into_it_and_keeps_the_source() {
         let layout = layout_with_popouts(&[]);
@@ -1763,7 +1654,7 @@ mod tests {
             assert_eq!(mgr.slot_content(main_tab, slot), Ok(content));
             assert!(!mgr.windows.contains_key(POP));
         }
-        assert_eq!(host.host.closed(), [POP, POP], "닫기 단추 · 연 창 거두기");
+        assert_eq!(host.host.closed(), [POP, POP], "close button · reaping the opened window");
 
         let docked = layout
             .0
@@ -1802,8 +1693,7 @@ mod tests {
         mgr.assert_number_invariants();
     }
 
-    // After the port answered that it is a window outside the model · before the layout lock is taken, that window entered the model (the commit of a new-window move) — it goes to closing a model window:
-    //   delete from the model and withdraw the OS window while holding the number until its `Destroyed`.
+    // After the port said "outside the model" and before the layout lock is taken, the window entered the model (a new-window move's commit): it goes to closing a model window — delete from the model and withdraw the OS window while the number is held until its `Destroyed`.
     #[test]
     fn an_unmodeled_window_that_entered_the_model_is_closed_as_a_model_window() {
         let layout = layout_with_popouts(&[]);
@@ -1820,7 +1710,7 @@ mod tests {
         let mut mgr = layout.0.lock().unwrap();
         assert!(!mgr.windows.contains_key(POP));
         mgr.assert_number_invariants();
-        assert!(mgr.release_closing(POP), "번호는 그 `Destroyed` 까지 쥔다");
+        assert!(mgr.release_closing(POP), "the number is held until that `Destroyed`");
     }
 
     // ── close join (§5-4) · close if empty (§5-5) ──
@@ -1835,7 +1725,7 @@ mod tests {
             Ok(CloseOutcome::HiddenAll)
         );
         assert_eq!(control.calls(), ["hide_all"]);
-        assert!(host.closed().is_empty(), "main 은 닫지 않는다");
+        assert!(host.closed().is_empty(), "main is not closed");
 
         let id = window_id(&layout, POP);
         assert_eq!(
@@ -1861,8 +1751,7 @@ mod tests {
         assert!(control.calls().is_empty() && host.closed().is_empty());
     }
 
-    // 「모델에서만 빠지고 OS 창은 남은 창」 (a window removed only from the model while its OS window remains) — the state of a popout whose tabs became 0. Only that window is closed by persistent id, and windows in the model · other ids ·
-    // windows whose OS window is already gone are left as they are (AC24 · AC32).
+    // 「A window removed only from the model while its OS window remains」 (a popout whose tabs became 0): only that window is closed by persistent id; windows in the model · other ids · windows whose OS window is gone stay (AC24 · AC32).
     #[test]
     fn if_empty_closes_only_the_closing_window_whose_os_window_is_still_open() {
         let layout = layout_with_popouts(&[POP, POP2]);
@@ -1875,30 +1764,30 @@ mod tests {
         assert_eq!(
             close_if_empty_of(&kept),
             Ok(CloseOutcome::Kept),
-            "모델에 있다"
+            "in the model"
         );
         assert_eq!(close_if_empty_of(MAIN_WINDOW_LABEL), Ok(CloseOutcome::Kept));
         layout.0.lock().unwrap().close_window(POP).unwrap();
         assert_eq!(
             close_if_empty_of(&uuid::Uuid::new_v4().to_string()),
             Ok(CloseOutcome::Kept),
-            "다른 id"
+            "another id"
         );
         assert!(host.closed().is_empty());
 
         assert_eq!(
             close_if_empty_of(&gone.to_uppercase()),
             Ok(CloseOutcome::Closed),
-            "UUID 값이 같은 철자"
+            "a spelling with the same UUID value"
         );
         assert_eq!(host.closed(), [POP]);
         assert_eq!(
             close_if_empty_of(&gone),
             Ok(CloseOutcome::Kept),
-            "OS 창이 이미 없다"
+            "the OS window is already gone"
         );
         assert_eq!(host.closed(), [POP]);
-        assert!(control.calls().is_empty(), "창 상태 포트를 부르지 않는다");
+        assert!(control.calls().is_empty(), "does not call the window state port");
     }
 
     // ── window list (§6-3) ──
@@ -1931,7 +1820,7 @@ mod tests {
                 (MAIN_WINDOW_LABEL, 1, true, OsWindowState::default()),
                 (POP2, 3, false, shown),
             ],
-            "OS 창을 못 읽은 행은 모두 거짓 · 닫히는 창(2)은 없다"
+            "every row whose OS window could not be read is false · there is no closing window (2)"
         );
         assert_eq!(rows[0].window_id, "main");
         assert_eq!(rows[1].window_id, window_id(&layout, POP2));

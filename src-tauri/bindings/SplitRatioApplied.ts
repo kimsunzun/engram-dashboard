@@ -2,13 +2,13 @@
 import type { SplitRatioOutcome } from "./SplitRatioOutcome";
 
 /**
- * `set_split_ratio` invoke 의 답. `ratio` = 셸이 실제로 가진 비율(a 쪽 = 왼쪽/위 칸의 몫 — ADR-0140) —
- * `Applied` 면 방금 쓴 값, 아니면 손대지 않은 지금 값이다.
+ * The answer of the `set_split_ratio` invoke. `ratio` = the ratio the shell actually holds (a side = the share of the left/top area — ADR-0140) —
+ * the value just written if `Applied`, otherwise the current value left untouched.
  */
 export type SplitRatioApplied = { ratio: number, outcome: SplitRatioOutcome, 
 /**
- * `Applied` 일 때만 뜻이 있다 — 이 쓰기로 통지된 레이아웃 스냅샷의 `version` 과 같다(같은 락 안에서 뜬
- * 값). `Unchanged`·`TooSmall` 이면 통지가 없고 이 값은 전역 카운터의 그 순간 값일 뿐이라 기다릴
- * 대상이 아니다. number 로 고정하는 이유는 `ViewSnapshot.version` 과 같다.
+ * Meaningful only for `Applied` — equal to the `version` of the layout snapshot notified by this write (a value taken inside the same lock).
+ * For `Unchanged` · `TooSmall` there is no notification and this value is just the global counter at that moment, so there is
+ * nothing to wait for. The reason for fixing it to number is the same as `ViewSnapshot.version`.
  */
 version: number, };

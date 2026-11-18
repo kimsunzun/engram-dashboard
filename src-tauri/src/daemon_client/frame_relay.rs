@@ -1,7 +1,7 @@
 //! Relay decision for one daemon output binary frame — decode → progress signal → incarnation marker filter → pass to the viewing window.
 //!
 //! ## ★Do not skip seq (ADR-0231, load-bearing)★
-//! In live, a view holds `seq > 마지막+1` (seq > last+1) with no deadline and releases only when `마지막+1` (last+1) arrives. So if this relay
+//! In live, a view holds `seq > last+1` with no deadline and releases only when `last+1` arrives. So if this relay
 //! silently discards one frame, the frames after it pile up to the hold cap — forever for an idle agent — and that view stalls. A frame whose decoding
 //! was rejected is split in two:
 //! - **Unknown tag (`UnknownTag`) → make a placeholder and flow it on the usual path.** The agent id · incarnation marker · seq are at fixed positions
@@ -18,8 +18,7 @@
 //! asks for a full replay on re-attach, and a window that is not viewing asks for replay when it attaches.
 //!
 //! ## ★Why it lives outside the connection driver★
-//! This verdict used to live inside the old connection task's `select!`, which needed a real socket. Here it runs
-//! one frame at a time with no socket or Tauri (the tests below). `deliver` is a parameter for the same reason as in
+//! The verdict runs one frame at a time with no socket or Tauri (the tests below). `deliver` is a parameter for the same reason as in
 //! `replay_events::apply_replay_event` — the real carrier needs a `tauri::ipc::Channel`, but **which window and which
 //! bytes** are decided here.
 
@@ -89,14 +88,14 @@ pub fn relay_binary_frame(
                     agent = %header.agent_id,
                     seq = header.seq,
                     tag,
-                    "모르는 tag 의 출력 프레임 — 같은 seq 의 자리채움으로 대신 흘린다(이 짝의 다음부터는 debug)"
+                    "output frame with an unknown tag — relaying a same-seq placeholder instead (debug from the next one of this pair)"
                 );
             } else {
                 tracing::debug!(
                     agent = %header.agent_id,
                     seq = header.seq,
                     tag,
-                    "모르는 tag 의 출력 프레임 — 자리채움으로 대신 흘린다"
+                    "output frame with an unknown tag — relaying a placeholder instead"
                 );
             }
             placeholder = placeholder_error_frame(header.agent_id, header.epoch, header.seq);
@@ -105,7 +104,7 @@ pub fn relay_binary_frame(
         Err(CodecError::TooShort { len }) => {
             tracing::warn!(
                 len,
-                "헤더보다 짧은 출력 프레임 — seq 를 못 읽어 연결을 끊는다"
+                "output frame shorter than the header — cannot read seq; closing the connection"
             );
             return FrameRelay::Disconnect;
         }
@@ -128,7 +127,7 @@ pub fn relay_binary_frame(
 
 #[cfg(test)]
 mod tests {
-    //! The TRD §7-1 「셸 중계」 row — short frame = disconnect · unknown tag = a same-seq placeholder passes · normal pass ·
+    //! The TRD §7-1 「shell relay」 row — short frame = disconnect · unknown tag = a same-seq placeholder passes · normal pass ·
     //! filtering of a different incarnation marker (placeholder included).
     use std::time::Duration;
 
@@ -145,12 +144,12 @@ mod tests {
         let mut mgr = ViewManager::new();
         let view = mgr
             .list_tabs(MAIN_WINDOW_LABEL)
-            .expect("main 창은 항상 있다")
+            .expect("the main window always exists")
             .active;
-        let slot = tree::first_empty_slot_id(&mgr.snapshot(view).expect("뷰 존재").layout)
-            .expect("빈 슬롯 존재");
+        let slot = tree::first_empty_slot_id(&mgr.snapshot(view).expect("view exists").layout)
+            .expect("an empty slot exists");
         mgr.assign_agent(view, slot, agent.to_string())
-            .expect("슬롯 배치");
+            .expect("slot placement");
         let router = OutputRouter::new();
         router.rebuild(&mgr);
         router
@@ -194,7 +193,7 @@ mod tests {
         fn delivered_seqs(&self) -> Vec<u64> {
             self.delivered
                 .iter()
-                .map(|(_, b)| decode_frame(b).expect("통과분은 정상 프레임").seq)
+                .map(|(_, b)| decode_frame(b).expect("passed frames are valid frames").seq)
                 .collect()
         }
     }
@@ -212,7 +211,7 @@ mod tests {
         assert_eq!(h.feed(&frame), FrameRelay::Continue);
         assert_eq!(h.delivered.len(), 1);
         assert_eq!(h.delivered[0].0, vec![MAIN_WINDOW_LABEL.to_string()]);
-        assert_eq!(h.delivered[0].1, frame, "원본 bytes 그대로");
+        assert_eq!(h.delivered[0].1, frame, "original bytes as is");
     }
 
     #[test]
@@ -223,7 +222,7 @@ mod tests {
         assert_eq!(
             h.feed(&frame[..FRAME_HEADER_LEN - 1]),
             FrameRelay::Disconnect,
-            "seq 를 못 읽으면 연결을 끊는다"
+            "disconnects when seq cannot be read"
         );
         assert!(h.delivered.is_empty());
     }
@@ -240,21 +239,21 @@ mod tests {
         assert_eq!(
             h.feed(&with_tag(encode_structured_frame(agent, 3, 6, b"{}"), 0x07)),
             FrameRelay::Continue,
-            "끊지 않는다 — 결정적 원인이면 끊김·replay 가 끝없이 되풀이된다"
+            "does not disconnect — with a deterministic cause, disconnects and replays would repeat forever"
         );
         assert_eq!(
             h.feed(&encode_terminal_frame(agent, 3, 7, b"b")),
             FrameRelay::Continue
         );
 
-        assert_eq!(h.delivered_seqs(), vec![5, 6, 7], "구멍 없는 seq 줄기");
+        assert_eq!(h.delivered_seqs(), vec![5, 6, 7], "a seq run without holes");
         let (labels, bytes) = &h.delivered[1];
-        assert_eq!(labels, &vec![MAIN_WINDOW_LABEL.to_string()], "보는 창으로");
+        assert_eq!(labels, &vec![MAIN_WINDOW_LABEL.to_string()], "to the viewing window");
         assert_eq!(decode_frame(bytes).unwrap().tag, FRAME_TAG_STRUCTURED_EVENT);
         assert_eq!(
             bytes,
             &placeholder_error_frame(agent, 3, 6),
-            "데몬 sink 의 자리채움과 바이트가 같다(한 벌)"
+            "same bytes as the daemon sink's placeholder (one copy)"
         );
     }
 
@@ -272,15 +271,15 @@ mod tests {
         assert_eq!(
             h.feed(&with_tag(encode_terminal_frame(agent, 2, 6, b"old"), 0x09)),
             FrameRelay::Continue,
-            "옛 화신의 모르는 tag 도 끊지 않고 거른다"
+            "an old incarnation's unknown tag is filtered without disconnecting"
         );
-        assert!(h.delivered.is_empty(), "옛 화신은 자리채움까지 거른다");
+        assert!(h.delivered.is_empty(), "an old incarnation is filtered even for the placeholder");
 
         assert_eq!(
             h.feed(&with_tag(encode_terminal_frame(agent, 3, 7, b"new"), 0x09)),
             FrameRelay::Continue
         );
-        assert_eq!(h.delivered_seqs(), vec![7], "현 화신의 자리채움은 통과");
+        assert_eq!(h.delivered_seqs(), vec![7], "the current incarnation's placeholder passes");
     }
 
     // An unknown tag is also a progress signal — it is evidence that the daemon is alive and flowing that agent's replay, so it postpones the no-progress expiry
@@ -307,7 +306,7 @@ mod tests {
             h.flight
                 .check_deadlines(start + Duration::from_millis(150))
                 .is_empty(),
-            "80ms 의 진행 신호로 만료가 180ms 로 밀렸다"
+            "an 80ms progress signal pushed the expiry to 180ms"
         );
     }
 
@@ -316,10 +315,10 @@ mod tests {
     fn an_unknown_tag_warns_once_per_agent_and_tag() {
         let (a, b) = (AgentId::new_v4(), AgentId::new_v4());
         let mut log = UnknownTagLog::default();
-        assert!(log.first_sighting(a, 7), "첫 번째는 warn");
-        assert!(!log.first_sighting(a, 7), "같은 짝의 두 번째는 debug");
-        assert!(log.first_sighting(a, 9), "다른 tag 는 따로 센다");
-        assert!(log.first_sighting(b, 7), "다른 에이전트는 따로 센다");
+        assert!(log.first_sighting(a, 7), "the first is warn");
+        assert!(!log.first_sighting(a, 7), "the second of the same pair is debug");
+        assert!(log.first_sighting(a, 9), "a different tag is counted separately");
+        assert!(log.first_sighting(b, 7), "a different agent is counted separately");
     }
 
     #[test]
@@ -335,11 +334,11 @@ mod tests {
         assert_eq!(
             h.delivered_seqs(),
             vec![5, 6, 7],
-            "경고를 줄여도 자리채움은 매번"
+            "even with fewer warnings the placeholder goes out every time"
         );
         assert!(
             !h.unknown_tags.first_sighting(agent, 0x07),
-            "첫 장에서 이미 셌다"
+            "already counted on the first one"
         );
     }
 }

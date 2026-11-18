@@ -1225,9 +1225,7 @@ async fn a_replay_without_progress_gets_one_failure_marker_after_the_deadline_on
     assert!(is_unsubscribe(&h.command(&endpoint).await, other));
 }
 
-// Copied from the old suite (TRD §6-2 U3 — the A1 safety on the single actor): a
-// replay request a dying popout's webview sends after its close request unsubscribed sends no Subscribe; a request
-// for an agent another window shows goes out.
+// A1 safety on the single actor (TRD §6-2 U3): a replay request a dying popout's webview sends after its close request unsubscribed sends no Subscribe; a request for an agent another window shows goes out.
 #[tokio::test]
 async fn a_replay_request_after_the_close_request_sends_no_subscribe() {
     let h = Harness::new(live());
@@ -1281,8 +1279,7 @@ async fn a_replay_request_after_the_close_request_sends_no_subscribe() {
     );
 }
 
-// Copied from the old suite (TRD §6-2 U3 — A2): the names sink gets each daemon list
-// after the frontend event, as it came; a broadcast that is not a list does not reach it.
+// A2 (TRD §6-2 U3): the names sink gets each daemon list after the frontend event, as it came; a broadcast that is not a list does not reach it.
 #[tokio::test]
 async fn agent_names_sink_receives_each_daemon_list_after_the_frontend_event() {
     let h = Harness::new(live());
@@ -1717,7 +1714,6 @@ impl ViewCommandPort for HeldView {
     }
 }
 
-/// A daemon command request for `name` and its request id.
 fn command_request(name: &str) -> (engram_dashboard_command::RequestId, AgentEvent) {
     let envelope = CommandEnvelope {
         name: name.to_owned(),
@@ -1732,7 +1728,6 @@ fn command_request(name: &str) -> (engram_dashboard_command::RequestId, AgentEve
     (envelope.request_id, event)
 }
 
-/// A short name for a command the shell wrote.
 fn label(cmd: &AgentCommand) -> String {
     match cmd {
         AgentCommand::UsageSubscribe { vendors } => {
@@ -2019,7 +2014,7 @@ async fn a_command_sent_as_soon_as_the_peer_is_live_goes_out_after_the_registrat
     joined("connect", connect).await.expect("connected");
 }
 
-// Copied from the old suite (TRD §6-2).
+// TRD §6-2
 #[tokio::test]
 async fn a_usage_broadcast_notifies_once_with_labels_and_socket_epoch() {
     let h = Harness::new(live());
@@ -2050,7 +2045,7 @@ async fn a_usage_broadcast_notifies_once_with_labels_and_socket_epoch() {
     );
 }
 
-// Copied from the old suite (TRD §6-2).
+// TRD §6-2
 #[tokio::test]
 async fn a_mismatched_broadcast_writes_the_interest_back_on_its_socket() {
     let h = Harness::new(live());
@@ -2080,8 +2075,7 @@ async fn a_mismatched_broadcast_writes_the_interest_back_on_its_socket() {
     );
 }
 
-// Copied from the old suite (TRD §6-2): nudges carry no set, so whatever order they are taken in, the last subscribe
-// is the last interest.
+// Nudges carry no set, so whatever order they are taken in, the last subscribe is the last interest (TRD §6-2).
 #[tokio::test]
 async fn nudges_carry_no_set_so_the_last_subscribe_is_the_last_interest() {
     let h = Harness::new(live());
@@ -2107,8 +2101,7 @@ async fn nudges_carry_no_set_so_the_last_subscribe_is_the_last_interest() {
     );
 }
 
-// Adapted from the old suite's `a_new_socket_sends_the_interest_before_queued_commands` (TRD §6-2) — the order against
-// queued commands is pinned by `a_command_sent_as_soon_as_the_peer_is_live_…`.
+// The order against queued commands is pinned by `a_command_sent_as_soon_as_the_peer_is_live_…` (TRD §6-2).
 #[tokio::test]
 async fn a_lost_connection_clears_the_usage_cache_and_the_next_one_gets_the_current_interest_first()
 {
@@ -2166,7 +2159,7 @@ async fn a_lost_connection_clears_the_usage_cache_and_the_next_one_gets_the_curr
     );
 }
 
-// Copied from the old suite (TRD §6-2).
+// TRD §6-2
 #[tokio::test]
 async fn a_refresh_writes_the_interest_before_the_refresh_frame() {
     let h = Harness::new(live());
@@ -2198,8 +2191,7 @@ async fn a_refresh_writes_the_interest_before_the_refresh_frame() {
     ));
 }
 
-// Copied from the old suite (TRD §6-2): the usage state sees the new socket when `Connected` is announced — first
-// connect and reconnect.
+// The usage state sees the new socket when `Connected` is announced — first connect and reconnect (TRD §6-2).
 #[tokio::test]
 async fn connected_is_announced_after_the_usage_state_sees_the_new_socket() {
     let h = Harness::new(live());
@@ -2227,8 +2219,7 @@ async fn connected_is_announced_after_the_usage_state_sees_the_new_socket() {
     assert_eq!(*at_connected.lock().unwrap(), [first, second]);
 }
 
-// Copied from the old suite (TRD §6-2): a command the daemon delivers runs through the table, its usage nudge writes
-// the subscribe, and a shrink goes out only after the shrink delay — the deferred nudge reaches this driver.
+// A command the daemon delivers runs through the table, its usage nudge writes the subscribe, and a shrink goes out only after the shrink delay — the deferred nudge reaches this driver (TRD §6-2).
 #[tokio::test]
 async fn a_usage_slot_placed_over_the_bus_subscribes_and_a_bus_toggle_off_shrinks_later() {
     let h = Harness::new(live());
@@ -2361,8 +2352,6 @@ async fn a_daemon_command_request_or_usage_snapshot_on_a_connection_being_droppe
     );
 }
 
-// ── review round 1 (3-2 U3c) ────────────────────────────────────────────────────────────────────
-
 /// Runs inbound command tasks and counts the ones that ran to their end — the outcome was handed over by then.
 #[derive(Default)]
 struct CountingSpawner {
@@ -2403,7 +2392,6 @@ fn list() -> AgentCommand {
 }
 
 impl Harness {
-    /// Commands written on `endpoint` up to and including the one labelled `last`.
     async fn labels_until(&self, endpoint: &MemoryEndpoint, last: &str) -> Vec<String> {
         let mut got = Vec::new();
         while !got.iter().any(|label| label == last) {
@@ -2455,9 +2443,7 @@ async fn a_waiting_command_fails_as_unsent_when_its_connection_is_lost() {
     assert_eq!(h.labels(&endpoint, 1).await, [m]);
 }
 
-// F1 (ADR-0195): a round trip waiting for its connection to open is bound to it. Polled again only once the next
-// connection is open and published, it fails as unsent — it does not take the next connection — and writes nothing
-// there.
+// A round trip waiting for its connection to open is bound to it (ADR-0195): polled again only once the next connection is open and published, it fails as unsent, does not take that connection and writes nothing there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
 async fn a_waiting_command_woken_only_after_the_next_connection_opened_fails_and_writes_nothing_there(
@@ -2535,8 +2521,7 @@ async fn fire_and_forgets_pending_for_a_connection_not_opened_yet_are_bounded_at
     assert!(pending(&h.link().gate).is_empty());
 }
 
-// Finding 2: one caller's fire-and-forget sent while its connection is not opened yet, then a round trip once it is —
-// written in that order (the actor writes the pending list before it sets the connection opened, under the gate).
+// One caller's fire-and-forget sent while its connection is not opened yet, then a round trip once it is — written in that order (the actor writes the pending list before setting the connection opened, under the gate).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
 async fn a_fire_and_forget_sent_before_the_open_goes_out_ahead_of_the_same_callers_round_trip_after_it(
@@ -2574,8 +2559,7 @@ async fn a_fire_and_forget_sent_before_the_open_goes_out_ahead_of_the_same_calle
     assert!(joined("the round trip", request).await.is_ok());
 }
 
-// Finding 1: a fire-and-forget left pending for a connection that was lost (a caller saw it live just before) does not
-// hold anything back — the next connection opens and a round trip on it completes.
+// A fire-and-forget left pending for a connection that was lost (a caller saw it live just before) holds nothing back — the next connection opens and a round trip on it completes.
 #[tokio::test]
 async fn a_pending_fire_and_forget_of_a_lost_connection_does_not_hold_back_the_next_one() {
     let h = Harness::new(live());
@@ -2616,7 +2600,7 @@ async fn a_pending_fire_and_forget_of_a_lost_connection_does_not_hold_back_the_n
     assert!(pending(&h.link().gate).is_empty());
 }
 
-// F3: on an opened connection one caller's fire-and-forget and round trip go out in the order made.
+// On an opened connection one caller's fire-and-forget and round trip go out in the order made.
 #[tokio::test]
 async fn a_fire_and_forget_then_a_round_trip_go_out_in_that_order_on_an_opened_connection() {
     let h = Harness::new(live());
@@ -2639,7 +2623,7 @@ async fn a_fire_and_forget_then_a_round_trip_go_out_in_that_order_on_an_opened_c
     assert!(joined("the round trip", caller).await.is_ok());
 }
 
-// F4: `close()` followed at once by a write fails it.
+// `close()` followed at once by a write fails it.
 #[tokio::test]
 async fn a_command_right_after_a_close_fails_at_once_and_nothing_goes_out() {
     let h = Harness::new(live());
@@ -2671,8 +2655,7 @@ async fn a_command_right_after_a_close_fails_at_once_and_nothing_goes_out() {
     assert_eq!(endpoint.frames(), Vec::<Frame>::new());
 }
 
-// G1: a fire-and-forget sent after `close()` while the connection is live but not opened yet is dropped at the caller —
-// it does not wait in the pending list for the `LinkUp` step to write it on the closing link.
+// A fire-and-forget sent after `close()` while the connection is live but not opened yet is dropped at the caller — it does not wait in the pending list to be written on the closing link.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
 async fn a_fire_and_forget_after_a_close_while_the_connection_is_not_opened_yet_is_dropped() {
@@ -2714,7 +2697,7 @@ async fn a_fire_and_forget_after_a_close_while_the_connection_is_not_opened_yet_
     );
 }
 
-// F5: a daemon command request in the tail of a link the user closed is not run.
+// A daemon command request in the tail of a link the user closed is not run.
 #[tokio::test]
 async fn a_daemon_command_request_of_a_closed_links_tail_is_not_run() {
     let mut b = Bench::new();
@@ -2743,7 +2726,7 @@ async fn a_daemon_command_request_of_a_closed_links_tail_is_not_run() {
     assert_eq!(route_request(&mut b), 0, "not run after the close");
 }
 
-// T1: a round trip whose connection does not open within the request timeout gives up with its text and a warn.
+// A round trip whose connection does not open within the request timeout gives up with its text and a warn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
 async fn a_command_whose_connection_does_not_open_in_time_gives_up_with_a_warn() {
@@ -2816,7 +2799,7 @@ async fn a_frontend_command_whose_reply_never_comes_fails_after_30_s_with_the_re
     assert_eq!(
         joined("the forward", forward).await,
         Err(
-            "daemon reply timeout — 연결은 살아있으나 데몬이 응답을 보내지 않음(30s 초과)"
+            "daemon reply timeout — the connection is alive but the daemon sent no reply (over 30s)"
                 .to_owned()
         )
     );
@@ -2872,8 +2855,7 @@ async fn pending_fire_and_forgets_follow_their_connection() {
     assert_eq!(lock_gate(&b.driver.gate).opened, None);
 }
 
-// T3 — adapted from the old suite's `a_drop_before_the_reply_shows_no_box` (TRD §6-2): a registration whose link drops
-// before the reply is a local failure — a warn, no box (ADR-0281); the next connection's refusal shows one.
+// A registration whose link drops before the reply is a local failure — a warn, no box (ADR-0281; TRD §6-2); the next connection's refusal shows one.
 #[tokio::test]
 async fn a_drop_before_the_registration_reply_shows_no_box() {
     let h = Harness::new(live());
@@ -2902,7 +2884,7 @@ async fn a_drop_before_the_registration_reply_shows_no_box() {
     );
 }
 
-// T4 — copied from the old suite (TRD §6-2): with no interest ⟳ still writes an empty subscribe ahead of the refresh.
+// With no interest ⟳ still writes an empty subscribe ahead of the refresh (TRD §6-2).
 #[tokio::test]
 async fn a_refresh_with_no_interest_writes_an_empty_subscribe_first() {
     let h = Harness::new(live());
@@ -2926,7 +2908,6 @@ async fn a_refresh_with_no_interest_writes_an_empty_subscribe_first() {
 
 // ── The production assembly on a real socket ─────────────────────────────────────────────────────────────────────
 
-/// Bounds a real-socket wait, so a regression fails instead of hanging.
 async fn within<F: std::future::Future>(what: &str, wait: F) -> F::Output {
     tokio::time::timeout(Duration::from_secs(10), wait)
         .await
@@ -3059,9 +3040,7 @@ async fn the_production_transport_attaches_answers_and_follows_the_daemon_to_a_n
     round_trip("the round trip after the loss", &client, &mut ws).await;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════════
-// Ported from the old driver's suite (TRD §6-2 「셸 시험 운명」 — the 「옮김」 rows this suite had not yet copied).
-// ══════════════════════════════════════════════════════════════════════════════════
+// Ported from the old driver's suite (TRD §6-2 「shell test fate」).
 
 // A second connect on a connected client answers at once — no second search, no second dial.
 #[tokio::test]
@@ -3132,7 +3111,7 @@ async fn forward_drops_a_webview_usage_subscribe() {
     assert_eq!(
         label(&h.command(&endpoint).await),
         m,
-        "웹뷰의 사용량 구독은 소켓에 안 나간다"
+        "the webview's usage subscription does not go out on the socket"
     );
 }
 
@@ -3145,7 +3124,7 @@ async fn assert_forward_refuses_and_writes_nothing(cmd: serde_json::Value) {
     let endpoint = h.connected().await;
     let refused = crate::commands::agent::forward_to_daemon(&h.client, cmd).await;
     assert!(
-        matches!(&refused, Err(m) if m.starts_with("AgentCommand 명령 칸 파싱 실패")),
+        matches!(&refused, Err(m) if m.starts_with("failed to parse the AgentCommand command field")),
         "{refused:?}"
     );
     let m = marker(&h.client);
@@ -3216,7 +3195,7 @@ async fn get_usage_snapshot_hands_off_the_cache_with_the_socket_epoch() {
     let early = usage_snapshot_reply(&h.client, now);
     let later = usage_snapshot_reply(&h.client, now + Duration::from_secs(100));
     assert!(age(&early) >= 10);
-    assert_eq!(age(&later), age(&early) + 100, "받은 뒤 흐른 초만큼 늙는다");
+    assert_eq!(age(&later), age(&early) + 100, "ages by the seconds elapsed since receipt");
 
     let wire = serde_json::to_value(&later).unwrap();
     let mut keys: Vec<&str> = wire
@@ -3229,7 +3208,7 @@ async fn get_usage_snapshot_hands_off_the_cache_with_the_socket_epoch() {
     assert_eq!(
         keys,
         ["snapshots", "socket_epoch"],
-        "웹뷰 계약 = snake_case 두 칸"
+        "webview contract = two snake_case fields"
     );
 }
 
@@ -3253,7 +3232,7 @@ async fn an_envelope_arriving_before_the_table_still_gets_an_answer() {
 }
 
 const CONFLICT_REFUSAL: &str = "CONFLICT: answered by this daemon itself, so they cannot be registered: agent.rename — pick different names; this packet was not applied";
-const LAST_REFUSAL: &str = "INVALID_ARGUMENT: 표지 — 마지막 연결의 거절(시험)";
+const LAST_REFUSAL: &str = "INVALID_ARGUMENT: marker — the last connection's refusal (test)";
 
 impl Harness {
     /// Answers the registration the shell wrote first on `endpoint` with a daemon refusal.
@@ -3341,13 +3320,8 @@ async fn an_unknown_code_refusal_shows_one_box() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════════
-// The usage interest's recompute sites (TRD S21 usage-limit-slot §1-7 「재계산 자리」 · §4 셸 관심 행) — a layout write,
-// a popup's destruction and the tray's hide · show recompute the interest and handle the result (a nudge at once · the
-// 1.5 s shrink timer). Ported from the old suite onto this driver: the actor is built and never started, so every nudge
-// and unsubscribe waits in its command channel, and the test plays the actor's usage step (`sync`) itself. The shrink
-// delay runs on paused tokio time — the timer is the client's runtime sleep, not the transport clock.
-// ══════════════════════════════════════════════════════════════════════════════════
+// ── Usage interest recompute sites (TRD S21 usage-limit-slot §1-7 · §4 shell interest row) ──
+// A layout write, a popup's destruction and the tray's hide · show recompute the interest and handle the result (a nudge at once · the 1.5 s shrink timer). The actor is built and never started, so nudges and unsubscribes wait in its command channel and the test plays the actor's usage step (`sync`); the shrink delay runs on paused tokio time (the client's runtime sleep, not the transport clock).
 
 /// A client whose actor is built and never started — what its callers send waits in `cmds`.
 struct Idle {
@@ -3360,7 +3334,6 @@ struct Idle {
 /// The connection generation the idle client's usage state is opened on — what the actor's `LinkUp` would hand it.
 const IDLE_SOCKET: u64 = 1;
 
-/// The usage state opened on [`IDLE_SOCKET`] with an empty interest (`sent` = ∅).
 fn idle_client() -> Idle {
     let mut parts = None;
     let client = DaemonClient::around_link(
@@ -3479,9 +3452,8 @@ async fn settle() {
     }
 }
 
-// ── One layout write → one recompute (`RouterSubs::resync`) ─────────────────────────────
-// Interest that grew while `sent` stays empty (the connection task does not take it out) issues one nudge per recompute — the nudge count is
-// the recompute count.
+// ── One layout write → one recompute (`RouterSubs::resync`) ──
+// Interest that grew while `sent` stays empty issues one nudge per recompute — the nudge count is the recompute count.
 #[tokio::test]
 async fn one_layout_write_recomputes_the_usage_interest_once() {
     let Idle {
@@ -3495,9 +3467,8 @@ async fn one_layout_write_recomputes_the_usage_interest_once() {
     assert_eq!(nudges(&mut rx), 1);
 }
 
-// ── Tray hide → interest shrunk after the deadline · show → interest grown at once ─────────────────────────────
-// Drives what the two tray functions do per window (`for_each_ui_window` + the production implementation `LayoutUsageVisibility`) as is —
-// only fetching the window list from the OS and the OS window calls are missing.
+// ── Tray hide → interest shrunk after the deadline · show → grown at once ──
+// Drives what the two tray functions do per window (`for_each_ui_window` + `LayoutUsageVisibility`) as is — only the OS window list fetch and OS window calls are missing.
 #[tokio::test(start_paused = true)]
 async fn tray_hide_shrinks_after_the_delay_and_show_grows_at_once() {
     let Idle {
@@ -3523,17 +3494,17 @@ async fn tray_hide_shrinks_after_the_delay_and_show_grows_at_once() {
         |_| true,
     );
     settle().await;
-    assert_eq!(nudges(&mut rx), 0, "줄임은 곧바로 안 나간다");
+    assert_eq!(nudges(&mut rx), 0, "a shrink does not go out right away");
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY - Duration::from_millis(100)).await;
     settle().await;
-    assert_eq!(nudges(&mut rx), 0, "기한 전");
+    assert_eq!(nudges(&mut rx), 0, "before the deadline");
     tokio::time::advance(Duration::from_millis(200)).await;
     settle().await;
-    assert_eq!(nudges(&mut rx), 1, "기한에 넛지 한 장");
+    assert_eq!(nudges(&mut rx), 1, "one nudge at the deadline");
     assert_eq!(
         sync_as_the_actor(&client, socket),
         Some(BTreeSet::new()),
-        "그 넛지가 보내는 것 = 줄인 관심"
+        "what that nudge sends = the shrunk interest"
     );
 
     for_each_ui_window(
@@ -3544,7 +3515,7 @@ async fn tray_hide_shrinks_after_the_delay_and_show_grows_at_once() {
         |_| {},
         |_| true,
     );
-    assert_eq!(nudges(&mut rx), 1, "늘어남은 기다리지 않는다");
+    assert_eq!(nudges(&mut rx), 1, "a growth does not wait");
     assert_eq!(
         sync_as_the_actor(&client, socket),
         Some(BTreeSet::from([AgentBackendKind::Claude]))
@@ -3572,11 +3543,11 @@ async fn showing_again_within_the_delay_cancels_the_shrink() {
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY / 2).await;
     settle().await;
     tray.set_visible(MAIN_WINDOW_LABEL, true);
-    assert_eq!(nudges(&mut rx), 0, "`sent` 로 돌아왔다 — 보낼 것이 없다");
+    assert_eq!(nudges(&mut rx), 0, "came back to `sent` — nothing to send");
 
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
     settle().await;
-    assert_eq!(nudges(&mut rx), 0, "물러진 줄임의 타이머가 넛지를 냈다");
+    assert_eq!(nudges(&mut rx), 0, "the timer of a reverted shrink emitted a nudge");
     assert_eq!(sync_as_the_actor(&client, socket), None);
 }
 
@@ -3604,17 +3575,15 @@ async fn a_destroyed_popup_leaves_the_interest_after_the_delay() {
         Some(1)
     );
     settle().await;
-    assert_eq!(nudges(&mut rx), 0, "줄임은 곧바로 안 나간다");
+    assert_eq!(nudges(&mut rx), 0, "a shrink does not go out right away");
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY + Duration::from_millis(100)).await;
     settle().await;
     assert_eq!(nudges(&mut rx), 1);
     assert_eq!(sync_as_the_actor(&client, socket), Some(BTreeSet::new()));
 }
 
-// ── A popup destroyed forgets the hidden mark even if the model did not hold that window ─────────────────────────────────
-// Moving a slot to a new window opens the OS window first and adds the model window later — if the tray hides and the window closes in that gap, the model
-// does not have that window. If a window with the same label is stood up in a new model with no tombstone (tests only — production labels are not reused, and a label with a tombstone is
-// not accepted by the model), the forgotten mark counts as shown.
+// ── A popup destroyed forgets the hidden mark even if the model did not hold that window ──
+// A slot moving to a new window opens the OS window first and adds the model window later; if the tray hides and the window closes in that gap the model lacks it. A same-label window in a new model with no tombstone (tests only — production labels are not reused) counts the forgotten mark as shown.
 #[tokio::test]
 async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_held_it() {
     let Idle {
@@ -3641,13 +3610,12 @@ async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_hel
     assert_eq!(
         nudges(&mut rx),
         1,
-        "숨김 표시가 남아 그 창을 숨은 창으로 셌다"
+        "the hidden mark remained and that window was counted as hidden"
     );
 }
 
-// ── A popout close request releases once the subscription of an agent that was visible only in that window, and the destroy cleanup that follows sends nothing ─────────
-// The close request removes the model first (TRD S21-slot-docking 5.8th edition §1-2 「닫히는 창」), so the release goes out then, and the destroy cleanup has nothing to emit even if it
-// does the same share again.
+// ── A popout close request releases once the subscription of an agent visible only there; the destroy cleanup that follows sends nothing ──
+// The close request removes the model first (TRD S21-slot-docking 5.8th edition §1-2), so the release goes out then and the destroy cleanup has nothing to emit.
 #[tokio::test]
 async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_nothing() {
     let Idle {
@@ -3671,8 +3639,8 @@ async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_
         slot,
         agent.to_string(),
     )
-    .expect("팝아웃 슬롯에 배정");
-    assert!(rx.try_recv().is_err(), "배정은 해제를 내지 않는다");
+    .expect("assigned to the popout slot");
+    assert!(rx.try_recv().is_err(), "an assignment does not emit a release");
 
     close_requested_popup_window(POPUP, &state, &client.router, &client);
     let mut sent = Vec::new();
@@ -3689,11 +3657,10 @@ async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_
         drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
         Some(0)
     );
-    assert!(rx.try_recv().is_err(), "소멸 정리가 명령을 냈다");
+    assert!(rx.try_recv().is_err(), "the destroy cleanup emitted a command");
 }
 
-// ── A destroy that came without a close request (a popout left in the model) — the one model share the `Destroyed` cleanup of `lib.rs` calls does all of: subscription release ·
-//   tombstone · usage interest shrink · window number release (TRD S26-window-chrome §4-1) ─────────────────────────
+// ── A destroy without a close request (a popout left in the model): the one model part `lib.rs`'s `Destroyed` cleanup calls does it all — subscription release · tombstone · usage interest shrink · window number release (TRD S26-window-chrome §4-1) ──
 #[tokio::test(start_paused = true)]
 async fn a_destroyed_popout_still_in_the_model_is_cleaned_up_in_one_pass_and_frees_its_number() {
     let Idle {
@@ -3719,8 +3686,8 @@ async fn a_destroyed_popout_still_in_the_model_is_cleaned_up_in_one_pass_and_fre
         slot,
         agent.to_string(),
     )
-    .expect("팝아웃 슬롯에 배정");
-    apply::create_tab(&state, &subs, &NoLayoutEvents, POPUP, None).expect("팝아웃의 둘째 탭");
+    .expect("assigned to the popout slot");
+    apply::create_tab(&state, &subs, &NoLayoutEvents, POPUP, None).expect("the popout's second tab");
     set_usage_slot(&state, &client, POPUP, true, false);
     assert_eq!(nudges(&mut rx), 1);
     assert_eq!(
@@ -3752,12 +3719,12 @@ async fn a_destroyed_popout_still_in_the_model_is_cleaned_up_in_one_pass_and_fre
     assert_eq!(
         mgr.create_window(POPUP),
         Err(crate::layout::LayoutError::WindowClosed(POPUP.to_string())),
-        "묘비가 섰다"
+        "a tombstone was put up"
     );
     mgr.create_window("slot-popup-8").unwrap();
     assert_eq!(
         mgr.windows["slot-popup-8"].number, 2,
-        "풀린 번호를 다음 새 창이 받는다"
+        "the freed number goes to the next new window"
     );
     mgr.assert_number_invariants();
 }
@@ -3789,14 +3756,12 @@ async fn a_failed_tray_hide_keeps_the_window_in_the_interest() {
     );
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
     settle().await;
-    assert_eq!(nudges(&mut rx), 0, "숨기지 못한 창을 관심에서 뺐다");
+    assert_eq!(nudges(&mut rx), 0, "a window that could not be hidden was taken out of the interest");
     assert_eq!(sync_as_the_actor(&client, socket), None);
 }
 
-// ── Moving a usage slot to a new window sends nothing to the daemon (TRD §1-9 #9) ─────────────────────────────
-// Every step of the move recomputes — phase A (detaching to a temporary view) leaves the original slot as is, and phase C closes the original **inside the same
-// lock** that attached it to the new window. So at no recompute does the interest leave `sent`, so not even a shrink stands. The broadcast after
-// the move goes to the new window.
+// ── Moving a usage slot to a new window sends nothing to the daemon (TRD §1-9 #9) ──
+// Phase A (detach to a temporary view) leaves the original slot, and phase C closes it inside the same lock that attached it to the new window, so no recompute takes the interest out of `sent` and not even a shrink stands. The broadcast after the move goes to the new window.
 #[tokio::test(start_paused = true)]
 async fn moving_a_usage_slot_to_a_new_window_sends_nothing() {
     let Idle {
@@ -3823,12 +3788,12 @@ async fn moving_a_usage_slot_to_a_new_window_sends_nothing() {
         slot,
         None,
     )
-    .expect("새 창으로 옮기기");
+    .expect("move to a new window");
     assert_ne!(moved.window, MAIN_WINDOW_LABEL);
-    assert_eq!(nudges(&mut rx), 0, "옮기는 동안 넛지가 났다");
+    assert_eq!(nudges(&mut rx), 0, "a nudge went out during the move");
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
     settle().await;
-    assert_eq!(nudges(&mut rx), 0, "옮긴 뒤 줄임 타이머가 넛지를 냈다");
+    assert_eq!(nudges(&mut rx), 0, "the shrink timer emitted a nudge after the move");
     assert_eq!(sync_as_the_actor(&client, socket), None);
 
     let outcome = client.usage_interest().lock().on_snapshot(
@@ -3847,16 +3812,13 @@ async fn moving_a_usage_slot_to_a_new_window_sends_nothing() {
         &[AgentBackendKind::Claude],
         Instant::now(),
     );
-    assert_eq!(outcome.labels, [moved.window], "방송은 새 창으로");
+    assert_eq!(outcome.labels, [moved.window], "the broadcast goes to the new window");
     assert_eq!(outcome.resend, None);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════════
-// Backoff rows of the old suite rewritten on the manual clock and the memory network (TRD §6-2 「다시 씀」).
-// ══════════════════════════════════════════════════════════════════════════════════
+// Backoff rows of the old suite rewritten on the manual clock and memory network (TRD §6-2 「rewrite」).
 
-// From `reconnect_close_during_backoff_no_zombie`: a close while the link waits in backoff after a loss ends it — Down,
-// and no dial however long the clock runs.
+// A close while the link waits in backoff after a loss ends it — Down, and no dial however long the clock runs.
 #[tokio::test]
 async fn a_close_during_the_reconnect_backoff_shows_down_and_never_dials_again() {
     let h = Harness::new(live());
@@ -3877,8 +3839,7 @@ async fn a_close_during_the_reconnect_backoff_shows_down_and_never_dials_again()
     );
 }
 
-// From `reconnect_connect_during_backoff_no_hijack`: a connect while the link waits in backoff connects on one new link,
-// and the handle it replaced dials nothing more.
+// A connect while the link waits in backoff connects on one new link, and the handle it replaced dials nothing more.
 #[tokio::test]
 async fn a_connect_during_the_reconnect_backoff_connects_on_one_new_link() {
     let h = Harness::new(live());
@@ -3904,8 +3865,7 @@ async fn a_connect_during_the_reconnect_backoff_connects_on_one_new_link() {
     assert_eq!(h.client.state(), ConnectionState::Connected);
 }
 
-// ADR-0195 — the shell adapter row of the fate table: a command sent while the link waits in backoff after a loss fails
-// at once as not connected, and nothing of it reaches the next connection.
+// Shell adapter row of the fate table (ADR-0195): a command sent while the link waits in backoff after a loss fails at once as not connected, and nothing of it reaches the next connection.
 #[tokio::test]
 async fn a_command_during_the_reconnect_backoff_fails_at_once_and_never_reaches_the_next_link() {
     let h = Harness::new(live());
@@ -3964,7 +3924,6 @@ async fn let_the_actor_run() {
     }
 }
 
-// Finding A: the shell showed `reconnecting` and nothing more once the reconnect failed.
 #[tokio::test]
 async fn a_daemon_that_dies_while_connected_shows_band_one_after_the_first_failed_reconnect() {
     let h = Harness::new(live());
@@ -4025,8 +3984,7 @@ async fn a_refusal_tells_the_token_from_the_version_in_the_band_and_in_the_answe
         }
     );
 
-    // The dial refused the daemon's version — the version text, ②. Finding B's shell half: the attach-only ensure a
-    //   failed boot start still leaves (the boot pulls' `ensureReady`) surfaces it.
+    // The dial refused the daemon's version — the version text (②), surfaced by the attach-only ensure a failed boot start still leaves (the boot pulls' `ensureReady`).
     let h = Harness::new(Current::VersionMismatch {
         daemon: PROTOCOL_VERSION - 1,
         pid: 9,

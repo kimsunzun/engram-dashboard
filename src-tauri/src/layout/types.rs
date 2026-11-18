@@ -1,8 +1,4 @@
-//! S14 레이아웃 타입(wire 미러) — 레이아웃 권위 = src-tauri(ADR-0035).
-//!
-//! ★배치 규약★: 이 타입들은 **src-tauri 안에서만** 정의·export 된다. protocol/daemon crate 에
-//! 절대 넣지 않는다 — 데몬은 View 를 일절 모르는 UI 불가지론(ADR-0035). ts-rs 로 프론트
-//! (`src/api/layoutTypes.ts`)에 미러하되, 데몬 wire 계약(protocol crate)과는 별개 채널이다.
+//! S14 layout types (wire mirror) — layout authority = src-tauri (ADR-0035). Defined and exported only inside src-tauri, never in the protocol/daemon crate (the daemon is UI-agnostic and knows nothing of View — ADR-0035); mirrored to the frontend (`src/api/layoutTypes.ts`) with ts-rs, a channel separate from the daemon wire contract (the protocol crate).
 
 use ts_rs::TS;
 use uuid::Uuid;
@@ -10,9 +6,9 @@ use uuid::Uuid;
 use super::geometry::{Insets, SlotRect, SplitRect};
 use super::spatial::SlotSpatial;
 
-/// 이름이 결과 배치를 말한다 — `LeftRight` 는 항상 좌/우, `TopBottom` 은 항상 위/아래.
-/// 축 어휘(`Horizontal`/`Vertical`)로 되돌리지 않는다: tmux(축 기준)와 vim(분할선 기준) 관례가
-/// 상반돼 그 이름만으로는 어느 배치인지 판정되지 않았다. // ADR-0140
+/// The name states the resulting layout — `LeftRight` is always left/right, `TopBottom` is always top/bottom.
+/// Do not go back to the axis vocabulary (`Horizontal`/`Vertical`): the tmux (by axis) and vim (by divider line) conventions
+/// are opposite, so the name alone did not tell which layout it was. // ADR-0140
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -21,31 +17,31 @@ pub enum SplitDir {
     TopBottom,
 }
 
-/// 슬롯 점유자 = 타입드 유니온(ADR-0060).
+/// Slot occupant = typed union (ADR-0060).
 ///
-/// 후속 콘텐츠 종류(FileTree/ControlPanel)는 variant 추가로 확장하고, 사용자 커스텀(프리셋 버튼셋)은 새
-/// variant 가 아니라 variant 내부 config 데이터로 표현한다(enum 폭발 방지 — ADR-0060 핵심 통찰).
+/// Later content kinds (FileTree/ControlPanel) are added as variants, and user customization (a preset button set) is expressed not as a new
+/// variant but as config data inside a variant (prevents enum explosion — the key insight of ADR-0060).
 ///
-/// ★불변식(ADR-0060)★: `Agent` variant 는 데몬 에이전트의 **바인딩(agent_id 참조 문자열)만** 담는다 —
-/// 라이브 출력 스트림은 여기 담지 않고 `OutputRouter` 가 agent_id 로 별도 라우팅한다(ADR-0041/0042/0046).
-/// epoch(화신 표식, ADR-0163)도 레이아웃 트리 밖(agentStore 소유) — 재구독 계기는 이 필드가 아니라
-/// 권위 명부 관측이다(ADR-0164 결정 8).
+/// ★Invariant (ADR-0060)★: the `Agent` variant holds **only the binding (the agent_id reference string)** of a daemon agent —
+/// the live output stream is not held here; `OutputRouter` routes it separately by agent_id (ADR-0041/0042/0046).
+/// The epoch (incarnation marker, ADR-0163) is also outside the layout tree (owned by agentStore) — the trigger for re-subscription is not this field but
+/// observation of the authoritative roster (ADR-0164 decision 8).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 pub enum SlotContent {
-    /// resolve_spawn_slot 점유 판정에서 "빈"(ADR-0059).
+    /// "empty" in the resolve_spawn_slot occupancy decision (ADR-0059).
     Empty,
-    /// resolve_spawn_slot 에서 "점유"(ADR-0059).
+    /// "occupied" in resolve_spawn_slot (ADR-0059).
     Agent { agent_id: String },
-    /// MVP=필드 없는 unit — 렌더 대상만 지정하고 데이터는 agentStore 가 쥔다(콘텐츠 종류만 표현, ADR-0060).
+    /// MVP = a unit with no fields — only names the render target, and the data is held by agentStore (expresses only the content kind, ADR-0060).
     AgentList,
-    /// 프리셋 팔레트(등록된 cwd 프리셋 버튼셋) 뷰. MVP=필드 없는 unit — 프리셋 목록 데이터는
-    /// 데몬 소유(presets.json, ADR-0061)라 여기 담지 않고 PresetRegistry wire 로 별도 흐른다.
+    /// Preset palette (a button set of registered cwd presets) view. MVP = a unit with no fields — the preset list data is
+    /// owned by the daemon (presets.json, ADR-0061), so it is not held here and flows separately over the PresetRegistry wire.
     PresetPalette,
-    /// 사용량 한도 뷰. 두 칸 = 이 슬롯이 켠 회사 — 셸은 이것으로 데몬 사용량 구독(관심)을 계산한다
-    /// (`daemon_client::usage_interest`). 값 자체는 여기 담지 않는다.
-    /// 칸이 빠진 입력은 `true` 로 읽는다 — `{"type":"usage"}` 한 장이 두 회사를 다 켠 슬롯이다.
+    /// Usage limit view. The two fields = the companies this slot switched on — the shell computes the daemon usage subscription (interest) from them
+    /// (`daemon_client::usage_interest`). The values themselves are not held here.
+    /// An input missing a field is read as `true` — a bare `{"type":"usage"}` is a slot with both companies on.
     Usage {
         #[serde(default = "enabled")]
         show_claude: bool,
@@ -78,17 +74,17 @@ impl SlotContent {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 pub enum LayoutNode {
-    /// id = 창 간 전역 고유(UUID). // ADR-0035
+    /// id = globally unique across windows (UUID). // ADR-0035
     Slot {
         #[ts(type = "string")]
         id: Uuid,
         content: SlotContent,
     },
-    /// ratio = a 가 차지하는 비율(`tree::RATIO_MIN`~`RATIO_MAX` 로 클램프, 기본 0.5).
+    /// ratio = the share taken by a (clamped to `tree::RATIO_MIN`..`RATIO_MAX`, default 0.5).
     Split {
-        /// 이 split 노드의 정체 — 분할마다 새로 뽑고, 노드가 자리를 옮겨도(형제 승격) 따라간다. 프론트는
-        /// 이 값(스냅샷 `split_rects` 의 `split_id` 로도 실린다)을 구분선(`Splitter`)의 key 와 드래그 미리보기가
-        /// 끄는 분할의 표식으로 쓴다(`ViewLayoutRenderer`·`splitPreview`).
+        /// Identity of this split node — drawn anew for every split, and follows the node even when it moves place (sibling promotion). The frontend
+        /// uses this value (also carried as `split_id` of the snapshot's `split_rects`) as the key of the divider (`Splitter`) and as the marker of the split
+        /// being dragged in the drag preview (`ViewLayoutRenderer` · `splitPreview`).
         // ADR-0223
         #[ts(type = "string")]
         id: Uuid,
@@ -100,21 +96,21 @@ pub enum LayoutNode {
     },
 }
 
-/// 탭 이름의 출처(TRD S26-window-chrome §3-1 · PRD R4) — `Auto` = 이름을 정하지 않았다(보이는 이름은 그때그때
-/// `tab_name::effective_tab_name` 이 포커스 슬롯에서 셈한다) · `Named` = 사람 · LLM 이 정한 이름(빈 글자 · 공백뿐인
-/// 글자는 담지 않는다).
-// 자동 탭의 이름을 문자열로 쥐지 않는다 — 낡은 문자열(「View 1」)을 누가 바로 읽으면 OS 제목이 그 글자를 보인다(AC3).
+/// Origin of a tab name (TRD S26-window-chrome §3-1 · PRD R4) — `Auto` = no name was set (the visible name is computed each time by
+/// `tab_name::effective_tab_name` from the focus slot) · `Named` = a name set by a person or the LLM (empty text and whitespace-only
+/// text are not held).
+// The name of an auto tab is not held as a string — if someone reads a stale string (「View 1」) directly, the OS title shows that text (AC3).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type", content = "name", rename_all = "snake_case")]
 #[ts(export)]
-// ADR-0301 — 탭 이름 · OS 제목
+// ADR-0301 — tab name · OS title
 pub enum TabName {
     Auto,
     Named(String),
 }
 
 impl TabName {
-    /// 정한 이름 — 빈 글자 · 공백뿐이면 `None`(AC36). 글자는 다듬지 않고 그대로 쥔다.
+    /// The name that was set — `None` if empty or whitespace-only (AC36). The text is held as is, without trimming.
     pub fn named(name: String) -> Option<Self> {
         (!name.trim().is_empty()).then_some(TabName::Named(name))
     }
@@ -124,7 +120,7 @@ impl TabName {
     }
 }
 
-/// 한 View(탭/팝업 하나) = 레이아웃 트리 + 포커스 슬롯.
+/// One View (a tab/popup) = layout tree + focus slot.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct View {
@@ -132,25 +128,25 @@ pub struct View {
     pub id: Uuid,
     pub name: TabName,
     pub layout: LayoutNode,
-    /// 가리키던 슬롯이 사라지면 트리 첫 슬롯으로 폴백.
+    /// If the slot it pointed to disappears, falls back to the first slot of the tree.
     #[ts(type = "string | null")]
     pub focused_slot_id: Option<Uuid>,
 }
 
-/// 탭 바용 View 메타(레이아웃 본체 제외 — `window:tabs-updated` 페이로드).
+/// View meta for the tab bar (without the layout body — the `window:tabs-updated` payload).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct ViewMeta {
     #[ts(type = "string")]
     pub id: Uuid,
-    /// 보이는 이름 — 정한 이름이거나, 정하지 않았으면 그 순간의 자동 이름(포커스 슬롯의 이름).
+    /// The visible name — the name that was set, or if none was set, the auto name at that moment (the name of the focus slot).
     pub name: String,
-    /// 이름을 정했나 — 거짓이면 `name` 은 슬롯 내용 · 포커스를 따라 바뀐다. 같은 글자로 이름 바꾸기를 보내면 그
-    /// 이름을 정한 것이 된다(TRD S26-window-chrome §3-1).
+    /// Whether a name was set — if false, `name` changes following slot content and focus. Sending a rename with the same text makes it
+    /// a set name (TRD S26-window-chrome §3-1).
     pub named: bool,
 }
 
-/// `get_view` 응답 + `layout:updated` 페이로드.
+/// The `get_view` response + the `layout:updated` payload.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct ViewSnapshot {
@@ -159,47 +155,47 @@ pub struct ViewSnapshot {
     pub layout: LayoutNode,
     #[ts(type = "string | null")]
     pub focused_slot_id: Option<Uuid>,
-    /// 이 판이 모르는 내용(더 새 판이 저장한 슬롯 종류)을 쥔 슬롯 id, 트리 전위 순. 그 슬롯의 `content` 는
-    /// `empty` 로 실리지만 비어 있지 않다 — 빈 슬롯 판정(자동 배치·여는 대상 고르기)은 이 목록의 슬롯을 점유로
-    /// 본다. 원문은 셸만 쥔다. 그 슬롯에 내용을 놓거나(`empty` 포함) 슬롯을 닫으면 목록에서 빠진다.
+    /// Slot ids holding content this version does not know (a slot kind saved by a newer version), in tree preorder. The `content` of those slots is
+    /// carried as `empty` but they are not empty — the empty-slot decision (auto placement · choosing the target to open) treats the slots in this list as
+    /// occupied. Only the shell holds the raw text. Putting content there (including `empty`) or closing the slot removes it from this list.
     #[ts(type = "Array<string>")]
     pub foreign_slots: Vec<Uuid>,
-    /// ★슬롯 공간 타깃 파생(ADR-0068)★: 각 말단 슬롯의 방향 이웃(up/down/left/right) + 순서(ordinal).
-    /// 논리 도면(split 방향·ratio)에서 산출한다 — 픽셀·getBoundingClientRect 무관(백엔드 권위 ADR-0035).
-    /// ordinal 순으로 담긴다. 정규화 좌표는 이 필드가 아니라 `slot_rects` 가 싣는다(ADR-0227 — ADR-0068 결정 3 개정).
+    /// ★Slot spatial target derivation (ADR-0068)★: the directional neighbours (up/down/left/right) + order (ordinal) of each leaf slot.
+    /// Computed from the logical plan (split direction · ratio) — independent of pixels · getBoundingClientRect (backend authority, ADR-0035).
+    /// Held in ordinal order. Normalized coordinates are carried not by this field but by `slot_rects` (ADR-0227 — amends ADR-0068 decision 3).
     pub slot_spatial: Vec<SlotSpatial>,
-    /// 각 말단 슬롯의 사각형 — 뷰 기준 정규화 [0,1] 경계 꼴 `x0,y0,x1,y1`(픽셀 아님). 맞닿는 경계 값은 비트
-    /// 단위로 같다. 트리 전위 순(노드 → a 서브트리 → b 서브트리)으로 담긴다 — `slot_spatial` 의 ordinal
-    /// 순과 다르므로 짝을 찾을 땐 `slot_id` 로 맞춘다.
+    /// The rectangle of each leaf slot — normalized [0,1] boundary form `x0,y0,x1,y1` relative to the view (not pixels). Shared boundary values are equal
+    /// bit for bit. Held in tree preorder (node → a subtree → b subtree) — different from the ordinal order of `slot_spatial`,
+    /// so match pairs by `slot_id`.
     // ADR-0227
     pub slot_rects: Vec<SlotRect>,
-    /// 각 분할 노드의 상자(두 자식을 합친 영역, `slot_rects` 와 같은 경계 꼴) + 분할 경계 `at`
-    /// (`dir` 이 `left_right` 면 x 축 값, `top_bottom` 이면 y 축 값). 트리 전위 순으로 담긴다.
+    /// The box of each split node (the area joining its two children, the same boundary form as `slot_rects`) + the split boundary `at`
+    /// (the x-axis value if `dir` is `left_right`, the y-axis value if `top_bottom`). Held in tree preorder.
     // ADR-0227
     pub split_rects: Vec<SplitRect>,
-    /// 분할 비율(a 쪽 몫)의 셸 한계 — 셸은 비율을 `[ratio_min, ratio_max]` 로 잘라 읽고, `slot_rects`·
-    /// `split_rects` 는 그렇게 자른 비율로 계산한 값이다. 화면은 이 두 값을 쓰고 한계 상수를 따로 두지 않는다.
+    /// The shell limits of the split ratio (a side's share) — the shell reads ratios clamped to `[ratio_min, ratio_max]`, and `slot_rects` ·
+    /// `split_rects` are values computed with the ratio clamped that way. The screen uses these two values and keeps no limit constants of its own.
     // ADR-0227
     pub ratio_min: f64,
     pub ratio_max: f64,
-    /// 변경마다 +1(ViewManager.version).
-    /// ts-rs u64 기본 매핑=bigint 이나 serde_json 은 number 로 직렬화(런타임=JS number) → 타입도 number 로 고정
-    /// (불일치 시 프론트 race 가드 `snap.version > pulled` 에서 bigint↔number 혼용 에러, FIX-1). 카운터라 2^53 비현실적.
+    /// +1 per change (ViewManager.version).
+    /// The ts-rs u64 default mapping is bigint, but serde_json serializes it as a number (runtime = JS number) → the type is also fixed to number
+    /// (on a mismatch the frontend race guard `snap.version > pulled` raises a bigint/number mixing error, FIX-1). As a counter, 2^53 is unrealistic.
     #[ts(type = "number")]
     pub version: u64,
 }
 
-/// 비율 쓰기(`set_split_ratio`)의 결말.
+/// The outcome of a ratio write (`set_split_ratio`).
 ///
-/// - `Applied`: 값을 바꿨다 — version 이 올랐고 그 뷰의 레이아웃 스냅샷이 통지된다.
-/// - `Unchanged`: 클램프한 값이 지금 값과 같다 — 무변경·무통지.
-/// - `TooSmall`: 손대지 않았다 — 무변경·무통지. 사유는 둘이다 — 분할 상자가 두 쪽 모두 `min_pane_px`
-///   이상을 줄 만큼 크지 않다(px 범위가 비었다), 또는 그 값을 쓰면 어떤 칸의 폭·높이가 0 이 된다.
+/// - `Applied`: the value changed — version rose and the layout snapshot of that view is notified.
+/// - `Unchanged`: the clamped value equals the current value — no change, no notification.
+/// - `TooSmall`: nothing was touched — no change, no notification. There are two reasons — the split box is not large enough to give both sides
+///   at least `min_pane_px` (the px range is empty), or writing that value would make the width/height of some area 0.
 ///
-/// 명령 버스 `split.setRatio` 의 `outcome` 과 철자가 같다.
-// ★여기에 `#[serde(rename_all)]` 을 달지 말 것★ — 버스 선언 매크로는 rename 을 못 달아 variant 이름이 그대로
-// wire 값이 된다. 여기만 바꾸면 같은 결말을 두 표면이 다른 철자로 말한다(버스 쪽 쌍둥이 = `commands::RatioOutcome` ·
-// 철자를 맞대는 테스트 = `tests/layout_commands.rs` 의 `both_surfaces_spell_the_split_ratio_outcome_the_same_way`).
+/// The spelling is the same as the `outcome` of the command bus `split.setRatio`.
+// ★Do not attach `#[serde(rename_all)]` here★ — the bus declaration macro cannot attach a rename, so the variant names become
+// the wire values as they are. Changing only here makes the two surfaces speak the same outcome in different spellings (the bus-side twin = `commands::RatioOutcome` ·
+// the test that checks the spellings against each other = `both_surfaces_spell_the_split_ratio_outcome_the_same_way` in `tests/layout_commands.rs`).
 // ADR-0227
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -209,30 +205,30 @@ pub enum SplitRatioOutcome {
     TooSmall,
 }
 
-/// `set_split_ratio` invoke 의 답. `ratio` = 셸이 실제로 가진 비율(a 쪽 = 왼쪽/위 칸의 몫 — ADR-0140) —
-/// `Applied` 면 방금 쓴 값, 아니면 손대지 않은 지금 값이다.
+/// The answer of the `set_split_ratio` invoke. `ratio` = the ratio the shell actually holds (a side = the share of the left/top area — ADR-0140) —
+/// the value just written if `Applied`, otherwise the current value left untouched.
 // ADR-0227
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct SplitRatioApplied {
     pub ratio: f64,
     pub outcome: SplitRatioOutcome,
-    /// `Applied` 일 때만 뜻이 있다 — 이 쓰기로 통지된 레이아웃 스냅샷의 `version` 과 같다(같은 락 안에서 뜬
-    /// 값). `Unchanged`·`TooSmall` 이면 통지가 없고 이 값은 전역 카운터의 그 순간 값일 뿐이라 기다릴
-    /// 대상이 아니다. number 로 고정하는 이유는 `ViewSnapshot.version` 과 같다.
+    /// Meaningful only for `Applied` — equal to the `version` of the layout snapshot notified by this write (a value taken inside the same lock).
+    /// For `Unchanged` · `TooSmall` there is no notification and this value is just the global counter at that moment, so there is
+    /// nothing to wait for. The reason for fixing it to number is the same as `ViewSnapshot.version`.
     #[ts(type = "number")]
     pub version: u64,
 }
 
-/// 칸 틀 기본 지표 — 웹뷰가 셸에 알리는 `report_ui_metrics` 의 인자(`{ metrics: UiMetrics }`).
+/// Basic area-frame metrics — the argument of `report_ui_metrics` that the webview reports to the shell (`{ metrics: UiMetrics }`).
 ///
-/// - `frame_insets`: 칸 틀 안쪽 테두리 폭 넷(CSS px). **실측값**이다 — 배율에 따라 소수가 올 수 있다.
-///   각 값은 유한하고 `0 ≤ v ≤ 64` 여야 한다.
-/// - `min_pane_px`: 칸 최소 크기(CSS px). 측정값이 아니라 화면의 **정책 상수**이고 그 값의 유일한 정본은
-///   화면이다 — 셸은 받아 쓰기만 하고 자기 상수를 두지 않는다. `1 ≤ v ≤ 1000` 이어야 한다.
+/// - `frame_insets`: the four inner border widths of the area frame (CSS px). They are **measured values** — fractions can occur depending on scale.
+///   Each value must be finite and `0 ≤ v ≤ 64`.
+/// - `min_pane_px`: the minimum area size (CSS px). It is not a measurement but a **policy constant** of the screen, and its only source of truth is
+///   the screen — the shell only receives and uses it and keeps no constant of its own. Must be `1 ≤ v ≤ 1000`.
 ///
-/// 범위를 벗어나면 셸이 거절(`Err`)하고 그 창의 직전 값을 유지한다. 보고는 version 을 올리지도 알리지도
-/// 않는다.
+/// If out of range the shell refuses (`Err`) and keeps that window's previous value. A report neither raises version nor notifies
+/// anyone.
 // ADR-0227
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]

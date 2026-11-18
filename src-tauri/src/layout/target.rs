@@ -1,12 +1,6 @@
-//! Resolving the target (TRD S28 §5-2) — resolves a target that an LLM command picked by id · agent · spatial word into (window, tab, area) of the current model.
-//!
-//! ★Call it inside the same lock that the apply service changes under★ — if you resolve, release the lock, and take it again to apply, another command ·
-//! the mouse may have moved that agent in between and the wrong tab · area gets changed. So it only reads the model (`ViewManager`) and knows nothing of locks.
-//!
-//! Resolving an agent **name** → id is not its job — a single resolver of the daemon registry resolves it (ADR-0132 · rule §1-2). The
-//! agent that arrives here is already an id. The shell's name ledger (`agent_names`) is used only to show the candidate · placement lines.
-//!
-//! Order (candidates · lines) is the same as `window.list`: window number order → tab row order → tree pre-order.
+//! Resolving the target (TRD S28 §5-2) — resolves a target an LLM command picked by id · agent · spatial word into (window, tab, area) of the current model. Call it inside the same lock the apply service changes under: resolve, release, re-take to apply, and another command · the mouse may have moved that agent between, changing the wrong tab · area; so it only reads the model (`ViewManager`) and knows nothing of locks.
+//! Resolving an agent name → id is not its job — a single resolver of the daemon registry does (ADR-0132 · rule §1-2), so the agent arriving here is already an id; the shell's name ledger (`agent_names`) is used only to show candidate · placement lines.
+//! Order (candidates · lines) matches `window.list`: window number order → tab row order → tree pre-order.
 // ADR-0307
 
 use uuid::Uuid;
@@ -19,32 +13,26 @@ use super::spatial::{resolve_spatial, SpatialToken};
 use super::tree;
 use super::types::{SlotContent, View};
 
-/// Upper bound of the candidate · name lists (rule §1-3 — only as many as can be fixed in one next call).
+/// Upper bound of the candidate · name lists — only as many as can be fixed in one next call (rule §1-3).
 pub const MAX_CANDIDATES: usize = 5;
 
 /// The share used when the size of the area to compute the attach share from is unknown (the webview has not reported the canvas yet) (TRD S28 §4-2 · §11-2).
 pub const UNMEASURED_SHARE: f64 = 0.5;
 
-/// The target a command picked. The id in the agent branch is one the daemon resolved, and it is compared with the area's agent id by UUID value (spelling does not matter).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    /// Tab given by id.
     Tab(ViewId),
-    /// The tab holding that agent — even if it appears in several areas of one tab it is that one tab. If several tabs, it is ambiguous.
     TabOf(Uuid),
     /// Area given by id — if `view` is given, it must be an area of that tab.
     Slot { view: Option<ViewId>, slot: Uuid },
-    /// The area holding that agent — if several areas (even within the same tab), it is ambiguous.
     SlotOf(Uuid),
-    /// The area a word picks in the visible tab of window `window` (label — the caller has already resolved the window argument · `None` = main)
-    /// (same rule as `slot.resolveSpatial` · ADR-0068).
+    /// The area a word picks in the visible tab of window `window` (a label — the caller already resolved the window argument; `None` = main) (same rule as `slot.resolveSpatial` · ADR-0068).
     At {
         token: SpatialToken,
         window: Option<WindowLabel>,
     },
 }
 
-/// The resolved target. `slot` = that area if the target picks an area (`Slot` · `SlotOf` · `At`), `None` if the target picks a tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Located {
     pub window: WindowLabel,
@@ -52,7 +40,6 @@ pub struct Located {
     pub slot: Option<Uuid>,
 }
 
-/// One area where an agent is shown — a candidate for ambiguity · one line of [`agent_places`]. `tab_index` = its position in that window's tab row (from 0).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
     pub window: WindowLabel,
@@ -63,7 +50,7 @@ pub struct Place {
     pub slot: Uuid,
 }
 
-/// By what words the target was picked — used to tell bus error codes apart (TRD S28 §5-2 · §5-3).
+/// By what words the target was picked — tells bus error codes apart (TRD S28 §5-2 · §5-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetBy {
     Id,
@@ -71,27 +58,23 @@ pub enum TargetBy {
     Spatial,
 }
 
-/// The target could not be resolved — the model is unchanged. Message = Korean reason + kind word in parentheses (same shape as `DockError`). Candidates are
-/// not put into the message — the caller takes them out with [`Self::candidates`] and appends them.
+/// The target could not be resolved — the model is unchanged. Message = Korean reason + kind word in parentheses (same shape as `DockError`); candidates are not in the message — the caller takes them with [`Self::candidates`] and appends.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LocateError {
-    #[error("탭 없음: {0} (TabNotFound)")]
+    #[error("tab not found: {0} (TabNotFound)")]
     TabNotFound(ViewId),
-    #[error("칸 없음: {0} (SlotNotFound)")]
+    #[error("slot not found: {0} (SlotNotFound)")]
     SlotNotFound(Uuid),
-    #[error("칸 {slot} 은 탭 {tab} 소속이 아님 (SlotNotInTab)")]
+    #[error("slot {slot} does not belong to tab {tab} (SlotNotInTab)")]
     SlotNotInTab { slot: Uuid, tab: ViewId },
-    /// That agent is in no area. `shown` = display names of the agents currently shown in areas (the id if not in the ledger) —
-    /// up to [`MAX_CANDIDATES`].
-    #[error("에이전트 {agent} 가 어느 칸에도 없음 (AgentNotShown)")]
+    /// That agent is in no area. `shown` = display names of agents currently shown in areas (the id if not in the ledger) — up to [`MAX_CANDIDATES`].
+    #[error("agent {agent} is in no area (AgentNotShown)")]
     AgentNotShown { agent: Uuid, shown: Vec<String> },
-    /// That agent is shown in several areas (several tabs if the target picks a tab). `places` = all those areas.
-    #[error("에이전트 {agent} 가 여러 곳에 떠 있음 (AgentAmbiguous)")]
+    #[error("agent {agent} is shown in several places (AgentAmbiguous)")]
     AgentAmbiguous { agent: Uuid, places: Vec<Place> },
-    #[error("창 없음: {0} (WindowNotFound)")]
+    #[error("window not found: {0} (WindowNotFound)")]
     WindowNotFound(WindowLabel),
-    /// The word did not pick an area in that window's visible tab (no neighbor in that direction, etc.).
-    #[error("'{}' 이 창 {window} 에서 칸을 못 집음 (NoSlotAt)", .token.as_str())]
+    #[error("'{}' picks no area in window {window} (NoSlotAt)", .token.as_str())]
     NoSlotAt {
         token: SpatialToken,
         window: WindowLabel,
@@ -111,16 +94,12 @@ impl LocateError {
         }
     }
 
-    /// A hint to fix it in one next call (English — attached as is to the end of the bus message `— candidates: …` · TRD S28 §5-3). Unknown name
-    /// = names of the agents that are shown · ambiguous = the `slot_id` of those areas · tab held (`in_tab=` — so it is not confused with the tab id argument `tab`) · window.
-    /// Up to [`MAX_CANDIDATES`]; other errors give an empty list.
-    /// The head of an area id is `slot_id=` — for another argument name use [`Self::candidates_as`].
+    /// A hint to fix it in one next call (English — attached as is to the bus message's end `— candidates: …` · TRD S28 §5-3): unknown name = names of agents shown · ambiguous = the `slot_id` of those areas · tab held (`in_tab=` — not to be confused with the tab id argument `tab`) · window. Up to [`MAX_CANDIDATES`]; other errors give an empty list. The area id's head is `slot_id=` — use [`Self::candidates_as`] for another argument name.
     pub fn candidates(&self) -> Vec<String> {
         self.candidates_as("slot_id")
     }
 
-    /// Same as [`Self::candidates`] but sets the head of the area id of an ambiguity candidate to `key=` — if you use the argument name that will receive that value (`slot_id` ·
-    /// `beside_slot`), the next call copies it over as is.
+    /// Same as [`Self::candidates`] but with the ambiguity candidate's area id headed `key=` — with the argument name that will receive the value (`slot_id` · `beside_slot`) the next call copies it as is.
     pub fn candidates_as(&self, key: &str) -> Vec<String> {
         match self {
             LocateError::AgentNotShown { shown, .. } => {
@@ -141,7 +120,7 @@ impl LocateError {
     }
 }
 
-/// Resolve `target` in the current model — only tabs in the window's tab list are looked at (a temporary tab not yet in a window is not a target).
+/// Resolve `target` in the current model — only tabs in a window's tab list are looked at (a temporary tab not yet in a window is not a target).
 // ADR-0307
 pub fn locate(mgr: &ViewManager, target: &Target) -> Result<Located, LocateError> {
     match target {
@@ -289,11 +268,7 @@ pub fn shown_agents(mgr: &ViewManager, max: usize) -> Vec<String> {
     out
 }
 
-/// Default share for seam docking — the same formula as the mouse, [`bands::attach_share`] (original size = canvas of the source tab's window · area = target area
-/// px frame, or the whole target window canvas for `Outer`). If either canvas is unknown or there is no target area, [`UNMEASURED_SHARE`].
-///
-/// ★Differs from the mouse★: the mouse's original size is the drag size measured by the web (the restored size if the source window is maximized), and the model has
-/// no such input, so the canvas stands in (TRD S28 §4-2 · §11-6).
+/// Default share for seam docking — the mouse's formula, [`bands::attach_share`] (original size = canvas of the source tab's window · area = the target area's px frame, or the whole target window canvas for `Outer`). If either canvas is unknown or there is no target area, [`UNMEASURED_SHARE`]. Differs from the mouse: its original size is the drag size the web measured (the restored size if the source window is maximized) and the model has no such input, so the canvas stands in (TRD S28 §4-2 · §11-6).
 pub fn seam_share(
     mgr: &ViewManager,
     source: ViewId,
@@ -338,14 +313,12 @@ fn canvas_of(mgr: &ViewManager, view: ViewId) -> Option<CanvasPx> {
         .and_then(|w| w.canvas)
 }
 
-/// Windows of the model — in window number order (same as `window.list`).
 pub(crate) fn windows_in_order(mgr: &ViewManager) -> Vec<(&WindowLabel, &WindowTabs)> {
     let mut windows: Vec<_> = mgr.windows.iter().collect();
     windows.sort_by_key(|(_, w)| w.number);
     windows
 }
 
-/// Tabs of window `w` — (position in the tab row, tab). Entries with no View are skipped (there are none if invariant 1 holds).
 pub(crate) fn tabs_of<'m>(
     mgr: &'m ViewManager,
     w: &'m WindowTabs,

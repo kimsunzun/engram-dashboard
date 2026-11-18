@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Engram Dashboard 기본 권한 — core 이벤트 listen/emit 허용(agent-list-updated 등 상태 브로드캐스트 수신에 필요). core:window:allow-start-dragging — 제목 줄 끌 자리(data-tauri-drag-region)의 누름을 Tauri drag.js 가 창 끌기로 넘긴다(빠지면 끌기가 소리 없이 안 된다 · 두 번 누름의 최대화 토글은 core:default 에 있다 · TRD S26-window-chrome §7-2 · §9). 창 단추 · 상태 명령은 셸 invoke(window_control)라 창 제어 권한을 주지 않는다(AC10).",
+  "description": "Engram Dashboard default permissions — core event listen/emit allowed (needed to receive state broadcasts such as agent-list-updated). core:window:allow-start-dragging — Tauri drag.js turns a press on the title-bar drag area (data-tauri-drag-region) into a window drag (without it dragging silently fails · the double-press maximize toggle is in core:default · TRD S26-window-chrome §7-2 · §9). Window buttons and state commands are shell invokes (window_control), so no window-control permission is granted (AC10).",
   "windows": ["main"],
   "permissions": [
     "core:default",

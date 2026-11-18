@@ -2,18 +2,13 @@
 //!
 //! ADR-0029: daemon-only (embedded removed). The app is a resident client of the daemon so it always attaches to the daemon (WS is phase4).
 //!
-//! ## Design — separating pure logic from the OS/WMI boundary
-//! Side effects are injected as traits so unit tests do not depend on the OS · WMI · real time.
-//!
-//! [`ensure_daemon`] is a **pure orchestration** that works only on top of these traits, so every branch can be unit tested without a real
-//! WMI spawn or a real sleep. The real spawn (WMI) integration is left as an
-//! `#[ignore]` test.
+//! ## Design — pure logic separated from the OS/WMI boundary
+//! Side effects are injected as traits, so unit tests do not depend on the OS, WMI or real time. [`ensure_daemon`] is pure orchestration over these traits, so every branch is unit-testable without a real WMI spawn or sleep; the real spawn is an `#[ignore]` test.
 //!
 //! The real implementations of the traits (PID decision · WMI launch · process tree stop) merely call functions of the OS-layer crate `platform` —
 //! this module's production code has no OS branches (ADR-0266).
 //!
-//! The data folder root · the `daemon.json` location · `logs\` are copies of the daemon's authority ([`layout`]). The shell's
-//! stop path (graceful `StopDaemon`, then the identity-checked kill) is [`crate::daemon_client::shutdown`].
+//! The data folder root, the `daemon.json` location and `logs\` are copies of the daemon's authority ([`layout`]). The shell's stop path is [`crate::daemon_client::shutdown`].
 //!
 //! ## Security
 //! `DaemonInfo.token` is never printed to logs (flows only in the local IPC file).
@@ -33,20 +28,14 @@ pub use layout::{default_data_dir, DataLayout};
 
 use layout::{data_dir_env_override, DAEMON_FILE};
 
-/// The lock held by every shell lib test that changes `ENGRAM_DATA_DIR` or picks a path from its value — the same-path tests (`layout`) and the two real
-/// WMI tests (`tests`). It is process-global environment, so with two locks they would not block each other.
+/// The lock held by every shell lib test that changes `ENGRAM_DATA_DIR` or picks a path from its value. The environment is process-global, so two locks would not block each other.
 // ADR-0282
 #[cfg(test)]
 pub(crate) static DATA_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-// ★Limit of the ENGRAM_DATA_DIR override — it does not reach the WMI path★ (authority for the override rule = the daemon `data_dir`):
-//   this override takes effect **only on spawns that inherit the parent env**. That is, only tests that launch the daemon **directly** with `std::process::Command`
-//   (the daemon's `tests/ws_e2e.rs` etc.) are isolated. This module's production spawn path (WMI Win32_Process.Create) has a child
-//   that is a child of WmiPrvSE and so **does not inherit the parent env**, and this override is ignored (design settled — no channel other than daemon.json/ACL).
-//   So the smoke tests that actually go through WMI (real_wmi_spawn_*) cannot be isolated by env; they poll the default
-//   path (`.engram-dev`) and protect the production files with backup/restore.
+// ★The ENGRAM_DATA_DIR override does not reach the WMI path★ (authority for the override rule = the daemon `data_dir`): it takes effect only on spawns that inherit the parent env (tests launching the daemon directly with `std::process::Command`, e.g. the daemon's `tests/ws_e2e.rs`). This module's production spawn (WMI Win32_Process.Create) makes a child of WmiPrvSE that does not inherit the parent env, and there is no other channel than daemon.json/ACL. So the smoke tests that really go through WMI (real_wmi_spawn_*) cannot be isolated by env; they poll the default path (`.engram-dev`) and protect the production files with backup/restore.
 
 fn unwritable(dir: &Path, e: &std::io::Error) -> DiscoveryError {
     DiscoveryError::DataDirUnwritable {
@@ -57,63 +46,38 @@ fn unwritable(dir: &Path, e: &std::io::Error) -> DiscoveryError {
 
 /// Checks whether the data folder can be written **without creating anything** (client pre-check).
 ///
-/// ★The point is not to create the folder★: this check asks "can the daemon write this folder", it does not settle that
-/// folder. If the check created a folder, an empty folder would be left forever on the path where the daemon ends up using a different
-/// folder.
+/// ★Do not leave a folder behind★: the check asks "can the daemon write this folder"; an empty folder left on a path the daemon ends up not using would stay forever.
 ///
-/// Interpretation:
-/// - If `dir` is already a folder, write a probe inside it.
-/// - If `dir` is a **file**, it fails. Do not pass it by looking at the parent — `create_dir_all` is certain to fail.
-/// - If it does not exist, **actually try creating the folder**, write the probe too, then undo it if we created it.
+/// - `dir` is already a folder: write a probe inside it.
+/// - `dir` is a **file**: fail (`create_dir_all` is certain to fail; do not pass by looking at the parent).
+/// - `dir` does not exist: **actually try creating it**, write the probe, then undo what we created.
 ///
-/// ★Do not substitute by trying to create a file in the parent folder (do not revive it)★: Windows
-/// `FILE_ADD_FILE` and `FILE_ADD_SUBDIRECTORY` are **granted separately**. In a folder where only files can be created,
-/// that substitute check passes and the daemon's `create_dir_all` fails, so the user sees a timeout instead of a message.
-/// The required permission must be tested as it is.
+/// ★Do not substitute a file-create test in the parent folder (do not revive)★: Windows `FILE_ADD_FILE` and `FILE_ADD_SUBDIRECTORY` are granted separately; where only files can be created that check passes, the daemon's `create_dir_all` fails, and the user sees a timeout instead of a message.
 ///
-/// ★Scope of the undo = **all** that we created, **and only that**★: it can create intermediate folders in a chain, and deleting only the leaf
-/// leaves the rest permanently. So it creates **one layer at a time** from top to bottom and records only the layers where **we won** the
-/// creation, then undoes from the leaf upward. It undoes on the failure path too.
+/// ★The undo covers all that we created and only that★: create one layer at a time from top to bottom, record only the layers where **we won** the creation, undo from the leaf upward, also on the failure path. ★Do not undo from a "snapshot before creating" (do not revive)★: A records `a/` as absent, B creates `a/`, and A later deletes **B's folder**; the side that saw `AlreadyExists` must decide it is someone else's.
 ///
-/// ★Do not undo from a "snapshot before creating" (do not revive it)★: if the list of ancestors that did not exist is taken beforehand, ownership does
-/// not hold — while A records `a/` as absent, B creates `a/`, and A later deletes **B's folder**.
-/// The side that saw `AlreadyExists` at each layer must decide it is someone else's for that window to close.
+/// Known limit: what is deleted is the **path** we created, not the directory object (ABA: someone deletes and recreates it under the same name, then our `remove_dir` deletes theirs). Accepted because `remove_dir` deletes only empty directories, and that victim's probe meets `NotFound` and recovers through [`retry_if_vanished`].
 ///
-/// ★Limit of the contract — what is deleted is "the **path** we created", not the directory **object** at that moment★:
-/// if after we create it someone else deletes it and recreates it under the same name (ABA), our `remove_dir` deletes theirs.
-/// To block that precisely we would hold the file ID at creation time and compare it just before deleting, but we did not because the harm is this
-/// narrow: `remove_dir` deletes **only empty directories**, so it fails if someone has started writing, and that
-/// victim also meets `NotFound` at the probe and recovers by trying once more with [`retry_if_vanished`].
-///
-/// A folder that already existed is left alone, and a folder the daemon has started writing to in the meantime is non-empty so the deletion fails,
-/// which is harmless (it is a folder already in use).
-///
-/// ★Overlapping calls are real★ — the tray "turn daemon on" and the boot ensure are not serialized
-/// (`src-tauri/src/commands/discovery.rs`). This check undoes the folder it created, so when they overlap another's probe
-/// trips with `NotFound` in the vanished folder — that is why it is wrapped in [`retry_if_vanished`].
+/// ★Overlapping calls are real★: the tray "turn daemon on" and the boot ensure are not serialized (`src-tauri/src/commands/discovery.rs`), and since this check undoes its own folder, another's probe can trip with `NotFound` — hence [`retry_if_vanished`].
 pub fn check_data_dir_writable(dir: &Path) -> Result<(), DiscoveryError> {
     retry_if_vanished(|| check_data_dir_writable_once(dir)).map_err(|e| unwritable(dir, &e))
 }
 
 fn check_data_dir_writable_once(dir: &Path) -> std::io::Result<()> {
-    // ★One stat decides three branches (do not revive — do not follow `is_dir()` with `exists()`)★:
-    //   if asked twice, when someone else creates the folder in between it reads as "not a folder + exists" = **a file is there**,
-    //   and a perfectly fine race is wrongly reported as "a file with the same name already exists" (the overlapping-check test
-    //   reproduced it by measurement). Two overlapping actors are real — the tray "turn daemon on" and the boot ensure.
+    // ★One stat decides three branches (do not revive — do not follow `is_dir()` with `exists()`)★: asked twice, a folder created by someone else in between reads as "not a folder + exists" = **a file is there**, and a fine race is reported as "a file with the same name already exists" (reproduced by the overlapping-check test).
     match std::fs::metadata(dir) {
         Ok(m) if m.is_dir() => return probe_write_in(dir),
         Ok(_) => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotADirectory,
-                "같은 이름의 파일이 이미 있어 폴더를 만들 수 없음",
+                "a file with the same name already exists, so the folder cannot be created",
             ))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
 
-    // Collect the non-existent ancestors from the leaf upward (stop at the first existing ancestor — do not climb to the root: create_dir on a drive
-    //   root is PermissionDenied, not AlreadyExists, measured 2026-08-14).
+    // Collect the non-existent ancestors from the leaf upward; stop at the first existing one (create_dir on a drive root is PermissionDenied, not AlreadyExists).
     let mut missing: Vec<&Path> = Vec::new();
     let mut cur = Some(dir);
     while let Some(p) = cur {
@@ -152,23 +116,22 @@ fn check_data_dir_writable_once(dir: &Path) -> std::io::Result<()> {
     outcome
 }
 
-// ── 에러 ───────────────────────────────────────────────────────────────────────
+// ── Errors ───────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
-    #[error("daemon exe 를 찾을 수 없음: {0}")]
+    #[error("daemon exe not found: {0}")]
     ExeNotFound(String),
-    #[error("daemon.json 파싱 실패: {0}")]
+    #[error("failed to parse daemon.json: {0}")]
     Parse(String),
-    #[error("daemon spawn 실패(WMI ReturnValue={rv})")]
+    #[error("daemon spawn failed (WMI ReturnValue={rv})")]
     SpawnFailed { rv: u32 },
-    #[error("daemon 시작 대기 timeout({0:?} 초과)")]
+    #[error("timed out waiting for the daemon to start (over {0:?})")]
     Timeout(Duration),
-    #[error("protocol 버전 불일치: 데몬={daemon}, 기대={expected}")]
+    #[error("protocol version mismatch: daemon={daemon}, expected={expected}")]
     VersionMismatch { daemon: u32, expected: u32 },
-    /// ★The message carries the remedy (ADR-0134 decision 4)★: this string rises as is up to the frontend's failure surface —
-    /// replacing a cause-less connection timeout is the reason this variant exists.
-    #[error("데이터 폴더에 쓸 수 없음({path}): {reason} — 쓰기 가능한 위치에 압축을 풀어 주세요")]
+    /// ★The message carries the remedy (ADR-0134 decision 4)★: this string rises as is to the frontend's failure surface; replacing a cause-less connection timeout is why this variant exists.
+    #[error("cannot write to the data folder ({path}): {reason} — please extract to a writable location")]
     DataDirUnwritable { path: String, reason: String },
     #[error("io: {0}")]
     Io(String),
@@ -176,8 +139,7 @@ pub enum DiscoveryError {
 
 // ── injection boundary (trait) ─────────────────────────────────────────────────────────────
 
-/// Takes start_time as well to tell apart PID reuse (M2) — it counts as alive only when "PID alive AND creation time==recorded value".
-/// If start_time==0 (unknown, old daemon.json), conservatively decide by PID alone being alive.
+/// Takes start_time too, to tell PID reuse apart (M2): alive only when "PID alive AND creation time == recorded value". start_time == 0 (unknown, old daemon.json) falls back to PID alone.
 pub trait PidLiveness {
     fn is_dead(&self, pid: u32, start_time: u64) -> bool;
 }
@@ -192,7 +154,7 @@ pub trait Spawner {
     fn spawn(&self, exe: &Path) -> Result<(), DiscoveryError>;
 }
 
-/// Polling clock — the current read comes from the base clock plus a sleep that **puts the thread to sleep** (this module is synchronous).
+/// Polling clock: the current time is the base clock plus a sleep that **blocks the thread** (this module is synchronous).
 // ADR-0275
 pub trait Clock: engram_dashboard_base::time::Clock {
     fn sleep(&self, dur: Duration);
@@ -208,9 +170,7 @@ pub(crate) enum AcceptCheck {
     VersionMismatch { daemon: u32 },
 }
 
-// ADR-0196: the liveness check comes **before** the version comparison — do not flip it. And this decision **deliberately does not look at the version
-// direction**: a dead record is stale whether it is lower or higher than ours, so do not "fix" it by adding a direction decision to make it
-// 「더 새 기록이면 물러난다」 (back off if the record is newer).
+// ADR-0196: the liveness check comes **before** the version comparison — do not flip it. The decision **deliberately ignores the version direction**: a dead record is stale whether lower or higher than ours, so do not add "back off if the record is newer".
 // pub(crate) for daemon_client::link::stop and daemon_client::link::endpoint · ADR-0271
 pub(crate) fn check_acceptable(info: &DaemonInfo, liveness: &dyn PidLiveness) -> AcceptCheck {
     if liveness.is_dead(info.pid, info.start_time) {
@@ -226,24 +186,14 @@ pub(crate) fn check_acceptable(info: &DaemonInfo, liveness: &dyn PidLiveness) ->
 
 /// ★The client does not delete daemon.json (do not revive — ADR-0134)★
 ///
-/// The old implementation **deleted** the file decided stale or broken in (a) before the spawn. That deletion
-/// ① gains nothing and ② causes two kinds of damage.
+/// Deleting a file decided stale or broken before the spawn gains nothing and does damage:
+/// - It gains nothing: polling accepts only "valid parse + live pid + compatible version", so an old file with a dead pid is filtered by `check_acceptable`, and the winning daemon overwrites its own daemon.json **after getting the lock**.
+/// - Damage (i): if the deletion comes before the gate (`pre_spawn`) and the gate blocks, only an irreversible deletion remains.
+/// - Damage (ii): in a portable folder on a network share (supported by ADR-0134 decision 3) the pid of **another computer** is decided by a local `OpenProcess`; deleting the portfile of someone else's live daemon read as stale means it does not publish again and **the original owner can no longer reconnect**.
 ///
-/// ① Why it gains nothing: polling accepts only "valid parse + live pid + compatible version", so even if the old file remains
-///    an already dead pid is filtered out by `check_acceptable`. And the winning daemon overwrites its own daemon.json **after getting the lock**
-///    — there is no need to clear the spot in advance.
-/// ② Damage: (i) if the deletion comes before the gate (`pre_spawn`), then when the gate blocks, only an irreversible deletion remains.
-///    (ii) Worse, in a portable folder on a network share (a configuration that ADR-0134 decision 3 states it supports)
-///    the pid of **another computer** gets decided by a local `OpenProcess`. If someone else's live daemon is read as stale
-///    and its portfile is deleted, that daemon does not publish again, so **the original owner can no longer reconnect**.
-///    A local pid check is not evidence of death in someone else's folder.
+/// So this function **only reads**; even a wrong decision does not break someone else's file.
 ///
-/// So this function **only reads**. The invariant is that even a wrong decision does not break someone else's file.
-///
-/// `pre_spawn` = a gate that runs only just before the spawn (the pre-check spot of ADR-0134 decision 4).
-///
-/// ★The attach point is the contract★: the path that attaches to a live daemon needs **only reading**, so it does not pass this gate
-/// — failing to attach to an already well-running daemon just because the folder briefly became unwritable would be the worse failure.
+/// `pre_spawn` = a gate that runs only just before the spawn (the pre-check spot of ADR-0134 decision 4). ★The attach path does not pass it★: attaching to a running daemon needs only reading, and failing because the folder briefly became unwritable would be the worse failure.
 #[allow(clippy::too_many_arguments)]
 fn ensure_with(
     reader: &dyn DaemonReader,
@@ -254,10 +204,7 @@ fn ensure_with(
     pre_spawn: &mut dyn FnMut() -> Result<(), DiscoveryError>,
     timeout: Duration,
 ) -> Result<DaemonInfo, DiscoveryError> {
-    // Safety net: keep the old DaemonInfo that was decided dead in memory. If polling times out (= the new daemon did not
-    // come up = possibly the existing daemon was actually alive because of a single-instance lock conflict), re-check whether this old info is still
-    // live and, if live, return it as a recovery — self-repair when our decision was wrong. A broken file's content
-    // cannot be trusted so it is not kept (None).
+    // Safety net: keep the old DaemonInfo decided dead. If polling times out (possibly the existing daemon was alive, e.g. a single-instance lock conflict), re-check it and return it if live. A broken file's content cannot be trusted, so it is not kept (None).
     let mut dead_candidate: Option<DaemonInfo> = None;
 
     // (a) Check the existing file — **read-only**.
@@ -269,13 +216,12 @@ fn ensure_with(
                     pid = info.pid,
                     daemon_version = info.protocol_version,
                     expected = PROTOCOL_VERSION,
-                    "{DAEMON_FILE} 의 pid 가 살아있지 않음 — 그 기록을 stale 로 판정"
+                    "the pid in {DAEMON_FILE} is not alive — that record is judged stale"
                 );
                 dead_candidate = Some(info);
             }
             AcceptCheck::VersionMismatch { daemon } => {
-                // Do not cover a live daemon with a spawn; fail clearly (the restart policy is decided by the phase4
-                // DaemonClient).
+                // Do not cover a live daemon with a spawn; fail clearly (restart policy is the DaemonClient's).
                 return Err(DiscoveryError::VersionMismatch {
                     daemon,
                     expected: PROTOCOL_VERSION,
@@ -285,25 +231,20 @@ fn ensure_with(
         Ok(None) => {}
         // A broken file is not deleted either — it may be mid-write, and the winning daemon overwrites it anyway.
         Err(DiscoveryError::Parse(_)) => {}
-        // ★Do not treat an io failure more harshly than a parse failure★: if a third party (antivirus · indexer) briefly opens the file with a narrow share,
-        //   the read here fails with 32, while the daemon side retries the same condition 5 times/400ms. If we hard-fail here,
-        //   ensure collapses wholesale **with a perfectly good daemon in place**. Report it as "not read yet" and let it flow into the
-        //   spawn+polling below — if one is already up polling finds that daemon, and if not a new one comes up.
+        // ★Do not treat an io failure more harshly than a parse failure★: a third party (antivirus, indexer) briefly opening the file with a narrow share makes the read fail with 32, while the daemon retries the same condition 5 times/400ms. Hard-failing here would collapse ensure **with a perfectly good daemon in place**. Report "not read yet" and flow into spawn + polling: an already-up daemon is found by polling, otherwise a new one comes up.
         Err(e) => {
-            tracing::warn!("{DAEMON_FILE} 초기 읽기 실패 — 아직 못 읽은 것으로 보고 계속: {e}");
+            tracing::warn!("initial read of {DAEMON_FILE} failed — treating it as not read yet and continuing: {e}");
         }
     }
 
     // (b) spawn — one gate before it.
     pre_spawn()?;
-    tracing::info!(exe = %exe.display(), "데몬 spawn");
+    tracing::info!(exe = %exe.display(), "spawning the daemon");
     spawner.spawn(exe)?;
 
     // (c) polling — wait for a new daemon.json until the timeout.
     let deadline = clock.now() + timeout;
-    // ★Hold "the last thing seen", not "could not read"★: if only read failures were kept here, when a timeout happens with a
-    //   broken file that never gets fixed or a rejected file (dead pid · version mismatch), the diagnosis below says "the file never
-    //   appeared", **which is wrong** — the only line the user can see points to the wrong place.
+    // ★Hold "the last thing seen", not "could not read"★: keeping only read failures would make a timeout with a never-fixed broken file or a rejected file (dead pid, version mismatch) say "the file never appeared", **which is wrong** — the only line the user sees would point to the wrong place.
     let mut last_reason: Option<String> = None;
     loop {
         match reader.read() {
@@ -311,30 +252,26 @@ fn ensure_with(
                 AcceptCheck::Accept => return Ok(info),
                 AcceptCheck::DeadPid => {
                     last_reason = Some(format!(
-                        "{DAEMON_FILE} 은 있으나 적힌 pid {} 가 살아있지 않음",
+                        "{DAEMON_FILE} exists but its recorded pid {} is not alive",
                         info.pid
                     ));
                 }
                 AcceptCheck::VersionMismatch { daemon } => {
                     last_reason = Some(format!(
-                        "{DAEMON_FILE} 의 프로토콜 버전 {daemon} ≠ 이 클라이언트 {PROTOCOL_VERSION}"
+                        "protocol version {daemon} in {DAEMON_FILE} ≠ this client's {PROTOCOL_VERSION}"
                     ));
                 }
             },
             Ok(None) => {}
-            // It may be a partial file mid-write so keep looping — but a **broken file that never gets fixed** has the same
-            //   shape, so carry the reason along (comment above).
+            // May be a partial file mid-write, so keep looping; a never-fixed broken file looks the same, so carry the reason along.
             Err(e @ DiscoveryError::Parse(_)) => {
-                last_reason = Some(format!("{DAEMON_FILE} 파싱 실패: {e}"));
+                last_reason = Some(format!("failed to parse {DAEMON_FILE}: {e}"));
             }
-            // ★Do not abort inside the loop★: one transient open failure (a third party briefly opens it with a narrow share
-            //   — the daemon side retries the same condition) would throw away **all of the remaining wait**. Reading again at the next
-            //   tick is enough, and if it truly cannot be read it ends in the timeout anyway.
-            // ★Do not raise to the default level every tick★: polling would flood the log with the same line. Hold only the last
-            //   reason and emit it once at the timeout below — that one is the only failure the user actually sees.
+            // ★Do not abort inside the loop★: one transient open failure (third party, narrow share) would throw away **all of the remaining wait**; reading again at the next tick is enough, and a truly unreadable file ends in the timeout.
+            // ★Do not log at the default level every tick★: polling would flood the log. Hold only the last reason and emit it once at the timeout.
             Err(e) => {
-                tracing::debug!("{DAEMON_FILE} 폴링 읽기 실패 — 다음 tick 에 재시도: {e}");
-                last_reason = Some(format!("{DAEMON_FILE} 읽기 실패: {e}"));
+                tracing::debug!("polling read of {DAEMON_FILE} failed — retrying on the next tick: {e}");
+                last_reason = Some(format!("failed to read {DAEMON_FILE}: {e}"));
             }
         }
         if clock.now() >= deadline {
@@ -343,20 +280,16 @@ fn ensure_with(
                 if old_live && old.protocol_version == PROTOCOL_VERSION {
                     tracing::warn!(
                         pid = old.pid,
-                        "dead 로 판정했던 daemon.json 이 폴링 timeout 시점엔 live — 그 데몬으로 복구"
+                        "the daemon.json judged dead is live at the polling timeout — recovering with that daemon"
                     );
                     return Ok(old);
                 } else if old_live {
-                    // ★Do not let it flow into a cause-less timeout★: the daemon we wrongly saw as dead is actually
-                    //   alive with only a different version, so if the protocol_version in hand is thrown away and a Timeout is
-                    //   emitted, the only line the user sees cannot point at the cause. In a portable
-                    //   folder on a network share, the pid of **someone else's computer** is measured by a local OpenProcess, so a live daemon is
-                    //   always read as dead and this path becomes the default.
+                    // ★Do not flow into a cause-less timeout★: the daemon wrongly seen as dead is alive with a different version, so discarding the protocol_version in hand leaves the user's only line without the cause. In a portable folder on a network share, **another computer's** pid is measured by a local OpenProcess, so a live daemon is always read as dead and this path becomes the default.
                     tracing::warn!(
                         pid = old.pid,
                         daemon_version = old.protocol_version,
                         expected = PROTOCOL_VERSION,
-                        "dead 로 판정했던 daemon.json 이 timeout 시점엔 live — 단 프로토콜 버전이 다름"
+                        "the daemon.json judged dead is live at the timeout — but its protocol version differs"
                     );
                     return Err(DiscoveryError::VersionMismatch {
                         daemon: old.protocol_version,
@@ -364,15 +297,13 @@ fn ensure_with(
                     });
                 }
             }
-            // ★It must remain at the default level (warn)★: this timeout is the very failure the user sees as a banner.
-            //   If it is silent here, not one line of cause is left in the release log file, and the moment the banner is closed the incident becomes
-            //   untraceable (the very reason the file log was made).
+            // ★Must stay at the default level (warn)★: this timeout is the failure the user sees as a banner; if silent, the release log file has no cause line and the incident is untraceable once the banner is closed.
             tracing::warn!(
                 ?timeout,
                 last_reason = last_reason
                     .as_deref()
-                    .unwrap_or("(없음 — daemon.json 이 끝내 생기지 않음)"),
-                "데몬 기동 대기 시간 초과"
+                    .unwrap_or("(none — daemon.json never appeared)"),
+                "timed out waiting for the daemon to start"
             );
             return Err(DiscoveryError::Timeout(timeout));
         }
@@ -417,8 +348,7 @@ pub fn daemon_status(data_dir: &Path) -> DaemonStatus {
     status_with(&reader, &RealLiveness)
 }
 
-/// ★How it differs from daemon_status★: daemon_status is a lifecycle probe giving pid/port only. This returns the
-/// full record (the token included) — see [`read_live_daemon`] for who receives it.
+/// ★Differs from daemon_status★: daemon_status is a lifecycle probe giving pid/port only; this returns the full record (token included) — see [`read_live_daemon`] for who receives it.
 fn read_live_with(reader: &dyn DaemonReader, liveness: &dyn PidLiveness) -> Option<DaemonInfo> {
     match reader.read() {
         Ok(Some(info)) => match check_acceptable(&info, liveness) {
@@ -475,7 +405,7 @@ pub fn ensure_daemon(
     let mut pre_spawn = || {
         if data_dir_env_override().is_some() {
             tracing::debug!(
-                "ENGRAM_DATA_DIR 설정됨 — WMI 데몬은 이 값을 상속하지 않으므로 데이터 폴더 사전 점검을 건너뛴다"
+                "ENGRAM_DATA_DIR is set — the WMI daemon does not inherit this value, so the data folder pre-check is skipped"
             );
             return Ok(());
         }
@@ -519,12 +449,12 @@ fn locate_in(candidates: &[PathBuf]) -> Result<PathBuf, DiscoveryError> {
         }
     }
     Err(DiscoveryError::ExeNotFound(format!(
-        "daemon exe 후보 {}개 모두 없음",
+        "none of the {} daemon exe candidates exist",
         candidates.len()
     )))
 }
 
-// ── real 구현 ──────────────────────────────────────────────────────────────────
+// ── real implementation ──────────────────────────────────────────────────────────────
 
 struct FileReader {
     path: PathBuf,
@@ -578,7 +508,7 @@ impl Spawner for WmiSpawner {
         spawn_outside_job(exe, self.console).map_err(|e| match e {
             DetachedSpawnError::Refused { rv } => DiscoveryError::SpawnFailed { rv },
             DetachedSpawnError::Io(e) if e.kind() == std::io::ErrorKind::Unsupported => {
-                DiscoveryError::Io("WMI spawn 은 Windows 전용".into())
+                DiscoveryError::Io("WMI spawn is Windows-only".into())
             }
             DetachedSpawnError::Io(e) => DiscoveryError::Io(e.to_string()),
         })
