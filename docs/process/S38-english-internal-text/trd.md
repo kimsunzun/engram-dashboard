@@ -1,6 +1,6 @@
 # S38 TRD — English-only internal text
 
-- Status: edition 2.1 · 2026-11-18 · canonical ADR = the S38 ADR written after review (decisions D1–D8 below) · PRD = `prd.md`.
+- Status: edition 2.1 · 2026-11-18 · Implemented · canonical ADR = the S38 ADR written after review (decisions D1–D8 below) · PRD = `prd.md`.
 - Edition 2 replaces edition 1 after the PRD+TRD review (full): screen errors become English causes inside the translated head (no shell table entries); the placeholder accepts the old marker too; the Hangul check covers code and config only; units follow packages.
 
 ## 1. Scope and PRD relation
