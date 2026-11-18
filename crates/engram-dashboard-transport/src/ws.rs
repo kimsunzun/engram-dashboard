@@ -1,108 +1,67 @@
 //! Real-socket WS adapter — behind feature `ws`. ★The only real transport implementation in this crate★.
 //!
-//! ## What this file owns
-//!
-//! The dialing side ([`WsDialer`] = a [`Dialer`]), the receiving side ([`WsListener`] = a [`Listener`], its accept policy [`AcceptPolicy`] ·
-//! refusal report [`AcceptRefusals`]), and splitting one open WS stream into the [`LinkTx`]/[`LinkRx`] ends. ★Both directions live together★,
-//! so this crate **attaches to itself** and measures what memory cannot (ADR-0177 decision 8).
-//!
-//! ★The stream wrapping is crate-internal★ — no function that splits a stream into two ends exists outside the crate, so the only path that
-//! sends a real WS stream out as an accepted link ([`Accepted`]) is [`WsListener`] (TRD 3 §3-5 · §5 17). ★Not a guarantee that consumers cannot
-//! skip the check★ — [`Accepted::new`] is public for other transports, so a link built from hand-written [`LinkTx`]/[`LinkRx`] also lands on the
-//! registry; code review, not the compiler, catches that bypass.
+//! Owns the dialing side ([`WsDialer`]), the receiving side ([`WsListener`] with [`AcceptPolicy`] · [`AcceptRefusals`]) and the split of one open WS
+//! stream into [`LinkTx`]/[`LinkRx`]. Both directions live here so the crate attaches to itself and measures what memory cannot (ADR-0177 decision 8).
+//! The stream split is crate-internal, so [`WsListener`] is the only path from a real WS stream to an [`Accepted`] link (TRD 3 §3-5 · §5 17); a link
+//! built from hand-written ends via the public [`Accepted::new`] bypasses it — code review, not the compiler, catches that.
 //!
 //! ## What the receiving side guards (TRD 3 §5 1 · 2 · 12 · 14 · 15 · 16 · 18)
 //!
-//! The consumer gives every policy value through [`AcceptPolicy`]; this file chose only the two that run the loop — the kernel accept queue
-//! length (`LISTEN_BACKLOG`) and the pause after an accept error ([`ACCEPT_ERROR_PAUSE`]).
-//! - Opens on loopback only — a non-loopback bound address is refused before listen.
-//! - TCP accept runs on one task and each WS upgrade on a separate spawned task, so a peer that never finishes its upgrade does not block other
-//!   accepts. The upgrade deadline is measured from the TCP accept time (task wait counts; an upgrade finishing past it is not accepted).
-//! - The upgrade permit ([`crate::PermitPool`]) is taken at TCP accept and travels in [`Accepted`] — links mid-upgrade, in the ready queue, and
-//!   taken but not yet on the registry count as one total. If all are used the new TCP is closed right after accept.
-//! - Origin and Host headers are checked against the policy and cut with 403 if outside it.
-//! - The size cap of one message and one frame is applied with the same value on the receiving and outgoing side.
-//! - What was cut is reported to [`AcceptRefusals`] with its branch and a masked remote address — the `Err` of [`Listener::accept`] means only
-//!   that the listener has ended.
+//! The consumer gives every policy value via [`AcceptPolicy`]; this file chose only `LISTEN_BACKLOG` and [`ACCEPT_ERROR_PAUSE`].
+//! - Loopback only — a non-loopback bound address is refused before listen.
+//! - TCP accept on one task, each upgrade on its own spawned task (a stalled upgrade blocks no accept). The upgrade deadline runs from TCP accept;
+//!   an upgrade finishing past it is not accepted.
+//! - The upgrade permit ([`crate::PermitPool`]) is taken at TCP accept and travels in [`Accepted`]; mid-upgrade, ready-queue and not-yet-registered links
+//!   count together. All used: the new TCP is closed right after accept.
+//! - Origin and Host headers are checked against the policy (403 if outside); one message/frame size cap applies to both directions.
+//! - Every cut is reported to [`AcceptRefusals`] with its branch and a masked remote address ([`Listener::accept`]'s `Err` means only that the listener ended).
 //!
-//! ## What it guarantees / what it leaves to the consumer
+//! ## Guarantees / left to the consumer
 //!
-//! Guarantees: the [`Frame`]↔`Message` round trip · the close code and message **in both directions** (so 「connected but rejected」 crosses as
-//! [`LinkRead::Closed`] and ADR-0180 decision 5 holds in code) · transport-layer Ping/Pong raised as [`Frame::Keepalive`]. ★The **translation
-//! table** is asserted by this file's unit tests★ ([`to_message`]/[`from_message`] are pure); the real-socket round trip and whether the close
-//! frame really goes out belong to the suites in `tests/`, and nobody yet measures the keepalive round trip (「Known limits」).
-//!
-//! Left to the consumer: address syntax (handed to `tokio-tungstenite` as is) · reconnect, deadline, keepalive interval (up to [`crate::Policy`]
-//! and the supervisor — ★the dialing adapter applies no deadline of its own★ ([`Dialer`] rustdoc); ★only the receiving side's upgrade deadline is
-//! an exception★, a phase before the supervisor exists, in [`AcceptPolicy`]) · auth and version negotiation ([`crate::Handshake`]) · the accept
-//! loop and peer registry (the consumer calls [`Listener::accept`] and [`crate::Registry::attach`]).
+//! Guaranteed: the [`Frame`]↔`Message` round trip · close code and message in both directions (so 「connected but rejected」 crosses as [`LinkRead::Closed`],
+//! ADR-0180 decision 5) · Ping/Pong raised as [`Frame::Keepalive`]. The translation table is unit-tested (`to_message`/`from_message` are pure); the socket
+//! round trip is in `tests/`, and nothing measures the keepalive round trip. Left to the consumer: address syntax · reconnect/deadline/keepalive timing
+//! ([`crate::Policy`]; ★the dialer applies no deadline of its own★ — only the upgrade deadline, a pre-supervisor phase, lives in [`AcceptPolicy`]) ·
+//! auth and version negotiation ([`crate::Handshake`]) · the accept loop and registry ([`Listener::accept`] → [`crate::Registry::attach`]).
 //!
 //! ## Known limits (do not read as guarantees)
 //!
-//! - ★The refusal when upgrade permits are all used has no HTTP response★ — TCP is closed right after accept, so the dialer sees a cut during
-//!   upgrade. Anyone on the same PC can fill the permits — loopback is shared by all OS users (TRD 3 §5 14 · R11).
-//! - ★Refusal reports can be lost★ — when the [`AcceptRefusals`] queue ([`AcceptPolicy::refusal_queue`]) is full new reports are dropped and only
-//!   [`AcceptRefusals::dropped`] rises; an accept loop waiting on the consumer during a refusal flood would itself be a denial of service.
-//! - ★A TCP accept error is not terminal★ — it is reported and accepting resumes. Per-connection errors (`ConnectionRefused` · `ConnectionAborted`
-//!   · `ConnectionReset`) take the next accept at once; other errors (e.g. `EMFILE`) pause [`ACCEPT_ERROR_PAUSE`] because they leave the connection
-//!   in the kernel queue and recur immediately. Same branching as axum 0.8.9's accept loop (read from source, not measured —
-//!   `handle_accept_error` in `serve/listener.rs`). So [`Listener::accept`] returns `Err` only when the accept task has ended (a panic).
-//! - ★TLS is not turned on★ — only `tokio-tungstenite` default features, so `wss://` fails at the dial step.
-//! - ★An outgoing close **message** is silently truncated when it overflows★ — cap = the smaller of 123 bytes (125-byte control payload minus 2
-//!   for the code, RFC 6455 §5.5) and that link's size cap − 2; [`LinkTx::close`] truncates. ★No ellipsis and no event★ — the consumer cannot know
-//!   (do not put decision material in the message). The code goes out unchanged, but with a size cap under 2 bytes even the code cannot be carried
-//!   and an empty close goes out. Canonical: `close_reason_room` and the `MAX_CLOSE_REASON_BYTES` rustdoc.
+//! - ★No HTTP response when upgrade permits are exhausted★ — TCP is closed after accept, so the dialer sees a cut during upgrade; anyone on the PC can fill
+//!   the permits (loopback is shared by all OS users; TRD 3 §5 14 · R11).
+//! - ★Refusal reports can be lost★ — a full [`AcceptRefusals`] queue ([`AcceptPolicy::refusal_queue`]) drops new reports and raises
+//!   [`AcceptRefusals::dropped`]; waiting on the consumer would itself be a denial of service.
+//! - ★A TCP accept error is not terminal★ — per-connection errors (`ConnectionRefused` · `ConnectionAborted` · `ConnectionReset`) take the next accept at once,
+//!   others (e.g. `EMFILE`) pause [`ACCEPT_ERROR_PAUSE`]; same branching as axum 0.8.9's accept loop (from source, not measured). [`Listener::accept`]
+//!   returns `Err` only when the accept task ended (a panic).
+//! - ★TLS is off★ — default `tokio-tungstenite` features only; `wss://` fails at dial.
+//! - ★An outgoing close **message** is silently truncated★ to min(123 bytes, size cap − 2) by [`LinkTx::close`] (RFC 6455 §5.5); no ellipsis, no event,
+//!   so never put decision material in it. The code goes out unchanged; a size cap under 2 bytes sends an empty close (`close_reason_room`).
 //!
 //! ## Link properties (facts of the outside world)
 //!
-//! - ★A write really stalls when the kernel send buffer fills★ — `SinkExt::send` calls tungstenite's `flush`, which turns `WouldBlock` into
-//!   `Pending` (`Sink::poll_flush` → `cvt(s.flush())` in tokio-tungstenite 0.26.2), so for a peer that does not read the supervisor's
-//!   `write_deadline` cuts it — what `tests/ws_write_deadline.rs` measures.
-//! - ★But **one large write** does not stall★ — **measured** (2026-09-07, Windows 11 loopback): one 16 MiB frame (4 and 8 MiB the same) went
-//!   straight in in 28 ms to a non-reading peer, also with `SO_SNDBUF`/`SO_RCVBUF` set to 4 KiB; repeating 1 MiB frames swallows 2 MiB then
-//!   stalls on the third. **Interpretation** (not observed): Windows' dynamic send buffering swallows one large send whole; the numbers stand
-//!   even if that is wrong. ★Backpressure is triggered not by frame size but by **accumulation**★.
-//! - ★The frame of a truncated write can go out late★ — from reading source (futures-util 0.3.32 `sink/feed.rs:38-40` → `sink/send.rs:37`;
-//!   `SplitSink` slot `stream/stream/split.rs:114`; tokio-tungstenite 0.26.2 `lib.rs:340-347`): `send` hands over the item **then** waits in
-//!   `flush`, and the handed-over item stays in a `SplitSink` slot or the tungstenite write buffer; whatever is next written to the same end
-//!   pushes it out first (`split.rs:104-109`). The supervisor cuts a write by control or deadline and then sends a close with [`LinkTx::close`],
-//!   so **the truncated frame can go out ahead of that close** and the supervisor's loss count can be inflated ([`crate::Direction::Outbound`]).
-//!   ★The in-memory harness does not imitate this★ — a blocked write stalls **before** handing over, so a cut leaves nothing (`testing::MemTx`).
-//! - ★tungstenite measures only the size of what comes in, not what goes out★ — from source (0.26.2: only the reading side checks
-//!   `max_frame_size` / `max_message_size`; `WebSocketContext::write` has no size check). Exceeding it is a **receiving-side read error** that
-//!   cuts the link (measured — one 32 MiB frame under defaults: `Space limit exceeded: Message too long: 33554432 > 16777216`). This adapter
-//!   applies one consumer-supplied value to both directions ([`WsDialer::new`] · [`AcceptPolicy::max_message_bytes`]); the receiving side has
-//!   `max_message_size` = `max_frame_size` = that value. ★So [`LinkTx::send`] **returns an error** for a frame over it★ — if only the receiver
-//!   enforced the cap, **an innocent peer burns its own reconnect budget**. ★This rests on 「the peer uses the same value」★ — a peer with a
-//!   smaller cap is still cut. ★It is a value, not a panic★ — a panic in the supervisor task ends the whole process in a production process
-//!   with a panic hook (ADR-0292), and in one without, nobody holds its `JoinHandle`, so the emitted state freezes at `Live`. The supervisor turns
-//!   the error into `LinkLost` (disconnect event plus reconnect); release and debug behave the same.
-//! - ★**But no diagnostic is left on this branch**★ — the error message is dropped when the supervisor turns `Ok(Err(_))` into
-//!   `LinkLost(WriteFailed)` (`Supervisor::write` in `peer.rs`), and [`crate::TransportEvent::Disconnected`] has no message field (`lib.rs`
-//!   「a disconnect during operation does not carry a reason message」). The oversize frame is counted as an outgoing loss (notification or
-//!   fan-out) or woken by `FailPending` (request), neither saying 「too big」: the consumer sees a **`WriteFailed` disconnect with no reason**.
-//!   Diagnosing it needs a message field on the disconnect event first.
-//! - ★**When** the automatic Pong for an incoming Ping goes out★ — from tungstenite 0.26.2 source (not measured): the receiver puts the Pong into
-//!   `additional_send` (`protocol/mod.rs:651`) and **the read loop flushes that pending write at the top of every iteration**
-//!   (`protocol/mod.rs:452`), so it goes out in **both reading and writing**. ★Reading does not stop when the send buffer is full★ — it swallows the
-//!   flush's `WouldBlock`, sets `unflushed_additional` and keeps reading ("If blocked continue reading, but try again later"), and
-//!   tokio-tungstenite's waker proxy (`WakerProxy` in `compat.rs`) hooks the reading waker onto the write axis, so a writable socket wakes the
-//!   reading task to flush again. Congestion therefore shows as 「our Pong is late」, not 「we cannot read」 — the supervisor's last-receive time does
-//!   not stop. A late Pong beyond the peer's patience shows as 「the peer cuts us with silence」. ★The only basis for being bounded is
-//!   `write_deadline`★ — applied to **every write** (`peer.rs` invariant), a stuck write is cut and the link dropped. ★Do not cite
-//!   `Policy::check`★: its `write_deadline < ping_interval < idle_timeout` is checked **only in debug builds** (production callers are two
-//!   `debug_assert_eq!` in `registry.rs`), and ★it cannot establish **the peer's** patience★ anyway (the peer's `idle_timeout` is its own); all
-//!   that holds is 「our writes do not hang forever」.
-//! - ★The keepalive **round trip** is unmeasured on a real socket★ — unit tests assert the translation table in both directions, but none measures
-//!   a real Ping out and a real Pong back as [`Frame::Keepalive`]; the crate's `ping_interval` far exceeds any real-socket test. If it goes wrong
-//!   the symptom is the one above.
-//! - ★`Message::Frame` does not come up from real-socket receiving★ (tungstenite docs), so that branch is skipped, not translated.
-//! - ★The cancel safety of [`LinkRx::recv`] is not load-bearing anywhere in this crate★ — ★not because 「it is never cancelled」★: the
-//!   operating-phase read is dropped mid-poll on every link drop (`drop_link` in `peer.rs` `abort()`s the reading task). It is not load-bearing
-//!   because **every place that cancels drops both ends whole right after** (`frames_rx` and `rx_raw` released together; the handshake's deadline
-//!   and peer-closed branches return `Err` and drop the link in `handshake_once`, and control winning drops the handshake future with both ends in
-//!   `shake_hands`). ★Hence no 「unverified」 label★ — it is a debt never taken on; the label would send a session measuring a nonexistent risk.
-//!   **A new call that reads the same link again after cancelling voids this sentence.**
+//! - ★A write stalls when the kernel send buffer fills★ — `SinkExt::send` flushes and tungstenite turns `WouldBlock` into `Pending` (tokio-tungstenite 0.26.2),
+//!   so `write_deadline` cuts it against a non-reading peer (`tests/ws_write_deadline.rs`). ★One large write does not stall★ — measured on Windows 11
+//!   loopback: a 16 MiB frame went in in 28 ms (also with 4 KiB socket buffers), repeated 1 MiB frames stall on the third. Interpretation (not observed):
+//!   dynamic send buffering. Backpressure is triggered by accumulation, not frame size.
+//! - ★A truncated write's frame can go out late★ (from source: futures-util 0.3.32 `sink/send.rs:37`, `split.rs:104-114`; tokio-tungstenite `lib.rs:340-347`) —
+//!   the handed-over item stays in a `SplitSink` slot or the tungstenite write buffer and the next write to that end pushes it out first. After a cut
+//!   by control or deadline the close can therefore **go out behind the truncated frame**, and the supervisor's loss count can be inflated
+//!   ([`crate::Direction::Outbound`]). The in-memory harness stalls before hand-over and does not imitate this (`testing::MemTx`).
+//! - ★tungstenite checks sizes only on receive★ (0.26.2: `max_frame_size` / `max_message_size`; `WebSocketContext::write` has none); an oversize frame is a
+//!   receiver read error that cuts the link (measured: a 32 MiB frame under defaults). One consumer value ([`WsDialer::new`] ·
+//!   [`AcceptPolicy::max_message_bytes`]) sets both caps, and ★[`LinkTx::send`] **returns an error** for an oversize frame — never a panic★: otherwise an
+//!   innocent peer burns its reconnect budget, and a panic in the supervisor task ends a hooked process (ADR-0292) or freezes the state at `Live`. It
+//!   assumes the peer uses the same value. ★No diagnostic survives★: the supervisor maps the error to `LinkLost(WriteFailed)` and
+//!   [`crate::TransportEvent::Disconnected`] has no message field, so the consumer sees a `WriteFailed` disconnect with no reason.
+//! - ★When the automatic Pong goes out★ (from tungstenite 0.26.2 source, not measured): it is flushed by both the reading loop (`protocol/mod.rs:452`) and the
+//!   writing side; a full send buffer does not stop reading (`WouldBlock` is swallowed; `WakerProxy` re-wakes the reader), so congestion shows as a late
+//!   Pong and the peer may cut us for silence. ★The only bound is `write_deadline`★ on every write (`peer.rs` invariant); `Policy::check`'s ordering is
+//!   debug-only and cannot establish the peer's patience.
+//! - ★The keepalive round trip is unmeasured on a real socket★ — `ping_interval` far exceeds any real-socket test.
+//! - `Message::Frame` does not arise from real-socket receive (tungstenite docs); that branch is skipped.
+//! - ★[`LinkRx::recv`] cancel safety is not load-bearing★ — not because it is never cancelled (`drop_link` aborts the read task), but because every canceller
+//!   drops both ends right after (`peer.rs` `drop_link` · `handshake_once` · `shake_hands`). Not an `[unverified]` debt; a new caller that re-reads a link after
+//!   cancelling voids this.
 
 use std::io;
 use std::net::SocketAddr;
@@ -134,26 +93,19 @@ use crate::link::{
 };
 use crate::mask::mask_reason;
 
-/// The maximum bytes a close message can carry — **not a character count**.
-///
-/// ★External fact★ — RFC 6455 §5.5 fixes the control frame payload at 125 bytes and a close frame spends 2 on the code. tungstenite 0.26.2 **does
-/// not check the outgoing side** (`Frame::close` concatenates code and message) but **the receiver cuts anything over 125 with
-/// `ControlFrameTooBig`** (`protocol/mod.rs:640`), so a long message makes 「connected but rejected」 reach the peer as a **read error**, collapsing the
-/// rejection decision and burning the reconnect budget — [`WsTx::close`] truncates first.
+/// Maximum bytes a close message can carry — **not a character count**. RFC 6455 §5.5 caps control payloads at 125 bytes and the code takes 2. tungstenite
+/// does not check the outgoing side but the receiver cuts anything over 125 (`ControlFrameTooBig`), turning 「connected but rejected」 into a read error and
+/// burning the reconnect budget — [`WsTx::close`] truncates first.
 const MAX_CLOSE_REASON_BYTES: usize = 123;
 
-/// Kernel accept queue length — the same value tokio `TcpListener::bind` uses. ★Unrelated to the upgrade permits★ (a connection in this queue is not yet accepted by us).
+/// Kernel accept queue length (tokio's default). Unrelated to the upgrade permits.
 const LISTEN_BACKLOG: u32 = 1024;
 
-/// The pause before accepting again after a TCP accept error (reason and pausing branches: file header 「Known limits」). ★Not a security value —
-/// it only keeps the loop from spinning, so it is not an [`AcceptPolicy`] field★.
-///
-/// ★Uses tokio's real clock, not the listener's [`Clock`]★ — it applies only to real-socket accept errors; following a hand-advanced clock would
-/// stop the accept loop until the test advances it.
+/// Pause before accepting again after a TCP accept error (branches: file header). ★Not a security value — it only stops the loop from spinning★, so it is not an
+/// [`AcceptPolicy`] field. ★Uses tokio's real clock, not the listener's [`Clock`]★ (a hand-advanced clock would stall the accept loop).
 pub const ACCEPT_ERROR_PAUSE: Duration = Duration::from_millis(100);
 
-/// Whether to pause for [`ACCEPT_ERROR_PAUSE`] after a TCP accept error. ★Per-connection errors do not pause★ — the peer cut before we accepted, so
-/// the next accept is a different connection, and pausing would let a peer that cuts right after opening delay accepting.
+/// Whether to pause after a TCP accept error. ★Per-connection errors do not pause★ — pausing would let a peer that cuts right after opening delay accepting.
 fn pauses_after_accept_error(kind: io::ErrorKind) -> bool {
     !matches!(
         kind,
@@ -163,20 +115,15 @@ fn pauses_after_accept_error(kind: io::ErrorKind) -> bool {
     )
 }
 
-/// Bytes usable for a close message on a link whose size cap is `max_payload` — the smaller of [`MAX_CLOSE_REASON_BYTES`] and `max_payload` − 2
-/// (the code's share). `None` = `max_payload` is under 2, so even the code cannot be carried.
-///
-/// ★Why it also truncates by `max_payload`★ (external fact) — tungstenite 0.26.2 applies the receiving `max_frame_size` as soon as it reads the frame
-/// header, control frames included (`protocol/frame/mod.rs:181`); truncating only to 125 would let one close frame cut the peer's read with
-/// `MessageTooLong` on a link capped below that.
+/// Bytes usable for a close message on a link capped at `max_payload`: min([`MAX_CLOSE_REASON_BYTES`], `max_payload` − 2). `None` = under 2, so even the code
+/// cannot be carried. ★Also capped by `max_payload`★ — tungstenite applies the receiving `max_frame_size` to control frames too (`protocol/frame/mod.rs:181`).
 fn close_reason_room(max_payload: usize) -> Option<usize> {
     max_payload
         .checked_sub(2)
         .map(|room| room.min(MAX_CLOSE_REASON_BYTES))
 }
 
-/// Truncates the close message to within `room` bytes ([`close_reason_room`]). ★Cut at a character boundary★ — a byte cut gives broken UTF-8, which
-/// fails **differently** from exceeding the length (tungstenite's `Utf8Bytes` guarantees UTF-8).
+/// Truncates the close message to within `room` bytes ([`close_reason_room`]) ★at a character boundary★ (a byte cut gives invalid UTF-8, a different failure).
 fn clamp_close_reason(reason: &str, room: usize) -> &str {
     if reason.len() <= room {
         return reason;
@@ -184,35 +131,31 @@ fn clamp_close_reason(reason: &str, room: usize) -> &str {
     &reason[..reason.floor_char_boundary(room)]
 }
 
-/// The receiving side's size cap — the same value for one message and one frame (TRD 3 §5 15); other fields are tungstenite defaults.
+/// The receiving side's size cap — the same value for one message and one frame (TRD 3 §5 15). The other fields are tungstenite defaults.
 fn ws_config(max_message_bytes: usize) -> WebSocketConfig {
     WebSocketConfig::default()
         .max_message_size(Some(max_message_bytes))
         .max_frame_size(Some(max_message_bytes))
 }
 
-/// The base property needed at one end of a link; both `MaybeTlsStream<TcpStream>` (dialing) and `TcpStream` (receiving) satisfy it, so both
-/// directions share one [`LinkTx`]/[`LinkRx`] implementation.
+/// The base property of one link end; both the dialing and receiving streams satisfy it, so one [`LinkTx`]/[`LinkRx`] implementation serves both.
 pub(crate) trait WsStream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
 
 impl<S> WsStream for S where S: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
 
 // ── Dialing side ──────────────────────────────────────────────────────────────
 
-/// A [`Dialer`] that opens a real WS link. [`Address`] is passed to `tokio-tungstenite` as is (`ws://host:port/path`); a syntax violation arrives as
-/// [`LinkError`] (the crate does not interpret the address).
-///
-/// ★Every failure is [`DialFailure::Unreachable`] — it never emits [`DialFailure::Refused`]★. An HTTP rejection at the upgrade (a status other than
-/// 101, e.g. the Origin check's 403) is the same: it has no close code, and mapping a status number to terminal or redial is a policy this adapter
-/// does not know (invented, a transient fault becomes a give-up with no budget). A consumer that knows the terminal outcome before dialing returns
-/// `Refused` from its own [`Dialer`] wrapping this one (TRD 3 §3-0 ⑤).
+/// A [`Dialer`] that opens a real WS link; [`Address`] goes to `tokio-tungstenite` as is (`ws://host:port/path`), a syntax violation arrives as [`LinkError`].
+/// ★Every failure is [`DialFailure::Unreachable`] — never [`DialFailure::Refused`]★: an HTTP rejection at upgrade (e.g. the Origin 403) has no close code, and mapping
+/// a status to terminal or redial is a policy this adapter does not own (a transient fault would become a give-up). A consumer that knows the terminal outcome
+/// returns `Refused` from its own [`Dialer`] wrapping this one (TRD 3 §3-0 ⑤).
 pub struct WsDialer {
     max_message_bytes: usize,
 }
 
 impl WsDialer {
-    /// Byte cap of one message and one frame — both the receiving size cap and the boundary at which an outgoing frame is returned as an error (file
-    /// header 「Link properties」). Give the same value as the peer listener's [`AcceptPolicy::max_message_bytes`].
+    /// Byte cap of one message and one frame: the receiving size cap and the boundary where an outgoing frame becomes an error. Use the peer listener's
+    /// [`AcceptPolicy::max_message_bytes`].
     pub fn new(max_message_bytes: usize) -> Self {
         Self { max_message_bytes }
     }
@@ -223,9 +166,7 @@ impl Dialer for WsDialer {
         &self,
         addr: &Address,
     ) -> BoxFuture<'_, Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), DialFailure>> {
-        // ★The link is created inside the future★ — the [`Dialer`] contract (cancelled, nothing may be left behind).
-        // ★The address moves into an owned String — enforced by the signature★: the `'_` in the return type is tied to `&self`, not `addr`, so the
-        //   future cannot borrow `addr`.
+        // ★The link is created inside the future★ ([`Dialer`] contract: cancelled, nothing left behind); the address is an owned String (the signature forbids borrowing `addr`).
         let url = addr.as_str().to_string();
         let max = self.max_message_bytes;
         Box::pin(async move {
@@ -243,66 +184,62 @@ impl Dialer for WsDialer {
 
 // ── Receiving side ────────────────────────────────────────────────────────────
 
-/// The accept policy of [`WsListener`] (TRD 3 §5 17 · C1).
-///
-/// ★No `Default`★ — crate-chosen values would be a security policy decided without the consumer's knowledge. ★No allow-everything value★ — checks
-/// cannot be turned off, so tests run with real values in the same fields as production. ★Not `#[non_exhaustive]`★ — a new field makes the consumer's
-/// construction site a compile error that forces a choice.
+/// The accept policy of [`WsListener`] (TRD 3 §5 17 · C1). ★No `Default`, no allow-everything value, not `#[non_exhaustive]`★ — a crate-chosen value would be a
+/// security policy set without the consumer, checks cannot be turned off (tests use real values), and a new field must force the consumer to choose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptPolicy {
-    /// Values accepted during an upgrade that carries an Origin header — compared byte for byte (TRD 3 §5 2). ★If empty, every upgrade carrying an
-    /// Origin is cut with 403★ (the release value of D21 ①). ★An upgrade without an Origin is always accepted★ — clients outside a browser send none,
-    /// and this check blocks browser-page requests (authentication belongs to the handshake). Two or more headers, or non-text, is cut.
+    /// Origin values accepted during an upgrade carrying an Origin header, compared byte for byte (TRD 3 §5 2). ★Empty = every upgrade with an Origin gets 403★. ★No Origin =
+    /// always accepted★ (non-browser clients; this blocks browser pages — auth belongs to the handshake). Two or more headers, or non-text, is cut.
     pub allowed_origins: Vec<String>,
-    /// Values accepted for the name part of the Host header (before the port — case-insensitive), e.g. `127.0.0.1` · `localhost` (TRD 3 §5 16 — DNS
-    /// rebinding). The port must be the one this listener bound (no port = 80). ★An upgrade without a Host is accepted★ (D9); two or more headers or
-    /// non-text is cut; if empty, every upgrade carrying a Host is cut. ★An IPv6 name is written with brackets★ (`[::1]`) — the header carries it that way
-    /// and the name is compared as is; a name with a colon outside the brackets (`::1` · `localhost:8080`) matches no header, so [`WsListener::bind`]
-    /// returns `Err`.
+    /// Host-header names accepted (before the port, case-insensitive), e.g. `127.0.0.1` · `localhost` (TRD 3 §5 16, DNS rebinding); the port must be this listener's
+    /// (none = 80). ★No Host = accepted★; two or more headers or non-text is cut; empty = every upgrade with a Host is cut. ★IPv6 is written with brackets★ (`[::1]`);
+    /// a name with a colon outside brackets matches nothing, so [`WsListener::bind`] returns `Err`.
     pub allowed_host_names: Vec<String>,
-    /// Deadline from TCP accept to the end of the WS upgrade (TRD 3 §5 12) — past it that TCP is closed. ★The accepted peer's auth deadline is measured
-    /// from where this one ends ([`Accepted::upgraded_at`])★ — the two add up.
+    /// Deadline from TCP accept to the end of the WS upgrade (TRD 3 §5 12); past it the TCP is closed. ★The auth deadline starts where this ends
+    /// ([`Accepted::upgraded_at`]) — they add up★.
     pub upgrade_timeout: Duration,
-    /// Number of upgrade permits (TRD 3 §5 14) — taken at TCP accept, released when the registered peer enters the operating phase (or [`Accepted`] is
-    /// dropped). ★The ready queue is counted by these permits too★ — its cap is this value, not counted separately. All used: the new TCP is closed
-    /// right after accept. 0 = accept nothing.
+    /// Upgrade permits (TRD 3 §5 14): taken at TCP accept, released when the registered peer enters the operating phase (or [`Accepted`] is dropped). ★The ready queue
+    /// counts against them too★ (its cap is this value). All used: the new TCP is closed after accept. 0 = accept nothing.
     pub max_pending_upgrades: usize,
-    /// Byte cap of one message and one frame (TRD 3 §5 15) — both the accepted link's receiving cap and the boundary at which an outgoing frame is
-    /// returned as an error (file header 「Link properties」). Give the same value to the dialer's [`WsDialer::new`].
+    /// Byte cap of one message and one frame (TRD 3 §5 15): the accepted link's receiving cap and the boundary where an outgoing frame becomes an error. Use the dialer's
+    /// [`WsDialer::new`] value.
     pub max_message_bytes: usize,
-    /// Size of the refusal report queue (TRD 3 §5 18) — when full, new reports are dropped and [`AcceptRefusals::dropped`] rises. 0 counts as 1.
+    /// Refusal report queue size (TRD 3 §5 18); full = new reports dropped ([`AcceptRefusals::dropped`]). 0 counts as 1.
     pub refusal_queue: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RefusalKind {
-    /// Upgrade permits all used — TCP closed right after accept (no HTTP response).
+    /// The upgrade permits are all used — TCP was closed right after accept (no HTTP response).
     SlotsFull,
+    /// The upgrade did not finish within [`AcceptPolicy::upgrade_timeout`].
     UpgradeTimeout,
+    /// The Origin header is outside [`AcceptPolicy::allowed_origins`] — 403.
     OriginRejected,
+    /// The Host header is outside [`AcceptPolicy::allowed_host_names`] · the bound port — 403.
     HostRejected,
-    /// The upgrade failed outside the branches above — not a WS request · peer cut during the upgrade, etc.
+    /// The upgrade failed for a reason outside the branches above — not a WS request · the peer cut during the upgrade, etc.
     UpgradeFailed,
     /// The TCP accept itself failed — there may be no peer, so the remote address is empty.
     AcceptError,
 }
 
-/// The report of one peer that was cut (TRD 3 §5 18). ★The text fields are already masked with [`crate::mask_reason`]★ — printable as is. ★The cut
-/// happens before the auth frame is read, so no token can ride★.
+/// One cut peer's report (TRD 3 §5 18). ★Text fields are already masked ([`crate::mask_reason`])★; the cut precedes the auth frame, so no token can ride.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AcceptRefusal {
     pub kind: RefusalKind,
-    /// Peer end address (`ip:port`); `None` for [`RefusalKind::AcceptError`].
+    /// The peer end address (`ip:port`). `None` for [`RefusalKind::AcceptError`].
     pub remote: Option<String>,
+    /// The Origin header of the upgrade request — filled only for Origin and Host refusals that read up to the headers.
     pub origin: Option<String>,
+    /// The Host header of the upgrade request — same as above.
     pub host: Option<String>,
 }
 
-/// The refusal report receiver returned with the listener by [`WsListener::bind`] — a reporting place outside the [`Listener`] trait (whose `Err` means
-/// only that it ended). ★You may drop it★ — later reports are discarded and the listener keeps running. ★Unread, the queue fills and new reports are
-/// lost first★ ([`AcceptRefusals::dropped`]). Dropping the listener hands out the remaining reports and then ends with `None`.
+/// The refusal-report receiver returned by [`WsListener::bind`] (outside the [`Listener`] trait, whose `Err` means only "ended"). ★You may drop it★ (the listener keeps running);
+/// ★unread, the queue fills and new reports are lost first★ ([`AcceptRefusals::dropped`]). Dropping the listener drains the rest, then `None`.
 pub struct AcceptRefusals {
     rx: mpsc::Receiver<AcceptRefusal>,
     dropped: Arc<AtomicU64>,
@@ -314,16 +251,18 @@ impl AcceptRefusals {
         self.rx.recv().await
     }
 
+    /// One report currently queued — `None` if there is none (it does not wait).
     pub fn try_recv(&mut self) -> Option<AcceptRefusal> {
         self.rx.try_recv().ok()
     }
 
-    /// Cumulative reports dropped because the queue was full — never decreases.
+    /// The cumulative number of reports dropped because the queue was full — it never decreases.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Acquire)
     }
 }
 
+/// Puts a refusal report into the queue — if full, drops it and counts.
 struct Reporter {
     tx: mpsc::Sender<AcceptRefusal>,
     dropped: Arc<AtomicU64>,
@@ -343,16 +282,15 @@ impl Reporter {
             origin: origin.map(mask_reason),
             host: host.map(mask_reason),
         };
-        // ★Does not wait★ — an accept loop or upgrade task waiting on the consumer would stall accepting during a refusal flood.
+        // ★Does not wait★ — waiting on the consumer would stall accepting during a refusal flood.
         if self.tx.try_send(refusal).is_err() {
             self.dropped.fetch_add(1, Ordering::AcqRel);
         }
     }
 }
 
-/// A [`Listener`] that accepts real WS links. TCP accept runs on one listener task and each upgrade on a spawned task; a finished upgrade waits in the
-/// ready queue for [`Listener::accept`] (still holding an upgrade permit). ★Dropping it reaps those tasks and closes the ready-queue links★ — the dialer
-/// sees a link loss.
+/// A [`Listener`] for real WS links: one TCP accept task, one task per upgrade, finished upgrades wait in a ready queue (holding their permit) for [`Listener::accept`].
+/// ★Dropping it reaps those tasks and closes the queued links★ (the dialer sees a link loss).
 pub struct WsListener {
     local: SocketAddr,
     ready: mpsc::Receiver<Accepted>,
@@ -361,16 +299,10 @@ pub struct WsListener {
 }
 
 impl WsListener {
-    /// Opens on `addr` and starts accepting — returns the listener and its refusal receiver. Port 0 lets the kernel pick ([`WsListener::local_addr`]).
-    ///
-    /// ★Opens on loopback only★ (TRD 3 §5 1 · C8) — a non-loopback bound address is `Err` before listen; plain `ws://` is not opened outside (remote
-    /// goes with TLS — TRD 3 §4). Also `Err` if [`AcceptPolicy::allowed_host_names`] has a name with a colon outside the brackets (it would quietly
-    /// accept nothing).
-    ///
-    /// ★`clock` must be the same clock as the registry the accepted link is put on★ — it stamps [`Accepted::upgraded_at`], from which the registry
-    /// measures the auth deadline ([`crate::Registry::attach_with_policy`] asserts the match in debug builds); the upgrade deadline uses it too.
-    ///
-    /// Call inside a tokio runtime — outside one it panics (it spawns the accept task).
+    /// Opens on `addr` and starts accepting; returns the listener and its refusal receiver. Port 0 = kernel-picked ([`WsListener::local_addr`]).
+    /// ★Loopback only★ (TRD 3 §5 1 · C8): a non-loopback bound address is `Err` before listen; plain `ws://` is never opened outside (TRD 3 §4). Also `Err` for an
+    /// [`AcceptPolicy::allowed_host_names`] name with a colon outside brackets. ★`clock` must be the registry's clock★ — it stamps [`Accepted::upgraded_at`], where the
+    /// auth deadline starts ([`crate::Registry::attach_with_policy`] asserts it in debug) — and drives the upgrade deadline. Call inside a tokio runtime (it panics outside).
     pub fn bind(
         addr: SocketAddr,
         policy: AcceptPolicy,
@@ -389,14 +321,14 @@ impl WsListener {
         let local = socket
             .local_addr()
             .map_err(|e| LinkError::new(format!("ws local_addr: {e}")))?;
-        // ★Check before listen★ — refused after listening, outside connections would already be in the kernel accept queue.
+        // ★Check before listen★ — refused after listening, outside connections would already be queued.
         ensure_loopback(local)?;
         let tcp = socket
             .listen(LISTEN_BACKLOG)
             .map_err(|e| LinkError::new(format!("ws listen {local}: {e}")))?;
 
         let permits = PermitPool::new(policy.max_pending_upgrades);
-        // ★The ready queue never fills★ — each queued link holds a permit, so queue length ≤ permits held ≤ this capacity.
+        // ★The ready queue never fills★ — queued length ≤ permits held ≤ this capacity.
         let (ready_tx, ready) = mpsc::channel(policy.max_pending_upgrades.max(1));
         let (refusal_tx, refusal_rx) = mpsc::channel(policy.refusal_queue.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
@@ -433,12 +365,12 @@ impl WsListener {
         Address::new(format!("ws://{}/", self.local))
     }
 
-    /// Upgrade permits currently held — links mid-upgrade, in the ready queue, and taken but not yet released. ★The permit pool itself is not handed
-    /// out★ — it could be used to hold permits and block this listener's accepting.
+    /// Upgrade permits currently held (mid-upgrade, ready queue, taken-not-released). ★The pool itself is not handed out★ — it could be used to block accepting.
     pub fn permits_in_use(&self) -> usize {
         self.permits.in_use()
     }
 
+    /// The number of upgrade permits — [`AcceptPolicy::max_pending_upgrades`].
     pub fn permit_limit(&self) -> usize {
         self.permits.limit()
     }
@@ -461,10 +393,12 @@ impl Listener for WsListener {
 
 impl Drop for WsListener {
     fn drop(&mut self) {
+        // The accept task holds the set of upgrade tasks, so they are reaped together (`drive`).
         self.driver.abort();
     }
 }
 
+/// Whether the bound address is loopback — if not, refuse (TRD 3 §5 1).
 fn ensure_loopback(local: SocketAddr) -> Result<(), LinkError> {
     if local.ip().is_loopback() {
         Ok(())
@@ -475,6 +409,7 @@ fn ensure_loopback(local: SocketAddr) -> Result<(), LinkError> {
     }
 }
 
+/// Whether any accepted Host name has a colon outside the brackets — if so, refuse ([`AcceptPolicy::allowed_host_names`]).
 fn ensure_host_names(names: &[String]) -> Result<(), LinkError> {
     let bracketed = |name: &str| name.starts_with('[') && name.ends_with(']');
     match names
@@ -496,8 +431,7 @@ struct Shared {
     reporter: Reporter,
 }
 
-/// The TCP accept loop. ★It does not wait for the upgrade★ — one task per connection so a slow peer does not block the next accept (TRD 3 §5 12);
-/// `upgrades` holds the spawned tasks, so reaping this task reaps them.
+/// The TCP accept loop. ★Never waits for the upgrade★ (one task per connection — TRD 3 §5 12); `upgrades` holds the tasks, so reaping this reaps them.
 async fn drive(tcp: TcpListener, shared: Arc<Shared>, ready: mpsc::Sender<Accepted>) {
     let mut upgrades = JoinSet::new();
     loop {
@@ -505,8 +439,7 @@ async fn drive(tcp: TcpListener, shared: Arc<Shared>, ready: mpsc::Sender<Accept
             accepted = tcp.accept() => match accepted {
                 Ok((stream, remote)) => match shared.permits.try_take() {
                     Some(permit) => {
-                        // ★Stamp the deadline's reference before spawning★ — stamped inside the task, the delay until it first runs would stay outside the
-                        //   deadline (TRD 3 §5 12 — from TCP accept).
+                        // ★Stamp the deadline reference before spawning★ — inside the task, spawn delay would escape the deadline (TRD 3 §5 12).
                         let accepted_at = shared.clock.now();
                         upgrades.spawn(upgrade(
                             stream,
@@ -518,7 +451,7 @@ async fn drive(tcp: TcpListener, shared: Arc<Shared>, ready: mpsc::Sender<Accept
                         ));
                     }
                     None => {
-                        // The overflow closes **the new one** (TRD 3 §5 14); a peer already holding a permit is untouched.
+                        // Overflow closes **the new one** (TRD 3 §5 14).
                         drop(stream);
                         shared
                             .reporter
@@ -532,11 +465,13 @@ async fn drive(tcp: TcpListener, shared: Arc<Shared>, ready: mpsc::Sender<Accept
                     }
                 }
             },
+            // Reaps finished upgrade tasks — if not reaped, the results pile up in the set.
             Some(_) = upgrades.join_next(), if !upgrades.is_empty() => {}
         }
     }
 }
 
+/// The decision on the upgrade request headers. If it cuts, it carries that branch and the header value seen (before masking).
 #[derive(Debug, PartialEq, Eq)]
 struct Screened {
     kind: RefusalKind,
@@ -544,12 +479,9 @@ struct Screened {
     host: Option<String>,
 }
 
-/// The upgrade of one link — finished before the deadline (`accepted_at` + [`AcceptPolicy::upgrade_timeout`]) it goes into the ready queue, otherwise it
-/// is closed and reported. `accepted_at` = TCP accept time (`shared.clock`); `permit` goes out with the accepted link or is dropped here.
-///
-/// ★The deadline is checked in three places★ — before starting (the spawned task ran late), while waiting, and after finishing. The after-finish check
-/// is separate because when finishing and the deadline stand in one poll, [`with_deadline`] polls the upgrade side first and it wins; it counts as past
-/// the deadline from **that very moment**.
+/// One link's upgrade: finished before `accepted_at` + [`AcceptPolicy::upgrade_timeout`] it enters the ready queue, otherwise it is closed and reported; `permit`
+/// goes out with the link or is dropped here. ★The deadline is checked three times★ — before starting, while waiting, and after finishing (a finish and the deadline in
+/// one poll resolve in the upgrade's favour in [`with_deadline`], so that moment counts as past the deadline).
 async fn upgrade<S: WsStream>(
     stream: S,
     remote: SocketAddr,
@@ -562,8 +494,7 @@ async fn upgrade<S: WsStream>(
     let report = |kind, origin: Option<&str>, host: Option<&str>| {
         shared.reporter.report(kind, Some(remote), origin, host)
     };
-    // Time left until the deadline — `None` = reached or passed. ★Subtract elapsed time rather than adding the deadline to the time★ — `Instant + Duration`
-    //   panics on overflow and the deadline field has no cap.
+    // Time left until the deadline (`None` = reached). ★Subtract elapsed time, do not add the deadline to now★ — `Instant + Duration` panics on overflow.
     let remaining_at = |now: Instant| {
         policy
             .upgrade_timeout
@@ -599,8 +530,7 @@ async fn upgrade<S: WsStream>(
             return;
         }
         Err(Elapsed) => {
-            // ★If cut by the header decision mid-403, report that branch★ — reported as the deadline, the cut reason and header seen disappear (the peer did
-            //   not read the 403 and the write stalled).
+            // ★A cut by the header decision mid-403 reports that branch★ — as the deadline it would lose the reason and header seen.
             match verdict {
                 Some(Err(screened)) => report(
                     screened.kind,
@@ -612,10 +542,10 @@ async fn upgrade<S: WsStream>(
             return;
         }
     };
-    // ★Stamp the upgrade-finish moment with the registry's clock★ — the auth deadline starts here (TRD 3 §5 3).
+    // ★Stamp the finish with the registry's clock★ — the auth deadline starts here (TRD 3 §5 3).
     let upgraded_at = shared.clock.now();
     if remaining_at(upgraded_at).is_none() {
-        // Finished past the deadline — even a finished upgrade is not accepted (this function's rustdoc). Link and permit are dropped here.
+        // Past the deadline — even a finished upgrade is not accepted; link and permit drop here.
         report(RefusalKind::UpgradeTimeout, None, None);
         return;
     }
@@ -632,14 +562,14 @@ async fn upgrade<S: WsStream>(
     let accepted = Accepted::new(tx, rx, info, upgraded_at, permit);
     match ready.try_send(accepted) {
         Ok(()) => {}
-        // Unreachable (the capacity comment in `WsListener::bind`) — if reached, treat as permits full.
+        // Unreachable (capacity comment in `WsListener::bind`); treat as permits full.
         Err(mpsc::error::TrySendError::Full(_)) => report(RefusalKind::SlotsFull, None, None),
+        // The listener was dropped — the link is closed here.
         Err(mpsc::error::TrySendError::Closed(_)) => {}
     }
 }
 
-/// The tungstenite header callback — checks upgrade headers against the policy and leaves the decision in `verdict` (the Origin to accept, or the cutting
-/// branch). A cut returns 403.
+/// The tungstenite header callback — checks upgrade headers against the policy and leaves the decision in `verdict`; a cut returns 403.
 struct Gate<'a> {
     policy: &'a AcceptPolicy,
     local_port: u16,
@@ -659,13 +589,14 @@ impl Callback for Gate<'_> {
     }
 }
 
-/// The 403 response. ★The body does not say which check caught it★ — no reason to tell the peer the policy; the refusal report carries the branch.
+/// The 403 response. ★The body does not name the failing check★ — the refusal report carries the branch.
 fn forbidden() -> ErrorResponse {
     let mut response = ErrorResponse::new(None);
     *response.status_mut() = StatusCode::FORBIDDEN;
     response
 }
 
+/// Checks the upgrade request headers against the accept policy — if it passes, returns the Origin to accept (`None` if absent). Origin is checked first.
 fn screen(
     policy: &AcceptPolicy,
     headers: &HeaderMap,
@@ -696,7 +627,7 @@ fn screen(
 enum OneHeader {
     Absent,
     One(String),
-    /// Two or more, or non-text bytes — cut without deciding; the real value (lossy conversion) is for reporting.
+    /// Two or more, or non-text — cut undecided; the lossy value is for reporting.
     Malformed(String),
 }
 
@@ -723,8 +654,7 @@ fn single(headers: &HeaderMap, name: header::HeaderName) -> OneHeader {
     }
 }
 
-/// Whether the Host header `name[:port]` matches the accepted names · this listener's port. In `[::1]:port` form only the colon after the bracket is
-/// the port; digits only (signs · blanks rejected); 80 if absent.
+/// Whether the Host value `name[:port]` matches the accepted names and this listener's port (digits only; 80 if absent; `[::1]:port` form).
 fn host_matches(value: &str, names: &[String], local_port: u16) -> bool {
     let (name, port) = match value.rsplit_once(':') {
         Some((name, port)) if !port.contains(']') => (name, Some(port)),
@@ -744,13 +674,9 @@ fn host_matches(value: &str, names: &[String], local_port: u16) -> bool {
             .any(|allowed| allowed.eq_ignore_ascii_case(name))
 }
 
-/// Splits an open stream into the two ends of a link. `max_payload` = outgoing frame cap (file header 「Link properties」).
-///
-/// ★Crate-internal only★ (TRD 3 §3-5 · §5 17) — opened outside, anyone could build a link from their own accept and skip every [`WsListener`] check.
-///
-/// ★The two ends share the stream through a `BiLock`★ so different tasks may hold them (the supervisor hands the reading side to a dedicated task);
-/// a side returning `Pending` releases the lock. ★The socket closes only when **both** ends are dropped★ (the `BiLock` releases the inner stream with
-/// the last end) — the caller must guarantee that, and the seam carries that duty ([`LinkTx`] rustdoc).
+/// Splits an open stream into the two ends of a link; `max_payload` = outgoing frame cap. ★Crate-internal only★ (TRD 3 §3-5 · §5 17) — opened, anyone could skip every
+/// [`WsListener`] check. The ends share the stream through a `BiLock`; ★the socket closes only when **both** ends are dropped★ — the caller must guarantee that
+/// ([`LinkTx`] rustdoc).
 pub(crate) fn split_link<S: WsStream>(
     ws: WebSocketStream<S>,
     max_payload: usize,
@@ -769,20 +695,16 @@ pub(crate) fn split_link<S: WsStream>(
 
 struct WsTx<S: WsStream> {
     sink: SplitSink<WebSocketStream<S>, Message>,
-    /// Cap of the outgoing frame payload — the same value as the size cap received by the side that opened this link ([`split_link`]).
+    /// Outgoing frame payload cap — the size cap received by the side that opened this link ([`split_link`]).
     max_payload: usize,
 }
 
 impl<S: WsStream> LinkTx for WsTx<S> {
     fn send(&mut self, frame: Frame) -> BoxFuture<'_, Result<(), LinkError>> {
         Box::pin(async move {
-            // ★A frame over the cap fails **as a value**★ — otherwise only the receiver enforces the cap (file header 「tungstenite measures only the size of
-            //   what comes in」), the link is cut and **an innocent peer burns its own reconnect budget**. ★Do not go back to panicking★ — the
-            //   `debug_assert` version fired inside the supervisor task, nobody holds its `JoinHandle` (`Unstarted::start`), so **the panic was unobservable**:
-            //   the state watch's sender dropped, the emitted state froze at `Live`, no disconnect or give-up event came, and the reading task fell away holding
-            //   half the link — in a production process with a panic hook the whole process ends instead (ADR-0292). As a value the supervisor turns it into
-            //   `LinkLost` (`Supervisor::write`), leaving a disconnect event and reconnect. ★But **the message does not remain**★ — that conversion drops the
-            //   `LinkError` message and `Disconnected` has no message field (file header).
+            // ★A frame over the cap fails **as a value**★ — else only the receiver enforces it and an innocent peer burns its reconnect budget. ★Do not go back to panicking★
+            //   (ADR-0292): the old `debug_assert` fired in the supervisor task where nobody holds the `JoinHandle` (`Unstarted::start`), so the state froze at `Live`
+            //   with no event. As a value the supervisor turns it into `LinkLost` (`Supervisor::write`); the message is dropped (file header).
             let len = payload_len(&frame);
             if len > self.max_payload {
                 return Err(LinkError::new(format!(
@@ -813,10 +735,10 @@ impl<S: WsStream> LinkTx for WsTx<S> {
                     code: WsCloseCode::from(close.code.0),
                     reason: clamp_close_reason(&close.reason, room).into(),
                 })),
-                // ★If the cap cannot even carry the code, send an empty close★ — read as a close with no code; carrying the code would exceed the cap and cut the peer's read.
+                // ★A cap that cannot carry the code sends an empty close★ — carrying it would exceed the cap and cut the peer's read.
                 None => Message::Close(None),
             };
-            // Even on failure there is nowhere to report ([`LinkTx::close`] contract); an unsent close frame leaves the peer reading it as cut without a word (the limit in `frame.rs`).
+            // No place to report a failure ([`LinkTx::close`] contract); an unsent close reads as cut without a word (`frame.rs`).
             let _ = self.sink.send(message).await;
             let _ = self.sink.close().await;
         })
@@ -825,17 +747,15 @@ impl<S: WsStream> LinkTx for WsTx<S> {
 
 struct WsRx<S: WsStream> {
     stream: SplitStream<WebSocketStream<S>>,
-    /// Reading has already failed on this link. ★Keeps [`LinkRead::Closed`] meaning 「the peer said it closed」★ (see [`WsRx::recv`]).
+    /// Reading already failed. ★Keeps [`LinkRead::Closed`] meaning 「the peer said it closed」★ (see [`WsRx::recv`]).
     failed: bool,
 }
 
 impl<S: WsStream> LinkRx for WsRx<S> {
     fn recv(&mut self) -> BoxFuture<'_, Result<LinkRead, LinkError>> {
         Box::pin(async move {
-            // ★A read that failed once keeps failing★ — only then does the [`LinkRead::Closed`] contract (「the peer **said** it closed」) hold. Otherwise: the
-            //   first read of a socket dropped without a word is `Protocol(ResetWithoutClosingHandshake)`, but tungstenite then sets its own `ended` marker and
-            //   **the next read gives `Ready(None)`** (`lib.rs:303` in 0.26.2); passed along, a close nobody spoke is reported and a consumer branching on it
-            //   swaps 「rejected / left politely」 for 「cut off」.
+            // ★A read that failed once keeps failing★ — else the [`LinkRead::Closed`] contract breaks: a socket dropped without a word errors once
+            //   (`ResetWithoutClosingHandshake`), then tungstenite's `ended` marker makes the next read `Ready(None)` (0.26.2 `lib.rs:303`), a close nobody spoke.
             if self.failed {
                 return Err(LinkError::new("ws read: link already failed"));
             }
@@ -846,10 +766,8 @@ impl<S: WsStream> LinkRx for WsRx<S> {
                         self.failed = true;
                         return Err(LinkError::new(format!("ws read: {e}")));
                     }
-                    // ★A dried-up stream is **not** 「cut without a word」★ — it arrives only after a close frame was already read (external fact:
-                    //   tokio-tungstenite 0.26.2 turns only `ConnectionClosed`/`AlreadyClosed` into `Ready(None)` at `lib.rs:303`, raised only in
-                    //   `ClosedByPeer`/`CloseAcknowledged` at `protocol/mod.rs:706`). A peer that vanished without a word is
-                    //   `Protocol(ResetWithoutClosingHandshake)` and comes through the `Err` branch — the [`LinkRead::Closed`] rustdoc carries that contract.
+                    // ★A dried-up stream is **not** 「cut without a word」★ — `Ready(None)` arises only after a close frame was read (tokio-tungstenite 0.26.2
+                    //   `lib.rs:303`, `protocol/mod.rs:706`); a vanished peer comes through the `Err` branch.
                     None => return Ok(LinkRead::Closed(None)),
                 };
                 if let Some(read) = from_message(msg) {
@@ -860,6 +778,7 @@ impl<S: WsStream> LinkRx for WsRx<S> {
     }
 }
 
+/// Translates an incoming `Message` into the link vocabulary. `None` = this branch is not raised and the next one is read.
 fn from_message(msg: Message) -> Option<LinkRead> {
     match msg {
         Message::Text(text) => Some(LinkRead::Frame(Frame::Text(text.as_str().to_owned()))),
@@ -870,6 +789,7 @@ fn from_message(msg: Message) -> Option<LinkRead> {
             frame.reason.as_str().to_owned(),
         )))),
         Message::Close(None) => Some(LinkRead::Closed(None)),
+        // It does not come up from real-socket receiving (file header).
         Message::Frame(_) => None,
     }
 }
@@ -878,7 +798,7 @@ fn to_message(frame: Frame) -> Message {
     match frame {
         Frame::Text(text) => Message::Text(text.into()),
         Frame::Binary(bytes) => Message::Binary(bytes.into()),
-        // ★Same as [`LinkTx::ping`]★ — keepalive is transport-layer vocabulary, so the payload is not redesigned (reason in the [`LinkTx::ping`] rustdoc).
+        // ★Same as [`LinkTx::ping`]★ — keepalive is transport vocabulary, the payload is not redesigned (reason in that rustdoc).
         Frame::Keepalive => Message::Ping(Bytes::new()),
     }
 }
@@ -908,7 +828,7 @@ mod tests {
             to_message(Frame::Binary(vec![1, 2, 3])),
             Message::Binary(Bytes::from_static(&[1, 2, 3]))
         );
-        // ★Keepalive goes out as a Ping with an empty payload★ — reason in the [`to_message`] comment.
+        // ★Keepalive goes out as a Ping and the payload is empty★ — the reason is in the [`to_message`] comment.
         assert_eq!(to_message(Frame::Keepalive), Message::Ping(Bytes::new()));
     }
 
@@ -922,7 +842,7 @@ mod tests {
 
     #[test]
     fn both_keepalive_directions_arrive_as_one_frame() {
-        // ★Pong and Ping both come up as the same thing★ — only arrival is the signal (`frame.rs`).
+        // ★Pong and Ping both come up as the same thing★ — only the fact of arrival is the signal (that contract in `frame.rs`).
         for msg in [
             Message::Ping(Bytes::from_static(&[9])),
             Message::Pong(Bytes::new()),
@@ -977,8 +897,7 @@ mod tests {
 
     #[test]
     fn a_four_byte_character_is_cut_below_the_limit_not_at_it() {
-        // ★4-byte characters are why this test exists★ — with 3-byte characters alone 123 is a multiple of 3, so the mutant 「delete the boundary alignment and
-        //   cut at 123」 passes (measured 2026-09-07: all four old inputs green). With 4-byte characters 123 is not a boundary and that mutant dies of a slice panic.
+        // ★4-byte characters are why this test exists★ — with 3-byte ones 123 is a multiple of 3 and a 「cut at 123」 mutant passes; with 4-byte it dies on a slice panic.
         let emoji = "\u{1F600}".repeat(40);
         assert_eq!(emoji.len(), 160);
         let cut = clamp_close_reason(&emoji, MAX_CLOSE_REASON_BYTES);
@@ -989,8 +908,7 @@ mod tests {
 
     // ── The bytes the close path actually emits ──
     //
-    // ★The pair of the tests above that call [`clamp_close_reason`] directly★ — those never measure **whether [`WsTx::close`] calls that function**, so a mutant
-    //   deleting the truncating line passes green (measured 2026-09-07).
+    // ★Pairs with the tests above that call [`clamp_close_reason`] directly★ — they never prove [`WsTx::close`] calls it (a mutant deleting the truncation passes).
     struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
     impl tokio::io::AsyncWrite for Recorder {
@@ -1019,7 +937,8 @@ mod tests {
     }
 
     impl tokio::io::AsyncRead for Recorder {
-        /// ★Returns EOF★ — `Pending` would hang the close cleanup there, and libtest has no per-test deadline.
+        /// ★It returns EOF★ — if it returned `Pending`, the close cleanup would hang right there, and libtest has no per-test
+        /// deadline, so that regression would stop the whole suite.
         fn poll_read(
             self: std::pin::Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
@@ -1032,7 +951,7 @@ mod tests {
     #[tokio::test]
     async fn the_close_path_puts_a_legal_control_frame_on_the_wire() {
         let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        // Plays the server role, so outgoing frames are **not masked** — the bytes are read as is.
+        // It plays the server role, so outgoing frames are **not masked** — so the bytes are read as is.
         let ws = WebSocketStream::from_raw_socket(
             Recorder(written.clone()),
             tokio_tungstenite::tungstenite::protocol::Role::Server,
@@ -1049,19 +968,20 @@ mod tests {
 
         let bytes = written.lock().unwrap().clone();
         assert_eq!(bytes[0], 0x88, "not a close frame: {:02x?}", &bytes[..2]);
-        // ★The second byte is the payload length★ — 126 means extended length, itself over 125 (external fact: RFC 6455 §5.5 forbids extended length on
-        //   control frames and tungstenite cuts it with `ControlFrameTooBig`).
+        // ★The second byte is the payload length★ — 126 means extended length, itself over 125 (RFC 6455 §5.5 forbids it on control frames).
         assert!(
             bytes[1] <= 125,
             "the control frame payload is {} bytes — the receiver cuts the link",
             bytes[1]
         );
+        // The code goes out as is even when truncated — which is why the branching material is the code, not the message.
         assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 4001);
     }
 
     #[test]
     fn a_cut_reason_fits_a_control_frame() {
-        // Measured on a real frame: code 2 bytes + message must not exceed 125, or the receiver cuts with `ControlFrameTooBig` ([`MAX_CLOSE_REASON_BYTES`]).
+        // Measures on a real frame that code 2 bytes + message does not exceed 125 — if it does, the receiving side
+        //   cuts with `ControlFrameTooBig` ([`MAX_CLOSE_REASON_BYTES`]).
         // hangul-ok-begin
         for reason in ["", "짧다", &"긴".repeat(200), &"a".repeat(200)] {
             let frame = WsFrame::close(Some(CloseFrame {
@@ -1073,9 +993,10 @@ mod tests {
         // hangul-ok-end
     }
 
-    // ★A size cap below 125 also applies to the close frame★ — the receiver's `max_frame_size` covers control frames ([`close_reason_room`]); truncating only to 123 would cut the peer's read.
+    // ★A size cap below 125 applies to the close frame too★ ([`close_reason_room`]).
     #[tokio::test]
     async fn the_close_frame_stays_within_a_small_configured_limit() {
+        // (size cap, payload that must go out) — under 2 the code cannot be carried either, so it is an empty close.
         for (limit, payload) in [(10usize, 10usize), (2, 2), (1, 0), (0, 0)] {
             let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let ws = WebSocketStream::from_raw_socket(
@@ -1111,8 +1032,7 @@ mod tests {
 
     // ── Outgoing size cap ──
     //
-    // ★Measures that the cap is the value given to [`split_link`]★ — as a fixed constant again, the consumer's value would apply only to the receiver and the
-    //   outgoing side would send frames that make the peer cut.
+    // ★Proves the cap is the value given to [`split_link`]★ — a fixed constant would limit only the receiver.
     #[tokio::test]
     async fn a_frame_over_the_given_limit_fails_as_a_value_and_one_at_it_goes_out() {
         let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1137,6 +1057,7 @@ mod tests {
 
     #[test]
     fn the_receive_limit_covers_a_message_and_a_frame_alike() {
+        // ★Both must be covered★ — if only the frame is covered, a fragmented message grows up to tungstenite's default 64 MiB.
         let config = ws_config(1234);
         assert_eq!(config.max_message_size, Some(1234));
         assert_eq!(config.max_frame_size, Some(1234));
@@ -1148,6 +1069,7 @@ mod tests {
         for ok in ["127.0.0.1:0", "127.9.9.9:4000", "[::1]:0"] {
             assert!(ensure_loopback(ok.parse().unwrap()).is_ok(), "{ok}");
         }
+        // ★`::ffff:127.0.0.1` is also refused★ — the standard decision (`Ipv6Addr::is_loopback`) sees only `::1` as loopback.
         for refused in [
             "0.0.0.0:0",
             "192.168.0.10:0",
@@ -1169,6 +1091,7 @@ mod tests {
             let err = ensure_host_names(&names(&["localhost", bad])).expect_err(bad);
             assert!(err.message.contains(bad), "{err}");
         }
+        // ★A name written with its brackets matches the real header★ — the form the check above accepts must be the form the header check accepts.
         assert!(host_matches("[::1]:4000", &names(&["[::1]"]), 4000));
         assert!(!host_matches("[::1]:4000", &names(&["::1"]), 4000));
     }
@@ -1183,6 +1106,7 @@ mod tests {
         ] {
             assert!(!pauses_after_accept_error(kind), "rested on {kind:?}");
         }
+        // Running out of file handles (`EMFILE`) has no named branch and arrives as a different branch per platform — measure with the named rest.
         for kind in [
             io::ErrorKind::Other,
             io::ErrorKind::OutOfMemory,
@@ -1195,10 +1119,10 @@ mod tests {
 
     // ── Upgrade deadline (§5 12) ──
     //
-    // ★The deadline's reference is the TCP accept time★ — even if the spawned task runs late or finishing and the deadline stand in one poll, nothing is
-    //   accepted from the deadline on. Measured with a hand-advanced clock and a memory stream, the test choosing the poll moment.
+    // ★The reference is the TCP accept time★ — nothing is accepted from the deadline on, even if the task ran late or finish and deadline share a poll.
     const UPGRADE_TIMEOUT: Duration = Duration::from_secs(10);
 
+    /// An upgrade request with no Host or Origin — passes the header check.
     const UPGRADE_REQUEST: &[u8] =
         b"GET / HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
         Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
@@ -1243,6 +1167,7 @@ mod tests {
     }
 
     impl Rig {
+        /// An upgrade that holds one permit and takes now as the TCP accept time — it is not spawned (the test chooses the poll moment).
         fn upgrade<S: WsStream>(&self, stream: S) -> impl std::future::Future<Output = ()> {
             upgrade(
                 stream,
@@ -1286,10 +1211,12 @@ mod tests {
         for late in [UPGRADE_TIMEOUT, UPGRADE_TIMEOUT + Duration::from_millis(1)] {
             let mut rig = rig();
             let (mut client, server) = tokio::io::duplex(64 * 1024);
+            // The request has already arrived — apart from the deadline, the upgrade finishes on the first poll.
             tokio::io::AsyncWriteExt::write_all(&mut client, UPGRADE_REQUEST)
                 .await
                 .unwrap();
             let task = rig.upgrade(server);
+            // The spawned task never ran before the deadline.
             rig.clock.advance(late);
             task.await;
             rig.assert_timed_out(&format!("first ran {late:?} after accept"));
@@ -1311,6 +1238,7 @@ mod tests {
             let (mut client, server) = tokio::io::duplex(64 * 1024);
             let mut task = Box::pin(rig.upgrade(server));
             assert!(!poll_once(&mut task).await, "ended without a request");
+            // The deadline and the request stand together — on the next poll the upgrade is polled before the deadline and finishes.
             rig.clock.advance(late);
             tokio::io::AsyncWriteExt::write_all(&mut client, UPGRADE_REQUEST)
                 .await
@@ -1320,7 +1248,7 @@ mod tests {
         }
     }
 
-    // Pair of the test above — finishing just before the deadline is accepted, and the auth deadline's reference is the finish time, not the accept time.
+    // Pair of the test above — finishing just before the deadline is accepted; the auth deadline starts at the finish.
     #[tokio::test]
     async fn an_upgrade_that_finishes_just_before_the_cutoff_is_accepted_stamped_at_completion() {
         let mut rig = rig();
@@ -1343,6 +1271,7 @@ mod tests {
         assert_eq!(rig.permits.in_use(), 1, "the accepted link holds a permit");
     }
 
+    /// A stream whose reads give the bytes it was handed and whose writes are never accepted — builds an upgrade that stalled while writing the response.
     struct WriteStalled(std::io::Cursor<Vec<u8>>);
 
     impl tokio::io::AsyncRead for WriteStalled {
@@ -1445,6 +1374,7 @@ mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
+        // Two or more · not text — cut even if the value is in the list.
         let twice = headers(&[
             ("origin", b"http://localhost:1420"),
             ("origin", b"http://localhost:1420"),
@@ -1462,6 +1392,7 @@ mod tests {
 
     #[test]
     fn an_empty_origin_list_refuses_every_upgrade_that_carries_one() {
+        // The release value of D21 ① — if there is no Origin, it is accepted as is.
         let p = policy(&[], &["127.0.0.1"]);
         assert_eq!(screen(&p, &headers(&[]), 9000), Ok(None));
         assert_eq!(
@@ -1516,6 +1447,7 @@ mod tests {
             kind(screen(&p, &twice, 9000)),
             Some(RefusalKind::HostRejected)
         );
+        // A missing port is 80 — accepted if the listener opened on 80.
         assert_eq!(
             screen(&p, &headers(&[("host", b"localhost")]), 80),
             Ok(None)
@@ -1552,6 +1484,7 @@ mod tests {
         };
         let mut refusals = AcceptRefusals { rx, dropped };
         let remote: SocketAddr = "127.0.0.1:5555".parse().unwrap();
+        // Text built by the peer is carried masked — line breaks · invisible characters are removed.
         reporter.report(
             RefusalKind::OriginRejected,
             Some(remote),

@@ -1,22 +1,13 @@
-//! Harness only — lives behind the feature flag `test-support` (ADR-0012, precedent = `engram-dashboard-command`).
+//! Harness only — behind feature `test-support` (ADR-0012). ★The real thing behind 「never **actually waits** for backoff, keepalive or write deadlines」★ (ADR-0177 decision 8):
+//! [`ManualClock`] stands in for time, [`MemoryNetwork`] and [`MemoryListener`] for the transport. ★Their far ends differ★ — [`MemoryNetwork`]'s is a script the test
+//! drives ([`MemoryEndpoint`]); [`MemoryListener`]'s is a real [`LinkTx`]/[`LinkRx`] pair ([`Accepted`]), so it joins two supervisors.
 //!
-//! ★This is the real thing behind 「never **actually waits** for backoff, keepalive or write deadlines」★
-//! (ADR-0177 decision 8): [`ManualClock`] stands in for time, [`MemoryNetwork`] and [`MemoryListener`] for the transport.
-//! ★Their far ends differ★ — the far end of [`MemoryNetwork`] is a script the test drives by hand ([`MemoryEndpoint`]),
-//! and the far end of [`MemoryListener`] is a real [`LinkTx`]/[`LinkRx`] pair ([`Accepted`]), so it joins two supervisors to each other.
+//! ★Only [`settle`] and [`settle_until`] need the current_thread runtime★ — they sync by cooperative yielding, so under `multi_thread` they would be silently flaky; both check the
+//! runtime kind and panic (helpers built on them, like `Near::arrived` in `registry.rs`, share the premise). The in-memory parts and [`PermitPool`] also work under multi_thread
+//! with real-time-bounded waits.
 //!
-//! ★**Only [`settle`] and [`settle_until`] are for the current_thread runtime**★ — they synchronize by cooperative yielding alone,
-//! so under `#[tokio::test(flavor = "multi_thread")]` they guarantee nothing. Breaking that gives a silently
-//! flaky test, so both **look at the runtime kind themselves and panic.** Test helpers built on them (like `Near::arrived`
-//! in the `registry.rs` tests, which polls once without waiting) share the same premise. The in-memory parts ([`MemoryNetwork`],
-//! [`memory_link`], [`ManualClock`] ...) and [`PermitPool`] also work under multi_thread — the ends are
-//! observed through waits bounded by a real-time deadline (the 3-0 U6b test in `registry.rs`).
-//!
-//! ★Production code must not reference this module★ — it is absent from the default build, so compilation breaks first.
-//!
-//! ★Consumers turn `test-support` on in `[dev-dependencies]` only★ — in `[dependencies]` this module would land in their
-//! release binary. CI checks it on the consumer: `.github/workflows/ci.yml` `shell gate 5` (shell; the daemon line comes
-//! with TRD 3 §6-3 U4).
+//! ★Production code must not reference this module★ (absent from the default build). ★Consumers enable `test-support` only in `[dev-dependencies]`★ — CI checks the consumer
+//! (`.github/workflows/ci.yml` `shell gate 5`; the daemon line comes with TRD 3 §6-3 U4).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -43,16 +34,13 @@ struct ManualState {
 }
 
 impl ManualState {
-    /// Drops the sleeper whose receiving side is gone.
-    ///
-    /// ★Without this `waiters` grows without bound★ — each turn of the supervisor's production loop creates a new `sleep`
-    /// and all but the winner are simply dropped (one piles up per traffic event).
+    /// Drops the sleeper whose receiving side is gone. ★Without this `waiters` grows without bound★ — each supervisor turn creates a `sleep` and drops all but the winner.
     fn prune(&mut self) {
         self.waiters.retain(|(_, tx)| !tx.is_closed());
     }
 }
 
-/// A clock pushed by hand. ★It does not flow on its own★ — only [`ManualClock::advance`] moves the time.
+/// A clock moved by hand — ★it never flows on its own★; only [`ManualClock::advance`] moves time.
 #[derive(Clone)]
 pub struct ManualClock {
     inner: Arc<Mutex<ManualState>>,
@@ -74,15 +62,11 @@ impl ManualClock {
         }
     }
 
-    /// A handle to plug in where an `Arc<dyn Clock>` goes. It sees the same time as the original.
     pub fn handle(&self) -> Arc<dyn Clock> {
         Arc::new(self.clone())
     }
 
-    /// Moves the time and wakes the sleepers whose deadline has passed **in deadline order**.
-    ///
-    /// ★The order is the contract★ — if one `advance` crosses two deadlines and wakes them in registration order, the result is an order
-    /// real time can never produce, and some test passes only under that order.
+    /// Moves time and wakes sleepers whose deadline passed **in deadline order** — ★the order is the contract★ (registration order across two deadlines would produce an order real time cannot, passing only under it).
     pub fn advance(&self, d: Duration) {
         let due = {
             let mut st = self.inner.lock().unwrap();
@@ -131,12 +115,10 @@ impl Clock for ManualClock {
     }
 }
 
-/// The number of yields [`settle`] runs in one call.
 const SETTLE_YIELDS: usize = 512;
 
 fn assert_single_threaded() {
-    // ★On a multithreaded runtime yielding is not synchronization★ — every assertion pattern in this module
-    //   silently turns flaky there. A loud failure beats a silent flake.
+    // ★Yielding is not synchronization on a multithreaded runtime★ — a loud failure beats a silent flake.
     let flavor = tokio::runtime::Handle::current().runtime_flavor();
     assert_eq!(
         flavor,
@@ -146,10 +128,8 @@ fn assert_single_threaded() {
     );
 }
 
-/// Lets the supervisor and reader tasks run as far as they can under the manual clock.
-///
-/// ★It does not sleep in real time★ — it only repeats `yield_now`. If you know the condition, [`settle_until`] is better:
-/// this function **does not notice that things are not finished**, and the failure surfaces at some unrelated assertion.
+/// Lets the supervisor and reader tasks run as far as they can under the manual clock. ★No real sleep — it only repeats `yield_now`★ and does not notice unfinished work;
+/// prefer [`settle_until`] when the condition is known.
 pub async fn settle() {
     assert_single_threaded();
     for _ in 0..SETTLE_YIELDS {
@@ -157,8 +137,7 @@ pub async fn settle() {
     }
 }
 
-/// Yields until the condition holds. ★Past the limit it panics on the spot★ — the reason this function exists is to avoid
-/// disguising 「not finished yet」 as 「the assertion is wrong」.
+/// Yields until the condition holds; ★past the limit it panics on the spot★ so 「not finished」 is not disguised as 「the assertion is wrong」.
 pub async fn settle_until(what: &str, mut done: impl FnMut() -> bool) {
     assert_single_threaded();
     for _ in 0..SETTLE_YIELDS {
@@ -172,7 +151,6 @@ pub async fn settle_until(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
-// ── Transport ──────────────────────────────────────────────────────────────────────
 
 /// What the client sent down the link. Besides frames, **keepalive and close** are also observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,7 +167,6 @@ enum ServerMsg {
     Fail(LinkError),
 }
 
-/// The other side of the link. The test pushes frames in through it and sees what the client sent.
 pub struct MemoryEndpoint {
     to_client: mpsc::UnboundedSender<ServerMsg>,
     /// The number pushed in but not yet read by the client — held together with `MemRx`.
@@ -200,12 +177,10 @@ pub struct MemoryEndpoint {
 }
 
 impl MemoryEndpoint {
-    /// One item the client sent. `None` if there is none.
     pub fn take(&self) -> Option<ClientMsg> {
         self.from_client.lock().unwrap().try_recv().ok()
     }
 
-    /// Everything the client sent.
     pub fn drain(&self) -> Vec<ClientMsg> {
         let mut rx = self.from_client.lock().unwrap();
         let mut out = Vec::new();
@@ -215,7 +190,6 @@ impl MemoryEndpoint {
         out
     }
 
-    /// Only the **frames** the client sent.
     pub fn frames(&self) -> Vec<Frame> {
         self.drain()
             .into_iter()
@@ -226,19 +200,16 @@ impl MemoryEndpoint {
             .collect()
     }
 
-    /// Sends the client one chunk.
     pub fn push(&self, frame: Frame) {
         self.send(ServerMsg::Frame(frame));
     }
 
-    /// The number of items (frames, closes, failures) pushed in but not yet read by the client. ★This is how to see whether
-    /// backpressure reached the link★ — if the supervisor does not drain the read-ahead queue or the bytes it holds exceed the read share, the read task does not read the link and
-    /// the items stay here.
+    /// Items (frames, closes, failures) pushed but not yet read by the client. ★Shows whether backpressure reached the link★ — an undrained read-ahead queue or bytes over the read share stop the read task.
     pub fn unread(&self) -> usize {
         self.unread.load(Ordering::Acquire)
     }
 
-    /// ★Count before sending★ — if counted after, the reader may take it out in between and the count wraps below 0.
+    /// ★Count before sending★ — counted after, the reader may take it in between and the count wraps below 0.
     fn send(&self, msg: ServerMsg) {
         self.unread.fetch_add(1, Ordering::AcqRel);
         if self.to_client.send(msg).is_err() {
@@ -246,56 +217,41 @@ impl MemoryEndpoint {
         }
     }
 
-    /// ★Says it closes **without** a code★ — this is `LinkRead::Closed(None)`, and by contract it too means 「the peer said it closed」. (Vanishing without a word is the [`MemoryEndpoint::fail`] side = `Err`.) The client learns of the close but
-    /// gets no reason.
-    ///
-    /// ★**Simply dropping this link** (dropping the endpoint) is not this branch★ — that is vanishing
-    /// without a word, so `MemRx` reports it as a read error (same shape as a real socket). To make 「said it closed」, call this or
-    /// [`MemoryEndpoint::reject`].
+    /// ★Closes **without** a code★ — `LinkRead::Closed(None)`, which by contract still means 「the peer said it closed」 (vanishing silently is [`MemoryEndpoint::fail`] = `Err`).
+    /// ★Dropping the endpoint is not this branch★ — it is a silent vanish, a read error as on a real socket; use this or [`MemoryEndpoint::reject`] for 「said it closed」.
     pub fn close(&self) {
         self.send(ServerMsg::Closed(None));
     }
 
-    /// ★Closes with a code and a message★ — the only path where the client can recognize 「connected but rejected」.
+    /// ★Closes with a code and message★ — the only way the client can see 「connected but rejected」.
     pub fn reject(&self, close: Close) {
         self.send(ServerMsg::Closed(Some(close)));
     }
 
-    /// Cuts with an error. ★It reaches the reading side only★ — the client's next read is an error (writes still go out).
+    /// Cuts with an error — ★reading side only★ (the client's next read errors; writes still go out).
     pub fn fail(&self, why: &str) {
         self.send(ServerMsg::Fail(LinkError::new(why)));
     }
 
-    /// ★Cuts the writing side only★ — the client's next `send` or `ping` ends in an error (after release, if a stall is set) and reads
-    /// stay alive. The counterpart of [`MemoryEndpoint::fail`] — dropping the endpoint cuts both sides together, so which one
-    /// is reported first depends on scheduling. What was already sent can still be taken out with [`MemoryEndpoint::take`].
+    /// ★Cuts the writing side only★ — the client's next `send`/`ping` errors (after release if stalled); reads stay alive. Counterpart of [`MemoryEndpoint::fail`]; dropping the endpoint
+    /// cuts both, so which is reported first would depend on scheduling. Already-sent data stays available to [`MemoryEndpoint::take`].
     pub fn fail_writes(&self) {
         self.from_client.lock().unwrap().close();
     }
 
-    /// When on, the client's writes stall — **all three**: `send`, `ping` and `close` (on a real socket those three
-    /// use one link). ★When off, it **really wakes up**★ — if it blocked with an unwakeable `pending()`, the stall would be decoration,
-    /// and a test that passed on it measured nothing.
-    ///
-    /// ★A test where the link is dropped while blocked must account for the pending close★ — if the close in `drop_link`
-    /// stalls here, the later steps (backoff wait, loss report) never start. There are two ways to release it: turn this
-    /// off, or push the clock `write_deadline` further so the deadline cuts that close.
-    ///
-    /// ★The 「when the peer does not read」 case, which needs a kernel buffer to measure, cannot be measured with this★ — that belongs to a real socket,
-    /// and what is measured here is **our side's deadline and queue logic**.
+    /// While on, the client's writes stall — **all three**: `send`, `ping`, `close` (one link on a real socket). ★Turning off **really wakes** them★ — an unwakeable `pending()` would make
+    /// the stall decoration. ★A test dropping the link while blocked must account for the pending close★ (`drop_link`'s close stalls and later steps never start): turn this off or advance the
+    /// clock `write_deadline`. ★The 「peer does not read」 kernel-buffer case cannot be measured here★ — a real socket does; this measures our deadline and queue logic.
     pub fn stall_writes(&self, on: bool) {
         let _ = self.stall_tx.send(on);
     }
 
-    /// Whether writes are blocked right now.
     pub fn writes_stalled(&self) -> bool {
         *self.stall_tx.borrow()
     }
 
-    /// When on, **only** the client's `ping` stalls — it stacks with [`MemoryEndpoint::stall_writes`] and really wakes up when off.
-    /// ★This shape does not exist on a real socket★ (ping goes out the same link) — it is here only to build 「the earlier write
-    /// finished, then it stops at the ping of the timer turn right after」. One handle cannot tell the two apart: the moment the stall is released the supervisor
-    /// pushes on to the next write without yielding.
+    /// While on, **only** the client's `ping` stalls (stacks with [`MemoryEndpoint::stall_writes`], really wakes when off). ★Does not exist on a real socket★ — it builds 「an earlier write
+    /// finished, then it stops at the next timer turn's ping」, where the supervisor moves on without yielding at release.
     pub fn stall_pings(&self, on: bool) {
         let _ = self.ping_stall_tx.send(on);
     }
@@ -335,11 +291,8 @@ impl LinkTx for MemTx {
         })
     }
 
-    /// ★Close goes out over the **same link** as `send`/`ping`, so it is blocked together with them★ — on a real socket the close frame
-    /// queues behind the rest of the truncated frame, and that is where the supervisor's `drop_link` spends
-    /// `write_deadline`. ★Do not delete this `wait_writable`★ — while it was missing the harness could not express 「a close queued behind an already blocked write」,
-    /// so the defect that `drop_link` cannot hear control meanwhile
-    /// stayed unexamined (2026-09-07).
+    /// ★Close shares the link with `send`/`ping`, so it blocks with them★ — a real close frame queues behind a truncated frame, which is where `drop_link` spends `write_deadline`.
+    /// ★Do not delete this `wait_writable`★ — without it the harness could not express 「a close queued behind a blocked write」.
     fn close(&mut self, close: Close) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             self.wait_writable().await;
@@ -358,9 +311,7 @@ struct MemRx {
 impl LinkRx for MemRx {
     fn recv(&mut self) -> BoxFuture<'_, Result<LinkRead, LinkError>> {
         Box::pin(async move {
-            // ★It carries the same contract as the real adapter★ — if the harness emitted `Closed(None)` after a failure, code
-            //   that branches on that value would be green here and never taken on a real socket (the canonical source of that trap = the
-            //   [`crate::LinkRead::Closed`] rustdoc in `link.rs`).
+            // ★Same contract as the real adapter★ — a `Closed(None)` after a failure would make code branching on it green here and dead on a real socket ([`crate::LinkRead::Closed`]).
             if self.failed {
                 return Err(LinkError::new("link already failed"));
             }
@@ -371,11 +322,7 @@ impl LinkRx for MemRx {
             match next {
                 Some(ServerMsg::Frame(f)) => Ok(LinkRead::Frame(f)),
                 Some(ServerMsg::Closed(close)) => Ok(LinkRead::Closed(close)),
-                // ★Channel exhausted = vanished without a word★ — on a real socket the same event (a socket dropped without a close handshake)
-                //   is a read error, so it is an error here too. The old version that raised it as `Ok(Closed(None))`
-                //   made the [`crate::LinkRead::Closed`] contract (「the peer **said** so」) false in the harness alone,
-                //   so a test that simulated death by dropping the endpoint was green as `PeerClosed` while on a real socket it
-                //   went to a link read error (now `ReadFailed`).
+                // ★Channel exhausted = vanished without a word★ — a read error, as on a real socket (not `Ok(Closed(None))`, which made the [`crate::LinkRead::Closed`] contract false only in the harness).
                 None => {
                     self.failed = true;
                     Err(LinkError::new("peer endpoint gone"))
@@ -397,7 +344,6 @@ struct NetState {
     opened: VecDeque<Arc<MemoryEndpoint>>,
 }
 
-/// In-memory transport. Opens links behind one [`Dialer`] and hands the far side of an opened link to the test.
 #[derive(Clone)]
 pub struct MemoryNetwork {
     inner: Arc<Mutex<NetState>>,
@@ -426,24 +372,20 @@ impl MemoryNetwork {
         Arc::new(self.clone())
     }
 
-    /// The next `n` dials fail.
     pub fn fail_next(&self, n: usize) {
         self.inner.lock().unwrap().fail_next = n;
     }
 
-    /// From now on every dial fails.
     pub fn fail_forever(&self) {
         self.inner.lock().unwrap().fail_forever = true;
     }
 
-    /// From now on every dial ends in [`DialFailure::Refused`] with no link — imitates a terminal refusal the caller already knows (local version
-    /// check). It takes precedence over [`MemoryNetwork::fail_forever`] and [`MemoryNetwork::fail_next`]. `close.code` must be
-    /// a terminal refusal code (the contract of that branch).
+    /// From now on every dial ends in [`DialFailure::Refused`] with no link (a known terminal refusal such as a local version check); beats [`MemoryNetwork::fail_forever`] · [`MemoryNetwork::fail_next`].
+    /// `close.code` must be a terminal refusal code.
     pub fn refuse(&self, close: Close) {
         self.inner.lock().unwrap().refuse = Some(close);
     }
 
-    /// Lets it connect again.
     pub fn allow(&self) {
         let mut st = self.inner.lock().unwrap();
         st.fail_forever = false;
@@ -469,7 +411,6 @@ impl MemoryNetwork {
         last
     }
 
-    /// The number of links nobody has taken yet.
     pub fn open_endpoints(&self) -> usize {
         self.inner.lock().unwrap().opened.len()
     }
@@ -480,8 +421,7 @@ impl Dialer for MemoryNetwork {
         &self,
         _addr: &Address,
     ) -> BoxFuture<'_, Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), DialFailure>> {
-        // ★The link is created **inside** the future★ — if created outside, a cancelled dial leaves a link nobody uses in
-        //   the registry, and the test picks it up with `accept()` and asserts on a channel the supervisor never adopted.
+        // ★The link is created **inside** the future★ — outside, a cancelled dial leaves a link the test would `accept()` and assert on though the supervisor never adopted it.
         let inner = self.inner.clone();
         Box::pin(async move {
             let mut st = inner.lock().unwrap();
@@ -525,7 +465,6 @@ impl Dialer for MemoryNetwork {
 
 // ── Two-ended link · receiving side ───────────────────────────────────────────
 
-/// What crosses over a two-ended link.
 #[derive(Debug)]
 enum PipeMsg {
     Frame(Frame),
@@ -537,17 +476,14 @@ enum PipeMsg {
     Fail(LinkError),
 }
 
-/// The state of one end of a two-ended link — held together by that end's two halves and that end's handle.
 struct EndState {
     stall: watch::Sender<bool>,
     ping_stall: watch::Sender<bool>,
     writes_failed: AtomicBool,
-    /// The number that arrived at this end but has not been read yet.
     unread: AtomicUsize,
     /// The number of live halves (2 at the start). 0 = this end has been dropped entirely.
     halves: AtomicUsize,
-    /// This end's incoming queue — where the handle puts in a failure. ★A weak handle★ — if strong, a test holding the handle would keep the queue from draining even after the peer
-    /// vanishes, so this end could not see 「vanished without a word」 (a read error).
+    /// This end's incoming queue (where the handle puts failures). ★Weak★ — a strong handle held by a test would stop the queue from draining after the peer vanishes and hide the read error.
     inbound: mpsc::WeakUnboundedSender<PipeMsg>,
 }
 
@@ -564,7 +500,7 @@ impl EndState {
     }
 }
 
-/// Puts one item into the `dest` end's queue. ★Count before putting in★ — the reason is in `MemoryEndpoint::send`.
+/// Puts one item into the `dest` end's queue ★counting before putting in★ (see `MemoryEndpoint::send`).
 fn deliver(dest: &EndState, line: &mpsc::UnboundedSender<PipeMsg>, msg: PipeMsg) -> bool {
     dest.unread.fetch_add(1, Ordering::AcqRel);
     if line.send(msg).is_err() {
@@ -587,9 +523,7 @@ impl MemLinkTx {
         let _ = self.stall.wait_for(|stalled| !*stalled).await;
     }
 
-    /// Returns when the two stalls are **both** released — it re-checks the other each time it wakes. ★Do not turn this back into passing each one
-    /// in turn★ — while stopped at the ping stall after passing the write stall, if the write stall gets set, releasing only the ping stall let the ping out (ping also goes out
-    /// the write link — [`MemoryLinkControl::stall_writes`]).
+    /// Returns when both stalls are released, re-checking the other on each wake. ★Do not turn it back into passing them one after another★ — a write stall set while stopped at the ping stall would let the ping out.
     async fn wait_pingable(&mut self) {
         loop {
             self.wait_writable().await;
@@ -600,8 +534,7 @@ impl MemLinkTx {
         }
     }
 
-    /// ★If only the peer end's reading half is dropped, writes succeed★ — a real socket also closes only when both halves of an end are dropped
-    /// ([`LinkTx`] rustdoc). What was put in then vanishes because no one can read it.
+    /// ★If only the peer end's reading half is dropped, writes succeed★ — a real socket closes only when both halves are dropped ([`LinkTx`] rustdoc); what was put in vanishes.
     fn put(&self, msg: PipeMsg) -> Result<(), LinkError> {
         if self.me.writes_failed.load(Ordering::Acquire) {
             return Err(LinkError::new("writes failed"));
@@ -652,7 +585,7 @@ struct MemLinkRx {
     me: Arc<EndState>,
     peer: Arc<EndState>,
     from_peer: mpsc::UnboundedReceiver<PipeMsg>,
-    /// Where the reply to a received Ping is sent back — on a real socket too the reply comes from the reading side (`ws.rs` 「automatic Pong for an incoming Ping」). ★So if this end does not read, the peer's Ping gets no reply★.
+    /// Where the reply to a received Ping goes — on a real socket too it comes from the reading side (`ws.rs`); ★so an end that does not read gets no reply★.
     to_peer: mpsc::UnboundedSender<PipeMsg>,
     /// The real thing behind the [`LinkRx::recv`] contract (no close is emitted after a failure) — same as `MemRx`.
     failed: bool,
@@ -671,7 +604,7 @@ impl LinkRx for MemLinkRx {
             match next {
                 Some(PipeMsg::Frame(f)) => Ok(LinkRead::Frame(f)),
                 Some(PipeMsg::Ping) => {
-                    // The reply does not take the stall — on a real socket it goes out late behind a congested send buffer (that shape belongs to a real socket).
+                    // The reply does not take the stall — on a real socket it goes out late behind a congested buffer.
                     if !self.me.writes_failed.load(Ordering::Acquire) {
                         deliver(&self.peer, &self.to_peer, PipeMsg::Pong);
                     }
@@ -679,8 +612,7 @@ impl LinkRx for MemLinkRx {
                 }
                 Some(PipeMsg::Pong) => Ok(LinkRead::Frame(Frame::Keepalive)),
                 Some(PipeMsg::Closed(close)) => Ok(LinkRead::Closed(close)),
-                // ★Queue exhausted = both halves of the peer end are dropped = vanished without a word★ — a read error, not a close
-                //   (the same arm in `MemRx` · the [`crate::LinkRead::Closed`] contract).
+                // ★Queue exhausted = peer end fully dropped = vanished without a word★ — a read error, not a close (same arm in `MemRx`).
                 None => {
                     self.failed = true;
                     Err(LinkError::new("peer end gone"))
@@ -700,25 +632,21 @@ impl Drop for MemLinkRx {
     }
 }
 
-/// One end of a two-ended link — two halves and that end's handle.
 pub struct MemoryLinkEnd {
     pub tx: Box<dyn LinkTx>,
     pub rx: Box<dyn LinkRx>,
     pub control: MemoryLinkControl,
 }
 
-/// A handle that operates one end of a two-ended link — ★it acts on its own end only★. The handle of [`MemoryEndpoint`] is what the far end applies to the client end,
-/// so the names differ: its `fail` = [`MemoryLinkControl::fail_reads`] here. The rest have the same names.
-///
-/// Holding the handle does not keep that end alive — once both halves are dropped the peer sees a read error.
+/// A handle operating one end of a two-ended link — ★acts on its own end only★. [`MemoryEndpoint`]'s handle is what the far end applies to the client end, so names differ (its `fail` =
+/// [`MemoryLinkControl::fail_reads`] here). Holding it does not keep the end alive — when both halves drop the peer sees a read error.
 #[derive(Clone)]
 pub struct MemoryLinkControl {
     state: Arc<EndState>,
 }
 
 impl MemoryLinkControl {
-    /// When on, this end's `send`, `ping` and `close` stall, and when off it really wakes up (same contract as [`MemoryEndpoint::stall_writes`]
-    /// — the cautions in its rustdoc apply too).
+    /// While on, this end's `send`, `ping` and `close` stall; off really wakes them (as [`MemoryEndpoint::stall_writes`]).
     pub fn stall_writes(&self, on: bool) {
         self.state.stall.send_replace(on);
     }
@@ -727,12 +655,10 @@ impl MemoryLinkControl {
         *self.state.stall.borrow()
     }
 
-    /// When on, **only** this end's `ping` stalls (same as [`MemoryEndpoint::stall_pings`] — a shape that does not exist on a real socket).
     pub fn stall_pings(&self, on: bool) {
         self.state.ping_stall.send_replace(on);
     }
 
-    /// Cuts this end's reading with an error — it queues behind what has already arrived. Writes still go out.
     pub fn fail_reads(&self, why: &str) {
         if let Some(line) = self.state.inbound.upgrade() {
             deliver(&self.state, &line, PipeMsg::Fail(LinkError::new(why)));
@@ -745,20 +671,16 @@ impl MemoryLinkControl {
         self.state.writes_failed.store(true, Ordering::Release);
     }
 
-    /// The number of items (frames, replies, closes, failures) that arrived at this end but have not been read yet.
     pub fn unread(&self) -> usize {
         self.state.unread.load(Ordering::Acquire)
     }
 
-    /// Whether both halves of this end have been dropped.
     pub fn dropped(&self) -> bool {
         self.state.halves.load(Ordering::Acquire) == 0
     }
 }
 
-/// Builds two ends joined to each other — what one end sends, the other reads.
-///
-/// ★The queue has no upper bound★ — the shape where a write stops in front of a peer that does not read (kernel buffer) does not exist. That belongs to a real socket.
+/// Builds two ends joined to each other. ★The queue is unbounded★ — a write stopping in front of a non-reading peer (kernel buffer) belongs to a real socket.
 pub fn memory_link() -> (MemoryLinkEnd, MemoryLinkEnd) {
     let (into_a, a_from) = mpsc::unbounded_channel();
     let (into_b, b_from) = mpsc::unbounded_channel();
@@ -787,12 +709,9 @@ pub fn memory_link() -> (MemoryLinkEnd, MemoryLinkEnd) {
     (end(&a, &b, a_from, into_b), end(&b, &a, b_from, into_a))
 }
 
-/// The two handles of one link opened by [`MemoryConnector`].
 #[derive(Clone)]
 pub struct MemoryLinkControls {
-    /// The dialing side (the end the supervisor holds).
     pub dialer: MemoryLinkControl,
-    /// The receiving side (the end carried in [`Accepted`]).
     pub acceptor: MemoryLinkControl,
 }
 
@@ -807,23 +726,16 @@ struct ListenShared {
     log: Mutex<ListenLog>,
 }
 
-/// In-memory listener — hands out links dialed through [`MemoryConnector`] as [`Accepted`].
-///
-/// ★The moment of dialing is the end of the upgrade★ — an in-memory link has no upgrade, so the moment dialing finishes the link
-/// sits in the ready queue and [`Accepted::upgraded_at`] is that time. The permit ([`MemoryListener::permits`]) is taken at that moment and goes
-/// along with [`Accepted`] — if the permits are all used, that dial fails (the overflowing new one is closed — TRD 3 §5 14).
-///
-/// ★The terminal `Err` of [`Listener::accept`] = every [`MemoryConnector`] is gone and the ready queue is empty★ — there is no way left to dial.
-/// Dropping the listener closes the links sitting in the ready queue (the dialing side gets a read error) and later dials fail.
+/// In-memory listener — hands out links dialed through [`MemoryConnector`] as [`Accepted`]. ★Finishing the dial is the end of the upgrade★ (there is none): the link enters the ready
+/// queue and [`Accepted::upgraded_at`] is that time; the permit ([`MemoryListener::permits`]) is taken then and goes with [`Accepted`] — all used makes that dial fail (TRD 3 §5 14).
+/// ★The terminal `Err` of [`Listener::accept`] = every [`MemoryConnector`] gone and the ready queue empty★. Dropping the listener closes queued links (the dialer reads an error) and later dials fail.
 pub struct MemoryListener {
     ready: mpsc::UnboundedReceiver<Accepted>,
     permits: PermitPool,
 }
 
 impl MemoryListener {
-    /// `clock` = the same clock as the registry the accepted peers are put on. `max_pending_upgrades` = the number of upgrade permits (ready queue + those taken away but
-    /// still holding a permit) — the upgrade-wait cap of TRD 3 §5 14. ★It is not the TCP listen backlog★ — it is a permit
-    /// count this crate keeps, not the kernel accept queue.
+    /// `clock` = the registry's clock. `max_pending_upgrades` = upgrade permits (ready queue + taken ones, TRD 3 §5 14) — ★not the TCP listen backlog★.
     pub fn new(clock: Arc<dyn Clock>, max_pending_upgrades: usize) -> (Self, MemoryConnector) {
         let (ready_tx, ready) = mpsc::unbounded_channel();
         let permits = PermitPool::new(max_pending_upgrades);
@@ -846,7 +758,6 @@ impl MemoryListener {
         self.permits.clone()
     }
 
-    /// The number sitting in the ready queue not yet taken.
     pub fn queued(&self) -> usize {
         self.ready.len()
     }
@@ -863,15 +774,13 @@ impl Listener for MemoryListener {
     }
 }
 
-/// Takes out both ends of the accepted link — used when a real-socket test drives the receiving side by hand without a supervisor (`tests/ws_*.rs`).
-///
-/// ★Not a production surface★ — the contract of [`Accepted`] is that both ends never leave the crate, and this path exists only behind `test-support`.
-/// The ends taken out have already passed the listener's accept check, so this is not a way to skip that check. The upgrade permit is released here.
+/// Takes out both ends of the accepted link for a real-socket test driving the receiving side without a supervisor (`tests/ws_*.rs`). ★Not a production surface★ — [`Accepted`]'s ends never leave
+/// the crate; this exists behind `test-support`, after the listener's accept check, and releases the upgrade permit.
 pub fn accepted_ends(accepted: Accepted) -> (Box<dyn LinkTx>, Box<dyn LinkRx>) {
     (accepted.tx, accepted.rx)
 }
 
-/// A [`Dialer`] that dials through a [`MemoryListener`]. A clone dials the same listener. It does not look at the address.
+/// A [`Dialer`] dialing through a [`MemoryListener`]; clones dial the same listener; the address is ignored.
 #[derive(Clone)]
 pub struct MemoryConnector {
     ready: mpsc::UnboundedSender<Accepted>,
@@ -883,23 +792,20 @@ impl MemoryConnector {
         Arc::new(self.clone())
     }
 
-    /// The number of dials **actually polled** so far (failures included).
     pub fn dials(&self) -> usize {
         self.shared.log.lock().unwrap().dials
     }
 
-    /// The number of links that reached the ready queue.
     pub fn links(&self) -> usize {
         self.shared.log.lock().unwrap().links.len()
     }
 
-    /// The handle of the `n`th (from 1) link — the [`LinkInfo::remote`] of its [`Accepted`] is `mem:<n>`.
+    /// The handle of the `n`th (from 1) link; its [`LinkInfo::remote`] is `mem:<n>`.
     pub fn link(&self, n: usize) -> Option<MemoryLinkControls> {
         let log = self.shared.log.lock().unwrap();
         n.checked_sub(1).and_then(|i| log.links.get(i).cloned())
     }
 
-    /// The handle of the last link.
     pub fn latest(&self) -> Option<MemoryLinkControls> {
         self.shared.log.lock().unwrap().links.last().cloned()
     }
@@ -910,12 +816,11 @@ impl Dialer for MemoryConnector {
         &self,
         _addr: &Address,
     ) -> BoxFuture<'_, Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), DialFailure>> {
-        // ★The link is created **inside** the future★ — the [`Dialer`] contract (a cancelled dial leaves nothing behind).
+        // ★The link is created **inside** the future★ ([`Dialer`] contract).
         let ready = self.ready.clone();
         let shared = self.shared.clone();
         Box::pin(async move {
-            // ★Read the injected clock outside the ledger lock★ — if the clock's `now` reads this connector's ledger (`links`, `dials`),
-            //   it takes the held lock again and deadlocks. Do not call anything injected while inside a lock.
+            // ★Read the injected clock outside the ledger lock★ — a clock reading this connector's ledger would retake the lock and deadlock.
             let now = shared.clock.now();
             let mut log = shared.log.lock().unwrap();
             log.dials += 1;
@@ -985,8 +890,7 @@ impl Handshake for HelloHandshake {
     }
 }
 
-/// Rejects right after connecting — [`RejectingHandshake::new`] is for measuring a terminal one (★the path that does not spend the budget★), [`RejectingHandshake::retryable`] the
-/// redial one (the path that spends the budget).
+/// Rejects right after connecting — [`RejectingHandshake::new`] = terminal (★does not spend budget★), [`RejectingHandshake::retryable`] = redial (spends budget).
 pub struct RejectingHandshake {
     pub kind: RejectKind,
     pub reason: String,
@@ -1026,7 +930,7 @@ impl Handshake for RejectingHandshake {
     }
 }
 
-/// Sends nothing and waits for the peer's first frame — used to measure the path where the peer speaks by **closing**.
+/// Sends nothing and waits for the peer's first frame — measures the path where the peer speaks by **closing**.
 pub struct ListeningHandshake;
 
 impl Handshake for ListeningHandshake {
@@ -1041,7 +945,6 @@ impl Handshake for ListeningHandshake {
 
 // ── Fake packet vocabulary ────────────────────────────────────────────────────
 
-/// What the harness sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestOut {
     Request { tag: u64, body: String },
@@ -1050,7 +953,6 @@ pub enum TestOut {
     Blob(Vec<u8>),
 }
 
-/// What the harness receives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestIn {
     Reply {
@@ -1074,11 +976,9 @@ pub enum TestIn {
     Blob(Vec<u8>),
 }
 
-/// A minimal packet vocabulary. Text split into fields by `|`, so it round-trips without serde.
 pub struct TestWire;
 
 impl TestWire {
-    /// Builds a frame for the other side to push to the client.
     pub fn encode_in(inn: &TestIn) -> Frame {
         match inn {
             TestIn::Reply { tag, body } => Frame::Text(format!("rep|{tag}|{body}")),
@@ -1099,7 +999,6 @@ impl TestWire {
         }
     }
 
-    /// A shortcut to build one stream chunk.
     pub fn chunk(key: u32, generation: u32, seq: u64) -> Frame {
         Self::encode_in(&TestIn::Chunk {
             key,
@@ -1109,7 +1008,6 @@ impl TestWire {
         })
     }
 
-    /// A shortcut to build one reply.
     pub fn reply(tag: u64) -> Frame {
         Self::encode_in(&TestIn::Reply {
             tag,
@@ -1118,15 +1016,11 @@ impl TestWire {
     }
 }
 
-/// A decode failure of [`TestWire`]. ★The branches that carry a value quote the received text verbatim★ — material for measuring whether that text leaks
-/// into the event ([`DecodeClass`]).
+/// A decode failure of [`TestWire`]. ★Value-carrying branches quote the received text verbatim★ — to measure whether it leaks into the event ([`DecodeClass`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestDecodeError {
-    /// A [`Frame::Keepalive`] reached the decoder — a crate contract violation.
     Keepalive,
-    /// Could not read a numeric field.
     BadNumber(String),
-    /// Unknown shape.
     Unknown(String),
 }
 
@@ -1245,10 +1139,7 @@ mod tests {
 
     // ── H1: a stalled write must really wake up ──
     //
-    // ★Put the stalled work on **another task**★ — if polled by hand on the same task, after releasing the stall we
-    //   poll it again ourselves, and then **an implementation that does not register a waker passes too**. The old version written that way
-    //   caught none of the counterexample mutants (a `poll_fn` that returns `Pending` during the stall and does not register a waker)
-    //   (measured 2026-09-07). With the work on a task, nothing but a wake-up leads to completion.
+    // ★Put the stalled work on **another task**★ — polled by hand on the same task, we re-poll after release and **an implementation that registers no waker passes too**; only a wake-up completes it on a task.
     #[tokio::test]
     async fn clearing_the_stall_actually_wakes_the_parked_write() {
         let net = MemoryNetwork::new();
@@ -1377,10 +1268,8 @@ mod tests {
 
     // ── H5: the harness also carries the 「no close is emitted after a failure」 latch ──
     //
-    // ★The point is **queueing a close after a failure**★ — without the latch the second read raises the close left in the queue
-    //   as 「the peer said so」, and the [`crate::LinkRead::Closed`] contract becomes false in the harness alone.
-    //   Counterpart on the real adapter side = `tests/ws_reject.rs`
-    //   `a_read_after_a_failed_read_is_still_an_error_never_a_spoken_close`.
+    // ★Queue a close after a failure★ — without the latch the second read raises it as 「the peer said so」, making the [`crate::LinkRead::Closed`] contract false in the harness
+    //   (real-adapter counterpart: `tests/ws_reject.rs` `a_read_after_a_failed_read_is_still_an_error_never_a_spoken_close`).
     #[tokio::test]
     async fn a_read_after_a_failed_read_is_still_an_error_in_the_harness_too() {
         let net = MemoryNetwork::new();
@@ -1397,8 +1286,7 @@ mod tests {
 
     // ── H6: dropping the endpoint is a read error, not a close ──
     //
-    // ★This test alone guards the channel-exhausted arm of `MemRx::recv`★ — H5 takes only the `Fail` arm through `fail`, and
-    //   even with the channel-exhausted arm turned back into `Ok(Closed(None))` the rest of the suite was all green (measured 2026-09-25).
+    // ★This test alone guards the channel-exhausted arm of `MemRx::recv`★ (H5 covers only the `Fail` arm).
     #[tokio::test]
     async fn dropping_the_endpoint_is_a_read_error_not_a_close() {
         let net = MemoryNetwork::new();
@@ -1456,8 +1344,7 @@ mod tests {
         }
     }
 
-    // Same as a real socket — an end closes only when both of its halves are dropped (`LinkTx` rustdoc). To the peer, a fully dropped end is a read error,
-    // not a close (the two-ended version of H6).
+    // As a real socket — an end closes only when both halves drop (`LinkTx` rustdoc); to the peer a fully dropped end is a read error, not a close (two-ended H6).
     #[tokio::test]
     async fn one_end_closes_only_once_both_of_its_halves_are_gone() {
         let (mut a, b) = memory_link();
@@ -1529,7 +1416,7 @@ mod tests {
         );
     }
 
-    // If the write stall gets set while stopped at the ping stall, releasing only the ping stall does not send it out; both stalls must be released.
+    // A write stall set while stopped at the ping stall: releasing only the ping stall must not send it; both must be released.
     #[tokio::test]
     async fn a_ping_parked_on_its_own_stall_still_waits_for_a_write_stall_set_meanwhile() {
         let (a, mut b) = memory_link();
@@ -1603,8 +1490,7 @@ mod tests {
         Address::new("mem://listener")
     }
 
-    // Drives the accepted end by hand without a supervisor (the path that puts it on the registry is `Registry::attach` — that test is in `registry.rs`) — the point is whether it joins
-    //   the dialing supervisor through a real link.
+    // Drives the accepted end by hand without a supervisor (the `Registry::attach` path is tested in `registry.rs`): does it join the dialing supervisor through a real link.
     #[tokio::test]
     async fn a_dialer_peer_handshakes_and_round_trips_a_request_with_a_raw_accepted_end() {
         let (clock, mut listener, connector) = listener(4);
@@ -1666,7 +1552,7 @@ mod tests {
         assert_eq!((connector.dials(), connector.links()), (1, 1));
     }
 
-    // The point is a future dropped after waking — an accept that woke because a link arrived while waiting leaves the link in place even if dropped without polling.
+    // A future dropped after waking — an accept woken by an arriving link leaves it in place even if dropped unpolled.
     #[tokio::test]
     async fn accept_is_cancel_safe() {
         let (_clock, mut listener, connector) = listener(4);
@@ -1747,7 +1633,7 @@ mod tests {
         assert_eq!(connector.links(), 1, "only the first link arrived");
     }
 
-    // The auth deadline is measured from the end of the upgrade (TRD 3 §5 3) — if stamped at the moment it was taken, the time sitting in the ready queue drops out of the deadline.
+    // The auth deadline starts at the end of the upgrade (TRD 3 §5 3) — stamped at take time, ready-queue time would drop out.
     #[tokio::test]
     async fn upgraded_at_is_when_the_link_landed_not_when_it_was_accepted() {
         let (clock, mut listener, connector) = listener(4);
@@ -1812,7 +1698,7 @@ mod tests {
         );
     }
 
-    /// A clock that reads the connector's ledger inside `now`. Clock and connector hold each other and leak, but only for the length of one test.
+    /// A clock that reads the connector's ledger inside `now` (they hold each other and leak, for one test).
     struct LogReadingClock {
         connector: std::sync::OnceLock<MemoryConnector>,
         reads: AtomicUsize,

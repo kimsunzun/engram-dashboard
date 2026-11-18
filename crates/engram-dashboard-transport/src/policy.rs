@@ -1,65 +1,48 @@
-//! Policy values — ★every one has a crate default and the consumer overrides it★ (ADR-0177 decision 4).
-//!
-//! [`crate::Registry::new`] takes the registry defaults and [`crate::Registry::add_with_policy`] takes the per-peer
-//! overrides.
-//!
-//! ★Where a value was chosen without grounds, write 「unverified」 at that spot★ — if not written, the next session
-//! reads a guess as a measurement. The unverified ones: `request_timeout` · `write_deadline` · `reconnect.jitter` · `inbound_queue` ·
-//! `frame_buffer` · `retired_tags` · `max_streams` · `resume_timeout` · `live_dwell` · `flush_timeout`.
-//! The rest preserve current code values.
+//! Policy values — ★every one has a crate default and the consumer overrides it★ (ADR-0177 decision 4): [`crate::Registry::new`] takes the registry defaults, [`crate::Registry::add_with_policy`] per-peer
+//! overrides. ★A value chosen without grounds is marked 「unverified」 at its spot★ (else a guess reads as a measurement): `request_timeout` · `write_deadline` · `reconnect.jitter` · `inbound_queue` ·
+//! `frame_buffer` · `retired_tags` · `max_streams` · `resume_timeout` · `live_dwell` · `flush_timeout`. The rest preserve current code values.
 
 use std::time::Duration;
 
-/// When the queue is full. ★It applies only to the outbound queue★ — the upward line filling means the consumer cannot keep up with that
-/// peer, not that the connection is at fault, and the disposition was decided as backpressure, not cutting (ADR-0310 decision 17).
+/// When the queue is full — ★applies only to the outbound queue★ (a full upward line means the consumer is slow, handled as backpressure — ADR-0310 decision 17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueFullPolicy {
-    /// it cuts that connection (kept as is — ADR-0177 decision 6). It is better to re-attach and sync from the start.
-    ///
-    /// ★The plan of dropping per message (drop oldest/newest) cannot be used on terminal bytes★ — dropping the middle breaks UTF-8
-    /// and desyncs the ANSI parser state, so the screen keeps being drawn broken.
+    /// Cuts that connection (kept as is — ADR-0177 decision 6); better to re-attach and sync from the start. ★Per-message dropping (drop oldest/newest) cannot be used on terminal bytes★ — a dropped middle
+    /// breaks UTF-8 and desyncs the ANSI parser, so the screen stays garbled.
     Disconnect,
-    /// Drop only that message and report it as [`crate::TransportEvent::Dropped`]. ★Not creating a silent loss is the whole of
-    /// this branch★ — if it stopped counting, it would be a worse choice than `Disconnect`.
+    /// Drops only that message and reports [`crate::TransportEvent::Dropped`]. ★Not creating a silent loss is the whole of this branch★ — not counting would be worse than `Disconnect`.
     DropAndReport,
 }
 
-/// When [`crate::Wire::decode`] fails.
-///
-/// ★The default being [`DecodeFailurePolicy::DropFrame`] is a judgment about how the user feels★ — one broken frame
-/// should not cut the whole screen. **Cost = a combination arises where it keeps running with the protocol out of sync** (TRD §12-11
-/// is the open question, and once its answer is settled the default may change).
+/// When [`crate::Wire::decode`] fails. ★Default [`DecodeFailurePolicy::DropFrame`] is a judgment about how the user feels★ — one broken frame should not cut the whole screen; **cost = it can keep running with
+/// the protocol out of sync** (TRD §12-11 is the open question; the default may change with its answer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeFailurePolicy {
     DropFrame,
     Disconnect,
 }
 
-/// Reconnect budget and backoff schedule.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReconnectPolicy {
-    /// ★The **number of retries** allowed after the budget recovers★. There are this many backoff waits, and if it fails again after that
-    /// it is [`crate::GaveUpReason::BudgetExhausted`].
+    /// ★The **number of retries** allowed after the budget recovers★ — that many backoff waits, then [`crate::GaveUpReason::BudgetExhausted`].
     pub max_attempts: u32,
     pub base: Duration,
     pub cap: Duration,
     pub multiplier: f64,
-    /// The proportion of wobble mixed into the wait time (0.2 = ±20%). ★Unverified★ — borrowed from the example value of a document gRPC itself titled *"Proposed Backoff
-    /// Algorithm"*. **Today's code has no jitter at all.**
+    /// Wobble proportion mixed into the wait (0.2 = ±20%). ★Unverified★ — borrowed from gRPC's *"Proposed Backoff Algorithm"* example; the old code had no jitter.
     pub jitter: f64,
 }
 
 impl Default for ReconnectPolicy {
     fn default() -> Self {
         Self {
-            // ADR-0180 decision 4 (user decision). Today's code is 5 — the two layers diverging is a known state and
-            //   aligning them is the job of the stage that attaches this crate.
+            // ADR-0180 decision 4 (user decision). The old code is 5 — the layers diverging is known; aligning is the job of the stage that attaches this crate.
             max_attempts: 3,
-            // Current value preserved — BACKOFF_BASE in `connection.rs`.
+            // Preserved from `BACKOFF_BASE` in `connection.rs`.
             base: Duration::from_millis(500),
-            // Current value preserved — BACKOFF_CAP in `connection.rs`.
+            // Preserved from `BACKOFF_CAP` in `connection.rs`.
             cap: Duration::from_secs(10),
-            // Current value preserved — 3 times = 500ms→1s→2s = total 3.5 seconds (the figure ADR-0180 cited).
+            // Preserved: 3 retries = 500ms→1s→2s = 3.5 s (the figure ADR-0180 cited).
             multiplier: 2.0,
             jitter: 0.2,
         }
@@ -67,32 +50,22 @@ impl Default for ReconnectPolicy {
 }
 
 impl ReconnectPolicy {
-    /// The wait before the `attempt`-th (0-based) retry.
-    ///
-    /// `r` is a wobble scale in [0,1) and the caller makes it (this crate does not bring in a random-number crate —
-    /// the canonical source of randomness is [`crate::machine`]).
-    ///
-    /// ★It does not die here even if the values are broken★ — an operating process with a panic hook ends at once on an uncontained panic
-    /// (ADR-0292), so one `Duration::from_secs_f64(NaN)` takes down the **whole process**. The policy is
-    /// a value the consumer reads in from a file, so we consider NaN · negative · jitter of 1 or more actually reachable and fold them all
-    /// here.
-    ///
-    /// ★The cap is bitten once more **after** the jitter★ — so near `cap` the upward wobble is cut and the distribution
-    /// is pressed to one side. Since the purpose of jitter is to scatter simultaneous retries, we judged this better than allowing the cap to be exceeded.
+    /// The wait before the `attempt`-th (0-based) retry; `r` = a wobble scale in [0,1) made by the caller (no random-number crate here; see [`crate::machine`]).
+    /// ★Broken values never die here★ — a process with a panic hook ends on an uncontained panic (ADR-0292), and `Duration::from_secs_f64(NaN)` would take down the **whole process**; the policy is
+    /// read from a file, so NaN · negative · jitter ≥ 1 are reachable and folded here. ★The cap is applied again **after** the jitter★ — near `cap` the upward wobble is cut and the distribution leans
+    /// one way, judged better than exceeding the cap.
     pub fn delay(&self, attempt: u32, r: f64) -> Duration {
-        // ★If the cap is smaller than the floor, **lower the floor**★ — the old edition quietly discarded the cap with `cap.max(base)`
-        //   so `base=10s, cap=1s` returned 10 seconds (ten times the declared cap). If the name is 「cap」,
-        //   not exceeding it is less surprising. `check()` rejects this combination outright.
+        // ★If the cap is below the floor, **lower the floor**★ — `cap.max(base)` discarded the cap (`base=10s, cap=1s` gave 10 s); not exceeding a thing named 「cap」 is less surprising. `check()` rejects it outright.
         let floor = MIN_BACKOFF.as_secs_f64();
         let cap = sane_secs(self.cap.as_secs_f64(), 10.0).max(floor);
         let base = sane_secs(self.base.as_secs_f64(), 0.5).clamp(floor, cap);
-        // A multiplier under 1 **shrinks** the backoff and becomes a dial busy loop.
+        // A multiplier under 1 **shrinks** the backoff into a dial busy loop.
         let multiplier = if self.multiplier.is_finite() && self.multiplier >= 1.0 {
             self.multiplier
         } else {
             1.0
         };
-        // A jitter of 1 or more can make the wait 0 and becomes the same busy loop.
+        // A jitter ≥ 1 can make the wait 0 — the same busy loop.
         let jitter = if self.jitter.is_finite() {
             self.jitter.clamp(0.0, 0.99)
         } else {
@@ -104,8 +77,7 @@ impl ReconnectPolicy {
             0.5
         };
 
-        // ★Do not pass `attempt as i32` directly★ — `u32::MAX` becomes `-1`, the exponent flips and
-        //   the backoff becomes **shorter** than base (measured: 500ms → 250ms). It saturates at the cap anyway, so we truncate.
+        // ★Do not pass `attempt as i32` directly★ — `u32::MAX` becomes `-1`, flipping the exponent and making the backoff **shorter** than base (measured: 500ms → 250ms); it saturates at the cap anyway.
         let grown = base * multiplier.powi(attempt.min(1024) as i32);
         let capped = if grown.is_finite() {
             grown.min(cap)
@@ -114,7 +86,7 @@ impl ReconnectPolicy {
         };
         let jittered = capped * (1.0 + jitter * (2.0 * nudge - 1.0));
         if jittered.is_finite() {
-            // ★There must be a floor★ — 「not zero」 is not enough: a 1ns backoff is a dial busy loop.
+            // ★A floor is required★ — 「not zero」 is not enough: a 1ns backoff is a dial busy loop.
             Duration::from_secs_f64(jittered.clamp(floor, cap))
         } else {
             Duration::from_secs_f64(cap)
@@ -122,7 +94,7 @@ impl ReconnectPolicy {
     }
 }
 
-/// Whatever policy value comes, the backoff never gets shorter than this. Retrying more often than this is a busy loop, not a wait.
+/// Whatever the policy, the backoff never gets shorter than this (faster retry is a busy loop, not a wait).
 pub const MIN_BACKOFF: Duration = Duration::from_millis(1);
 
 fn sane_secs(value: f64, fallback: f64) -> f64 {
@@ -133,76 +105,51 @@ fn sane_secs(value: f64, fallback: f64) -> f64 {
     }
 }
 
-/// All the policy that applies to one peer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Policy {
-    /// The upper limit on waiting for a reply. One shared value regardless of command kind (ADR-0181 decision 1).
-    ///
-    /// ★Unverified — the real time agent spawn takes has never been measured★. It is the place that ADR wrote down as the only real risk of 8 seconds.
+    /// Upper limit on waiting for a reply; one value for every command kind (ADR-0181 decision 1). ★Unverified★ — real agent spawn time never measured (the ADR's only real risk, 8 s).
     pub request_timeout: Duration,
-    /// The limit that wraps the dial and the handshake **together** (preserving the current `HANDSHAKE_TIMEOUT`). ★For an accepted peer
-    /// ([`crate::Registry::attach`]) it is the auth deadline★ — measured not from when it was attached but from the end of the upgrade ([`crate::Accepted::upgraded_at`])
-    /// (TRD 3 §5 3). An accepted peer does not redial, so it does not use [`Policy::reconnect`] · [`Policy::live_dwell`].
+    /// The limit wrapping the dial and the handshake **together** (as the old `HANDSHAKE_TIMEOUT`). ★For an accepted peer ([`crate::Registry::attach`]) it is the auth deadline★, measured from the end of the
+    /// upgrade ([`crate::Accepted::upgraded_at`], TRD 3 §5 3); an accepted peer does not redial, so it ignores [`Policy::reconnect`] · [`Policy::live_dwell`].
     pub connect_timeout: Duration,
-    /// The limit allowed for pushing one frame. ★Unverified — only industry reference values★ (NATS 10s · nginx 60s · gRPC keepalive
-    /// timeout 20s). Invariant: `write_deadline < ping_interval` — otherwise one write starves
-    /// keepalive entirely (the deleted `net` crate had exactly that shape).
+    /// Limit for pushing one frame. ★Unverified — only industry reference values★ (NATS 10s · nginx 60s · gRPC keepalive 20s). Invariant: `write_deadline < ping_interval`, else one write starves keepalive
+    /// (the deleted `net` crate did).
     pub write_deadline: Duration,
     /// Active ping interval (current daemon value preserved).
     pub ping_interval: Duration,
     /// If the peer is this quiet, cut (current daemon value preserved — 2.5 times the ping interval).
     pub idle_timeout: Duration,
-    /// ★Only a connection that stayed in the operating phase this long refills the reconnect budget★.
-    ///
-    /// Without it, a peer that is cut as soon as it attaches repeats reconnecting every 500ms **forever** and
-    /// never reaches [`crate::GaveUpReason::BudgetExhausted`], and then the popup of ADR-0180 decision 7
-    /// **does not appear** in exactly the state of 「never recovers unless the user acts」.
-    /// ★Unverified — the real reconnect time has never been measured★. Today's shell has no such concept at all (reset on success).
+    /// ★Only a connection that stayed operating this long refills the reconnect budget★ — without it a peer cut right after attaching reconnects every 500 ms **forever** and the ADR-0180 decision 7 popup
+    /// **never appears**. ★Unverified — real reconnect time never measured★; the old shell has no such concept.
     pub live_dwell: Duration,
     pub reconnect: ReconnectPolicy,
     /// Outbound queue length (current shell value preserved).
     pub outbound_queue: usize,
-    /// ★One handle's★ receiver end ([`crate::Inbox`]) length (count). Each time [`crate::Registry::add`] · [`crate::Registry::attach`]
-    /// raise one, a line of this length is set up (even raising the same name tag again is a new line). The total held is the sum of the live receiver-end
-    /// lengths (including old receiver ends whose old supervisor has not finished teardown) and ★this value measures only count★ — bytes are measured by each supervisor's crate-internal
-    /// budget (16 MiB — one count covers the read-ahead queue · the ordering area · this line · the resume window. Only a supervisor that has received a stream piece even once
-    /// splits it half and half into read share · window cap, and for one that has not, the read share is the whole budget) (`lib.rs` 「known limits」). When full, that handle's supervisor holds in its own ordering area and stops that peer's reading — it does not drop (backpressure).
-    /// ★Unverified — there is no counterpart today★ (the shell goes straight to a Tauri Channel so this queue itself does not exist). That is, this crate
-    /// **creates one new failure mode** (TRD §12-12).
+    /// ★One handle's★ receiver-end ([`crate::Inbox`]) length (count): every [`crate::Registry::add`] · [`crate::Registry::attach`] sets up a line of this length (re-raising a name tag is a new line). Total held =
+    /// the sum over live receiver ends, including old ones whose supervisor has not finished teardown. ★Count only★ — bytes are the supervisor's crate-internal budget (16 MiB; `budget.rs`, `lib.rs` 「known
+    /// limits」). Full = that supervisor holds in its ordering area and stops reading that peer (no drop). ★Unverified — no counterpart today★ (the shell goes straight to a Tauri Channel); this crate **creates one new
+    /// failure mode** (TRD §12-12).
     pub inbound_queue: usize,
-    /// One connection's read-ahead buffer (count). ★A **different resource** from [`Policy::inbound_queue`]★ — if this one fills,
-    /// the read task stops and transport-layer backpressure applies, and if that one fills, that peer's events · packets are held in the supervisor's ordering area
-    /// and the supervisor drains this one no more — so if that one fills, this one soon fills too. Bytes are measured by the supervisor's budget separately from this value
-    /// (the same sentence in `inbound_queue` above).
-    /// ★Unverified★.
+    /// One connection's read-ahead buffer (count). ★A **different resource** from [`Policy::inbound_queue`]★: this one full stops the read task (transport backpressure); that one full makes the supervisor
+    /// hold events · packets in its ordering area and stop draining this one, so this soon fills too. Bytes: see `inbound_queue`. ★Unverified★.
     pub frame_buffer: usize,
     pub full_queue: QueueFullPolicy,
     pub decode_failure: DecodeFailurePolicy,
-    /// How many expired pairing numbers to remember. ★Unverified★ — it is the length of [`crate::Pending`]'s bounded ring.
+    /// How many expired pairing numbers to remember — the length of [`crate::Pending`]'s bounded ring. ★Unverified★.
     pub retired_tags: usize,
-    /// The upper limit on the number of streams whose sequence numbers are tracked. ★This is **the only collection in this crate whose size the peer decides**, so
-    /// without a limit a peer that keeps sending new keys pushes memory up without bound★. When it overflows it forgets from the oldest
-    /// registered, and a forgotten stream rebuilds its dedup ledger from scratch. ★Unverified★.
+    /// Limit on streams whose sequence numbers are tracked — ★the only collection here whose size the peer decides★ (unbounded, a peer inventing keys would grow memory without bound). Overflow forgets the
+    /// oldest registered; a forgotten stream rebuilds its dedup ledger from scratch. ★Unverified★.
     pub max_streams: usize,
-    /// The upper limit on waiting for the answer (= piece number `after+1`) after asking for a resume.
-    ///
-    /// ★This value separates 「the peer cannot give it」 from 「it has not come yet」★ — an out-of-order piece arriving in between
-    /// may be one the peer had already sent before receiving the re-request, so we drop it and wait for the answer. Only after exceeding this deadline do we raise
-    /// [`crate::TransportEvent::StreamTruncated`]. ★While that peer's reading is stopped by backpressure, this clock
-    /// stops★ — even if the answer comes in that time we cannot read it (`lib.rs` 「Receiver-side invariants」 2). ★Unverified★.
+    /// Upper limit on waiting for the answer (piece `after+1`) after a resume request. ★Separates 「the peer cannot give it」 from 「not come yet」★ — an out-of-order piece meanwhile may be one the peer sent before
+    /// the re-request, so it is dropped and we wait; only past this deadline is [`crate::TransportEvent::StreamTruncated`] raised. ★The clock stops while that peer's reading is stopped by backpressure★
+    /// (`lib.rs` 「Receiver-side invariants」 2). ★Unverified★.
     pub resume_timeout: Duration,
-    /// The upper limit on the number of pieces one stream **holds back** while waiting for a re-request's answer.
-    ///
-    /// They are held to keep order so dropping is not allowed, but without a limit the peer pushes our memory
-    /// with this buffer. When full, the window is closed on the spot and what was held is sent out in order. In bytes, each supervisor's crate-internal window cap
-    /// (8 MiB — half of the byte budget · the sum of held pieces across all streams) also measures, and when exceeded it closes the same way — if it is a new hole,
-    /// it does not open the window and goes straight to a truncation (`lib.rs` 「known limits」). ★Unverified★.
+    /// Upper limit on pieces one stream **holds back** while awaiting a re-request's answer (held to keep order, not droppable; unbounded the peer would push our memory). Full = the window closes at once and
+    /// held pieces go out in order. In bytes, the supervisor's window cap (8 MiB — half the byte budget, summed over all streams) closes it the same way; a new hole then opens no window and truncates at once
+    /// (`lib.rs` 「known limits」). ★Unverified★.
     pub resume_buffer: usize,
-    /// The deadline that one [`crate::Peer::close_after_flush`] uses — from when the supervisor notices that close it covers the writes before the marker ·
-    /// keepalive · close frame **all together**. If exceeded, it closes without writing the rest.
-    ///
-    /// ★It is not replaced by [`Policy::write_deadline`]★ — that is per write, so a peer that reads slowly can hold the close for queue length ×
-    /// write deadline (TRD 3 §3-0 ④). ★Unverified★ — it is the draft value of TRD 3 §3-0 ④ as is.
+    /// The deadline one [`crate::Peer::close_after_flush`] uses — from the supervisor's notice it covers the writes before the marker · keepalive · close frame **together**; past it, it closes without writing the
+    /// rest. ★Not replaceable by [`Policy::write_deadline`]★ (per write — a slow reader could hold the close for queue length × write deadline; TRD 3 §3-0 ④). ★Unverified★ — TRD 3 §3-0 ④'s draft value.
     pub flush_timeout: Duration,
 }
 
@@ -231,11 +178,8 @@ impl Default for Policy {
 }
 
 impl Policy {
-    /// Do the values contradict each other. Returns the human-readable name of the item that is off.
-    ///
-    /// ★The crate does not die even if this does not pass★ — [`ReconnectPolicy::delay`] folds broken values by itself.
-    /// This function exists so that **the consumer fails loudly when reading its settings**, and the registry
-    /// looks only with `debug_assert`.
+    /// Do the values contradict each other; returns the human-readable name of the offending item. ★The crate does not die without this passing★ ([`ReconnectPolicy::delay`] folds broken values); it exists so
+    /// **the consumer fails loudly when reading its settings** — the registry only `debug_assert`s it.
     pub fn check(&self) -> Result<(), &'static str> {
         if self.write_deadline >= self.ping_interval {
             return Err("write_deadline < ping_interval");

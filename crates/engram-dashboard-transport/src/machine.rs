@@ -1,14 +1,7 @@
-//! State machine of one connection — ★pure layer★.
-//!
-//! Input = (current time, event) · output = list of actions. ★No future, no runtime, no I/O★ — so the backoff schedule and
-//! the budget decision are measured **without really waiting**. The gate keeps that purity (canonical = `lib.rs` header).
-//!
-//! ★This file is this crate's only 「so we never refactor later」 device★ — within one crate the compiler does not enforce sans-IO purity,
-//! so it holds only by convention, and this repo already has a precedent that fills that weakness
-//! (the purity gate of `src-tauri/src/daemon_client/replay_flight.rs`, ADR-0175 decision 3).
-//!
-//! ★It does **not execute** actions★ — opening, closing and waiting on links are all the supervisor task of [`crate::peer`].
-//! What grows here is only variants of [`Action`] · [`Input`], and that does not shake the boundary.
+//! State machine of one connection — ★pure layer★: input = (current time, event), output = list of actions; ★no future, runtime or I/O★, so backoff and the budget decision are measured
+//! **without really waiting** (the gate keeps that purity — canonical = `lib.rs` header). ★The crate's only sans-IO device★ (not compiler-enforced within one crate; precedent: the purity gate
+//! of `src-tauri/src/daemon_client/replay_flight.rs`, ADR-0175 decision 3). ★It does **not execute** actions★ — opening, closing and waiting on links is the [`crate::peer`] supervisor's;
+//! what grows here is only [`Action`] · [`Input`] variants.
 
 use std::time::{Duration, Instant};
 
@@ -17,18 +10,13 @@ use crate::link::{LinkError, RejectKind};
 use crate::mask::mask_reason;
 use crate::policy::Policy;
 
-/// Connection generation. Monotonically increasing and never reused. It is +1 every time it enters the operating phase.
-///
-/// ★It does not rewind even if the same label is put on the registry again★ — [`Machine::new`] takes a **floor value**, and the registry
-/// passes the old supervisor's last generation as that floor. Otherwise the consumer's ordinary defense (「ignore anything below the max generation」) **throws away the new connection wholesale**.
-///
-/// ★It differs from the stream's incarnation marker ([`crate::StreamMark::generation`], u32)★ — this one is **which of our connections
-/// this is**, while that one is **which incarnation of the peer's stream this is**. The width and the comparison rule differ
-/// (here ordering comparison has meaning, there only match/mismatch is looked at).
+/// Connection generation: monotonic, never reused, +1 on each entry to the operating phase. ★It does not rewind when the same label is re-put on the registry★ — [`Machine::new`] takes a
+/// **floor value** (the old supervisor's last generation), else the consumer's 「ignore below the max generation」 defense **discards the new connection**. ★Not the stream's incarnation marker★
+/// ([`crate::StreamMark::generation`], u32): this is **which of our connections**, that is **which incarnation of the peer's stream** — width and comparison rule differ (here ordering matters,
+/// there only match/mismatch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Generation(pub u64);
 
-/// The current state of one peer. It is exposed outside only through [`crate::Peer::state`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerState {
     Idle,
@@ -51,8 +39,7 @@ impl PeerState {
     }
 }
 
-/// Why it gave up. ★This is the input from which the shell decides popup eligibility★ (ADR-0180 decision 2) — both are 「a state that never recovers unless the user acts」 and so qualify, but what the user can do on the spot differs, so the screen
-/// shape splits.
+/// Why it gave up — ★the input for the shell's popup eligibility★ (ADR-0180 decision 2): both are 「never recovers unless the user acts」, but what the user can do differs, so the screen splits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GaveUpReason {
     /// Received a terminal rejection ([`RejectKind::Terminal`]) — it connected and was rejected, or the dialer knew it before dialing
@@ -62,19 +49,17 @@ pub enum GaveUpReason {
     BudgetExhausted,
 }
 
-/// Why it disconnected. ★Today's code has no such distinction — everything is one lump of 「disconnected」★.
+/// Why it disconnected (the old code had one lump 「disconnected」).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisconnectCause {
     /// The peer exited normally.
     PeerClosed,
-    /// The reading side ended — link reading produced an error, or it disconnected because what was read could not be read (the policy of disconnecting on decode failure).
-    /// ★Telling it apart from [`DisconnectCause::WriteFailed`] is the point★ — the daemon adapter tells the read end (finishes the remaining commands)
-    /// from the write end (disconnects right away) by this value (TRD 3 §3-0 ①).
+    /// The reading side ended — a link read error, or a decode failure under the disconnect-on-decode-failure policy. ★Distinguishing it from [`DisconnectCause::WriteFailed`] is the point★ —
+    /// the daemon adapter finishes remaining commands on the read end and disconnects at once on the write end (TRD 3 §3-0 ①).
     ReadFailed,
     /// The writing side ended — a frame · keepalive write produced an error (a deadline overrun is [`DisconnectCause::WriteDeadline`]).
     WriteFailed,
-    /// The peer was quiet for `idle_timeout`. An accepted peer ([`crate::Registry::attach`]) failing to finish the handshake within the auth deadline is this too
-    /// (the `cause` of `TransportEvent::Closed`).
+    /// The peer was quiet for `idle_timeout`; also an accepted peer not finishing the handshake by the auth deadline (the `cause` of `TransportEvent::Closed`).
     Idle,
     /// Exceeded `write_deadline` pushing one frame — for an accepted peer's handshake write, it exceeded the auth deadline.
     WriteDeadline,
@@ -96,18 +81,15 @@ impl DisconnectCause {
     }
 }
 
-/// Why a connection could not stand. ★What splits the budget is not the branch but 「is it a terminal rejection」★ (ADR-0180 decision 5 · TRD 3 §3-0 ⑤) —
-/// only an [`RejectKind::Terminal`] rejection spends no budget and gives up at the first rejection; the rest spend budget and dial again.
+/// Why a connection could not stand. ★What splits the budget is 「is it a terminal rejection」, not the branch★ (ADR-0180 decision 5 · TRD 3 §3-0 ⑤): only [`RejectKind::Terminal`] spends
+/// no budget and gives up at once; the rest spend budget and redial.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectFailure {
-    /// The link itself did not open → spends budget. ★The text may be text the peer gave too★ — a consumer [`crate::Dialer`] may carry the peer's
-    /// response text over, so this text carried by an event that passed through the machine has also gone through [`mask_reason`].
+    /// The link did not open → spends budget. ★The text may be peer-given★ (a consumer [`crate::Dialer`] may carry the response), so it is masked ([`mask_reason`]) in events.
     Unreachable(LinkError),
-    /// The peer (or this side's handshake · the dialer) said it will not accept. `kind` splits the budget and `code` is the close code of that rejection
-    /// that crossed the link (for the dialer's [`crate::DialFailure::Refused`], the code it chose).
-    ///
-    /// ★`reason` may be text the peer gave — neither decide on it nor use it as popup text★ (TRD 3 §3-0 ⑤ · §5 19). The screen
-    /// text is the consumer's fixed message chosen by `code`, and this text is for details · logs. When carrying it onto an LLM surface, mark it as 「data the peer gave」. This text carried by an event that passed through the machine has gone through [`mask_reason`].
+    /// The peer (or this side's handshake · the dialer) said it will not accept. `kind` splits the budget; `code` = the rejection close code (the dialer's [`crate::DialFailure::Refused`] code).
+    /// ★`reason` may be peer-given — neither decide on it nor show it as popup text★ (TRD 3 §3-0 ⑤ · §5 19): screen text is the consumer's fixed message chosen by `code`; this is for details ·
+    /// logs (mark it 「data the peer gave」 on an LLM surface); masked ([`mask_reason`]) in events.
     Rejected {
         kind: RejectKind,
         code: CloseCode,
@@ -138,8 +120,7 @@ pub enum Input {
     Start,
     /// The link opened — now the handshake.
     Dialed,
-    /// The handshake finished. ★The supervisor draws the generation from the **shared counter per peer label** and carries it here★ —
-    /// if the machine did +1 itself, an old and a new supervisor of the same label could emit the same number (D1).
+    /// The handshake finished. ★The supervisor draws the generation from the **per-label shared counter** and carries it★ — a machine-side +1 could emit one number from an old and a new supervisor (D1).
     Connected(Generation),
     /// The dial or the handshake failed.
     ConnectFailed(ConnectFailure),
@@ -153,8 +134,7 @@ pub enum Input {
     Close,
 }
 
-/// An event the machine instructs to raise upward. [`crate::peer`] attaches a source marker to it and turns it into
-/// a [`crate::TransportEvent`].
+/// An event the machine tells the supervisor to raise upward ([`crate::peer`] adds a source marker → [`crate::TransportEvent`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MachineEvent {
     Connected {
@@ -165,18 +145,14 @@ pub enum MachineEvent {
         cause: DisconnectCause,
     },
     ConnectFailed {
-        /// ★The **retry** budget used so far★ (1-based). The first connection attempt is not a retry and is not counted, so
-        /// if `retry_in` is `Some`, read it as "now do the `attempt`th retry after that long", and if `None`, read it as
-        /// "used up `attempt`/`of`".
+        /// ★The **retry** budget used so far★ (1-based; the first attempt is not a retry): `retry_in` `Some` = 「the `attempt`th retry after that long」, `None` = 「used up `attempt`/`of`」.
         attempt: u32,
         of: u32,
         cause: ConnectFailure,
-        /// `None` = the budget is used up so it waits no more — that is all it means. A terminal rejection does not raise this event
-        /// (it goes as [`MachineEvent::Rejected`] · [`MachineEvent::GaveUp`]).
+        /// `None` = the budget is used up so it waits no more (a terminal rejection does not raise this — it goes as [`MachineEvent::Rejected`] · [`MachineEvent::GaveUp`]).
         retry_in: Option<Duration>,
     },
-    /// ★Raises only a terminal rejection ([`RejectKind::Terminal`])★ — a rejection that is retried goes as the `cause` of [`MachineEvent::ConnectFailed`].
-    /// `reason` is masked text ([`ConnectFailure::Rejected`]).
+    /// ★Only a terminal rejection ([`RejectKind::Terminal`])★ — a retried one is the `cause` of [`MachineEvent::ConnectFailed`]. `reason` is masked ([`ConnectFailure::Rejected`]).
     Rejected {
         code: CloseCode,
         reason: String,
@@ -189,7 +165,7 @@ pub enum MachineEvent {
 /// What the machine instructs. The supervisor task carries it out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Opens a link. `deadline` wraps **dial and handshake together** (preserves the current `HANDSHAKE_TIMEOUT`).
+    /// Opens a link. `deadline` wraps **dial and handshake together** (as the old `HANDSHAKE_TIMEOUT`).
     Dial { deadline: Instant },
     /// Runs the handshake over the open link. `deadline` is exactly the one [`Action::Dial`] set.
     Handshake { deadline: Instant },
@@ -203,38 +179,30 @@ pub enum Action {
     Emit(MachineEvent),
 }
 
-/// The lifetime of one connection.
 #[derive(Debug)]
 pub struct Machine {
     state: PeerState,
     generation: u64,
-    /// ★Budget spent on failing to connect★ — the number of backoff waits reserved since the last successful connection (or [`Input::ReconnectNow`]).
-    /// It returns to 0 when a connection succeeds.
+    /// ★Budget spent on failing to connect★ — backoff waits reserved since the last success (or [`Input::ReconnectNow`]); 0 on a successful connection.
     retries: u32,
-    /// ★Consecutive count of connecting and soon disconnecting★ — the number of connections in a row that failed to fill `live_dwell`. One
-    /// connection that lasted long resets it to 0.
-    ///
-    /// Why there are two axes: merge them into one and **one of the two is bound to break**. If the budget is refilled completely on every connect,
-    /// a peer that disconnects as soon as it connects repeats forever and never reaches [`GaveUpReason::BudgetExhausted`] (no popup
-    /// appears), and if it is not refilled, there is a place where it gives up **without ever having retried** — the shape where the daemon takes 4 seconds to
-    /// restart and burns the whole budget during that time, and then one disconnect 10 seconds after connecting makes it give up at once.
-    /// That state is not 「never recovers unless the user acts」; it is one that **connects if tried just once more**,
-    /// so it has no popup eligibility (ADR-0180 decision 2).
+    /// ★Consecutive count of connecting and soon disconnecting★ — connections in a row not filling `live_dwell`; one long-lived connection resets it to 0.
+    /// ★Two axes because one merged axis must break★: refilling fully on every connect lets a peer that drops right after connecting loop forever without reaching
+    /// [`GaveUpReason::BudgetExhausted`] (no popup); not refilling can give up **without ever retrying** (daemon restart burns the budget in 4 s, then one drop 10 s after connecting gives up at once) —
+    /// that state is 「connects if tried once more」, not 「never recovers unless the user acts」, so it has no popup eligibility (ADR-0180 decision 2).
     flaps: u32,
     policy: Policy,
-    /// The dial+handshake deadline of the current attempt. The machine holds it because the two stretches share one budget.
+    /// The dial+handshake deadline of the current attempt — held here because the two stretches share one budget.
     connect_deadline: Instant,
     /// The time the current connection entered the operating phase. Eligibility to refill the budget is measured by it.
     live_since: Option<Instant>,
-    /// The time axis of the jitter scale. `Instant` does not expose its internal representation, so the difference from a reference point is used.
+    /// Time axis of the jitter scale — `Instant` hides its representation, so the difference from a reference point is used.
     epoch: Instant,
     /// A seed that makes each peer get a different scale. The caller draws it from `PeerId`.
     jitter_seed: u64,
 }
 
 impl Machine {
-    /// `generation_floor` = this peer's generation continues from here (the value left by an old supervisor of the same label).
-    /// A peer being set up for the first time has 0.
+    /// `generation_floor` = where this peer's generation continues (an old supervisor of the same label left it); 0 for a first-time peer.
     pub fn new(policy: Policy, jitter_seed: u64, created: Instant, generation_floor: u64) -> Self {
         Self {
             state: PeerState::Idle,
@@ -267,7 +235,6 @@ impl Machine {
         self.flaps
     }
 
-    /// Feeds in one event and receives the work to do.
     pub fn on(&mut self, now: Instant, input: Input) -> Vec<Action> {
         if self.state == PeerState::Closed {
             return Vec::new();
@@ -278,8 +245,7 @@ impl Machine {
                 let generation = Generation(self.generation);
                 self.state = PeerState::Closed;
                 self.live_since = None;
-                // Wake the waiters first — DropLink can be delayed by as much as the write deadline, and in that time a stale answer goes out to
-                //   a caller asking for the reason.
+                // Wake the waiters first — DropLink can be delayed by `write_deadline`, and a stale answer could go out to a caller asking the reason.
                 let mut acts = vec![Action::FailPending(DisconnectCause::Explicit)];
                 if was_live {
                     acts.push(Action::Emit(MachineEvent::Disconnected {
@@ -301,9 +267,8 @@ impl Machine {
                 _ => Vec::new(),
             },
             Input::ReconnectNow => {
-                // ★If the waiters are not woken here, nobody wakes them★ — if the next dial burns the budget and
-                //   lands on GaveUp, this machine never looks at a deadline again, and that slot becomes a permanent wait.
-                //   Close · LinkLost · rejection all emit FailPending, and only this branch did not — that was the defect.
+                // ★Waiters must be woken here★ — if the next dial burns the budget and lands on GaveUp the machine never looks at a deadline again and the slot waits forever
+                //   (Close · LinkLost · rejection all emit FailPending; only this branch did not).
                 let was_live = self.state.is_live();
                 let generation = Generation(self.generation);
                 self.retries = 0;
@@ -337,8 +302,7 @@ impl Machine {
             },
             Input::Connected(generation) => match self.state {
                 PeerState::Handshaking => {
-                    // ★If it connected, the 「cannot connect」 budget fills again★ — what that axis measures is reachability,
-                    //   and it was just reached. Catching a peer that disconnects as soon as it connects is the `flaps` axis below.
+                    // ★A successful connection refills the 「cannot connect」 budget★ — that axis measures reachability; a peer dropping right after connecting is caught by `flaps` below.
                     self.retries = 0;
                     self.live_since = Some(now);
                     self.generation = generation.0;
@@ -421,10 +385,9 @@ impl Machine {
         }
     }
 
-    /// Sets the next attempt or declares the budget exhausted. If there is a `cause`, it raises `ConnectFailed` too.
     fn schedule_retry(&mut self, now: Instant, cause: Option<ConnectFailure>) -> Vec<Action> {
         let of = self.policy.reconnect.max_attempts;
-        // ★If either of the two axes runs out, it gives up★ — `retries` measures 「cannot connect」, `flaps` measures 「connects but does not last」. Either is a state that does not clear unless the user steps in.
+        // ★Either axis running out gives up★ — `retries` = 「cannot connect」, `flaps` = 「connects but does not last」; neither clears without the user.
         if self.retries >= of || self.flaps >= of {
             self.state = PeerState::GaveUp(GaveUpReason::BudgetExhausted);
             let mut acts = Vec::new();
@@ -461,11 +424,8 @@ impl Machine {
         acts
     }
 
-    /// A jitter scale in [0,1). ★No new dependency is brought in★ — it mixes the per-peer seed and the generation into the clock's low-order nanoseconds
-    /// (precedent = the place where `profile.rs` of `agent` uses uuid v4 bytes instead of a random-number crate).
-    ///
-    /// **Two limits:** ① it is not a cryptographic random number (not needed for jitter) ② under a manual clock it becomes deterministic —
-    /// a property the harness **wants**, but that is why the *variance* of jitter can be observed only on a real socket.
+    /// A jitter scale in [0,1). ★No new dependency★ — it mixes the per-peer seed and generation into the clock's low-order nanoseconds (as `agent`'s `profile.rs` uses uuid v4 bytes). Not
+    /// cryptographic; ★deterministic under a manual clock★ (wanted by the harness), so jitter *variance* is observable only on a real socket.
     fn jitter_nudge(&self, now: Instant) -> f64 {
         let nanos = now.saturating_duration_since(self.epoch).subsec_nanos() as u64;
         let mixed = nanos
@@ -508,13 +468,12 @@ mod tests {
             .collect()
     }
 
-    /// Mimics what the supervisor does — ★the generation is assigned **from outside**, not by the machine★ (D1).
+    /// Mimics the supervisor — ★the generation is assigned **from outside**★ (D1).
     fn connect(m: &mut Machine, now: Instant) -> Vec<Action> {
         let minted = Generation(m.generation().0 + 1);
         m.on(now, Input::Connected(minted))
     }
 
-    /// Pushes Idle → Dialing → Handshaking → Live in one go.
     fn go_live(m: &mut Machine, t0: Instant) {
         m.on(t0, Input::Start);
         m.on(t0, Input::Dialed);

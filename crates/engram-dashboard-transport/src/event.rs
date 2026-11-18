@@ -1,12 +1,6 @@
-//! Vocabulary of what goes upward — data types only, no logic.
-//!
-//! ★Each handle has exactly one upward line★ ([`Incoming`]) — packets and events flow through the same line. Having no side channel is the
-//! decision (ADR-0177 decision 9): a signal not put into the stream the consumer **already reads** is the same as nonexistent if not heard.
-//! The price = a consumer that wants only packets also uses one more layer of `match`.
-//!
-//! ★This list is the crate boundary★ (ADR-0182 「Impact」) — **agent errors and command failures are not here.** The upper layer
-//! knows about them, and merging several sources is done later by the screen. If even one entry comes in on the grounds of 「it would be convenient to raise this too」,
-//! that boundary breaks on the spot.
+//! Vocabulary of what goes upward — data types only. ★Each handle has exactly one upward line ([`Incoming`])★ — packets and events share it; no side channel (ADR-0177 decision 9): a signal
+//! outside the stream the consumer already reads goes unheard. Price: a packets-only consumer needs one more `match`. ★This list is the crate boundary★ (ADR-0182 「Impact」) —
+//! **agent errors and command failures are not here** (upper layers know them; the screen merges sources); admitting one entry 「because it would be convenient」 breaks that boundary.
 
 use std::fmt;
 use std::sync::Arc;
@@ -16,9 +10,7 @@ use crate::frame::CloseCode;
 use crate::machine::{ConnectFailure, DisconnectCause, GaveUpReason, Generation};
 use crate::wire::Wire;
 
-/// Label the consumer attaches to a peer. ★This value is the event's source marker, and it later shows on screen as is★.
-///
-/// The crate does not interpret this string — it only checks whether two are equal.
+/// Label the consumer attaches to a peer — ★the event's source marker, shown on screen as is★. The crate only compares it for equality.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PeerId(pub Arc<str>);
 
@@ -31,7 +23,7 @@ impl PeerId {
         &self.0
     }
 
-    /// Seed that scatters jitter per peer. ★Not random but a function of the name, so it is the same across re-runs★ (FNV-1a 64).
+    /// Seed scattering jitter per peer — ★a function of the name (FNV-1a 64), so the same across re-runs★.
     pub fn jitter_seed(&self) -> u64 {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for byte in self.0.as_bytes() {
@@ -54,50 +46,29 @@ impl fmt::Display for PeerId {
     }
 }
 
-/// From which direction it was discarded.
-///
-/// ★There is no receiver-side branch★ — even when the upward line is full, the supervisor holds items in its own ordering area instead of discarding them
-/// (`peer.rs` header 「ordering area」 · TRD 3 §3-0 ②).
+/// From which direction it was discarded. ★There is no receiver-side branch★ — a full upward line makes the supervisor hold items in its ordering area, not discard (`peer.rs` header · TRD 3 §3-0 ②).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    /// Could not send out what was meant to go to the peer. It includes not only queue saturation but also what was discarded because of a disconnect, and among those are
-    /// notifications and fan-outs **cut off mid-write** (a request in the same situation is not included here; it wakes with an error).
+    /// Could not send out what was meant for the peer: queue saturation, discards because of a disconnect, and notifications · fan-outs **cut off mid-write** (a request in that case wakes with
+    /// an error and is not counted). ★Not 「certainly lost」 but 「did not see the write end in `Ok`」 — the count can be inflated★: a frame cut mid-write may already be in the adapter buffer, and on
+    /// WS the close sent on link discard may push it out first (`ws.rs` 「link properties」; that close can also be cut by the write deadline).
     ///
-    /// ★It is not 「certainly lost」 but 「did not see the write end in Ok」 — the count can be inflated★. The place where it is inflated is
-    /// a frame cut off mid-write — it may already have been in the adapter buffer, and on the WS adapter, the close
-    /// sent when the link is discarded may push it out first (source reading — `ws.rs` 「link properties」). Under the same congestion that close
-    /// can also be cut by the write deadline.
-    ///
-    /// A frame that [`crate::Registry::broadcast`] could not put in is counted once by that peer's supervisor (queue saturation · not in the operating phase).
-    /// But a frame that could not be put in because the peer was not in the operating phase after the app called [`crate::Peer::close`] is not counted (`lib.rs`
-    /// 「known limits」) — a frame put into a peer still operating after close was called, where the queue then filled, is counted.
-    ///
-    /// ★It also includes what was not written because the bound generation was not the current one just before the write★ (TRD 3 §3-0 ③ — [`crate::Peer::notify_in`])
-    /// — the connection was operating when it was queued, but it reconnected before the write. That report may come after the next connection's
-    /// [`TransportEvent::Connected`] — what was discarded belongs to the previous connection. A call where the generation bound by `notify` · `notify_in` at the entrance
-    /// was not operating and got `Err` ([`crate::SendError::Disconnected`]) is not counted — an `Err` received because the queue was full is
-    /// counted (queue saturation). Fan-outs and resume calls cannot get the error to the caller, so an entrance rejection is counted too (above). A queue
-    /// that filled in an ended generation only reports and does not cut the next connection.
-    ///
-    /// Conversely, what was not counted does not guarantee arrival either — the `Ok` of a write only reaches the transport buffer.
+    /// [`crate::Registry::broadcast`] failures are counted once by that peer's supervisor (queue saturation · not operating). ★Not counted: frames refused because the peer was not operating after
+    /// the app called [`crate::Peer::close`]★ (`lib.rs` 「known limits」); frames put in before that and then overflowing are counted. ★Also counted: frames not written because the bound generation
+    /// was not current just before the write★ (TRD 3 §3-0 ③ — [`crate::Peer::notify_in`]); that report may arrive after the next connection's [`TransportEvent::Connected`]. An entry `Err` the
+    /// caller received ([`crate::SendError::Disconnected`]) is not counted, but a queue-full `Err` is; fan-outs and resumes cannot return the error, so entry rejection is counted for them. A queue
+    /// filled in an ended generation only reports and does not cut the next connection. Not counted ≠ delivered — an `Ok` write reaches only the transport buffer.
     Outbound,
 }
 
-/// One packet from the peer.
 pub struct Arrival<W: Wire> {
     /// ★Source marker★ — which peer it is from.
     pub peer: PeerId,
-    /// ★Generation boundary★ — which **connection** generation this piece belongs to. The handle stays alive across reconnects,
-    /// so this is where the boundary shows.
-    ///
-    /// ★A stream fragment can arrive carrying an old generation number after a newer generation's [`TransportEvent::Connected`]★ — a fragment the resume
-    /// window held goes upward when the window closes after reconnecting, but it carries the generation of the connection it arrived on. So once the decision to turn the stream layer on
-    /// is made (today's two consumers do not use it — ADR-0310 decision 16), that receiver must not filter stream fragments by generation —
-    /// filtering would discard fragments the window held and then raised. Generation filtering applies only to non-stream messages.
-    ///
-    /// ★To send an answer · request hanging on this message only over the connection it arrived on, pass this value to [`crate::Peer::notify_in`] ·
-    /// [`crate::Peer::request_in`]★ — if it reconnected in between, it does not go over to the next connection and is not sent (TRD 3
-    /// §3-0 ③).
+    /// ★Generation boundary★ — which **connection** generation this piece belongs to (the handle outlives reconnects).
+    /// ★A stream fragment can carry an old generation after a newer generation's [`TransportEvent::Connected`]★ — a fragment the resume window held goes up on window close after reconnecting, stamped
+    /// with the connection it arrived on. So once the stream layer is on (today's two consumers do not — ADR-0310 decision 16), the receiver must not filter stream fragments by generation (it
+    /// would drop held fragments); filter only non-stream messages.
+    /// ★To answer or request only on this message's connection, pass this to [`crate::Peer::notify_in`] · [`crate::Peer::request_in`]★ — after a reconnect nothing is sent (TRD 3 §3-0 ③).
     pub generation: Generation,
     pub msg: W::In,
 }
@@ -115,7 +86,6 @@ where
     }
 }
 
-/// Everything that comes up into the inbox ([`crate::Inbox`]).
 pub enum Incoming<W: Wire> {
     Message(Arrival<W>),
     Event(TransportEvent<W>),
@@ -158,25 +128,19 @@ where
     }
 }
 
-/// What happened to the connection. ★All of them carry `peer`★.
-///
-/// The `generation` of the stream family is an **incarnation marker** (u32), a different thing from [`Generation`] (connection generation) —
-/// the names are the same and easy to confuse, so it is quicker to remember that they are told apart by width.
-/// ★`#[non_exhaustive]`★ — TRD §7 pinned it down as 「items grow」 and this crate aims at reuse.
-/// If it is not set now, the moment one more branch is added, every consumer's `match` breaks.
+/// What happened to the connection; ★all carry `peer`★. The stream family's `generation` is an **incarnation marker** (u32), not [`Generation`] (connection generation) — same name, told apart by
+/// width. ★`#[non_exhaustive]`★ (TRD §7 「items grow」, crate aims at reuse): a new branch otherwise breaks every consumer's `match`.
 #[non_exhaustive]
 pub enum TransportEvent<W: Wire> {
     Connected {
         peer: PeerId,
         generation: Generation,
     },
-    /// ★Today's code has no such `cause` distinction — everything is one lump of 「disconnected」★.
     Disconnected {
         peer: PeerId,
         generation: Generation,
         cause: DisconnectCause,
     },
-    /// ★Today the failure reason during a reconnect is left only as `debug!` and discarded★.
     ConnectFailed {
         peer: PeerId,
         attempt: u32,
@@ -184,51 +148,30 @@ pub enum TransportEvent<W: Wire> {
         cause: ConnectFailure,
         retry_in: Option<Duration>,
     },
-    /// ★Terminal rejection ([`crate::RejectKind::Terminal`])★ — [`TransportEvent::GaveUp`] comes right after (the version
-    /// rejection of ADR-0178 · the dialer's [`crate::DialFailure::Refused`] comes up here). A rejection that is retried does not come here; it goes
-    /// as the `cause` of [`TransportEvent::ConnectFailed`].
-    ///
-    /// ★The popup text is a fixed local string chosen by `code` — not `reason`★ (TRD 3 §3-0 ⑤). `reason` may be text the peer
-    /// gave, so it is neither used to decide nor used as screen text and goes only to details · the log — it is masked text
-    /// ([`crate::mask_reason`] · [`crate::ConnectFailure::Rejected`]).
+    /// ★Terminal rejection ([`crate::RejectKind::Terminal`])★ — [`TransportEvent::GaveUp`] follows (ADR-0178 version rejection · the dialer's [`crate::DialFailure::Refused`]); a retried rejection
+    /// is the `cause` of [`TransportEvent::ConnectFailed`]. ★The popup text is a fixed local string chosen by `code`, not `reason`★ (TRD 3 §3-0 ⑤): `reason` may be peer-given, goes only to
+    /// details · the log, and is masked ([`crate::mask_reason`] · [`crate::ConnectFailure::Rejected`]).
     Rejected {
         peer: PeerId,
         code: CloseCode,
         reason: String,
     },
-    /// Input from which the shell decides popup eligibility (ADR-0180 decision 2).
     GaveUp { peer: PeerId, reason: GaveUpReason },
-    /// ★This supervisor's last event and the last item of that handle's inbox ([`crate::Inbox`])★ — cleanup closes all links and loads everything held in the
-    /// ordering area, then emits it at the very end and releases the supervisor's sending end, so the next `recv` on that inbox is `None`
-    /// (TRD 3 §3-0 ②).
+    /// ★This supervisor's last event and the last item of its inbox ([`crate::Inbox`])★ — cleanup loads everything held in the ordering area, emits this last and releases the sending end, so
+    /// the next `recv` is `None` (TRD 3 §3-0 ②). `generation` = this supervisor's last connection generation (the registry's floor if it never connected); `cause` = why it ended.
+    /// ★A dialed peer ([`crate::Registry::add`]) is always [`DisconnectCause::Explicit`]★ (its only end is a close). ★An accepted peer ([`crate::Registry::attach`]) carries the real reason★ (it does not
+    /// redial): a disconnect during operation = the preceding `Disconnected`'s cause (read/write end split — the daemon adapter uses it, TRD 3 §3-0 ①); a handshake that never completed = where it
+    /// stopped (our rejection `Explicit` · peer closed `PeerClosed` · read/write error `ReadFailed`/`WriteFailed` · write past deadline `WriteDeadline` · peer silent past the auth deadline `Idle`);
+    /// `Explicit` if the app · receiver closed it.
     ///
-    /// `generation` = this supervisor's last connection generation (the floor value the registry gave if it never connected) · `cause` = the reason it ended.
-    /// ★A peer that we dialed ([`crate::Registry::add`]) is always [`DisconnectCause::Explicit`]★ — the supervisor's only way to end is a close
-    /// (the app closed it, or all its handles are gone, or the receiver closed the inbox). ★A peer that was accepted ([`crate::Registry::attach`]) carries
-    /// the real reason★ — it does not redial, so losing the connection is the end: if it dropped while operating, the same reason as the preceding `Disconnected`;
-    /// if it never reached the operating phase, the place where the handshake stopped (our handshake's rejection = `Explicit` · peer closed = `PeerClosed` ·
-    /// read · write error = `ReadFailed` · `WriteFailed` · write passed its deadline = `WriteDeadline` · the peer could not
-    /// finish by the auth deadline = `Idle`), and `Explicit` if the app · the receiver closed it.
-    ///
-    /// ★Do not tell supervisors apart by `generation` — the inbox does★ — the floor value is the generation the previous supervisor of the same label
-    /// last drew, so for a supervisor that ended without ever connecting, this can be identical to the previous supervisor's. Each supervisor has
-    /// its own inbox, so the two never mix in one inbox.
-    ///
-    /// ★It may not come★ — after the receiver closes or drops the inbox there is nowhere to load it (one already loaded before closing can still be taken out
-    /// after closing). It also does not come when the supervisor ends without a normal cleanup —
-    /// either cleanup went past its cap (`CLOSE_DRAIN_LIMIT` in `peer.rs`) against a receiver that stays alive and does not drain, and discarded this along with the rest
-    /// (not counted and not reported), or the task ended abnormally (panic · runtime shutdown). Either way the sending
-    /// end drops and a `None` without `Closed` signals the end — do not read it only as a cap overrun.
-    ///
-    /// The read-end / write-end split of a disconnect while operating ([`DisconnectCause::ReadFailed`] · [`DisconnectCause::WriteFailed`])
-    /// is carried by the preceding [`TransportEvent::Disconnected`] — an accepted peer carries it here too (the daemon adapter tells the read
-    /// end from the write end by this one reason — TRD 3 §3-0 ①).
+    /// ★Do not tell supervisors apart by `generation` — the inbox does★ (a supervisor that never connected carries the previous one's floor; each has its own inbox). ★It may not come★: after the
+    /// receiver closes/drops the inbox (one already loaded can still be taken), or when the supervisor ends without normal cleanup (cleanup past `CLOSE_DRAIN_LIMIT` in `peer.rs` against a
+    /// non-draining receiver — uncounted, unreported — or panic · runtime shutdown); then a `None` without `Closed` signals the end.
     Closed {
         peer: PeerId,
         generation: Generation,
         cause: DisconnectCause,
     },
-    /// Where and how many were lost and what was requested again. ★Today there is no sequence-hole check at all★.
     StreamGap {
         peer: PeerId,
         stream: W::StreamKey,
@@ -237,7 +180,7 @@ pub enum TransportEvent<W: Wire> {
         got: u64,
         resumed_from: Option<u64>,
     },
-    /// ★Not true/false but a **number**★ — the oldest sequence number valid now (ADR-0177 decision 9).
+    /// ★Not true/false but a **number**★ — the oldest valid sequence number now (ADR-0177 decision 9).
     StreamTruncated {
         peer: PeerId,
         stream: W::StreamKey,
@@ -253,11 +196,8 @@ pub enum TransportEvent<W: Wire> {
         /// Number of fragments held and then discarded for the old incarnation. Under the new incarnation those numbers have no meaning.
         discarded: u64,
     },
-    /// Forgot this stream's ledger because of the stream-count cap.
-    ///
-    /// ★If the peer keeps inventing new keys, room runs out★ — if what was forgotten were not reported then, from that point
-    /// that stream's duplicate removal and hole detection would silently restart from scratch. Fragments being held are not
-    /// discarded and come up together with [`TransportEvent::StreamTruncated`].
+    /// Forgot this stream's ledger because of the stream-count cap. ★If the peer keeps inventing keys, room runs out★ — unreported, dedup and hole detection would silently restart from scratch. Held
+    /// fragments are not discarded; they come up with [`TransportEvent::StreamTruncated`].
     StreamForgotten {
         peer: PeerId,
         stream: W::StreamKey,
@@ -269,22 +209,16 @@ pub enum TransportEvent<W: Wire> {
         tag: W::Tag,
         after: Duration,
     },
-    /// A reply came but **there is no waiting slot**.
-    ///
-    /// A reply that arrives late after expiry does not come here — that is quietly discarded by design (ADR-0181 decision 4). What
-    /// comes here is **a pairing number we never asked for in the first place**, and it is either a consumer-side mistake (a command that expects a reply was pushed through
-    /// `notify`/`broadcast`) or a number the peer made up.
+    /// A reply came but **there is no waiting slot**. A late reply after expiry does not come here (quietly discarded by design — ADR-0181 decision 4); this is **a number we never asked for**: a consumer
+    /// mistake (a reply-expecting command pushed through `notify`/`broadcast`) or a number the peer made up.
     UnmatchedReply { peer: PeerId, tag: W::Tag },
-    /// Number of discarded items — what is counted is defined by each branch of [`Direction`]. It comes up regardless of queue policy.
-    /// ★This field exists so as not to create silent loss★.
+    /// Number of discarded items (what counts is defined per [`Direction`] branch); raised regardless of queue policy. ★Exists so as not to create silent loss★.
     Dropped {
         peer: PeerId,
         direction: Direction,
         count: u64,
     },
-    /// [`Wire::decode`] failed. Whether to disconnect is decided by [`crate::DecodeFailurePolicy`].
-    ///
-    /// `reason` = classification of the consumer's decode error ([`crate::wire::DecodeClass::class`]) — ★a fixed word that does not hold the received value★.
+    /// [`Wire::decode`] failed; whether to disconnect is [`crate::DecodeFailurePolicy`]. `reason` = classification of the consumer's decode error ([`crate::wire::DecodeClass::class`]) — ★a fixed word, never the received value★.
     DecodeFailed {
         peer: PeerId,
         generation: Generation,
@@ -315,7 +249,6 @@ impl<W: Wire> TransportEvent<W> {
         }
     }
 
-    /// Stable name for picking out the branch in logs · assertions.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Connected { .. } => "Connected",
@@ -545,8 +478,7 @@ mod tests {
 
     #[test]
     fn the_event_list_is_open_for_growth() {
-        // All `#[non_exhaustive]` means is that this enum cannot be matched exhaustively outside the crate.
-        // Here we only measure that the branch name comes out as a stable string — the consumer tells branches apart by it.
+        // `#[non_exhaustive]` only blocks exhaustive matching outside the crate; here we measure that the branch name is a stable string the consumer tells branches apart by.
         let peer = PeerId::new("d1");
         let forgotten: TransportEvent<TestWire> = TransportEvent::StreamForgotten {
             peer: peer.clone(),

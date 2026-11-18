@@ -1,20 +1,12 @@
-//! Peer-N registry — ★driving layer★. Sets up one supervisor per peer and returns that handle's receiver end ([`Inbox`]) to the side that raised it.
+//! Peer-N registry — ★driving layer★: one supervisor per peer, each returning its own receiver end ([`Inbox`]) to the side that raised it.
 //!
-//! ★N peers from the start★ (ADR-0177 decision 3 · ADR-0179) — no state presumes a world of one. **Peers share no state**: if daemon A gives up, B operates.
-//!
-//! ★The upward line is separate per handle★ (ADR-0310 decision 17 · TRD 3 §3-0 ① D24 ②) — with one line a noisy peer would hold a quiet peer's
-//! events · packets behind it and 「even if A dies, B and C must keep working」 collapses (ADR-0180 decision 8). Each [`Registry::add`] sets up a line (length =
-//! [`Policy::inbound_queue`]), returns its receiving end, and only that one supervisor holds the enqueue end. When full, the supervisor holds in its own
-//! ordering area and stops that peer's reading — it neither drops nor cuts the connection (`peer.rs` header). An undrained receiver end stalls only that peer.
-//!
-//! ★Re-raising the same name tag does not continue the line★ — the old supervisor puts into the old receiver end until teardown finishes, the new one into
-//! the new; one receiver end's end is that supervisor's end, and there is no ordering between receiver ends (a consumer adapter merges them — filtering rules TRD 3 §3-3).
-//!
-//! ★Two ways to raise a peer★ — [`Registry::add`] dials by address and redials when cut; [`Registry::attach`] puts on one received channel ([`Accepted`]),
-//! never redials, and removes itself when it ends (TRD 3 §3-1 ①). The consumer runs the accept loop; the registry holds no listener.
-//!
-//! ★The registry does not decide 「is the whole app disconnected」★ — that is a screen concept; this crate only counts peers. It gives two ingredients
-//! ([`Registry::peers`] · [`crate::Peer::reconnect_now`]) and the shell folds them (closing ADR-0180's open question).
+//! ★N peers from the start★ (ADR-0177 decision 3 · ADR-0179), sharing no state: if daemon A gives up, B operates.
+//! ★The upward line is per handle★ (ADR-0310 decision 17 · TRD 3 §3-0 ① D24 ②; ADR-0180 decision 8): [`Registry::add`] sets up a line ([`Policy::inbound_queue`]) and only
+//! that supervisor holds its enqueue end, so a noisy peer cannot hold a quiet one's output behind it; full = it stops reading that peer (`peer.rs` header).
+//! ★Re-raising a name tag does not continue the line★ — old and new supervisors write to different receiver ends with no order between them (merging: TRD 3 §3-3).
+//! Two ways to raise: [`Registry::add`] dials and redials; [`Registry::attach`] takes one accepted channel ([`Accepted`]), never redials and removes itself when it ends
+//! (TRD 3 §3-1 ①) — the consumer runs the accept loop. ★The registry does not decide 「the whole app is disconnected」★ (a screen concept): it gives
+//! [`Registry::peers`] · [`crate::Peer::reconnect_now`] and the shell folds them (ADR-0180).
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -34,37 +26,28 @@ use crate::peer::{prepare_peer, AcceptedLink, LeaveRoster, Origin, Peer, PeerCon
 use crate::policy::Policy;
 use crate::wire::Wire;
 
-/// One handle's receiver end — only what the one supervisor raised by the [`Registry::add`] · [`Registry::attach`] that returned it emitted.
-///
-/// ★The end = `None` after [`TransportEvent::Closed`](crate::TransportEvent::Closed)★ — the supervisor loads `Closed` last in teardown and releases the
-/// enqueue end. ★A `None` without `Closed`, unless the receiver called [`Inbox::close`]★ means the supervisor ended without normal teardown: teardown
-/// exceeded `CLOSE_DRAIN_LIMIT` (`peer.rs`) and dropped the rest up to `Closed` (neither counted nor reported), or the task ended abnormally (panic ·
-/// runtime shutdown). A `None` after [`Inbox::close`] is not the supervisor's end — it may still run. ★Drain to the end★ — crate header 「Receiver-side invariants」 5.
-///
-/// Each item carries the supervisor's byte share, released when taken out (`budget.rs`); dropping the receiver end releases the share of what it held.
+/// One handle's receiver end — only what that handle's supervisor emitted. ★The end = `None` after [`TransportEvent::Closed`](crate::TransportEvent::Closed)★; a `None`
+/// without `Closed` (unless [`Inbox::close`] was called) means the supervisor ended without normal teardown (cap `CLOSE_DRAIN_LIMIT` in `peer.rs`, panic, or runtime shutdown).
+/// After [`Inbox::close`] a `None` is not the supervisor's end. ★Drain to the end★ (crate header 「Receiver-side invariants」 5). Items carry a byte share released
+/// when taken out or when the receiver end is dropped (`budget.rs`).
 pub struct Inbox<W: Wire> {
     rx: mpsc::Receiver<Charged<Incoming<W>>>,
 }
 
 impl<W: Wire> Inbox<W> {
-    /// `None` = the end — the supervisor released the enqueue end or [`Inbox::close`] was called, and everything held has been taken out.
-    /// ★Cancel-safe★ — on a `select!` arm no item is lost when another arm wins.
+    /// `None` = the end (enqueue end released or [`Inbox::close`] called, and all held items taken). ★Cancel-safe★.
     pub async fn recv(&mut self) -> Option<Incoming<W>> {
         self.rx.recv().await.map(Charged::into_item)
     }
 
-    /// Without waiting. `None` = nothing held now or ended — use [`Inbox::recv`] to tell them apart.
+    /// Without waiting; `None` = nothing now or ended (use [`Inbox::recv`] to tell).
     pub fn try_recv(&mut self) -> Option<Incoming<W>> {
         self.rx.try_recv().ok().map(Charged::into_item)
     }
 
-    /// Blocks only new items. What is already held (including an already loaded `Closed`) can still be taken out with [`Inbox::recv`] · [`Inbox::try_recv`];
-    /// when all is taken out it is `None` even if the supervisor still runs. ★What the supervisor holds in the ordering area unloaded is silently dropped★
-    /// (a closed line cannot take it; neither counted nor reported) — the same if the [`Inbox`] is dropped.
-    ///
-    /// ★The supervisor folds immediately★ — even with nothing to put in it goes to closing on the spot and does not re-attach (crate header 「Receiver-side
-    /// invariants」 5); the same if dropped. ★Accepted outbound work is dropped too★ — queued commands are rejected and the frame being written is dropped
-    /// (counted, nowhere to report). To send and leave, drain until `Closed` · `None`, then release.
+    /// Blocks only new items; held items (including a loaded `Closed`) can still be taken, then `None`. ★What the supervisor holds in the ordering area is silently dropped★
+    /// (uncounted), as on drop. ★The supervisor folds immediately★ (crate header 「Receiver-side invariants」 5) — queued commands are rejected and the frame being
+    /// written dropped. To send and leave, drain until `Closed` · `None`, then release.
     pub fn close(&mut self) {
         self.rx.close();
     }
@@ -75,43 +58,36 @@ struct RegistryInner<W: Wire> {
     dialer: Arc<dyn Dialer>,
     clock: Arc<dyn Clock>,
     policy: Policy,
-    /// ★Do not wait inside the lock★ — starting supervisors · closing · dropping handles are outside it.
+    /// ★Never wait inside the lock★ — supervisor start, close and handle drops happen outside it.
     roster: Mutex<Roster<W>>,
 }
 
-/// Everything one registry lock guards. ★The generation table is inside it too★ — taking out the handle to replace · choosing the counter · raising the
-/// new handle must be one critical section (`Registry::launch`).
+/// Everything one registry lock guards — ★including the generation table★: taking out the handle to replace, choosing the counter and raising the new handle are one critical section (`Registry::launch`).
 struct Roster<W: Wire> {
+    /// The handle of a name tag that is raised.
     peers: HashMap<PeerId, Peer<W>>,
-    /// The per-name-tag generation counter. ★Do not erase with `remove`★ — re-raising the same name tag would rewind generations to 0 and the consumer's
-    /// ordinary defense (「ignore anything below the max generation」) would discard the new connection entirely.
-    ///
-    /// It grows by **the number of name tags the consumer wrote with [`Registry::add`]** (not peer-decided). ★Accepted peers are not put in★ — their name
-    /// tag is new per connection and it would grow forever ([`Registry::attach_with_policy`]).
+    /// Per-name-tag generation counter. ★Never erase on `remove`★ — a re-raise would rewind to 0 and the consumer's 「ignore below max generation」 defense would discard the
+    /// new connection. Grows with the name tags the consumer `add`s; ★accepted peers stay out★ (a new tag per connection would grow it forever).
     generations: HashMap<PeerId, Arc<AtomicU64>>,
-    /// [`Registry::close_all`] was called — a peer raised afterwards does not get onto the registry and is closed at once. The setter (`close_all`'s draining)
-    /// and reader (`launch`) share the lock, so a raise crossing the fold does not remain in the emptied registry.
+    /// [`Registry::close_all`] ran — later raises are closed at once and not registered; setter and reader share the lock, so a raise crossing the fold cannot linger.
     folded: bool,
 }
 
 impl<W: Wire> RegistryInner<W> {
-    /// Reuse a poisoned lock as is — leaving the poison would make the registry unusable forever. No half-changed table remains: the only thing that can panic
-    /// inside the lock is building the supervisor (`prepare_peer` of `Registry::launch` — e.g. the injected clock), which ends before the table changes, and the
-    /// table change is one field at a time. ★A panic while building does not retake this lock while unwinding★ (`new_peer` in `peer.rs`) — it would deadlock on the same thread.
+    /// Reuse a poisoned lock — leaving it poisoned would disable the registry forever. No half-changed table: the only in-lock panic is building the supervisor
+    /// (`prepare_peer`), before the table changes. ★A panic while building must not retake this lock while unwinding★ (`new_peer` in `peer.rs`).
     fn roster(&self) -> MutexGuard<'_, Roster<W>> {
         self.roster.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 impl<W: Wire> Roster<W> {
-    /// The generation counter this name tag will use — the table's if present, else the raised (to be replaced) handle's, else a new one. Does not change the
-    /// table; `Registry::launch` puts it there after building.
+    /// The counter this name tag uses: the table's, else the replaced handle's, else new. Does not change the table (`Registry::launch` does).
     fn counter(&self, id: &PeerId) -> Arc<AtomicU64> {
         if let Some(counter) = self.generations.get(id) {
             return counter.clone();
         }
-        // ★Continue the counter itself, not the old supervisor's last generation★ (race = `PeerConfig::generations`). Replacing an accepted peer not in the table
-        //   with `add` with a new counter would repeat numbers the accepted peer already drew.
+        // ★Continue the counter itself, not the old supervisor's last generation★ (race: `PeerConfig::generations`); a new counter for an accepted peer replaced by `add` would repeat numbers.
         self.peers
             .get(id)
             .map(Peer::generations)
@@ -119,8 +95,7 @@ impl<W: Wire> Roster<W> {
     }
 }
 
-/// Peer registry. A clone points to the same registry. ★When the last clone disappears the registry merely releases the handles it holds★ — a supervisor hears
-/// it as a close once all of that peer's [`Peer`] handles are gone and tears down (its receiver end ends with `Closed` → `None`); a consumer-held handle keeps it running.
+/// Peer registry; clones share it. ★Dropping the last clone only releases the handles★ — a supervisor closes once all its [`Peer`] handles are gone; a consumer-held handle keeps it running.
 pub struct Registry<W: Wire> {
     inner: Arc<RegistryInner<W>>,
 }
@@ -134,7 +109,7 @@ impl<W: Wire> Clone for Registry<W> {
 }
 
 impl<W: Wire> Registry<W> {
-    /// Sets up one registry. ★What is received comes out only through the [`Inbox`] that [`Registry::add`] · [`Registry::attach`] return per handle★. `dialer` is used only by `add`.
+    /// Sets up one registry. ★Received data comes only through the per-handle [`Inbox`]★. `dialer` is used only by `add`.
     pub fn new(
         wire: Arc<W>,
         dialer: Arc<dyn Dialer>,
@@ -161,13 +136,8 @@ impl<W: Wire> Registry<W> {
         }
     }
 
-    /// Raises a peer and starts attaching at once — returns that handle and receiver end. An existing same name tag is **closed and replaced**.
-    ///
-    /// ★Must be called inside a tokio runtime★ — it starts a supervisor task; outside, it panics before the registry is touched (usable afterwards, a peer
-    /// raised under the same name tag stays raised).
-    ///
-    /// After [`Registry::close_all`] it does not raise onto the registry and closes before dialing — the receiver end ends `Closed` → `None` and the
-    /// [`Dialer`] is not called.
+    /// Raises a peer and starts attaching at once; returns its handle and receiver end. An existing same name tag is **closed and replaced**. ★Call inside a tokio
+    /// runtime★ (it panics outside, before the registry is touched). After [`Registry::close_all`] it is not registered and closes before dialing (`Closed` → `None`, [`Dialer`] not called).
     pub fn add(
         &self,
         id: PeerId,
@@ -178,23 +148,16 @@ impl<W: Wire> Registry<W> {
         self.add_with_policy(id, addr, handshake, policy)
     }
 
-    /// Applies a different policy to this peer only. Runtime conditions · a folded registry as [`Registry::add`].
+    /// Applies a different policy to this peer only; runtime and folded-registry conditions as [`Registry::add`].
     ///
-    /// ★Close the old supervisor first, and pass its last generation as the new supervisor's floor★ — reversed, two sockets attach to the same peer at once;
-    /// without the floor, generations rewind to 0 and the consumer's ordinary defense (「ignore anything below the max generation」) **discards the new
-    /// connection entirely**.
+    /// ★Close the old supervisor first and pass its last generation as the floor★ — reversed, two sockets attach at once, and without the floor generations rewind to 0
+    /// and the consumer's 「ignore below max generation」 defense **discards the new connection**. [`Peer::close`] has no completion signal, so the old supervisor may still
+    /// issue one more generation; the **shared counter** keeps drawn numbers (`Connected` · `Disconnected` · message numbers) from repeating. ★A supervisor that never
+    /// attached carries the floor as is★, so its `Closed` and [`Peer::generation`] show the old number (the receiver end tells which supervisor it is).
     ///
-    /// ★The overlap still does not become 0★ — [`Peer::close`] has no completion signal, so the old supervisor may still be closing and may enter the
-    /// operating phase and issue one more generation. The **shared counter** makes that harmless — the generation drawn on attach (`Connected` · `Disconnected`
-    /// · the number on messages) never comes out twice. ★Exception: a supervisor that never attached★ carries the floor (the old supervisor's last
-    /// generation) as is, so its [`TransportEvent::Closed`](crate::TransportEvent::Closed) and [`Peer::generation`] show the old number; the receiver end tells which supervisor it is.
-    ///
-    /// ★Generations start again from 1 only for a name tag never raised with `add` and not on the registry now★ — `add` on a name tag put on as an accepted peer
-    /// that then removed itself or was removed with [`Registry::remove`] falls here too. Otherwise it continues this name tag's counter (table's, else the
-    /// replaced handle's) and puts it on the table, also among simultaneous raises — no call makes a new counter without seeing a handle another took out.
-    ///
-    /// ★The receiver end is new even under the same name tag★ — the old supervisor puts into the old one until teardown finishes and its end is `None` after
-    /// `Closed`. If the old receiver end is released, the old teardown ends without waiting; held undrained, it remains up to `CLOSE_DRAIN_LIMIT` in `peer.rs`.
+    /// ★Generations restart from 1 only for a name tag never `add`ed and absent now★ (including an accepted peer that left or was [`Registry::remove`]d); otherwise the table's
+    /// (else the replaced handle's) counter continues, also among simultaneous raises. ★The receiver end is always new★; the old supervisor's teardown ends without
+    /// waiting if its receiver end is released, or up to `CLOSE_DRAIN_LIMIT` (`peer.rs`) if held undrained.
     pub fn add_with_policy(
         &self,
         id: PeerId,
@@ -226,7 +189,7 @@ impl<W: Wire> Registry<W> {
         (peer, Inbox { rx })
     }
 
-    /// Puts a received channel on as a peer — returns that handle and receiver end. The policy is the registry's ([`Registry::attach_with_policy`] overrides it; contract there).
+    /// Puts a received channel on as a peer; the policy is the registry's ([`Registry::attach_with_policy`] overrides it — contract there).
     pub fn attach(
         &self,
         id: PeerId,
@@ -237,33 +200,23 @@ impl<W: Wire> Registry<W> {
         self.attach_with_policy(id, accepted, handshake, policy)
     }
 
-    /// Puts a received channel ([`Accepted`]) on as a peer with this policy (TRD 3 §3-1 ①). Runtime conditions · replacing the same name tag (closes the old
-    /// one · old receiver end ends `Closed` → `None` · receiver end is new) as [`Registry::add_with_policy`].
+    /// Puts a received channel ([`Accepted`]) on as a peer (TRD 3 §3-1 ①); runtime conditions and same-name replacement as [`Registry::add_with_policy`].
     ///
-    /// ★Starts from the handshake and never redials★ — ending without entering the operating phase (reject · deadline · channel loss) or cut during operation,
-    /// it folds at once: the receiver end ends with `None` after [`TransportEvent::Closed`](crate::TransportEvent::Closed) whose `cause` carries the real reason
-    /// (for a disconnect during operation, the preceding `Disconnected`'s cause, read-end/write-end distinction included). Dialing-side events (`ConnectFailed` ·
-    /// `Rejected` · `GaveUp`) do not come and [`Peer::state`] skips `Dialing` · `Backoff` · `GaveUp`. [`Peer::reconnect_now`] is not listened to. Other handle
-    /// contracts (sending · closing · drain and close) as a dialed peer.
+    /// ★Starts from the handshake and never redials★ — failing before the operating phase (reject · deadline · channel loss) or cut during operation folds at once: the
+    /// receiver end ends with `None` after `Closed` whose `cause` is the real reason (read/write end included). No `ConnectFailed` · `Rejected` · `GaveUp`, [`Peer::state`]
+    /// skips `Dialing` · `Backoff` · `GaveUp`, and [`Peer::reconnect_now`] is ignored.
     ///
-    /// ★Auth deadline = [`Accepted::upgraded_at`] + [`Policy::connect_timeout`]★ (TRD 3 §5 3) — listener ready-queue time counts. If already passed on putting on,
-    /// the handshake does not run and it closes (`cause` = `Idle`). So the listener must stamp `upgraded_at` with this registry's [`Clock`] (a debug build asserts a future time).
+    /// ★Auth deadline = [`Accepted::upgraded_at`] + [`Policy::connect_timeout`]★ (TRD 3 §5 3), ready-queue time included; already passed means no handshake and a close (`cause` =
+    /// `Idle`). So the listener must stamp `upgraded_at` with this registry's [`Clock`] (debug asserts a future time).
     ///
-    /// ★When it ends it removes itself from the registry★ — after dropping the channel and before teardown (which waits for the receiver end to drain); a
-    /// same-name replacement in the meantime is left alone. It removes itself even if the supervisor ends abnormally, and a peer ending at its first poll (deadline
-    /// already passed · peer already cut) does not remain either — the supervisor starts after raising.
+    /// ★Removes itself from the registry when it ends★ — after dropping the channel, before teardown waits for the receiver end; a newer same-name peer is left alone;
+    /// also on abnormal end and when it ends at its first poll (the supervisor starts after raising). ★Not in the generation table★ (the tag is new per connection —
+    /// TRD 3 §3-1 ① `conn-<ConnId>`): the counter is the table's, the replaced handle's, or new, and generations restart from 1 for a tag never `add`ed and absent
+    /// (receiving tags are assumed not reused).
     ///
-    /// ★Not in the generation table★ — the receiving name tag is new per connection (TRD 3 §3-1 ① `conn-<ConnId>`), so it would grow with connections. The counter
-    /// is the table's if the name tag was raised with `add`, else the replaced handle's, else new — re-putting a name tag already on the registry does not rewind
-    /// generations even when simultaneous. ★Generations start again from 1 only for a name tag never raised with `add` and not on the registry now★ — first-time, or re-put after it
-    /// removed itself or was removed with [`Registry::remove`] (on the premise that receiving name tags are not reused).
-    ///
-    /// ★The upgrade permit ([`crate::ConnPermit`] of [`Accepted`]) is released on entering the operating phase★ — if it ends without entering, where the channel is dropped
-    /// (before the receiver end drains — TRD 3 §5 14 「a peer that failed auth releases its permit as soon as it closes」). The auth-wait permit does not exist yet (3-3 U4),
-    /// so this one covers that role; when it arrives, this holds it and releases the upgrade permit.
-    ///
-    /// After [`Registry::close_all`] it does not raise onto the registry and closes before the handshake — loads a close ([`CloseCode::GOING_AWAY`]) and drops it
-    /// without reading or writing the channel.
+    /// ★The upgrade permit ([`crate::ConnPermit`]) is released on entering the operating phase★, or where the channel is dropped if it never does (before the receiver end
+    /// drains — TRD 3 §5 14); it also covers the not-yet-existing auth-wait permit's role. After [`Registry::close_all`] it is not registered and closes before the
+    /// handshake with [`CloseCode::GOING_AWAY`], without reading or writing the channel.
     pub fn attach_with_policy(
         &self,
         id: PeerId,
@@ -309,30 +262,25 @@ impl<W: Wire> Registry<W> {
         (peer, Inbox { rx: inbox })
     }
 
-    /// The common tail of `add` · `attach` — builds the supervisor and handle and starts the supervisor **after** raising it on the registry. `record` = if the
-    /// name tag was not in the table, put the chosen counter there (`add`).
+    /// Common tail of `add` · `attach`: builds the supervisor and handle and starts the supervisor **after** raising it. `record` = put the chosen counter on the table (`add`).
     ///
-    /// ★Raising comes before starting★ — reversed, an accepted peer ending at its first poll (deadline passed · peer already cut) could finish even removing itself
-    /// on another worker and then be raised, leaving the ended handle forever (the name tag is new per connection, so nobody removes it again). A folded registry is
-    /// also told apart before starting and the close put in first, so the supervisor sees it at its first poll and neither dials nor handshakes (first line of `dial` ·
-    /// `shake_hands` in `peer.rs`); reversed, a supervisor running first on another worker would dial once or start a handshake.
-    ///
-    /// ★Choosing the counter · taking out the handle to replace · raising is one critical section★ — split, one of two simultaneous raises of the same name tag could
-    /// make a new counter without seeing the other's taken handle or the table field and draw an already issued generation again.
-    ///
-    /// ★The table changes only after building (`prepare_peer`) finishes★ — a panic while building (e.g. the injected clock) leaves the registry untouched, so the
-    /// handle to be replaced stays raised and running. The table change afterwards has no place to panic (`roster`).
+    /// ★Raising comes before starting★ — reversed, an accepted peer that ends at its first poll could remove itself on another worker and then be raised, leaving an ended
+    /// handle forever; and a folded registry's close must be in before start so the first poll neither dials nor handshakes (`dial` · `shake_hands`). ★Counter choice, taking out
+    /// the replaced handle and raising are one critical section★ — split, simultaneous raises could draw an already issued generation. ★The table changes only after
+    /// `prepare_peer` finishes★ — a build panic leaves the registry untouched and the replaced handle running.
     fn launch(
         &self,
         id: PeerId,
         record: bool,
         config: impl FnOnce(Arc<AtomicU64>) -> PeerConfig<W>,
     ) -> Peer<W> {
+        // Outside a runtime it panics here — before the registry is touched (`Registry::add`).
         let runtime = tokio::runtime::Handle::current();
         let (peer, supervisor, displaced, folded) = {
             let mut roster = self.inner.roster();
             let generations = roster.counter(&id);
             let (peer, supervisor) = prepare_peer(config(generations.clone()));
+            // Only `add` puts the chosen counter on the table — an accepted peer only reads the table (`Roster::generations`).
             if record {
                 roster.generations.entry(id.clone()).or_insert(generations);
             }
@@ -353,13 +301,14 @@ impl<W: Wire> Registry<W> {
         peer
     }
 
-    /// How an accepted peer removes itself when it ends — only if that name tag still points to that handle. ★Weak★: it does not hold the registry (if the registry vanished first, nothing to remove).
+    /// How an accepted peer removes itself when it ends — only if the name tag still points to that handle. ★Weak★: it does not hold the registry.
     fn leave_roster(&self, id: PeerId) -> LeaveRoster<W> {
         let registry = Arc::downgrade(&self.inner);
         Box::new(move |me: &Peer<W>| {
             let Some(registry) = registry.upgrade() else {
                 return;
             };
+            // A removed handle is dropped outside the lock.
             let _left = {
                 let mut roster = registry.roster();
                 match roster.peers.get(&id) {
@@ -370,7 +319,7 @@ impl<W: Wire> Registry<W> {
         })
     }
 
-    /// Removes it from the registry and closes that peer; its receiver end ends `Closed` → `None` when the supervisor finishes teardown.
+    /// Removes it from the registry and closes it; its receiver end ends `Closed` → `None` when the supervisor finishes teardown.
     pub fn remove(&self, id: &PeerId) {
         let removed = self.inner.roster().peers.remove(id);
         if let Some(peer) = removed {
@@ -378,23 +327,15 @@ impl<W: Wire> Registry<W> {
         }
     }
 
-    /// Removes all peers from the registry and, after each drains the outbound work it had accepted, closes ([`Peer::close_after_flush`] ·
-    /// [`CloseCode::GOING_AWAY`]) — waits for all those supervisors until `deadline` (the registry's clock) (TRD 3 §3-0 ④ — the daemon shutdown waits on this).
-    /// `Err` = not all finished by the deadline; the rest keep folding and finish at their own deadlines ([`Policy::flush_timeout`] · the teardown limit).
+    /// Removes all peers and, after each drains its accepted outbound work, closes ([`Peer::close_after_flush`] · [`CloseCode::GOING_AWAY`]); waits until `deadline`
+    /// (the registry's clock) for all supervisors (TRD 3 §3-0 ④ — daemon shutdown). `Err` = not all finished by then; the rest keep folding to their own deadlines
+    /// ([`Policy::flush_timeout`] · teardown limit). ★Drains rather than closing at once★ (so a last answer such as a stop Ack goes out; use [`Registry::remove`] to close at once).
     ///
-    /// ★It drains rather than closing at once★ — so the last answer put in just before closing (e.g. a stop Ack) goes out; to close at once use [`Registry::remove`].
-    ///
-    /// ★Waits only for peers on the registry at the call★ — a supervisor still folding because `add` replaced it or `remove` took it out earlier is not known.
-    ///
-    /// ★It folds the registry — it does not reopen★ — [`Registry::add`] · [`Registry::attach`] afterwards do not get onto the registry and are closed before
-    /// dialing or handshaking (receiver end ends `Closed` → `None`; an accepted channel loads a close and is dropped unread). This function does not wait for that.
-    /// It keeps a peer the accept loop put on across the fold from remaining unclosed on the emptied registry; still stand up the accept loop first.
-    ///
-    /// ★The close starts at the call★ — the returned future only waits; dropping it, the close continues (as [`Peer::close_after_flush`]). The deadline runs from its first poll.
-    ///
-    /// ★Do not wait on the task that drains those receiver ends★ — a supervisor's end depends on the receiver draining (crate header 「known limits」), so that
-    /// supervisor lingers to the teardown limit and this wait goes to `deadline`. Keep draining to the end (`None`); if released, that peer's remaining outbound work is
-    /// dropped (crate header 「Receiver-side invariants」 5).
+    /// ★Waits only for peers on the registry at the call★. ★Folds the registry, does not reopen★ — later [`Registry::add`] · [`Registry::attach`] are not registered and are
+    /// closed before dialing/handshaking (not waited for), so an accept loop racing the fold cannot leave unclosed peers; still stop the accept loop first.
+    /// ★The close starts at the call★ (the future only waits; dropping it keeps closing; the deadline runs from its first poll).
+    /// ★Do not wait on the task that drains these receiver ends★ — it lingers to the teardown limit and this wait goes to `deadline`; keep draining to `None` (a released
+    /// receiver end drops that peer's remaining outbound work — crate header 「Receiver-side invariants」 5).
     pub fn close_all(
         &self,
         deadline: Duration,
@@ -404,6 +345,7 @@ impl<W: Wire> Registry<W> {
             roster.folded = true;
             roster.peers.drain().map(|(_, peer)| peer).collect()
         };
+        // The handle may be released here — the marker holds the control channel and the drain continues (`Peer::close_after_flush`).
         let ends: Vec<_> = peers
             .iter()
             .map(|peer| peer.close_after_flush(CloseCode::GOING_AWAY, "going away"))
@@ -420,7 +362,7 @@ impl<W: Wire> Registry<W> {
         self.inner.roster().peers.get(id).cloned()
     }
 
-    /// A snapshot of now, sorted by name tag — ★the ingredient the shell uses to fold 「the whole app」★.
+    /// A snapshot of now, sorted by name tag. ★This is the ingredient the shell uses to fold 「the whole app」★.
     pub fn peers(&self) -> Vec<(PeerId, PeerState)> {
         let mut out: Vec<(PeerId, PeerState)> = self
             .inner
@@ -441,19 +383,14 @@ impl<W: Wire> Registry<W> {
         self.len() == 0
     }
 
-    /// Pushes the same thing to all peers. ★Encoded once and the frame handed out★ — no `Clone` on `W::Out`; in exchange, the fanout has **fixed notification
-    /// semantics** (no reply wait).
-    ///
-    /// A partial failure comes up as that peer's [`TransportEvent::Dropped`](crate::TransportEvent::Dropped) **on that peer's receiver end** — ★not creating
-    /// something that disappears silently is the one tricky part★ (today's `net` fanout is silent there). That peer's supervisor counts and reports, through
-    /// the same ordering area as its other output, so the report is not dropped even when the line is full (`Peer::send_frame`).
-    ///
-    /// ★What could not be put in because a peer the app called [`Peer::close`] on is not operating is not reported★, even if it remains on the registry (user
-    /// decision 2026-09-26 — `lib.rs` 「known limits」); what was in the queue earlier is counted by the supervisor.
+    /// Pushes the same thing to all peers. ★Encoded once, frame handed out★ (no `Clone` on `W::Out`), hence **fixed notification semantics** (no reply wait). A partial failure
+    /// is that peer's [`TransportEvent::Dropped`](crate::TransportEvent::Dropped) **on its own receiver end**, reported through its ordering area so a full line does not drop it
+    /// (`Peer::send_frame`); ★no silent disappearance is the one tricky part★. ★Not reported when a peer the app [`Peer::close`]d is not operating★ (`lib.rs` 「known limits」).
     pub fn broadcast(&self, out: W::Out) {
         let frame = self.inner.wire.encode(&out);
         let targets: Vec<Peer<W>> = self.inner.roster().peers.values().cloned().collect();
         for peer in targets {
+            // Failure is counted by that peer's supervisor (`Peer::send_frame`).
             let _ = peer.send_frame(frame.clone());
         }
     }
@@ -496,6 +433,7 @@ mod tests {
             }
         }
 
+        /// ★You must hold the returned receiver end★ — if dropped, the supervisor folds at once.
         fn add(
             &self,
             name: &str,
@@ -513,6 +451,7 @@ mod tests {
         Arc::new(ImmediateHandshake)
     }
 
+    /// Ends the supervisor task abnormally — if the channel opens, it panics in `start`.
     struct PanickingHandshake;
 
     impl Handshake for PanickingHandshake {
@@ -537,7 +476,6 @@ mod tests {
         out
     }
 
-    /// Runs the supervisors and drains — letting them move what they hold in the ordering area into the line — until nothing comes up in one turn.
     async fn drain_until_quiet(inbox: &mut Inbox<TestWire>) -> Vec<Incoming<TestWire>> {
         let mut out = Vec::new();
         loop {
@@ -550,7 +488,7 @@ mod tests {
         }
     }
 
-    /// Has it ended now — nothing held and the enqueue end released (or closed). ★Something held is taken out and discarded★ — call it after taking everything out.
+    /// Has it ended now (nothing held, enqueue end released). ★Takes one held item out and discards it★ — call after draining.
     async fn ended(inbox: &mut Inbox<TestWire>) -> bool {
         matches!(poll_immediate(inbox.recv()).await, Some(None))
     }
@@ -691,6 +629,7 @@ mod tests {
         assert_eq!(eb.frames(), vec![Frame::Text("not|all".into())]);
     }
 
+    // A peer that gave up is asleep waiting only for control — that supervisor must wake by itself and report.
     #[tokio::test]
     async fn a_partial_broadcast_failure_shows_up_as_that_peers_event() {
         let f = Fixture::new(Policy::default());
@@ -750,7 +689,6 @@ mod tests {
         assert_eq!(f.registry.len(), 1);
     }
 
-    // ── N7: raising the same name tag again does not rewind the generation ──
     #[tokio::test]
     async fn re_adding_the_same_name_never_rewinds_the_generation() {
         let f = Fixture::new(Policy::default());
@@ -777,6 +715,7 @@ mod tests {
         let (_second, _second_inbox) =
             f.registry
                 .add(PeerId::new("a"), Address::new("mem://a2"), immediate());
+        // A point where no task has run yet — the old handle should already have received the shutdown signal.
         settle().await;
         assert_eq!(first.peer_state(), PeerState::Closed);
     }
@@ -852,6 +791,7 @@ mod tests {
         );
     }
 
+    // The shape of one daemon rewind ring (4096) arriving at once — eight times the line length (default 512).
     #[tokio::test]
     async fn a_replay_sized_burst_arrives_whole_while_the_consumer_lags() {
         let f = Fixture::new(Policy::default());
@@ -947,9 +887,8 @@ mod tests {
 
     // ── 3-0 U1c: the registry hands the byte budget to the supervisor ──
     //
-    // ★Measure with the real budget value★ — supervisor tests pass a small budget directly, so a wrong value from the registry (0 · no limit) would not show there.
-    //   For a non-stream peer the whole budget (16 MiB) is the read share, so two frames over half of it close the read gate at the second (same shape as the net
-    //   `CONN_RX_MAX_BYTES` test — same value).
+    // ★Use the real budget value★ — supervisor tests pass a small one directly, so a wrong registry value (0 · unlimited) would not show. A non-stream peer's read share is the whole
+    //   16 MiB, so two frames over half of it close the read gate at the second (same shape as the net `CONN_RX_MAX_BYTES` test).
     #[tokio::test]
     async fn the_registry_stops_reading_a_peer_once_it_holds_the_byte_budget() {
         let f = Fixture::new(Policy::default());
@@ -1036,8 +975,7 @@ mod tests {
 
     // ── 3-0 U1d: fanout loss is counted by that peer's supervisor and emitted to its own receiver end ──
     //
-    // ★Do not advance the clock★ — a backoff wait woken by the clock leaves the report stuck at the turn start, and we could not tell whether the supervisor woke by
-    //   itself. Line length 1 = a line filled by one `ConnectFailed`.
+    // ★Do not advance the clock★ — a clock-woken backoff leaves the report stuck at the turn start and hides whether the supervisor woke by itself. Line length 1 = filled by one `ConnectFailed`.
     #[tokio::test]
     async fn a_broadcast_loss_wakes_a_backing_off_supervisor_and_survives_a_full_inbox() {
         let f = Fixture::new(Policy {
@@ -1191,8 +1129,7 @@ mod tests {
         );
     }
 
-    // Why 30 times: without the check before polling the dial phase, the dial future and the closed arm become ready together and which is polled first is random
-    //   (`select!`) — one run could miss that the check is gone.
+    // 30 runs: without the pre-dial check the dial future and the closed arm are ready together and `select!` order is random, so one run could miss the check's absence.
     #[tokio::test]
     async fn an_inbox_dropped_before_its_supervisor_runs_never_dials() {
         let f = Fixture::new(Policy::default());
@@ -1240,8 +1177,7 @@ mod tests {
         assert!(!ended(&mut new_inbox).await);
     }
 
-    // ★The old supervisor emits `Closed` only after fully closing the channel, and meanwhile the new one attaches★ — with one line the two would mix and an
-    //   item's supervisor would have to be told by generation.
+    // ★The old supervisor emits `Closed` only after fully closing the channel while the new one attaches★ — with one line the two would mix.
     #[tokio::test]
     async fn a_name_re_added_while_its_old_supervisor_is_still_closing_splits_by_inbox() {
         let f = Fixture::new(Policy::default());
@@ -1308,6 +1244,7 @@ mod tests {
         let name = PeerId::new("a");
         let mut inboxes = Vec::new();
         for _ in 0..30 {
+            // Removed before the supervisor runs — the supervisor sees the close before dialing and ends having emitted only a `Closed`.
             let (_peer, inbox) = f
                 .registry
                 .add(name.clone(), Address::new("mem://a"), immediate());
@@ -1324,7 +1261,7 @@ mod tests {
 
     // ── 3-0 U1d: if teardown exceeds the limit, the receiver end ends without `Closed` ──
     //
-    // Line length 1 = a line filled by one `Connected` — the notifications · disconnect · `Closed` after it wait in the supervisor's ordering area.
+    // Line length 1 = filled by one `Connected`; the notifications · disconnect · `Closed` behind it wait in the ordering area.
     #[tokio::test]
     async fn an_inbox_nobody_drains_ends_without_closed_once_the_teardown_gives_up() {
         for (waited, expected) in [
@@ -1393,8 +1330,7 @@ mod tests {
 
     // ── 3-0 U1a: fanout loss is reported to an open peer · an ended peer receives nothing even if it remains on the registry ──
     //
-    // That the rejection after the app called close is not counted (user decision 2026-09-26) cannot be measured here — the supervisor and receiver end have
-    //   ended, so a count would not show. The test right below measures that gap.
+    // The uncounted rejection after close cannot be measured here (supervisor and receiver end already ended); the next test measures that gap.
     #[tokio::test]
     async fn a_broadcast_loss_is_reported_for_an_open_peer_and_never_reaches_an_ended_one() {
         let f = Fixture::new(Policy::default());
@@ -1418,9 +1354,8 @@ mod tests {
         assert!(ended(&mut shut_inbox).await);
     }
 
-    // ★Measures the gap after close and before the supervisor handles it★ — a supervisor asleep in the give-up wait that gets control and a wake together has no
-    //   fixed look order, so a handle-side count in that gap may load `Dropped` ahead of `Closed`. So close without yielding, push right away, and look at the
-    //   handle-side count first.
+    // ★Measures the gap after close and before the supervisor handles it★ — a supervisor in the give-up wait with control and a wake ready has no fixed order, so a handle-side count there
+    //   may load `Dropped` ahead of `Closed`; close without yielding, push, and look at the handle-side count first.
     #[tokio::test]
     async fn a_broadcast_right_after_close_is_not_counted_before_the_supervisor_sees_the_close() {
         let f = Fixture::new(Policy::default());
@@ -1531,7 +1466,7 @@ mod tests {
         })
         .await;
         let endpoints = [fx.net.accept().unwrap(), fx.net.accept().unwrap()];
-        // ★Block the write★ — the close must arrive while 「last」 is being written, to tell it from a regression that closes at once.
+        // ★Block the write★ — the close must arrive mid-write of 「last」, to tell it from a regression that closes at once.
         for endpoint in &endpoints {
             endpoint.stall_writes(true);
         }
@@ -1573,7 +1508,7 @@ mod tests {
         }
     }
 
-    // ★Closes even if the future is not awaited★ — the close starts at the call; the future only waits.
+    // ★It closes even if you do not await the future★ — the close starts at the place of the call and the future only waits.
     #[tokio::test]
     async fn close_all_closes_even_when_nobody_waits_for_it() {
         let fx = Fixture::new(Policy::default());
@@ -1592,7 +1527,7 @@ mod tests {
         assert!(ended(&mut inbox).await);
     }
 
-    // ★Put close_all's deadline (1 s · 3 s) on both sides of the drain's deadline (2 s)★ — unfinished within it is `Err`, and the supervisor ends at its own deadline regardless.
+    // ★close_all's deadlines (1 s · 3 s) straddle the drain's (2 s)★ — unfinished is `Err`, and the supervisor ends at its own deadline regardless.
     #[tokio::test]
     async fn close_all_waits_only_up_to_its_deadline() {
         assert_eq!(Policy::default().flush_timeout, Duration::from_secs(2));
@@ -1632,7 +1567,7 @@ mod tests {
 
     // ── 3-0 U6b: an accepted peer (`attach`) ──
 
-    /// An auth window for these tests (`ManualClock`, so the value only sets the step size; the daemon's real window is 15 s, TRD 3 revision 9 ⑧).
+    /// Auth window for these tests (`ManualClock`: only the step size; the daemon's real window is 15 s — TRD 3 revision 9 ⑧).
     const AUTH: Duration = Duration::from_secs(1);
     const GOOD: &str = "auth|good";
 
@@ -1643,7 +1578,7 @@ mod tests {
         }
     }
 
-    /// Receiving-side auth — the first frame must be [`GOOD`] to enter the operating phase; otherwise a reject that makes it redial (stale credentials — TRD 3 §3-0 ⑤).
+    /// Receiving-side auth — the first frame must be [`GOOD`]; otherwise a reject that makes it redial (stale credentials — TRD 3 §3-0 ⑤).
     struct TokenGate;
 
     impl Handshake for TokenGate {
@@ -1663,7 +1598,7 @@ mod tests {
         }
     }
 
-    /// The receiving-side registry and its listener. ★The registry's Dialer is a net that only counts★ — it checks whether an accepted peer redials.
+    /// The receiving-side registry and listener; its Dialer only counts, to check that an accepted peer never redials.
     struct Accepting {
         registry: Registry<TestWire>,
         redials: MemoryNetwork,
@@ -1700,6 +1635,7 @@ mod tests {
             }
         }
 
+        /// Opens one dialing-side end and takes that channel from the listener — `upgraded_at` = now.
         async fn connect(&mut self) -> (Near, Accepted) {
             let (tx, rx) = self
                 .connector
@@ -1736,6 +1672,7 @@ mod tests {
                 .expect("dialing-side write");
         }
 
+        /// Reads everything that has arrived now — it does not wait, and does not read past the end (close · error).
         async fn arrived(&mut self) -> Vec<Seen> {
             let mut out = Vec::new();
             while let Some(read) = poll_immediate(self.rx.recv()).await {
@@ -1758,7 +1695,7 @@ mod tests {
         Seen::Closed(Some(Close::new(CloseCode::GOING_AWAY, "closing")))
     }
 
-    // ★See the end without advancing the clock★ — if it went to reconnect it would stand in the backoff wait and `Closed` would not come.
+    // ★See the end without advancing the clock★ — a reconnect would stand in backoff and `Closed` would not come.
     #[tokio::test]
     async fn an_accepted_peer_that_loses_its_link_ends_with_that_cause_and_never_redials() {
         let mut a = Accepting::new(auth_policy());
@@ -1787,7 +1724,7 @@ mod tests {
         assert_eq!(a.redials.dials(), 0, "an accepted peer does not redial");
     }
 
-    // The daemon adapter tells the read end (finish remaining commands) from the write end (cut at once) by this cause (TRD 3 §3-0 ①).
+    // The daemon adapter tells the read end (finish running the remaining commands) from the write end (cut at once) by this cause (TRD 3 §3-0 ①).
     #[tokio::test]
     async fn read_end_and_write_end_causes_reach_closed_on_the_accepted_side() {
         let write_deadline = Policy::default().write_deadline;
@@ -1828,9 +1765,11 @@ mod tests {
                     settle().await;
                     a.clock.advance(write_deadline);
                     settle().await;
+                    // The close that drops the channel is also blocked — that wait too is cut by the write deadline.
                     a.clock.advance(write_deadline);
                     "WriteDeadline"
                 }
+                // The dialing side does not read, so there is no reply to our ping either.
                 _ => {
                     for _ in 0..5 {
                         settle().await;
@@ -1839,6 +1778,7 @@ mod tests {
                     "Idle"
                 }
             };
+            // The write-side end also counts that half-written notification as `Dropped` — what is measured here is the end cause.
             let ends: Vec<String> = labels(&drain_until_quiet(&mut inbox).await)
                 .into_iter()
                 .filter(|label| label != "Dropped")
@@ -1857,6 +1797,7 @@ mod tests {
         }
     }
 
+    // An end that did not enter the operating phase also tells the read end from the write end (at each failure place of `handshake_once`).
     #[tokio::test]
     async fn a_handshake_that_ends_on_the_link_reports_which_end_failed() {
         for case in [
@@ -1868,6 +1809,7 @@ mod tests {
             let mut a = Accepting::new(auth_policy());
             let (mut near, accepted) = a.connect().await;
             let far = a.far();
+            // The write-side branch is measured with a handshake that speaks first.
             let handshake: Arc<dyn Handshake> = match case {
                 "write error" | "write deadline" => Arc::new(HelloHandshake),
                 _ => Arc::new(TokenGate),
@@ -1926,6 +1868,7 @@ mod tests {
                 "{n}: the reject code goes to the peer"
             );
         }
+        // A terminal reject also comes with only the end — `Rejected` is a dialing-side event that promises a `GaveUp` right after it.
         let (mut near, accepted) = a.connect().await;
         let (_peer, mut inbox) = a.attach(
             "conn-terminal",
@@ -1943,6 +1886,7 @@ mod tests {
                 "version mismatch"
             )))]
         );
+        // A channel that says nothing — dropped without a close at the auth deadline.
         let (mut silent, accepted) = a.connect().await;
         let (_peer, mut inbox) = a.attach("conn-6", accepted, Arc::new(TokenGate));
         settle().await;
@@ -1971,7 +1915,7 @@ mod tests {
         assert_eq!(a.redials.dials(), 0);
     }
 
-    // ★The auth frame has already arrived★ — if the path reads once even on a passed deadline (0 of `with_deadline`), it passes.
+    // ★The auth frame has already arrived★ — a path that reads once even past the deadline (0 of `with_deadline`) passes.
     #[tokio::test]
     async fn a_link_that_sat_in_the_ready_queue_past_the_auth_deadline_closes_as_soon_as_it_is_attached(
     ) {
@@ -2052,7 +1996,7 @@ mod tests {
         assert_eq!(a.redials.dials(), 0);
     }
 
-    /// A minimal packet where both sides share one vocabulary (ask and answer). `TestWire` is one side's (client's) vocabulary and cannot connect two registries face to face.
+    /// A minimal packet with one vocabulary for both sides (`TestWire` is the client's only and cannot join two registries).
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Talk {
         Ask { tag: u64, body: String },
@@ -2119,6 +2063,7 @@ mod tests {
         }
     }
 
+    /// For every question that comes to the receiver end, it answers on the connection the question came from. It returns the number answered.
     async fn answer_asks(peer: &Peer<TalkWire>, inbox: &mut Inbox<TalkWire>) -> usize {
         settle().await;
         let mut answered = 0;
@@ -2140,7 +2085,7 @@ mod tests {
         answered
     }
 
-    // A transport-level round trip — measures whether the receiving side carries bidirectional requests, not a daemon-to-daemon vocabulary (TRD 3 §6-0 U6).
+    // It is a transport-level round trip — it measures not a daemon-to-daemon vocabulary but whether the receiving side's place carries bidirectional requests (TRD 3 §6-0 U6).
     #[tokio::test]
     async fn two_registries_ask_each_other_over_a_dialed_peer_and_an_attached_one() {
         let clock = ManualClock::new();
@@ -2170,6 +2115,7 @@ mod tests {
         })
         .await;
 
+        // The request is awaited outside the task that drains the receiver end (crate header 「Receiver-side invariants」 1).
         let ask = |peer: &Peer<TalkWire>, tag: u64, body: &str| {
             let peer = peer.clone();
             let out = Talk::Ask {
@@ -2242,7 +2188,7 @@ mod tests {
         assert!(a.registry.is_empty());
     }
 
-    // ★The old supervisor ends after the new one is raised★ — its registry removal must not remove the new one.
+    // ★The old supervisor ends after the new one is raised★ — the registry removal at its end must not remove the new one.
     #[tokio::test]
     async fn re_attaching_a_name_closes_the_old_peer_and_its_end_leaves_the_new_one_listed() {
         let mut a = Accepting::new(auth_policy());
@@ -2279,7 +2225,7 @@ mod tests {
         assert!(a.registry.is_empty());
     }
 
-    // A table name tag (`add`) replaced by an accepted channel continues the table's counter (no table growth); an accepted peer replaced with `add` puts that counter on the table — either way the same number is never drawn twice.
+    // A table name tag replaced by an accepted channel continues the table's counter; an accepted peer replaced by `add` puts its counter on the table — a number is never drawn twice.
     #[tokio::test]
     async fn a_name_passed_between_add_and_attach_never_mints_the_same_generation_twice() {
         let mut a = Accepting::new(auth_policy());
@@ -2411,6 +2357,7 @@ mod tests {
         assert!(a.registry.is_empty());
     }
 
+    // Teardown waits for the receiving side to drain the receiver end — in the meantime an ended handle must not be seen on the registry.
     #[tokio::test]
     async fn an_accepted_peer_leaves_the_roster_before_its_teardown_waits_on_the_inbox() {
         let mut a = Accepting::new(Policy {
@@ -2449,12 +2396,12 @@ mod tests {
 
     // ── 3-0 U6b: raising on a runtime with several worker threads ──
     //
-    // ★`settle` cannot be used★ (current_thread only — `testing.rs`) — the end is seen by a real-time-deadline wait. `RACE_THREADS` OS threads start together at a
-    //   barrier and hammer the same registry while the supervisors run on worker threads.
+    // ★`settle` is unusable★ (current_thread only) — the end is seen by a real-time wait. `RACE_THREADS` OS threads start at a barrier and hammer one registry.
 
     const RACE_THREADS: usize = 4;
     const REAL_WAIT: Duration = Duration::from_secs(10);
 
+    /// Drains the receiver end to the end (`None`) — panics if it does not finish within the real-time [`REAL_WAIT`].
     async fn drain_to_end(inbox: &mut Inbox<TestWire>) -> Vec<Incoming<TestWire>> {
         tokio::time::timeout(REAL_WAIT, async {
             let mut out = Vec::new();
@@ -2467,6 +2414,7 @@ mod tests {
         .expect("the inbox did not end within the real-time deadline")
     }
 
+    /// Waits for a condition to hold up to the real-time [`REAL_WAIT`].
     async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
         tokio::time::timeout(REAL_WAIT, async {
             while !done() {
@@ -2477,6 +2425,7 @@ mod tests {
         .unwrap_or_else(|_| panic!("did not happen within the real-time deadline: {what}"));
     }
 
+    /// One accepted channel and its dialing-side end — upgrade end = `upgraded_at`.
     fn accepted_link(pool: &PermitPool, upgraded_at: Instant) -> (Near, Accepted) {
         let (near, far) = memory_link();
         let permit = pool.try_take().expect("upgrade permit");
@@ -2490,8 +2439,7 @@ mod tests {
         )
     }
 
-    /// [`RACE_THREADS`] OS threads cross a barrier together inside the runtime context and run `call(thread number)`. ★This wait blocks the test-body thread★ —
-    /// a multi_thread test body is the `block_on` thread, not a worker, so the supervisors keep running.
+    /// [`RACE_THREADS`] OS threads cross a barrier in the runtime context and run `call(n)`. ★Blocks the test-body thread★ (the `block_on` thread, not a worker), so supervisors keep running.
     fn race<T: Send>(call: impl Fn(usize) -> T + Sync) -> Vec<T> {
         let runtime = tokio::runtime::Handle::current();
         let start = std::sync::Barrier::new(RACE_THREADS);
@@ -2513,8 +2461,7 @@ mod tests {
         })
     }
 
-    /// Reads the dialing-side end to the end (close · error) — up to the real-time [`REAL_WAIT`]. ★Do not use [`Near::arrived`]★ — it polls once without waiting, so on a
-    /// task with an exhausted tokio cooperative budget it cannot read even what has arrived.
+    /// Reads the dialing-side end to the end up to [`REAL_WAIT`]. ★Do not use [`Near::arrived`]★ — it polls once without waiting and may miss data when the tokio cooperative budget is exhausted.
     async fn read_to_end(near: &mut Near) -> Vec<Seen> {
         tokio::time::timeout(REAL_WAIT, async {
             let mut out = Vec::new();
@@ -2545,8 +2492,7 @@ mod tests {
             .collect()
     }
 
-    // An accepted peer ending at its first poll — deadline already passed (`Idle`) or the dialing side already cut. If raising came after starting, the handle of a
-    //   supervisor that finished even removing itself on another worker would be raised afterwards and remain forever (`Registry::launch`).
+    // An accepted peer ending at its first poll (deadline passed → `Idle`, or already cut): if raising came after start, a supervisor that removed itself on another worker would be raised later and linger (`Registry::launch`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn accepted_peers_that_end_on_their_first_poll_never_stay_listed() {
         const PER_THREAD: usize = 50;
@@ -2593,7 +2539,7 @@ mod tests {
         assert_eq!(pool.in_use(), 0);
     }
 
-    // A peer raised on a folded registry has the close in before starting, so on whichever worker it first runs it neither dials nor handshakes.
+    // A peer raised on a folded registry has the close in before starting, so whichever worker it runs on first, it neither dials nor handshakes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn after_close_all_no_attach_shakes_hands_and_no_add_dials_on_a_multi_thread_runtime() {
         const PER_THREAD: usize = 25;
@@ -2647,8 +2593,8 @@ mod tests {
         assert_eq!(pool.in_use(), 0);
     }
 
-    // Several calls replace the same name tag at once with `add` · `attach`. ★The race is raising an accepted peer with no table field★ — if taking out that handle and
-    //   choosing the counter were split, another call would see neither, make a new counter and draw an already issued generation (`Registry::launch`); so each name tag starts in that state.
+    // Several calls replace one name tag at once with `add` · `attach`. ★The race is raising an accepted peer with no table field★ — split counter choice and handle take-out would draw an
+    //   already issued generation (`Registry::launch`); each name tag starts in that state.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn racing_replacements_of_one_name_never_mint_the_same_generation_twice() {
         const NAMES: usize = 60;
@@ -2683,6 +2629,7 @@ mod tests {
                     })
                     .collect::<Vec<_>>()
             });
+            // Attach once more with the counter left in the table after the race — if the race put a new counter on the table, 1 is drawn again here.
             let (last, last_inbox) =
                 registry.add(name.clone(), Address::new("mem://x"), immediate());
             wait_until("last peer operating", || last.peer_state().is_live()).await;
@@ -2710,9 +2657,10 @@ mod tests {
         }
     }
 
+    /// The value of the panic that [`TrippingClock`] sets off.
     struct Tripped;
 
-    /// A clock that panics once at the n-th `now()` of a designated thread — otherwise [`ManualClock`]. ★Filtered by thread★ so other supervisors' reads on worker threads do not count.
+    /// Panics once at the n-th `now()` of a designated thread, else [`ManualClock`]. ★Filtered by thread★ so other supervisors' reads do not count.
     #[derive(Default)]
     struct TrippingClock {
         clock: ManualClock,
@@ -2720,6 +2668,7 @@ mod tests {
     }
 
     impl TrippingClock {
+        /// Makes the calling thread panic on its `nth` read.
         fn arm(&self, nth: usize) {
             *self.trip.lock().unwrap() = Some((std::thread::current().id(), nth));
         }
@@ -2741,7 +2690,7 @@ mod tests {
                     _ => false,
                 }
             };
-            // Fire after releasing the lock — blowing up while holding it would poison it and blow up other supervisors' reads too.
+            // Fire after releasing the lock — blowing up while holding it would poison it for other supervisors.
             if fire {
                 std::panic::panic_any(Tripped);
             }
@@ -2753,8 +2702,7 @@ mod tests {
         }
     }
 
-    /// Runs `call` on an OS thread in the runtime context catching panics — not finishing within the real-time [`REAL_WAIT`] is treated as a deadlock and panics.
-    /// ★Detach that thread★ — waiting on a deadlocked thread would hang the test instead of failing it.
+    /// Runs `call` on an OS thread in the runtime context catching panics; not finishing within [`REAL_WAIT`] = deadlock → panic. ★Detach the thread★ — waiting on a deadlock hangs the test.
     fn off_thread<T: Send + 'static>(
         call: impl FnOnce() -> T + Send + 'static,
     ) -> std::thread::Result<T> {
@@ -2769,9 +2717,8 @@ mod tests {
             .expect("did not finish within the real-time deadline — registry lock deadlock")
     }
 
-    // The replacing `attach` · `add` panics while building the supervisor inside the registry lock (the injected clock). ★If an accepted peer panics after being
-    //   built, the registry removal dropped while unwinding retakes the lock on the same thread★ (`new_peer` in `peer.rs`) — called on a thread with a real-time
-    //   deadline so that deadlock does not hang the test. If the table changed before building, the handle to be replaced would vanish (`Registry::launch`).
+    // The replacing `attach` · `add` panics while building the supervisor inside the registry lock (injected clock). ★A panicking accepted peer's unwinding removal retakes the lock on the same
+    //   thread★ (`new_peer`) — run on a deadline thread so that deadlock cannot hang the test. A table changed before building would lose the handle to be replaced (`Registry::launch`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_replacement_that_panics_while_preparing_leaves_the_roster_untouched_and_usable() {
         let clock = Arc::new(TrippingClock::default());
@@ -2789,6 +2736,7 @@ mod tests {
             registry.len() == 1 && registry.get(&name).is_some_and(|peer| peer.same(&first))
         };
 
+        // In a debug build, the clock assertion of `attach_with_policy` stands ahead of one read of the build.
         let nth = if cfg!(debug_assertions) { 2 } else { 1 };
         let (_near, accepted) = accepted_link(&pool, clock.now());
         let attached = off_thread({
