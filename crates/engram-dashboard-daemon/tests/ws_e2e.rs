@@ -1,17 +1,10 @@
-//! 격리 하네스 — 데몬 단독 WS E2E (phase 2 step 6).
+//! Isolation harness — daemon-only WS E2E (phase 2 step 6).
 //!
-//! 프론트(UI) 없이 데몬의 WS 서버를 **in-process 로 실제 기동**하고(`start_test_server`),
-//! 이 테스트 코드가 **WS 클라이언트**가 되어 auth → subscribe → binary frame 디코드 →
-//! command 송신 전 경로를 검증한다. (ADR-0012 — 모듈은 격리 하네스로 단독으로 돈다.)
+//! Without the frontend, it starts the daemon's WS server really in-process (`start_test_server`) and this test acts as the WS client, verifying auth → subscribe → binary frame decode → command send (ADR-0012 — a module runs alone in an isolation harness).
 //!
-//! ★격리★: bind 는 127.0.0.1:0(OS 자동 포트 — 테스트 병렬 충돌 없음), store 는 in-memory,
-//! 각 테스트가 독립 서버 인스턴스를 띄우고 끝에서 shutdown(전 에이전트 kill — 좀비 PTY 방지).
-//! 모든 await 에 timeout 가드를 둬 hang 시 영구 멈추지 않는다.
+//! Isolation: bind is 127.0.0.1:0 (OS-assigned port — no parallel collisions), the store is in-memory, each test starts an independent server and shuts it down at the end (kills all agents — no zombie PTYs). Every await has a timeout guard.
 //!
-//! ★실프로세스 케이스 분리(은폐 금지)★: 아래 in-process 테스트가 커버하지 **못하는** 것들
-//! (데몬 .exe kill→PTY child Job 동반 정리, single-instance 폴더 잠금, stale daemon.json discovery)은
-//! 실제 OS 프로세스/Job 이 필요하다. 이들은 이 파일 하단 `#[ignore]` 테스트로 두고 수동 실행법을
-//! 주석에 적었다. 기본 `cargo test` 는 in-process 케이스만 빠르게 돈다.
+//! Real-process cases stay separate (no concealment): what in-process tests cannot cover (daemon .exe kill → PTY child Job cleanup, single-instance folder lock, stale daemon.json discovery) needs a real OS process/Job — `#[ignore]` tests at the bottom with manual run instructions. Default `cargo test` runs only the fast in-process cases.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,19 +30,18 @@ type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 const NET_TIMEOUT: Duration = Duration::from_secs(10);
 
-// ── 클라이언트 헬퍼 ────────────────────────────────────────────────────────────────
+// ── client helpers ────────────────────────────────────────────────────────────────
 
 struct Client {
     ws: Ws,
 }
 
-// AgentEvent 가 AgentProfile(failed_reason 추가로 clippy 임계 200B 초과)을 품어 variant 크기차가 크다.
-// 테스트 헬퍼라 Box indirection(동작 변경) 대신 lint 만 허용한다.
+// AgentEvent holds an AgentProfile (past clippy's 200B threshold after adding failed_reason), so the variant size gap is large; as a test helper only the lint is allowed instead of Box indirection (a behavior change).
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum Incoming {
     Event(AgentEvent),
-    /// 디코드된 (agent_id, epoch, seq, payload). epoch 는 디버깅 가시성용(현 단언엔 미사용).
+    /// Decoded (agent_id, epoch, seq, payload). epoch is for debugging visibility (unused by the current assertions).
     #[allow(dead_code)]
     Frame(Uuid, u32, u64, Vec<u8>),
 }
@@ -66,9 +58,7 @@ impl Client {
         client
     }
 
-    /// ★핸드셰이크는 명령이 아니다(ADR-0129 0-4)★ — 따로 된 프레임 타입(protocol `handshake`)이라
-    /// `send`(명령 전용)를 못 탄다. 첫 프레임(정상 인증)과 2차 프레임(case21 의 프로토콜 위반)이
-    /// **같은 바이트**여야 하므로 두 자리가 이 헬퍼 하나를 공유한다.
+    /// A handshake is not a command (ADR-0129 0-4) — a separate frame type (protocol `handshake`) that cannot ride `send` (commands only). The first frame (normal auth) and the second (case21's protocol violation) must be the same bytes, so both share this helper.
     async fn send_auth(&mut self, token: &str) {
         let auth = AuthFrame::Auth {
             token: Secret::new(token),
@@ -105,11 +95,12 @@ impl Client {
                 .expect("recv timeout")?;
             match item {
                 Ok(Message::Text(t)) => {
-                    let ev: AgentEvent = serde_json::from_str(&t).expect("control JSON 파싱 실패");
+                    let ev: AgentEvent =
+                        serde_json::from_str(&t).expect("control JSON parse failed");
                     return Some(Incoming::Event(ev));
                 }
                 Ok(Message::Binary(b)) => {
-                    let f = decode_frame(&b).expect("binary frame 디코드 실패");
+                    let f = decode_frame(&b).expect("binary frame decode failed");
                     return Some(Incoming::Frame(
                         f.agent_id,
                         f.epoch,
@@ -126,7 +117,11 @@ impl Client {
 
     async fn next_event(&mut self) -> AgentEvent {
         loop {
-            match self.next().await.expect("연결이 끊김(이벤트 기대)") {
+            match self
+                .next()
+                .await
+                .expect("connection dropped (an event was expected)")
+            {
                 Incoming::Event(ev) => return ev,
                 Incoming::Frame(..) => continue,
             }
@@ -155,20 +150,23 @@ impl Client {
         while std::time::Instant::now() < deadline {
             match self.next().await {
                 Some(Incoming::Event(AgentEvent::Ack { request_id })) => {
-                    assert_eq!(request_id, expect_id, "Ack 의 request_id 가 echo 돼야 함");
+                    assert_eq!(
+                        request_id, expect_id,
+                        "the request_id of the Ack must be echoed"
+                    );
                     return;
                 }
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
                 })) if rid == expect_id => {
-                    panic!("Ack 기대했으나 Error(req={rid:?}): {message}");
+                    panic!("expected Ack but got Error(req={rid:?}): {message}");
                 }
                 Some(_) => continue,
                 None => break,
             }
         }
-        panic!("request_id={expect_id:?} 의 Ack 도달 전 timeout/close");
+        panic!("timeout/close before the Ack of request_id={expect_id:?} arrived");
     }
 
     async fn await_error(&mut self, expect_id: engram_dashboard_protocol::RequestId) -> String {
@@ -184,13 +182,13 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Ack { request_id }))
                     if request_id == expect_id =>
                 {
-                    panic!("Error 기대했으나 Ack(req={request_id:?})");
+                    panic!("expected Error but got Ack(req={request_id:?})");
                 }
                 Some(_) => continue,
                 None => break,
             }
         }
-        panic!("request_id={expect_id:?} 의 Error 도달 전 timeout/close");
+        panic!("timeout/close before the Error of request_id={expect_id:?} arrived");
     }
 
     async fn await_error_no_id(&mut self) -> String {
@@ -202,7 +200,7 @@ impl Client {
                 None => break,
             }
         }
-        panic!("Error 도달 전 timeout/close");
+        panic!("timeout/close before the Error arrived");
     }
 
     async fn await_profile_list(
@@ -216,17 +214,17 @@ impl Client {
                     request_id,
                     profiles,
                 })) => {
-                    assert_eq!(request_id, req, "ProfileList 의 request_id echo");
+                    assert_eq!(request_id, req, "request_id echo of ProfileList");
                     return profiles;
                 }
                 Some(_) => continue,
                 None => break,
             }
         }
-        panic!("ProfileList 도달 전 timeout/close");
+        panic!("timeout/close before ProfileList arrived");
     }
 
-    /// reply(Ack) 와 broadcast_profile_list 의 큐잉 순서에 의존하지 않게 한 루프에서 함께 모은다.
+    /// Collects the reply (Ack) and broadcast_profile_list together in one loop so as not to depend on their queueing order.
     async fn await_crud(&mut self, req: RequestId) -> Vec<engram_dashboard_protocol::AgentProfile> {
         let mut saw_ack = false;
         let mut profiles: Option<Vec<engram_dashboard_protocol::AgentProfile>> = None;
@@ -234,7 +232,7 @@ impl Client {
         while (!saw_ack || profiles.is_none()) && std::time::Instant::now() < deadline {
             match self.next().await {
                 Some(Incoming::Event(AgentEvent::Ack { request_id })) => {
-                    assert_eq!(request_id, req, "CRUD Ack 의 request_id echo");
+                    assert_eq!(request_id, req, "request_id echo of the CRUD Ack");
                     saw_ack = true;
                 }
                 Some(Incoming::Event(AgentEvent::ProfileListUpdated { profiles: p })) => {
@@ -243,14 +241,14 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
-                })) if rid == req => panic!("CRUD 실패 Error(req={rid:?}): {message}"),
+                })) if rid == req => panic!("CRUD failure Error(req={rid:?}): {message}"),
                 Some(_) => continue,
                 None => break,
             }
         }
         assert!(
             saw_ack && profiles.is_some(),
-            "CRUD 후 Ack({saw_ack})+ProfileListUpdated({}) 둘 다 와야",
+            "after CRUD both Ack({saw_ack}) and ProfileListUpdated({}) must arrive",
             profiles.is_some()
         );
         profiles.unwrap()
@@ -264,21 +262,23 @@ impl Client {
                     request_id,
                     profile,
                 })) => {
-                    assert_eq!(request_id, req, "Created 의 request_id echo");
+                    assert_eq!(request_id, req, "request_id echo of Created");
                     return profile;
                 }
                 Some(Incoming::Event(AgentEvent::Ack { request_id })) if request_id == req => {
-                    panic!("Created 기대했으나 Ack(req={request_id:?}) — Ack 중복 금지");
+                    panic!("expected Created but got Ack(req={request_id:?}) — no duplicate Ack");
                 }
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
-                })) if rid == req => panic!("Created 기대했으나 Error(req={rid:?}): {message}"),
+                })) if rid == req => {
+                    panic!("expected Created but got Error(req={rid:?}): {message}")
+                }
                 Some(_) => continue,
                 None => break,
             }
         }
-        panic!("request_id={req:?} 의 Created 도달 전 timeout/close");
+        panic!("timeout/close before the Created of request_id={req:?} arrived");
     }
 
     async fn await_spawned(&mut self, req: RequestId) -> engram_dashboard_protocol::AgentInfo {
@@ -286,21 +286,23 @@ impl Client {
         while std::time::Instant::now() < deadline {
             match self.next().await {
                 Some(Incoming::Event(AgentEvent::Spawned { request_id, agent })) => {
-                    assert_eq!(request_id, req, "Spawned 의 request_id echo");
+                    assert_eq!(request_id, req, "request_id echo of Spawned");
                     return agent;
                 }
                 Some(Incoming::Event(AgentEvent::Ack { request_id })) if request_id == req => {
-                    panic!("Spawned 기대했으나 Ack(req={request_id:?}) — Ack 중복 금지");
+                    panic!("expected Spawned but got Ack(req={request_id:?}) — no duplicate Ack");
                 }
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
-                })) if rid == req => panic!("Spawned 기대했으나 Error(req={rid:?}): {message}"),
+                })) if rid == req => {
+                    panic!("expected Spawned but got Error(req={rid:?}): {message}")
+                }
                 Some(_) => continue,
                 None => break,
             }
         }
-        panic!("request_id={req:?} 의 Spawned 도달 전 timeout/close");
+        panic!("timeout/close before the Spawned of request_id={req:?} arrived");
     }
 
     async fn await_snapshot(
@@ -315,14 +317,14 @@ impl Client {
                     agent_id,
                     chunks,
                 })) => {
-                    assert_eq!(request_id, req, "Snapshot 의 request_id echo");
+                    assert_eq!(request_id, req, "request_id echo of Snapshot");
                     return (agent_id, chunks);
                 }
                 Some(_) => continue,
                 None => break,
             }
         }
-        panic!("Snapshot 도달 전 timeout/close");
+        panic!("timeout/close before Snapshot arrived");
     }
 
     async fn await_agent_list(
@@ -333,19 +335,17 @@ impl Client {
         while std::time::Instant::now() < deadline {
             match self.next().await {
                 Some(Incoming::Event(AgentEvent::AgentList { request_id, agents })) => {
-                    assert_eq!(request_id, req, "AgentList 의 request_id echo");
+                    assert_eq!(request_id, req, "request_id echo of AgentList");
                     return agents;
                 }
                 Some(_) => continue,
                 None => break,
             }
         }
-        panic!("AgentList 도달 전 timeout/close");
+        panic!("timeout/close before AgentList arrived");
     }
 
-    /// ★중요★: spawn_agent 은 agent_list_updated 브로드캐스트를
-    /// reply(Ack) **전에** 큐잉하므로 conn_tx 순서가 [list, Ack] 이다. 따라서 await_ack 를 먼저 부르면
-    /// list 를 흘려버린다 — 그래서 둘을 한 루프에서 함께 모은다.
+    /// Important: spawn_agent queues the agent_list_updated broadcast before the reply (Ack), so the conn_tx order is [list, Ack]; calling await_ack first would let the list slip by, so both are collected in one loop.
     async fn await_spawn(&mut self, wanted: Uuid, req: RequestId) {
         let mut saw_ack = false;
         let mut saw_list = false;
@@ -353,7 +353,7 @@ impl Client {
         while (!saw_ack || !saw_list) && std::time::Instant::now() < deadline {
             match self.next().await {
                 Some(Incoming::Event(AgentEvent::Ack { request_id })) => {
-                    assert_eq!(request_id, req, "Spawn Ack 의 request_id echo");
+                    assert_eq!(request_id, req, "request_id echo of the Spawn Ack");
                     saw_ack = true;
                 }
                 Some(Incoming::Event(AgentEvent::AgentListUpdated { agents })) => {
@@ -364,18 +364,18 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
-                })) if rid == req => panic!("Spawn 실패 Error(req={rid:?}): {message}"),
+                })) if rid == req => panic!("Spawn failure Error(req={rid:?}): {message}"),
                 Some(_) => continue,
                 None => break,
             }
         }
         assert!(
             saw_ack && saw_list,
-            "Spawn 후 Ack({saw_ack})+AgentListUpdated({saw_list}) 둘 다 와야"
+            "after Spawn both Ack({saw_ack}) and AgentListUpdated({saw_list}) must arrive"
         );
     }
 
-    /// kill_agent 도 list 갱신을 reply(Ack) 전에 큐잉하므로(순서 [list, Ack]) 함께 모은다.
+    /// kill_agent also queues the list update before the reply (Ack) (order [list, Ack]) so they are collected together.
     async fn await_kill(&mut self, wanted: Uuid, req: RequestId) {
         let mut saw_ack = false;
         let mut saw_excluded = false;
@@ -383,7 +383,7 @@ impl Client {
         while (!saw_ack || !saw_excluded) && std::time::Instant::now() < deadline {
             match self.next().await {
                 Some(Incoming::Event(AgentEvent::Ack { request_id })) => {
-                    assert_eq!(request_id, req, "Kill Ack 의 request_id echo");
+                    assert_eq!(request_id, req, "request_id echo of the Kill Ack");
                     saw_ack = true;
                 }
                 Some(Incoming::Event(AgentEvent::AgentListUpdated { agents })) => {
@@ -394,14 +394,14 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
-                })) if rid == req => panic!("Kill 실패 Error(req={rid:?}): {message}"),
+                })) if rid == req => panic!("Kill failure Error(req={rid:?}): {message}"),
                 Some(_) => continue,
                 None => break,
             }
         }
         assert!(
             saw_ack && saw_excluded,
-            "Kill 후 Ack({saw_ack})+목록제외({saw_excluded}) 둘 다 와야"
+            "after Kill both Ack({saw_ack}) and list exclusion({saw_excluded}) must arrive"
         );
     }
 
@@ -426,15 +426,13 @@ impl Client {
                 Err(_) => return false,
                 Ok(None) | Ok(Some(Err(_))) => return true,
                 Ok(Some(Ok(Message::Close(_)))) => return true,
-                // 그 외 메시지는 무시(읽긴 하지만 — tungstenite 는 한 메시지씩 디코드).
+                // Other messages are ignored (read but — tungstenite decodes one message at a time).
                 Ok(Some(Ok(_))) => continue,
             }
         }
     }
 
-    /// ★중요★: tungstenite 는 stream 을 poll 할 때 들어온 Ping 에 자동 Pong 한다. 이 메서드는
-    /// 정상 클라처럼 계속 읽으며(자동 Pong 유발) 그 와중에 Ping 도착을 관측한다. 다른 control/
-    /// binary 는 흡수한다.
+    /// Important: tungstenite auto-Pongs an incoming Ping when it polls the stream; this method keeps reading like a normal client (triggering the auto Pong) and observes the Ping's arrival. Other control/binary frames are absorbed.
     async fn saw_ping_within(&mut self, deadline: Duration) -> bool {
         let end = std::time::Instant::now() + deadline;
         loop {
@@ -467,12 +465,12 @@ impl Client {
     }
 }
 
-/// Client 메서드를 모듈 자유 함수로 노출(slow consumer 케이스 가독성).
+/// Exposes Client methods as module free functions (readability of the slow consumer case).
 async fn expect_closed_within(c: &mut Client, deadline: Duration) -> bool {
     c.expect_closed_within(deadline).await
 }
 
-/// ★resize 는 비동기(WS → read_task → dispatch → manager)라 즉시 반영이 아니다★ → 폴링한다.
+/// resize is asynchronous (WS → read_task → dispatch → manager), so it is not reflected immediately → poll.
 async fn wait_for_size(handle: &TestServerHandle, id: Uuid, cols: u16, rows: u16) -> bool {
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
     loop {
@@ -492,9 +490,9 @@ async fn wait_for_size(handle: &TestServerHandle, id: Uuid, cols: u16, rows: u16
     }
 }
 
-// ── 서버 헬퍼 ──────────────────────────────────────────────────────────────────────
+// ── server helpers ──────────────────────────────────────────────────────────────────────
 
-/// 결정적 출력을 위해 interactive `cmd.exe` 를 직접 띄운다(/c 없이 — 살아있는 셸).
+/// Directly launches an interactive `cmd.exe` for deterministic output (without /c — a live shell).
 fn spawn_shell_agent(handle: &TestServerHandle) -> Uuid {
     #[cfg(windows)]
     let command = AgentCommand::Shell {
@@ -511,22 +509,20 @@ fn spawn_shell_agent(handle: &TestServerHandle) -> Uuid {
         command,
         std::env::temp_dir(),
         vec![],
-        false, // auto_restore=false (복원 대상 아님)
+        false, // auto_restore=false (not a restore target)
     );
     let id = profile.id;
     handle
         .manager
         .spawn_agent(&profile, SpawnMode::Fresh)
-        .expect("shell agent spawn 실패")
+        .expect("shell agent spawn failed")
         .into_started()
-        .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+        .expect("this call really launches (not a duplicate request)");
     id
 }
 
-/// WS `Spawn{profile_id}` dispatch 경로를 타려면 manager 의 레지스트리에 알려진 프로필이 있어야 한다.
-/// ★운영 회귀 0★: 등록은 manager 의 공개 API(`try_create_agent` — 명부 단일 입구, ADR-0119)만 사용 —
-///   start_test_server/run() 배선을 건드리지 않는다(프로필 주입 인자 추가 불필요). 운영 `CreateProfile`
-///   경로도 **같은 동사**를 쓰므로 이름 유일성 강제(ADR-0120)를 함께 탄다.
+/// To ride the WS `Spawn{profile_id}` dispatch path, the manager's registry needs a known profile.
+/// Zero production regression: registration uses only the manager's public API (`try_create_agent` — the single roster entrance, ADR-0119), not the start_test_server/run() wiring. Production `CreateProfile` uses the same verb, so it rides the name-uniqueness enforcement (ADR-0120) too.
 fn register_shell_profile(handle: &TestServerHandle) -> Uuid {
     #[cfg(windows)]
     let command = AgentCommand::Shell {
@@ -543,15 +539,17 @@ fn register_shell_profile(handle: &TestServerHandle) -> Uuid {
         command,
         std::env::temp_dir(),
         vec![],
-        false, // auto_restore=false(복원 대상 아님)
+        false, // auto_restore=false (not a restore target)
     );
     let id = profile.id;
-    handle.manager.try_create_agent(profile).expect("등록 성공");
+    handle
+        .manager
+        .try_create_agent(profile)
+        .expect("registration succeeded");
     id
 }
 
-/// 결정적 출력은 PTY 가 즉시 내지만, OS 스케줄 지연을
-/// 흡수하려고 snapshot seq 수가 min_events 이상이 될 때까지 최대 deadline 대기.
+/// The PTY emits deterministic output immediately, but to absorb OS scheduling delay it waits up to a deadline until the snapshot seq count reaches min_events.
 async fn wait_for_output(handle: &TestServerHandle, id: Uuid, min_events: usize) {
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
     loop {
@@ -564,13 +562,13 @@ async fn wait_for_output(handle: &TestServerHandle, id: Uuid, min_events: usize)
             return;
         }
         if std::time::Instant::now() >= deadline {
-            panic!("출력 {min_events}건 대기 timeout (현재 {n}건)");
+            panic!("timeout waiting for {min_events} outputs (currently {n})");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
-// ── 케이스 1: auth 성공 → Hello + AgentListUpdated ────────────────────────────────
+// ── case 1: auth success → Hello + AgentListUpdated ────────────────────────────────
 #[tokio::test]
 async fn case01_auth_success_hello_and_list() {
     let server = start_test_server().await.unwrap();
@@ -580,26 +578,27 @@ async fn case01_auth_success_hello_and_list() {
         AgentEvent::Hello {
             protocol_version, ..
         } => assert_eq!(protocol_version, PROTOCOL_VERSION),
-        ev => panic!("Hello 기대, got {ev:?}"),
+        ev => panic!("expected Hello, got {ev:?}"),
     }
     match c.next_event().await {
-        AgentEvent::AgentListUpdated { agents } => assert!(agents.is_empty(), "초기 목록은 비어야"),
-        ev => panic!("AgentListUpdated 기대, got {ev:?}"),
+        AgentEvent::AgentListUpdated { agents } => {
+            assert!(agents.is_empty(), "the initial list must be empty")
+        }
+        ev => panic!("expected AgentListUpdated, got {ev:?}"),
     }
 
     server.shutdown().await;
 }
 
-// ── 케이스 2: auth 실패(틀린 토큰) → 서버가 close ──────────────────────────────────
+// ── case 2: auth failure (wrong token) → the server closes ──────────────────────────────────
 #[tokio::test]
 async fn case02_auth_wrong_token_closes() {
     let server = start_test_server().await.unwrap();
     let mut c = Client::connect_and_auth(server.port, &"f".repeat(64)).await;
-    // ★짧은 deadline★: 옛 expect_closed 는 10s recv timeout 에
-    //   기대 닫힘을 잡아 느리고 불명확했다(mutation D). 닫힘은 즉시 일어나므로 3s 안에 단언한다.
+    // Short deadline: the old expect_closed caught the expected close within a 10 s recv timeout — slow and unclear (mutation D); the close is immediate, so assert within 3 s.
     assert!(
         c.expect_closed_within(Duration::from_secs(3)).await,
-        "틀린 토큰이면 연결이 즉시(3s 내) 닫혀야 함"
+        "with a wrong token the connection must close immediately (within 3s)"
     );
     server.shutdown().await;
 }
@@ -621,7 +620,7 @@ async fn case03_auth_timeout_closes() {
     server.shutdown().await;
 }
 
-// ── 케이스 4: 출력 순서(seq 0,1,2… 무결) ───────────────────────────────────────────
+// ── case 4: output order (seq 0,1,2… intact) ───────────────────────────────────────────
 #[tokio::test]
 async fn case04_output_order_exact() {
     let server = start_test_server().await.unwrap();
@@ -642,13 +641,13 @@ async fn case04_output_order_exact() {
         .unwrap();
 
     let seqs = collect_frame_seqs_until_marker(&mut c, id, "CASE4_MARKER").await;
-    assert!(!seqs.is_empty(), "frame 을 받아야 함");
+    assert!(!seqs.is_empty(), "frames must be received");
     assert_seq_contiguous_from_zero(&seqs);
 
     server.shutdown().await;
 }
 
-// ── 케이스 5: replay→live FIFO 순서(SubscribeAck→replay→ReplayComplete→live) ────────
+// ── case 5: replay→live FIFO order (SubscribeAck→replay→ReplayComplete→live) ────────
 #[tokio::test]
 async fn case05_replay_then_live_order() {
     let server = start_test_server().await.unwrap();
@@ -681,11 +680,11 @@ async fn case05_replay_then_live_order() {
                 "after_seq=None → Reset(oldest)"
             );
         }
-        ev => panic!("SubscribeAck 기대, got {ev:?}"),
+        ev => panic!("expected SubscribeAck, got {ev:?}"),
     }
     let mut replay_frames = 0usize;
     loop {
-        match c.next().await.expect("ReplayComplete 전 끊김") {
+        match c.next().await.expect("dropped before ReplayComplete") {
             Incoming::Frame(aid, _, _, _) => {
                 assert_eq!(aid, id);
                 replay_frames += 1;
@@ -694,22 +693,25 @@ async fn case05_replay_then_live_order() {
                 assert_eq!(agent_id, id);
                 break;
             }
-            Incoming::Event(ev) => panic!("replay 구간 예상 밖 event: {ev:?}"),
+            Incoming::Event(ev) => panic!("unexpected event in the replay phase: {ev:?}"),
         }
     }
-    assert!(replay_frames >= 1, "PREFILL replay frame 이 1건 이상");
+    assert!(replay_frames >= 1, "at least 1 PREFILL replay frame");
 
     server
         .manager
         .write_stdin(id, b"echo LIVE5\r\n", InputOrigin::User)
         .unwrap();
     let live = collect_frames_until_marker(&mut c, id, "LIVE5").await;
-    assert!(!live.is_empty(), "ReplayComplete 후 live frame 도착해야");
+    assert!(
+        !live.is_empty(),
+        "live frames must arrive after ReplayComplete"
+    );
 
     server.shutdown().await;
 }
 
-// ── 케이스 6: afterSeq resume — tail 만 ────────────────────────────────────────────
+// ── case 6: afterSeq resume — tail only ────────────────────────────────────────────
 #[tokio::test]
 async fn case06_after_seq_resume_tail_only() {
     let server = start_test_server().await.unwrap();
@@ -759,30 +761,30 @@ async fn case06_after_seq_resume_tail_only() {
             );
             assert!(
                 replay_from > last_seq,
-                "resume 은 last_seq({last_seq}) 초과분부터(replay_from={replay_from})"
+                "resume starts from beyond last_seq({last_seq}) (replay_from={replay_from})"
             );
         }
-        ev => panic!("SubscribeAck(Resume) 기대, got {ev:?}"),
+        ev => panic!("expected SubscribeAck(Resume), got {ev:?}"),
     }
     let tail = collect_frame_seqs_until_marker(&mut c2, id, "R6B").await;
     for s in &tail {
         assert!(
             *s > last_seq,
-            "tail frame seq({s}) 는 last_seq({last_seq}) 초과여야"
+            "tail frame seq({s}) must exceed last_seq({last_seq})"
         );
     }
 
     server.shutdown().await;
 }
 
-// ── 케이스 7: truncated — ring(2MB) 초과 출력 후 after_seq<oldest ───────────────────
+// ── case 7: truncated — after_seq<oldest after output exceeding the ring (2MB) ───────────────────
 #[tokio::test]
 async fn case07_truncated_replay() {
     let server = start_test_server().await.unwrap();
     let id = spawn_shell_agent(&server);
     let epoch = server.manager.agent_epoch(id).unwrap();
 
-    // (한 줄 ~80B × 40000 ≈ 3MB → 2MB ring 의 oldest 가 0 위로 밀린다.)
+    // (~80B per line × 40000 ≈ 3MB → the 2MB ring's oldest gets pushed above 0.)
     server
         .manager
         .write_stdin(
@@ -798,7 +800,7 @@ async fn case07_truncated_replay() {
             break;
         }
         if std::time::Instant::now() >= deadline {
-            panic!("ring eviction(oldest>0) 대기 timeout");
+            panic!("timeout waiting for ring eviction (oldest>0)");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -819,16 +821,19 @@ async fn case07_truncated_replay() {
             ..
         } => {
             assert_eq!(action, SubscribeAction::TruncatedReplay);
-            assert!(truncated, "truncated 플래그 set");
-            assert!(oldest_seq > 0, "oldest 가 0 위로 밀려야(eviction 발생)");
+            assert!(truncated, "the truncated flag is set");
+            assert!(
+                oldest_seq > 0,
+                "oldest must be pushed above 0 (eviction occurred)"
+            );
         }
-        ev => panic!("SubscribeAck(Truncated) 기대, got {ev:?}"),
+        ev => panic!("expected SubscribeAck(Truncated), got {ev:?}"),
     }
 
     server.shutdown().await;
 }
 
-// ── 케이스 8: epoch mismatch → Reset(oldest 부터) ──────────────────────────────────
+// ── case 8: epoch mismatch → Reset (from oldest) ──────────────────────────────────
 #[tokio::test]
 async fn case08_epoch_mismatch_reset() {
     let server = start_test_server().await.unwrap();
@@ -843,7 +848,7 @@ async fn case08_epoch_mismatch_reset() {
 
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
-    // 다른 화신 표식 + after_seq 지정 → after_seq 무시하고 Reset.
+    // A different incarnation marker + after_seq given → after_seq is ignored and it Resets.
     c.send(&WireCommand::Subscribe {
         agent_id: id,
         epoch: Some(epoch.wrapping_add(1)),
@@ -856,21 +861,19 @@ async fn case08_epoch_mismatch_reset() {
             current_epoch,
             ..
         } => {
-            assert_eq!(action, SubscribeAction::Reset, "epoch 불일치 → Reset");
-            assert_eq!(current_epoch, epoch, "현재 epoch 통보");
+            assert_eq!(action, SubscribeAction::Reset, "epoch mismatch → Reset");
+            assert_eq!(current_epoch, epoch, "the current epoch is reported");
         }
-        ev => panic!("SubscribeAck(Reset) 기대, got {ev:?}"),
+        ev => panic!("expected SubscribeAck(Reset), got {ev:?}"),
     }
 
     server.shutdown().await;
 }
 
-// ── 케이스 9: slow consumer → 그 연결만 close, 타 연결 무영향 ──────────────────────
+// ── case 9: slow consumer → only that connection closes, other connections unaffected ──────────────────────
 //
-// ★Mechanism★: after ReplayComplete the slow consumer **never reads its socket**. With bulk output flowing on the same
-//   agent, slow's server-side outbound queue (`CONN_TX_CAP` = 4608 in `link::server`) and the OS socket buffers both fill,
-//   and the frame outlet's `try_send` meets a full queue and closes that connection only (`link::server::ConnFrameSink`).
-//   The good consumer **keeps draining in a background task** and must survive (other connections unaffected).
+// Mechanism: after ReplayComplete the slow consumer never reads its socket. With bulk output on the same agent, its server-side outbound queue (`CONN_TX_CAP` = 4608 in `link::server`) and the OS socket buffers fill, and the frame outlet's `try_send` meets a full queue and closes that connection only (`link::server::ConnFrameSink`).
+// The good consumer keeps draining in a background task and must survive (other connections unaffected).
 #[tokio::test]
 async fn case09_slow_consumer_closed_others_unaffected() {
     let server = start_test_server().await.unwrap();
@@ -911,11 +914,8 @@ async fn case09_slow_consumer_closed_others_unaffected() {
         })
     };
 
-    // ★m1 (hardening)★: the output volume is raised to avoid a false positive (no blocking where socket buffers are large).
-    //   One line ~140 B (padded) × 200000 ≈ 28 MB. The 4608-slot queue (≈0.6 MB) plus any realistic OS socket send buffer
-    //   (usually tens of KB to a few MB) cannot absorb 28 MB, so while slow does not read, `try_send` surely meets a full
-    //   queue and the connection is closed. (Stated limit: if the OS buffers exceeded 28 MB this test could turn flaky, but
-    //   that does not happen with realistic defaults.)
+    // m1 (hardening): the output volume is raised to avoid a false positive (no blocking where socket buffers are large). One line ~140 B (padded) × 200000 ≈ 28 MB; the 4608-slot queue (≈0.6 MB) plus any realistic OS socket send buffer (tens of KB to a few MB) cannot absorb it, so while slow does not read, `try_send` surely meets a full queue.
+    //   (Limit: OS buffers above 28 MB could make this flaky; not with realistic defaults.)
     server
         .manager
         .write_stdin(
@@ -924,31 +924,29 @@ async fn case09_slow_consumer_closed_others_unaffected() {
         )
         .unwrap();
 
-    // ★Important★: if slow read right away the socket would drain and the server queue would not fill. It first waits a
-    //   while **without reading** so the server outbound queue + OS buffers fill and the connection is closed. Then it reads
-    //   down what reached its socket and meets the close.
+    // Important: if slow read at once the socket would drain and the server queue would not fill. It first waits without reading so the server outbound queue + OS buffers fill and the connection closes, then reads down what reached its socket and meets the close.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // slow 는 서버가 닫은 연결이므로 backlog 소진 후 Close/None 에 도달한다 — 넉넉한 deadline.
+    // slow is a connection the server closed, so after draining the backlog it reaches Close/None — a generous deadline.
     assert!(
         expect_closed_within(&mut slow, Duration::from_secs(40)).await,
-        "느린 소비자 연결은 서버가 닫아야 함"
+        "the slow consumer's connection must be closed by the server"
     );
 
     assert!(
         good_alive.load(std::sync::atomic::Ordering::Relaxed),
-        "정상 소비자는 닫히면 안 됨"
+        "the normal consumer must not be closed"
     );
     assert!(
         good_frames.load(std::sync::atomic::Ordering::Relaxed) > 0,
-        "정상 소비자는 영향 없이 frame 을 계속 수신"
+        "the normal consumer keeps receiving frames unaffected"
     );
 
     drain_task.abort();
     server.shutdown().await;
 }
 
-// ── 케이스 10: reconnect 복구 — resume 후 무손실(seq dedup 후 gap 0) ────────────────
+// ── case 10: reconnect recovery — lossless after resume (gap 0 after seq dedup) ────────────────
 #[tokio::test]
 async fn case10_reconnect_lossless() {
     let server = start_test_server().await.unwrap();
@@ -985,7 +983,7 @@ async fn case10_reconnect_lossless() {
         after_seq: Some(max1),
     })
     .await;
-    // SubscribeAck 소진.
+    // Drain the SubscribeAck.
     let _ = c2.next_event().await;
     let got2 = collect_frame_seqs_until_marker(&mut c2, id, "RC10B").await;
 
@@ -995,12 +993,12 @@ async fn case10_reconnect_lossless() {
     all.dedup();
     let max_all = *all.last().unwrap();
     let expected: Vec<u64> = (0..=max_all).collect();
-    assert_eq!(all, expected, "reconnect+resume 후 seq gap 0(무손실)");
+    assert_eq!(all, expected, "seq gap 0 after reconnect+resume (lossless)");
 
     server.shutdown().await;
 }
 
-// ── 케이스 11: high throughput — 순서·무결, 데드락 없음 ────────────────────────────
+// ── case 11: high throughput — order intact, no deadlock ────────────────────────────────
 #[tokio::test]
 async fn case11_high_throughput_no_deadlock() {
     let server = start_test_server().await.unwrap();
@@ -1026,13 +1024,12 @@ async fn case11_high_throughput_no_deadlock() {
         .unwrap();
 
     let seqs = collect_frame_seqs_until_marker(&mut c, id, "HT11_DONE").await;
-    assert!(!seqs.is_empty(), "대량 출력 frame 수신");
-    // 수신 seq 는 strictly increasing(순서 무결). (truncated 통보가 없으면 연속이어야 하나,
-    // ring eviction 가능성을 고려해 '증가' 만 강하게 단언 — 데드락/순서역전 없음이 핵심.)
+    assert!(!seqs.is_empty(), "frames of bulk output received");
+    // Received seqs are strictly increasing (order intact). Without a truncated notice they should be contiguous, but with possible ring eviction only "increasing" is asserted — no deadlock/order reversal is the point.
     for w in seqs.windows(2) {
         assert!(
             w[1] > w[0],
-            "frame seq 가 단조 증가해야(순서 무결): {:?}",
+            "frame seqs must increase monotonically (order intact): {:?}",
             w
         );
     }
@@ -1040,7 +1037,7 @@ async fn case11_high_throughput_no_deadlock() {
     server.shutdown().await;
 }
 
-// ── 케이스 12: 멀티 구독(역다중화) — 한 연결이 agent 2개 구독 ──────────────────────
+// ── case 12: multi-subscribe (demultiplexing) — one connection subscribes to 2 agents ──────────────────────
 #[tokio::test]
 async fn case12_multi_subscribe_demux() {
     let server = start_test_server().await.unwrap();
@@ -1081,11 +1078,11 @@ async fn case12_multi_subscribe_demux() {
             Some(Incoming::Frame(aid, _, _, payload)) => {
                 let text = String::from_utf8_lossy(&payload);
                 if text.contains("AAA12") {
-                    assert_eq!(aid, id_a, "AAA12 는 agent A 로만 와야");
+                    assert_eq!(aid, id_a, "AAA12 must come only to agent A");
                     saw_a = true;
                 }
                 if text.contains("BBB12") {
-                    assert_eq!(aid, id_b, "BBB12 는 agent B 로만 와야");
+                    assert_eq!(aid, id_b, "BBB12 must come only to agent B");
                     saw_b = true;
                 }
             }
@@ -1095,23 +1092,20 @@ async fn case12_multi_subscribe_demux() {
     }
     assert!(
         saw_a && saw_b,
-        "두 agent 의 출력을 각자 agent_id 로 역다중화해야 (a={saw_a}, b={saw_b})"
+        "must demultiplex the output of the two agents by their own agent_id (a={saw_a}, b={saw_b})"
     );
 
     server.shutdown().await;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════
-// M1: WS dispatch() 를 실제로 타는 E2E.
+// M1: E2E that really rides WS dispatch().
 //
-// 위 case01~12 는 출력평면(replay/seq/slow-consumer) 결정성을 보려고 agent 를
-// `server.manager.spawn_agent` 로 **직접** 만들어 dispatch 를 우회한다. 아래 case13~ 은
-// 반대로 **WS frame(JSON text control)으로 명령을 보내 read_task→dispatch() 를 실제로 타는**
-// 경로를 검증한다 — Spawn/WriteStdin/Kill/Interrupt/Resize/Unsubscribe/ListAgents/StopDaemon
-// /2차 Auth/binary 거부/파싱 실패. request_id echo(Ack/Error 매핑)도 단언한다.
+// Cases case01~12 above create the agent directly with `server.manager.spawn_agent` to see output-plane (replay/seq/slow-consumer) determinism, bypassing dispatch. Cases case13~ below verify the path that sends commands as WS frames (JSON text control) and really rides read_task→dispatch() —
+// Spawn/WriteStdin/Kill/Interrupt/Resize/Unsubscribe/ListAgents/StopDaemon/second Auth/binary rejection/parse failure — with the request_id echo (Ack/Error mapping) asserted too.
 // ══════════════════════════════════════════════════════════════════════════════════
 
-// ── 케이스 13: WS Spawn → Ack(req echo) + AgentListUpdated(새 agent_id) ─────────────
+// ── case 13: WS Spawn → Ack(req echo) + AgentListUpdated(new agent_id) ─────────────
 #[tokio::test]
 async fn case13_ws_spawn_ack_and_list() {
     let server = start_test_server().await.unwrap();
@@ -1130,13 +1124,13 @@ async fn case13_ws_spawn_ack_and_list() {
     c.await_spawn(profile_id, req).await;
     assert!(
         server.manager.agent_epoch(profile_id).is_some(),
-        "WS Spawn 후 manager 에 agent 가 살아있어야"
+        "after WS Spawn the agent must be alive in the manager"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 14: WS Spawn → WriteStdin(VIA_WS 마커가 binary frame 으로) ───────────────
+// ── case 14: WS Spawn → WriteStdin (the VIA_WS marker as a binary frame) ───────────────
 #[tokio::test]
 async fn case14_ws_write_stdin_roundtrip() {
     let server = start_test_server().await.unwrap();
@@ -1171,12 +1165,15 @@ async fn case14_ws_write_stdin_roundtrip() {
     c.await_ack(req_write).await;
 
     let frames = collect_frames_until_marker(&mut c, profile_id, "VIA_WS").await;
-    assert!(!frames.is_empty(), "VIA_WS 출력이 binary frame 으로 와야");
+    assert!(
+        !frames.is_empty(),
+        "the VIA_WS output must arrive as a binary frame"
+    );
 
     server.shutdown().await;
 }
 
-// ── 케이스 15: WS Kill → Ack + AgentListUpdated 로 종료 반영(불변식: terminal=list) ──
+// ── case 15: WS Kill → Ack + AgentListUpdated reflecting termination (invariant: terminal=list) ──
 #[tokio::test]
 async fn case15_ws_kill_ack_and_list_excludes() {
     let server = start_test_server().await.unwrap();
@@ -1202,14 +1199,14 @@ async fn case15_ws_kill_ack_and_list_excludes() {
     c.await_kill(profile_id, req_kill).await;
     assert!(
         server.manager.agent_epoch(profile_id).is_none(),
-        "kill 후 manager 에서 agent 제거"
+        "after kill the agent is removed from the manager"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 16: WS Interrupt → 터미널 모드는 거절(Error) · 프로세스 생존 ──────────────────
-// ★터미널 모드는 끊기 명령을 받지 않는다★ — 0x03 을 넣으면 한가한 TUI 가 두 번째 Ctrl-C 에 죽을 수 있다.
+// ── case 16: WS Interrupt → terminal mode refuses (Error) · the process survives ──────────────────
+// Terminal mode does not accept an interrupt command — 0x03 could kill an idle TUI on a second Ctrl-C.
 // ADR-0245
 #[tokio::test]
 async fn case16_ws_interrupt_refused_on_terminal_process_alive() {
@@ -1236,17 +1233,17 @@ async fn case16_ws_interrupt_refused_on_terminal_process_alive() {
     let msg = c.await_error(req_int).await;
     assert!(
         msg.contains("terminal mode does not accept the interrupt command"),
-        "PTY 끊기는 거절 문구로 답해야 한다: {msg}"
+        "a PTY interrupt must be answered with the refusal wording: {msg}"
     );
     assert!(
         server.manager.agent_epoch(profile_id).is_some(),
-        "거절된 Interrupt 뒤에도 프로세스 생존(manager 에 잔존)"
+        "the process survives even after a refused Interrupt (stays in the manager)"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 17: WS Resize → 에러 없이 수용(Resize 는 request_id 없음 → Ack 없음) ──────
+// ── case 17: WS Resize → accepted without error (Resize has no request_id → no Ack) ──────
 #[tokio::test]
 async fn case17_ws_resize_no_error() {
     let server = start_test_server().await.unwrap();
@@ -1263,8 +1260,7 @@ async fn case17_ws_resize_no_error() {
     .await;
     c.await_spawn(profile_id, req_spawn).await;
 
-    // WS Resize — messages.rs 상 request_id 없는 명령. dispatch 는 성공 시 무응답, 실패만 Error.
-    // 따라서 "Ack 가 오지 않는다"(설계대로)와 "Error 가 오지 않는다"를 함께 단언한다.
+    // WS Resize has no request_id (messages.rs): dispatch is silent on success and emits only Error on failure, so both "no Ack" (as designed) and "no Error" are asserted.
     c.send(&WireCommand::Resize {
         agent_id: profile_id,
         cols: 100,
@@ -1273,8 +1269,7 @@ async fn case17_ws_resize_no_error() {
     })
     .await;
 
-    // 후속 명령(ListAgents)을 보내 그 응답 전에 Resize Error/Ack 가 끼지 않는지로 "무응답" 검증.
-    // (Resize 가 잘못 Ack/Error 를 보내면 ListAgents 응답보다 먼저 그게 잡힌다.)
+    // Send a follow-up command (ListAgents) and verify "silence" by whether any Resize Error/Ack gets in before its response.
     let req_list = RequestId::new();
     c.send(&WireCommand::ListAgents {
         request_id: req_list,
@@ -1283,13 +1278,13 @@ async fn case17_ws_resize_no_error() {
     let agents = c.await_agent_list(req_list).await;
     assert!(
         agents.iter().any(|a| a.id == profile_id),
-        "ListAgents 응답이 와야(Resize 는 무응답이어야)"
+        "the ListAgents response must arrive (Resize must be silent)"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 18: WS Unsubscribe → 이후 live frame 더 안 옴 ────────────────────────────
+// ── case 18: WS Unsubscribe → no more live frames afterwards ────────────────────────────
 #[tokio::test]
 async fn case18_ws_unsubscribe_stops_live() {
     let server = start_test_server().await.unwrap();
@@ -1324,20 +1319,28 @@ async fn case18_ws_unsubscribe_stops_live() {
     })
     .await;
 
-    // ★타이밍 비의존 보장★: ListAgents 를 왕복시켜 Unsubscribe 가 read_task 에서 이미 처리됐음을
-    //   확정한 뒤(동일 read_task 가 FIFO 처리) 새 출력을 낸다.
+    // Timing-independent guarantee: round-trip ListAgents to confirm Unsubscribe was already processed in the read_task (the same read_task is FIFO), then produce new output.
     let req_list = RequestId::new();
     c.send(&WireCommand::ListAgents {
         request_id: req_list,
     })
     .await;
     loop {
-        match c.next().await.expect("ListAgents 응답 전 끊김") {
+        match c
+            .next()
+            .await
+            .expect("dropped before the ListAgents response")
+        {
             Incoming::Event(AgentEvent::AgentList { request_id, .. }) => {
-                assert_eq!(request_id, req_list, "ListAgents 응답 request_id echo");
+                assert_eq!(
+                    request_id, req_list,
+                    "request_id echo of the ListAgents response"
+                );
                 break;
             }
-            Incoming::Frame(..) => panic!("Unsubscribe 후 잔여 frame 도착(구독이 안 끊김)"),
+            Incoming::Frame(..) => {
+                panic!("a leftover frame arrived after Unsubscribe (the subscription was not cut)")
+            }
             _ => continue,
         }
     }
@@ -1351,18 +1354,18 @@ async fn case18_ws_unsubscribe_stops_live() {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         match tokio::time::timeout(remaining, c.next()).await {
             Ok(Some(Incoming::Frame(..))) => {
-                panic!("Unsubscribe 후 live frame 이 도착하면 안 됨");
+                panic!("a live frame must not arrive after Unsubscribe");
             }
             Ok(Some(Incoming::Event(_))) => continue,
             Ok(None) => break,
-            Err(_) => break, // timeout = frame 안 옴(정상).
+            Err(_) => break, // timeout = no frame arrives (normal).
         }
     }
 
     server.shutdown().await;
 }
 
-// ── 케이스 19: WS ListAgents → AgentList ───────────────────────────────────────────
+// ── case 19: WS ListAgents → AgentList ───────────────────────────────────────────
 #[tokio::test]
 async fn case19_ws_list_agents() {
     let server = start_test_server().await.unwrap();
@@ -1387,14 +1390,14 @@ async fn case19_ws_list_agents() {
     let agents = c.await_agent_list(req_list).await;
     assert!(
         agents.iter().any(|a| a.id == profile_id),
-        "ListAgents 응답에 spawn 한 agent 포함"
+        "the ListAgents response includes the spawned agent"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 20: WS StopDaemon force 정책(M4) ────────────────────────────────────────
-//   활성 agent 있는 상태에서 force=false → 거부 Error(서버 살아있음). 이어서 force=true → 종료.
+// ── case 20: WS StopDaemon force policy (M4) ────────────────────────────────────────
+//   With an active agent, force=false → refusal Error (server stays alive). Then force=true → shutdown.
 #[tokio::test]
 async fn case20_ws_stop_daemon_force_policy() {
     let server = start_test_server().await.unwrap();
@@ -1421,7 +1424,7 @@ async fn case20_ws_stop_daemon_force_policy() {
     let msg = c.await_error(req_reject).await;
     assert!(
         msg.contains("active agents"),
-        "force=false 거부 메시지에 active agents 명시: {msg}"
+        "the force=false refusal message must state the active agents: {msg}"
     );
     let req_alive = RequestId::new();
     c.send(&WireCommand::ListAgents {
@@ -1440,7 +1443,7 @@ async fn case20_ws_stop_daemon_force_policy() {
     // The Ack is best effort (the daemon's `Close` aborts its writer), so the test asserts the close and the shutdown.
     assert!(
         c.expect_closed().await,
-        "StopDaemon(force) 후 연결이 닫혀야"
+        "after StopDaemon(force) the connection must close"
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !server.shutdown_signalled() {
@@ -1451,11 +1454,11 @@ async fn case20_ws_stop_daemon_force_policy() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // accept_handle join 으로 accept loop 종료 확정(shutdown 은 idempotent — 이미 종료된 watch 에 재send).
+    // Confirm the accept loop ended by joining accept_handle (shutdown is idempotent — re-send on an already ended watch).
     server.shutdown().await;
 }
 
-// ── 케이스 21: 2차 Auth → already authenticated Error ───────────────────────────────
+// ── case 21: second Auth → already authenticated Error ───────────────────────────────
 #[tokio::test]
 async fn case21_ws_second_auth_rejected() {
     let server = start_test_server().await.unwrap();
@@ -1466,7 +1469,7 @@ async fn case21_ws_second_auth_rejected() {
     let msg = c.await_error_no_id().await;
     assert!(
         msg.contains("already authenticated"),
-        "2차 Auth 는 already authenticated Error 여야: {msg}"
+        "a second Auth must be an already authenticated Error: {msg}"
     );
     let req_alive = RequestId::new();
     c.send(&WireCommand::ListAgents {
@@ -1478,7 +1481,7 @@ async fn case21_ws_second_auth_rejected() {
     server.shutdown().await;
 }
 
-// ── 케이스 22: control 자리에 binary frame → Error + 연결 close(AgentConnection::on_binary, agent_conn.rs) ──────────
+// ── case 22: binary frame in the control position → Error + connection close (AgentConnection::on_binary, agent_conn.rs) ──────────
 #[tokio::test]
 async fn case22_ws_binary_frame_rejected() {
     let server = start_test_server().await.unwrap();
@@ -1488,13 +1491,13 @@ async fn case22_ws_binary_frame_rejected() {
     c.send_binary(vec![0xde, 0xad, 0xbe, 0xef]).await;
     assert!(
         c.expect_closed().await,
-        "control 자리 binary 는 Error 후 연결이 닫혀야"
+        "a binary in the control position must close the connection after an Error"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 23: 깨진 JSON text → Error(req 없음), 연결은 유지(AgentConnection::on_text, agent_conn.rs) ─────────────
+// ── case 23: broken JSON text → Error (no req), connection kept (AgentConnection::on_text, agent_conn.rs) ─────────────
 #[tokio::test]
 async fn case23_ws_parse_failure_error() {
     let server = start_test_server().await.unwrap();
@@ -1505,7 +1508,7 @@ async fn case23_ws_parse_failure_error() {
     let msg = c.await_error_no_id().await;
     assert!(
         msg.contains("invalid command"),
-        "파싱 실패 Error 메시지: {msg}"
+        "parse failure Error message: {msg}"
     );
     let req_alive = RequestId::new();
     c.send(&WireCommand::ListAgents {
@@ -1517,7 +1520,7 @@ async fn case23_ws_parse_failure_error() {
     server.shutdown().await;
 }
 
-// ── 케이스 24: dispatch 실패 arm — 없는 agent_id Kill → Error(req echo) ─────────────
+// ── case 24: dispatch failure arm — Kill of a nonexistent agent_id → Error (req echo) ─────────────
 #[tokio::test]
 async fn case24_ws_kill_unknown_agent_error() {
     let server = start_test_server().await.unwrap();
@@ -1533,13 +1536,13 @@ async fn case24_ws_kill_unknown_agent_error() {
     let msg = c.await_error(req).await;
     assert!(
         msg.contains("not found"),
-        "없는 agent Kill 은 not found Error 여야: {msg}"
+        "Kill of a nonexistent agent must be a not found Error: {msg}"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 25: dispatch 실패 arm — 없는 agent_id WriteStdin → Error(req echo) ─────────
+// ── case 25: dispatch failure arm — WriteStdin to a nonexistent agent_id → Error (req echo) ─────────
 #[tokio::test]
 async fn case25_ws_write_unknown_agent_error() {
     let server = start_test_server().await.unwrap();
@@ -1556,13 +1559,13 @@ async fn case25_ws_write_unknown_agent_error() {
     let msg = c.await_error(req).await;
     assert!(
         msg.contains("not found"),
-        "없는 agent WriteStdin 은 not found Error 여야: {msg}"
+        "WriteStdin to a nonexistent agent must be a not found Error: {msg}"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 26: dispatch 실패 arm — 없는 profile_id Spawn → Error(req echo) ────────────
+// ── case 26: dispatch failure arm — Spawn of a nonexistent profile_id → Error (req echo) ────────────
 #[tokio::test]
 async fn case26_ws_spawn_unknown_profile_error() {
     let server = start_test_server().await.unwrap();
@@ -1578,14 +1581,14 @@ async fn case26_ws_spawn_unknown_profile_error() {
     let msg = c.await_error(req).await;
     assert!(
         msg.contains("profile not found"),
-        "없는 profile Spawn 은 profile not found Error 여야: {msg}"
+        "Spawn of a nonexistent profile must be a profile not found Error: {msg}"
     );
 
     server.shutdown().await;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════
-// A: WS application-level keepalive (half-open 연결 감지).
+// A: WS application-level keepalive (half-open connection detection).
 // ══════════════════════════════════════════════════════════════════════════════════
 
 fn fast_keepalive() -> KeepaliveConfig {
@@ -1595,7 +1598,7 @@ fn fast_keepalive() -> KeepaliveConfig {
     }
 }
 
-// ── 케이스 27: 데몬이 능동 Ping 을 보낸다(half-open 감지의 전제) ─────────────────────
+// ── case 27: the daemon actively sends a Ping (the premise of half-open detection) ─────────────────────
 #[tokio::test]
 async fn case27_keepalive_server_sends_ping() {
     let server = start_test_server_with_keepalive(fast_keepalive())
@@ -1604,37 +1607,35 @@ async fn case27_keepalive_server_sends_ping() {
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    // ping_interval(200ms) 안에 첫 Ping 이 와야 한다. 여유 deadline(2s).
+    // The first Ping must arrive within ping_interval (200ms). Slack deadline (2s).
     assert!(
         c.saw_ping_within(Duration::from_secs(2)).await,
-        "데몬이 ping_interval 안에 능동 WS Ping 을 보내야(half-open 감지 전제)"
+        "the daemon must actively send a WS Ping within ping_interval (premise of half-open detection)"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 28: Pong 미응답(죽은 클라) → idle_timeout 후 서버가 close ─────────────────
+// ── case 28: no Pong reply (dead client) → the server closes after idle_timeout ─────────────────
 #[tokio::test]
 async fn case28_keepalive_dead_client_closed() {
     let server = start_test_server_with_keepalive(fast_keepalive())
         .await
         .unwrap();
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
-    // ★주의★: drain_handshake 든 expect_closed_within 이든 stream 을 poll 하면 tungstenite 가
-    //   서버 Ping 에 자동 Pong 해 last_recv 가 갱신된다(=죽은 클라가 아니게 됨). 그래서 먼저
-    //   idle_timeout 의 수 배 동안 **전혀 읽지 않고 sleep** 해 자동 Pong 을 원천 차단한다.
-    //   그 sleep 동안 서버 ping arm 이 idle 을 감지(last_recv=auth 시점 고정)해 연결을 닫는다.
+    // Caution: whether drain_handshake or expect_closed_within, polling the stream makes tungstenite auto-Pong the server Ping, updating last_recv (it stops being a dead client). So first sleep without reading at all for several times idle_timeout to cut off the auto Pong at the source;
+    //   during that sleep the server ping arm detects idle (last_recv fixed at the auth moment) and closes the connection.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     assert!(
         c.expect_closed_within(Duration::from_secs(3)).await,
-        "Pong 미응답(죽은 클라)이면 idle_timeout 후 서버가 연결을 닫아야"
+        "if there is no Pong reply (dead client) the server must close the connection after idle_timeout"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 29: 정상 활성 클라는 keepalive 로 끊기지 않음(회귀 방지) ──────────────────
+// ── case 29: a normal active client is not cut by keepalive (regression guard) ──────────────────
 #[tokio::test]
 async fn case29_keepalive_active_client_survives() {
     let server = start_test_server_with_keepalive(fast_keepalive())
@@ -1643,21 +1644,21 @@ async fn case29_keepalive_active_client_survives() {
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
     drain_handshake(&mut c).await;
 
-    // idle_timeout(600ms)의 ~4배(2.5s) 동안 계속 읽으며(자동 Pong) 안 끊기는지.
+    // Keeps reading for ~4× idle_timeout (600ms) (2.5s) (auto Pong) to see it is not cut.
     assert!(
         c.stays_alive_while_reading(Duration::from_millis(2500))
             .await,
-        "정상 활성 클라는 keepalive(자동 Pong)로 idle_timeout 을 넘지 않아 끊기면 안 됨"
+        "a normal active client must not be cut — keepalive (auto Pong) keeps it from exceeding idle_timeout"
     );
 
     server.shutdown().await;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════
-// 멀티뷰어: resize 협상(tmux smallest) + 입력 lease(Zellij 명시 lease).
+// Multi-viewer: resize negotiation (tmux smallest) + input lease (Zellij explicit lease).
 // ══════════════════════════════════════════════════════════════════════════════════
 
-// ── 케이스 30: resize 협상 — 두 viewport 의 smallest 로 PTY, detach 후 재협상 ──────────
+// ── case 30: resize negotiation — PTY at the smallest of two viewports, renegotiated after detach ──────────
 #[tokio::test]
 async fn case30_multiviewer_resize_smallest_and_renegotiate() {
     let server = start_test_server().await.unwrap();
@@ -1674,7 +1675,7 @@ async fn case30_multiviewer_resize_smallest_and_renegotiate() {
     .await;
     assert!(
         wait_for_size(&server, id, 80, 40).await,
-        "viewport a 단독이면 (80,40)"
+        "viewport a alone gives (80,40)"
     );
 
     let mut c2 = Client::connect_and_auth(server.port, &server.token).await;
@@ -1688,19 +1689,19 @@ async fn case30_multiviewer_resize_smallest_and_renegotiate() {
     .await;
     assert!(
         wait_for_size(&server, id, 40, 20).await,
-        "두 viewport(a=80x40, b=40x20)의 smallest = (40,20)"
+        "the smallest of the two viewports (a=80x40, b=40x20) = (40,20)"
     );
 
     drop(c2);
     assert!(
         wait_for_size(&server, id, 80, 40).await,
-        "viewport b 의 연결이 끊기면 남은 a 기준 (80,40) 으로 재협상 복귀"
+        "when viewport b's connection drops, it returns to renegotiating on the remaining a as (80,40)"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 31: resize 하위호환 — viewport_id 없으면 협상 우회(직접 그 크기) ─────────────
+// ── case 31: resize backward compat — no viewport_id bypasses negotiation (that size directly) ─────────────
 #[tokio::test]
 async fn case31_resize_no_viewport_id_bypasses_negotiation() {
     let server = start_test_server().await.unwrap();
@@ -1717,13 +1718,13 @@ async fn case31_resize_no_viewport_id_bypasses_negotiation() {
     .await;
     assert!(
         wait_for_size(&server, id, 120, 50).await,
-        "viewport_id 없으면 그 크기로 직접 resize(하위호환)"
+        "without viewport_id it resizes directly to that size (backward compat)"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 32: 입력 lease — 보유 중 타 연결 WriteStdin 거부, 해제 후 통과 ───────────────
+// ── case 32: input lease — while held another connection's WriteStdin is refused, passes after release ───────────────
 #[tokio::test]
 async fn case32_input_lease_locks_other_viewer() {
     let server = start_test_server().await.unwrap();
@@ -1752,7 +1753,7 @@ async fn case32_input_lease_locks_other_viewer() {
     let msg = c2.await_error(req_w2).await;
     assert!(
         msg.contains("locked by another viewer"),
-        "lease 보유 중 타 연결 WriteStdin 은 locked Error 여야: {msg}"
+        "while a lease is held another connection's WriteStdin must be a locked Error: {msg}"
     );
 
     let req_w1 = RequestId::new();
@@ -1784,7 +1785,7 @@ async fn case32_input_lease_locks_other_viewer() {
     server.shutdown().await;
 }
 
-// ── 케이스 33: 보유자 연결 끊기면 lease 자동 해제(좀비 lock 방지) ───────────────────────
+// ── case 33: the lease is released automatically when the holder's connection drops (prevents a zombie lock) ───────────────────────
 #[tokio::test]
 async fn case33_input_lease_auto_released_on_disconnect() {
     let server = start_test_server().await.unwrap();
@@ -1805,7 +1806,7 @@ async fn case33_input_lease_auto_released_on_disconnect() {
 
     drop(c1);
 
-    // 끊김 cleanup 이 비동기라 즉시 반영 아님 → 재시도 폴링.
+    // The disconnect cleanup is asynchronous so it is not reflected immediately → retry polling.
     let mut acquired = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
     while std::time::Instant::now() < deadline {
@@ -1842,13 +1843,13 @@ async fn case33_input_lease_auto_released_on_disconnect() {
     }
     assert!(
         acquired,
-        "보유자(c1) 끊김 후 c2 가 lease 를 획득할 수 있어야(좀비 lock 자동 해제)"
+        "after the holder (c1) drops, c2 must be able to acquire the lease (the zombie lock is auto-released)"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 34: lease 없을 때 WriteStdin 자유 통과(case14 회귀 — 단일 뷰어 마찰 0) ───────
+// ── case 34: WriteStdin passes freely with no lease (case14 regression — zero friction for a single viewer) ───────
 #[tokio::test]
 async fn case34_no_lease_write_stdin_passes_freely() {
     let server = start_test_server().await.unwrap();
@@ -1870,10 +1871,10 @@ async fn case34_no_lease_write_stdin_passes_freely() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════
-// phase4 1단계: 프로필 CRUD + ad-hoc spawn 의 WS wire 경로.
+// phase4 stage 1: the WS wire path of profile CRUD + ad-hoc spawn.
 // ══════════════════════════════════════════════════════════════════════════════════
 
-// ── 케이스 35: WS CreateProfile → Created(req echo, 생성 프로필 동봉) ────────────────
+// ── case 35: WS CreateProfile → Created (req echo, with the created profile attached) ────────────────
 #[tokio::test]
 async fn case35_ws_create_profile() {
     let server = start_test_server().await.unwrap();
@@ -1895,20 +1896,23 @@ async fn case35_ws_create_profile() {
     .await;
 
     let created = c.await_created(req).await;
-    assert_eq!(created.name, "p35", "Created 에 동봉된 프로필 이름 일치");
-    assert_eq!(created.cwd, sent_cwd, "Created 에 동봉된 cwd 일치");
+    assert_eq!(
+        created.name, "p35",
+        "the profile name attached to Created matches"
+    );
+    assert_eq!(created.cwd, sent_cwd, "the cwd attached to Created matches");
     assert!(
         matches!(&created.command, engram_dashboard_protocol::AgentSpawnCommand::Claude { extra_args, output_format, .. }
             if extra_args == &vec!["--foo".to_string()] && *output_format == WireOutputFormat::Terminal),
-        "claude 프로필이 extra_args 보존 + 기본 output_format=Terminal"
+        "a claude profile keeps extra_args + default output_format=Terminal"
     );
-    assert!(created.auto_restore, "auto_restore 반영");
+    assert!(created.auto_restore, "auto_restore is reflected");
     assert!(
         server.manager.agent_snapshot(created.id).is_some(),
-        "create 후 manager 레지스트리에 존재해야"
+        "must exist in the manager registry after create"
     );
 
-    // ── ADR-0044 M2: 같은 WS 경로로 output_format=StreamJson 프로필 생성 → json 모드 저장 확인 ──
+    // ── ADR-0044 M2: create an output_format=StreamJson profile through the same WS path → confirm it is stored in json mode ──
     let req_json = RequestId::new();
     c.send(&WireCommand::CreateProfile {
         name: "p35-json".into(),
@@ -1925,27 +1929,27 @@ async fn case35_ws_create_profile() {
     assert!(
         matches!(&created_json.command, engram_dashboard_protocol::AgentSpawnCommand::Claude { output_format, .. }
             if *output_format == WireOutputFormat::StreamJson),
-        "StreamJson 으로 만든 프로필이 wire 로 json 모드로 돌아와야"
+        "a profile made as StreamJson must come back over the wire in json mode"
     );
     assert!(
         matches!(
             &server
                 .manager
                 .agent_snapshot(created_json.id)
-                .expect("json 프로필 등록됨")
+                .expect("the json profile is registered")
                 .command,
             AgentCommand::Claude {
                 output_format: AgentOutputFormat::StreamJson,
                 ..
             }
         ),
-        "core 레지스트리 프로필이 json 모드여야(wire output_format→core 매핑)"
+        "the core registry profile must be in json mode (wire output_format→core mapping)"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 36: WS ListProfiles → ProfileList(req echo, 전용 reply) ──────────────────
+// ── case 36: WS ListProfiles → ProfileList (req echo, dedicated reply) ──────────────────
 #[tokio::test]
 async fn case36_ws_list_profiles() {
     let server = start_test_server().await.unwrap();
@@ -1962,13 +1966,13 @@ async fn case36_ws_list_profiles() {
     let profiles = c.await_profile_list(req_list).await;
     assert!(
         profiles.iter().any(|p| p.id == pre_id),
-        "ListProfiles 응답에 미리 등록한 프로필 포함"
+        "the ListProfiles response includes the pre-registered profile"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 37: WS SpawnProfile → Spawned(req echo, AgentInfo 동봉) ───────────────────
+// ── case 37: WS SpawnProfile → Spawned (req echo, with AgentInfo attached) ───────────────────
 #[tokio::test]
 async fn case37_ws_spawn_profile() {
     let server = start_test_server().await.unwrap();
@@ -1985,16 +1989,16 @@ async fn case37_ws_spawn_profile() {
     })
     .await;
     let agent = c.await_spawned(req).await;
-    assert_eq!(agent.id, profile_id, "Spawned 의 agent.id == profile_id");
+    assert_eq!(agent.id, profile_id, "agent.id of Spawned == profile_id");
     assert!(
         server.manager.agent_epoch(profile_id).is_some(),
-        "SpawnProfile 후 manager 에 agent 가 살아있어야"
+        "after SpawnProfile the agent must be alive in the manager"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 38: WS DeleteProfile → Ack + ProfileListUpdated(제거됨) ──────────────────
+// ── case 38: WS DeleteProfile → Ack + ProfileListUpdated (removed) ──────────────────
 #[tokio::test]
 async fn case38_ws_delete_profile() {
     let server = start_test_server().await.unwrap();
@@ -2012,17 +2016,17 @@ async fn case38_ws_delete_profile() {
     let profiles = c.await_crud(req).await;
     assert!(
         !profiles.iter().any(|p| p.id == profile_id),
-        "DeleteProfile 후 목록에서 제거돼야"
+        "must be removed from the list after DeleteProfile"
     );
     assert!(
         server.manager.agent_snapshot(profile_id).is_none(),
-        "manager 레지스트리에서도 제거"
+        "removed from the manager registry too"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 39: WS SetProfileAutoRestore → Ack + ProfileListUpdated(토글 반영) ────────
+// ── case 39: WS SetProfileAutoRestore → Ack + ProfileListUpdated (toggle reflected) ────────
 #[tokio::test]
 async fn case39_ws_set_auto_restore() {
     let server = start_test_server().await.unwrap();
@@ -2042,21 +2046,21 @@ async fn case39_ws_set_auto_restore() {
     let p = profiles
         .iter()
         .find(|p| p.id == profile_id)
-        .expect("토글 대상 프로필이 목록에 있어야");
-    assert!(p.auto_restore, "auto_restore 가 true 로 토글돼야");
+        .expect("the toggled profile must be in the list");
+    assert!(p.auto_restore, "auto_restore must be toggled to true");
     assert!(
         server
             .manager
             .agent_snapshot(profile_id)
             .map(|p| p.auto_restore)
             .unwrap_or(false),
-        "manager 레지스트리에도 토글 반영"
+        "the toggle is reflected in the manager registry too"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 40: WS SpawnByCwd → Spawned(req echo, AgentInfo 동봉) ─────────────────────
+// ── case 40: WS SpawnByCwd → Spawned (req echo, with AgentInfo attached) ─────────────────────
 #[tokio::test]
 async fn case40_ws_spawn_by_cwd() {
     let server = start_test_server().await.unwrap();
@@ -2074,17 +2078,17 @@ async fn case40_ws_spawn_by_cwd() {
     let agent = c.await_spawned(req).await;
     assert!(
         server.manager.agent_epoch(agent.id).is_some(),
-        "Spawned 에 동봉된 agent.id 가 manager 에 살아있어야"
+        "the agent.id attached to Spawned must be alive in the manager"
     );
     assert!(
         server.manager.list_agents().len() > before,
-        "manager 에 ad-hoc agent 가 추가돼야"
+        "the ad-hoc agent must be added to the manager"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 41: WS GetSnapshot → Snapshot(req echo, chunks) — 전용 reply, Ack 없음 ────
+// ── case 41: WS GetSnapshot → Snapshot (req echo, chunks) — dedicated reply, no Ack ────
 #[tokio::test]
 async fn case41_ws_get_snapshot() {
     let server = start_test_server().await.unwrap();
@@ -2106,13 +2110,16 @@ async fn case41_ws_get_snapshot() {
     })
     .await;
     let (aid, chunks) = c.await_snapshot(req).await;
-    assert_eq!(aid, id, "Snapshot 의 agent_id echo");
-    assert!(!chunks.is_empty(), "쌓인 출력이 snapshot chunk 로 와야");
+    assert_eq!(aid, id, "agent_id echo of Snapshot");
+    assert!(
+        !chunks.is_empty(),
+        "the accumulated output must arrive as snapshot chunks"
+    );
 
     server.shutdown().await;
 }
 
-// ── 케이스 42: WS SpawnProfile 없는 profile_id → Error(req echo) ────────────────────
+// ── case 42: WS SpawnProfile with a nonexistent profile_id → Error (req echo) ────────────────────
 #[tokio::test]
 async fn case42_ws_spawn_profile_unknown_error() {
     let server = start_test_server().await.unwrap();
@@ -2129,13 +2136,13 @@ async fn case42_ws_spawn_profile_unknown_error() {
     let msg = c.await_error(req).await;
     assert!(
         msg.contains("profile not found"),
-        "없는 profile SpawnProfile 은 not found Error 여야: {msg}"
+        "SpawnProfile of a nonexistent profile must be a not found Error: {msg}"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 43: WS SetProfileAutoRestore 없는 profile_id → Error(req echo) ────────────
+// ── case 43: WS SetProfileAutoRestore with a nonexistent profile_id → Error (req echo) ────────────
 #[tokio::test]
 async fn case43_ws_set_auto_restore_unknown_error() {
     let server = start_test_server().await.unwrap();
@@ -2152,13 +2159,13 @@ async fn case43_ws_set_auto_restore_unknown_error() {
     let msg = c.await_error(req).await;
     assert!(
         msg.contains("profile not found"),
-        "없는 profile SetProfileAutoRestore 은 not found Error 여야: {msg}"
+        "SetProfileAutoRestore of a nonexistent profile must be a not found Error: {msg}"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 44: WS GetSnapshot 없는 agent_id → Error(req echo) ───────────────────────
+// ── case 44: WS GetSnapshot with a nonexistent agent_id → Error (req echo) ───────────────────────
 #[tokio::test]
 async fn case44_ws_get_snapshot_unknown_error() {
     let server = start_test_server().await.unwrap();
@@ -2174,22 +2181,17 @@ async fn case44_ws_get_snapshot_unknown_error() {
     let msg = c.await_error(req).await;
     assert!(
         msg.contains("not found") || !msg.is_empty(),
-        "없는 agent GetSnapshot 은 Error 여야: {msg}"
+        "GetSnapshot of a nonexistent agent must be an Error: {msg}"
     );
 
     server.shutdown().await;
 }
 
-// ── 케이스 45: 활성화가 도는 동안 뒤 명령이 먼저 답한다(소켓 head-of-line blocking 회귀망) ────────
+// ── case 45: while an activation runs the later command answers first (socket head-of-line blocking regression net) ────────
 //
-// ★옛 모양★: 읽기 루프가 `on_text` 을 완료까지 await 했으므로, 활성화 한 건(실 프로세스 생성 + 링크
-//   대기 — 전형 2s·백스톱 15s)이 끝날 때까지 같은 클라이언트의 **다른 명령이 소켓에서 꺼내지지도**
-//   않았다. 그래서 아래 두 답은 반드시 보낸 순서대로 왔다.
-// ★무엇이 이 순서를 뒤집나★: 활성화는 이제 그 연결의 도착순 줄 밖에서 돌고(`connection_core::
-//   dispatch_order`), `ListAgents` 는 그 줄에서 곧바로 처리된다. 두 일의 규모 차가 3 자릿수라
-//   (프로세스 생성 대 인메모리 맵 조회) 이 단언은 타이밍 여유에 기대지 않는다.
-// ★e2e 로 두는 이유★: 이 순서 뒤집힘은 소켓 → 읽기 행 → 수신 큐 → 처리 행 → dispatch 가 **전부
-//   제대로 이어져야** 나온다. 단위 시험 둘(`agent_conn` 의 짝)은 각 조각만 잰다.
+// The old shape: the read loop awaited `on_text` to completion, so until one activation (real process creation + link wait — typically 2 s, backstop 15 s) finished, the same client's other commands were not even taken off the socket and the two answers came in sent order.
+// What flips this: activation now runs outside the connection's arrival-order lane (`connection_core::dispatch_order`) and `ListAgents` is handled straight in that lane; the jobs differ by 3 orders of magnitude (process creation vs an in-memory map lookup), so the assertion does not lean on timing slack.
+// An e2e because the flip occurs only when socket → read row → inbound queue → handling row → dispatch all connect; the two unit tests (the pair in `agent_conn`) measure only each piece.
 #[tokio::test]
 async fn case45_ws_activation_does_not_block_the_next_command() {
     let server = start_test_server().await.unwrap();
@@ -2226,7 +2228,7 @@ async fn case45_ws_activation_does_not_block_the_next_command() {
                 request_id: Some(rid),
                 message,
             })) if rid == spawn_req => {
-                panic!("Spawn 이 실패했다 — 이 케이스가 재는 것이 아니다: {message}")
+                panic!("Spawn failed — that is not what this case measures: {message}")
             }
             Some(_) => continue,
             None => break,
@@ -2235,19 +2237,19 @@ async fn case45_ws_activation_does_not_block_the_next_command() {
     assert_eq!(
         order,
         vec!["list", "spawn"],
-        "뒤에 보낸 ListAgents 가 활성화를 기다렸다 — 소켓 head-of-line blocking 회귀"
+        "the later ListAgents waited for the activation — socket head-of-line blocking regression"
     );
 
     server.shutdown().await;
 }
 
-// ── 보조 함수 ──────────────────────────────────────────────────────────────────────
+// ── helper functions ──────────────────────────────────────────────────────────────────────
 
-/// AgentListUpdated 는 spawn 으로 추가 발생할 수 있어 Hello 만 보장 소진하고, 첫 list 1건도 소진.
+/// AgentListUpdated can additionally occur from spawn, so only Hello is guaranteed drained, plus the first 1 list.
 async fn drain_handshake(c: &mut Client) {
     match c.next_event().await {
         AgentEvent::Hello { .. } => {}
-        ev => panic!("Hello 기대(handshake), got {ev:?}"),
+        ev => panic!("expected Hello (handshake), got {ev:?}"),
     }
     loop {
         match c.next_event().await {
@@ -2259,7 +2261,7 @@ async fn drain_handshake(c: &mut Client) {
 
 async fn wait_replay_complete(c: &mut Client, id: Uuid) {
     loop {
-        match c.next().await.expect("ReplayComplete 전 끊김") {
+        match c.next().await.expect("dropped before ReplayComplete") {
             Incoming::Event(AgentEvent::ReplayComplete { agent_id, .. }) if agent_id == id => {
                 return
             }
@@ -2268,7 +2270,7 @@ async fn wait_replay_complete(c: &mut Client, id: Uuid) {
     }
 }
 
-/// id 의 frame seq 를 모으며, payload 에 marker 가 나타나면 멈춘다(그 frame seq 포함).
+/// Collects the frame seqs of an id, stopping when the marker appears in the payload (including that frame's seq).
 async fn collect_frame_seqs_until_marker(c: &mut Client, id: Uuid, marker: &str) -> Vec<u64> {
     let mut seqs = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -2285,7 +2287,7 @@ async fn collect_frame_seqs_until_marker(c: &mut Client, id: Uuid, marker: &str)
         }
     }
     panic!(
-        "marker '{marker}' 도달 전 timeout/close (수집 {}건)",
+        "timeout/close before marker '{marker}' arrived (collected {})",
         seqs.len()
     );
 }
@@ -2306,27 +2308,26 @@ async fn collect_frames_until_marker(c: &mut Client, id: Uuid, marker: &str) -> 
             None => break,
         }
     }
-    panic!("marker '{marker}' 도달 전 timeout/close");
+    panic!("timeout/close before marker '{marker}' arrived");
 }
 
-/// PTY 가 첫 구독부터 모든 출력을 흘리므로 FromOldest replay+live 는 0 부터 빈틈없이 와야 한다.
+/// The PTY streams all output from the first subscribe, so FromOldest replay+live must come from 0 with no gaps.
 fn assert_seq_contiguous_from_zero(seqs: &[u64]) {
     let mut sorted = seqs.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
     for (i, s) in sorted.iter().enumerate() {
-        assert_eq!(*s, i as u64, "seq 가 0 부터 연속이어야: {sorted:?}");
+        assert_eq!(*s, i as u64, "seq must be contiguous from 0: {sorted:?}");
     }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════
-// 실프로세스 전용 케이스 (#[cfg(windows)] + #[ignore]) — in-process 로는 검증 불가.
+// Real-process-only cases (#[cfg(windows)] + #[ignore]) — cannot be verified in-process.
 //
-// 기본 `cargo test` 에서는 제외(#[ignore] — 실 OS·느림)하고, 다음으로 돌린다:
+// Excluded from the default `cargo test` (#[ignore] — real OS, slow); run with:
 //   cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture
 //
-// ★Windows 전용★: 데몬은 Windows 1차. 단일 인스턴스 잠금/Job Object/child_pids 가 Windows 구현이라
-//   #[cfg(windows)] 로 한정한다(다른 OS 에선 컴파일 자체에서 제외 — 위장 PASS 없음).
+// Windows only: the single-instance lock/Job Object/child_pids are Windows implementations, so limited with #[cfg(windows)] (excluded from compilation elsewhere — no fake PASS).
 // ══════════════════════════════════════════════════════════════════════════════════
 
 #[cfg(windows)]
@@ -2341,16 +2342,14 @@ mod real_process {
 
     const DAEMON_EXE: &str = env!("CARGO_BIN_EXE_engram-dashboard-daemon");
 
-    /// 테스트별 고유 격리 컨텍스트. 유니크한 data_dir(ENGRAM_DATA_DIR) 하나면 충분하다 — ADR-0134
-    /// 이후 단일 인스턴스 잠금 스코프가 **데이터 폴더**라, 폴더가 다르면 명부도 잠금도 함께 갈린다
-    /// (별도 열쇠 변수를 짝지어 챙기던 것이 사라졌다).
+    /// A unique isolation context per test. A unique data_dir (ENGRAM_DATA_DIR) suffices: since ADR-0134 the single-instance lock scope is the data folder, so different folders diverge both roster and lock.
     struct IsoCtx {
         data_dir: PathBuf,
     }
 
     fn fresh_iso(tag: &str) -> IsoCtx {
         use std::sync::atomic::{AtomicU64, Ordering};
-        // 같은 나노초에 두 번 불려도 충돌하지 않게 프로세스 내 단조 카운터를 섞는다.
+        // Mix in an in-process monotonic counter so two calls in the same nanosecond do not collide.
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2360,7 +2359,7 @@ mod real_process {
         let uniq = format!("{tag}-{nanos}-{n}");
         let dir = std::env::temp_dir().join(format!("engram-step7-{uniq}"));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp data_dir 생성");
+        std::fs::create_dir_all(&dir).expect("temp data_dir creation");
         IsoCtx { data_dir: dir }
     }
 
@@ -2368,22 +2367,20 @@ mod real_process {
         spawn_daemon_in(&ctx.data_dir)
     }
 
-    /// data_dir 을 명시 주입하는 spawn(단일 인스턴스 테스트가 같은 폴더로 2개를 띄울 때 사용).
+    /// A spawn that explicitly injects data_dir (used when the single-instance test launches two on the same folder).
     fn spawn_daemon_in(data_dir: &Path) -> Child {
         Command::new(DAEMON_EXE)
             .env("ENGRAM_DATA_DIR", data_dir)
             .env("RUST_LOG", "info")
             .stdin(std::process::Stdio::null())
-            // ★stdout 캡처(진단)★: agent 의 tracing fmt::layer() 는 기본 stdout 으로 쓴다. 데몬이 왜
-            //   daemon.json 을 못 쓰는지(잠금 거부? data_dir? panic?)를 실패 시 인용하려고 stdout 을
-            //   piped 로 받는다. (토큰 등 민감값은 데몬이 애초에 로그에 안 찍는다 — port/pid 만.)
+            // stdout capture (diagnostics): the agent's tracing fmt::layer() writes to stdout by default; stdout is piped to quote it when the daemon fails to write daemon.json (lock refused? data_dir? panic?). The daemon never logs sensitive values like the token — only port/pid.
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .expect("데몬 .exe spawn")
+            .expect("daemon .exe spawn")
     }
 
-    /// 핸들을 take 해 끝까지 읽는다 — 호출 전 데몬이 이미 종료했거나(EOF) kill 됐어야 블록되지 않는다.
+    /// Takes the handle and reads to the end — the daemon must already have exited (EOF) or been killed before the call, to avoid blocking.
     fn drain_logs(child: &mut Child) -> String {
         use std::io::Read;
         let mut buf = String::new();
@@ -2420,11 +2417,9 @@ mod real_process {
         let _ = child.wait();
     }
 
-    /// 데몬이 부팅 시 restore_all 로 이 프로필을 복원 → 살아있는 PTY child(cmd.exe)를 만든다.
-    /// ShellBackend 는 program/args 를 그대로 PTY 에 싣는다(shim 래핑 없음) → cmd.exe 가 데몬의
-    /// 직계 자식이 되어 child_pids(daemon_pid) 로 식별 가능하다.
+    /// At boot the daemon restores this profile via restore_all → a live PTY child (cmd.exe). ShellBackend loads program/args onto the PTY as is (no shim wrapping), so cmd.exe is the daemon's direct child and identifiable by child_pids(daemon_pid).
     fn write_restorable_shell_agents_json(data_dir: &Path) {
-        // schema_version == 1 (persistence/mod.rs 의 `PROFILES`). 형태 고정(회귀 시 감지).
+        // schema_version == 1 (`PROFILES` in persistence/mod.rs); shape pinned (regression detection).
         let profile = AgentProfile::new(
             "step7-restore-shell".into(),
             AgentCommand::Shell {
@@ -2433,19 +2428,19 @@ mod real_process {
             },
             std::env::temp_dir(),
             vec![],
-            true, // auto_restore=true → 부팅 복원 대상
+            true, // auto_restore=true → a boot-restore target
         );
-        // ProfilesFile 은 비공개 구조라 동등한 JSON 을 직접 만든다(schema_version=1 + profiles 배열).
-        let profiles_json = serde_json::to_string(&[profile]).expect("profile 직렬화");
+        // ProfilesFile is a private struct so equivalent JSON is built directly (schema_version=1 + profiles array).
+        let profiles_json = serde_json::to_string(&[profile]).expect("profile serialization");
         let file = format!("{{\"schema_version\":1,\"profiles\":{profiles_json}}}");
         let state = DataLayout::new(data_dir).daemon_state_dir();
-        std::fs::create_dir_all(&state).expect("state 폴더");
-        std::fs::write(state.join("agents.json"), file).expect("agents.json 작성");
+        std::fs::create_dir_all(&state).expect("state folder");
+        std::fs::write(state.join("agents.json"), file).expect("agents.json write");
     }
 
-    // ── case1: 데몬 .exe kill → PTY child(cmd.exe) Job(KILL_ON_JOB_CLOSE) 동반 정리 ──────
+    // ── case1: daemon .exe kill → PTY child (cmd.exe) Job (KILL_ON_JOB_CLOSE) cleanup together ──────
     #[tokio::test]
-    #[ignore = "실프로세스/Job 필요 — `-- --ignored` 로 실행(Windows 전용)"]
+    #[ignore = "needs a real process/Job — run with `-- --ignored` (Windows only)"]
     async fn ignored_daemon_kill_cleans_pty_child() {
         use engram_dashboard_platform::process::{
             child_pids, pid_alive_with_start_time, process_creation_time,
@@ -2463,13 +2458,13 @@ mod real_process {
                 let _ = daemon.wait();
                 let err = drain_logs(&mut daemon);
                 let _ = std::fs::remove_dir_all(&data_dir);
-                panic!("데몬이 daemon.json 을 발행해야 — 데몬 로그:\n{err}");
+                panic!("the daemon must publish daemon.json — daemon log:\n{err}");
             }
         };
         let daemon_pid = info.pid;
-        assert!(daemon_pid != 0, "데몬 PID 유효");
+        assert!(daemon_pid != 0, "the daemon PID is valid");
 
-        // 복원은 3s 조기종료 윈도가 있어 넉넉히 대기한다.
+        // Restore has a 3s early-exit window so wait generously.
         let mut child_set: Vec<u32> = Vec::new();
         let appeared = wait_until(std::time::Duration::from_secs(20), || {
             child_set = child_pids(daemon_pid);
@@ -2479,8 +2474,8 @@ mod real_process {
             kill_daemon(&mut daemon);
             let _ = std::fs::remove_dir_all(&data_dir);
             panic!(
-                "데몬(pid={daemon_pid})의 PTY child(cmd.exe)를 OS 트리 열거로 식별하지 못함 — \
-                 복원이 자식을 안 띄웠거나 ppid 미반영. 이 케이스는 살아있는 child 식별이 전제다."
+                "the PTY child (cmd.exe) of the daemon (pid={daemon_pid}) could not be identified by OS tree enumeration — \
+                 restore did not launch the child or ppid is not reflected. This case presupposes identifying a live child."
             );
         }
         let live_children: Vec<(u32, u64)> = child_set
@@ -2490,13 +2485,13 @@ mod real_process {
             .collect();
         assert!(
             !live_children.is_empty(),
-            "kill 전 데몬의 살아있는 PTY child 가 있어야(creation_time 조회됨): {child_set:?}"
+            "there must be a live PTY child of the daemon before the kill (creation_time was looked up): {child_set:?}"
         );
 
         let _ = daemon.kill();
         let _ = daemon.wait();
 
-        // 자식 PID 들이 동반 사망하는지 폴링(Job 정리는 즉시는 아닐 수 있어 여유).
+        // Poll whether the child PIDs die together (Job cleanup may not be immediate, so allow slack).
         let all_dead = wait_until(std::time::Duration::from_secs(15), || {
             live_children
                 .iter()
@@ -2516,19 +2511,17 @@ mod real_process {
 
         assert!(
             all_dead,
-            "데몬 kill 후 PTY child({live_children:?})가 Job(KILL_ON_JOB_CLOSE)으로 동반 사망해야"
+            "after the daemon kill the PTY child ({live_children:?}) must die together via the Job (KILL_ON_JOB_CLOSE)"
         );
     }
 
-    // ── case2: single-instance — 두 번째 데몬이 폴더 잠금으로 거부(빠른 정상 종료 + json 불변) ──
+    // ── case2: single-instance — the second daemon is refused by the folder lock (quick normal exit + json unchanged) ──
     //
-    // exit code: instance.rs 가 중복 시 run() 이 Ok(()) → main 이 정상 종료(exit 0). 따라서
-    //   "exit 0 + 빠른 종료 + json 불변" 으로 단언한다(중복 전용 특수 코드는 없음 — 그 사실 명시).
+    // exit code: on duplicate instance.rs run() returns Ok(()) → main exits normally (exit 0), so assert "exit 0 + quick exit + json unchanged" (no special code dedicated to duplicates).
     #[tokio::test]
-    #[ignore = "실프로세스 2개 필요 — `-- --ignored` 로 실행(Windows 전용)"]
+    #[ignore = "needs 2 real processes — run with `-- --ignored` (Windows only)"]
     async fn ignored_single_instance_second_rejected() {
-        // ★single-instance 충돌을 의도적으로 유발★: A·B 가 **같은 data_dir** 를 쓴다(ADR-0134 —
-        //   잠금 스코프가 폴더라 이것만으로 충돌한다). 다른 ignored 테스트는 폴더가 유니크해 무영향.
+        // Deliberately trigger a single-instance collision: A and B use the same data_dir (ADR-0134 — the lock scope is the folder). Other ignored tests use unique folders.
         let ctx = fresh_iso("single");
         let data_dir = ctx.data_dir.clone();
 
@@ -2540,7 +2533,7 @@ mod real_process {
                 let _ = daemon_a.wait();
                 let err = drain_logs(&mut daemon_a);
                 let _ = std::fs::remove_dir_all(&data_dir);
-                panic!("데몬 A 가 daemon.json 을 발행해야 — 데몬 A 로그:\n{err}");
+                panic!("daemon A must publish daemon.json — daemon A log:\n{err}");
             }
         };
 
@@ -2563,33 +2556,32 @@ mod real_process {
 
         assert!(
             exited_fast,
-            "두 번째 데몬은 잠금 거부로 빠르게(3s 내) 종료해야 — B 로그:\n{b_logs}"
+            "the second daemon must exit quickly (within 3s) by lock refusal — B log:\n{b_logs}"
         );
         if let Some(status) = b_status {
             assert!(
                 status.success(),
-                "두 번째 데몬은 정상 종료(exit 0)해야 — got {status:?}, B 로그:\n{b_logs}"
+                "the second daemon must exit normally (exit 0) — got {status:?}, B log:\n{b_logs}"
             );
         } else {
-            panic!("두 번째 데몬이 3s 내 종료하지 않음(잠금 거부 실패 가능) — B 로그:\n{b_logs}");
+            panic!("the second daemon did not exit within 3s (lock refusal may have failed) — B log:\n{b_logs}");
         }
-        let info_after = info_after.expect("A 의 daemon.json 이 유지돼야");
+        let info_after = info_after.expect("A's daemon.json must be kept");
         assert_eq!(
             info_after.pid, info_a.pid,
-            "두 번째 데몬이 daemon.json 을 덮어쓰면 안 됨(pid 불변)"
+            "the second daemon must not overwrite daemon.json (pid unchanged)"
         );
         assert_eq!(
             info_after.token, info_a.token,
-            "daemon.json token 도 불변(B 가 새 토큰을 발행하면 안 됨)"
+            "the daemon.json token too is unchanged (B must not issue a new token)"
         );
     }
 
-    // ── case3: stale daemon.json → 데몬이 stale 감지 후 자기 정보로 덮어쓰기 ────────────────
+    // ── case3: stale daemon.json → the daemon detects stale and overwrites with its own info ────────────────
     //
-    // src-tauri 의 ensure_daemon(WMI spawn) 경로는 별도 테스트(셸 discovery::tests::real_wmi_spawn_smoke)로
-    //   분리해 채운다(daemon crate 에서 src-tauri 함수 호출 불가).
+    // The src-tauri ensure_daemon (WMI spawn) path is filled by a separate test (shell discovery::tests::real_wmi_spawn_smoke) — a src-tauri function cannot be called from the daemon crate.
     #[tokio::test]
-    #[ignore = "실프로세스 + 파일 discovery 필요 — `-- --ignored` 로 실행(Windows 전용)"]
+    #[ignore = "needs a real process + file discovery — run with `-- --ignored` (Windows only)"]
     async fn ignored_stale_daemon_json_discovery() {
         let ctx = fresh_iso("stale");
         let data_dir = ctx.data_dir.clone();
@@ -2600,9 +2592,9 @@ mod real_process {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("임시 자식 spawn");
+            .expect("temp child spawn");
         let dead_pid = tmp_child.id();
-        let _ = tmp_child.wait(); // 종료 보장 → dead_pid 는 이제 죽음.
+        let _ = tmp_child.wait(); // termination guaranteed → dead_pid is now dead.
 
         let stale = DaemonInfo {
             pid: dead_pid,
@@ -2610,15 +2602,14 @@ mod real_process {
             port: 59999,
             token: Secret::new("d".repeat(64)),
             protocol_version: PROTOCOL_VERSION,
-            // ADR-0134 이후 stale 판정은 **진단 로그용**이라 이 값이 기동 여부를 가르지 않는다 —
-            //   덮어쓸 권한은 폴더 잠금에서 나온다. 값은 "죽은 pid + 불일치 생성시각"이라는 현실적인
-            //   조합을 유지하려고 그대로 둔다.
+            // After ADR-0134 the stale judgment is for diagnostic logs, so this value does not decide whether to start — the right to overwrite comes from the folder lock. The value stays to keep the realistic "dead pid + mismatched creation time" combination.
             start_time: 0xDEAD_BEEF,
         };
-        let stale_json = serde_json::to_vec_pretty(&stale).expect("stale 직렬화");
+        let stale_json = serde_json::to_vec_pretty(&stale).expect("stale serialization");
         let record_path = DataLayout::new(&data_dir).daemon_file();
-        std::fs::create_dir_all(record_path.parent().expect("run 폴더")).expect("run 폴더 생성");
-        std::fs::write(&record_path, &stale_json).expect("stale daemon.json 작성");
+        std::fs::create_dir_all(record_path.parent().expect("run folder"))
+            .expect("run folder creation");
+        std::fs::write(&record_path, &stale_json).expect("stale daemon.json write");
 
         let mut daemon = spawn_daemon_iso(&ctx);
 
@@ -2634,19 +2625,22 @@ mod real_process {
 
         assert!(
             overwritten,
-            "데몬이 stale daemon.json 을 자기 정보로 덮어써야(pid 가 stale dead_pid={dead_pid} 와 달라야) — 데몬 로그:\n{err}"
+            "the daemon must overwrite the stale daemon.json with its own info (pid must differ from stale dead_pid={dead_pid}) — daemon log:\n{err}"
         );
-        let fresh = latest.expect("덮어쓴 daemon.json");
-        assert_ne!(fresh.pid, dead_pid, "새 pid 는 stale dead_pid 와 달라야");
+        let fresh = latest.expect("the overwritten daemon.json");
+        assert_ne!(
+            fresh.pid, dead_pid,
+            "the new pid must differ from stale dead_pid"
+        );
         assert!(
             fresh.start_time != 0,
-            "새 데몬은 유효 start_time 을 기록해야"
+            "the new daemon must record a valid start_time"
         );
         assert_ne!(
             fresh.token.expose(),
             "d".repeat(64),
-            "새 데몬은 새 토큰을 발행해야(stale 토큰 유지 금지)"
+            "the new daemon must issue a new token (keeping the stale token is forbidden)"
         );
-        assert!(fresh.port != 0, "새 데몬은 유효 포트를 기록해야");
+        assert!(fresh.port != 0, "the new daemon must record a valid port");
     }
 }

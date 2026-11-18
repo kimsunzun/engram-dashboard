@@ -1,14 +1,12 @@
-//! 에이전트 시스템이 네트워크 프레임 포트에 꽂는 어댑터(ADR-0129).
+//! Adapter the agent system plugs into the network frame port (ADR-0129).
 //!
-//! 소유하는 것: 연결 수명 훅(`AgentConnection` — Hello/목록 push · 명령 dispatch · 연결 정리)과
-//! **wire 인코딩 전부**(`AgentEvent`→JSON text, `OutputFrame`→codec binary). 네트워크 행은 여기서
-//! 나온 불투명 프레임만 받는다.
+//! Owns the connection lifetime hook (`AgentConnection` — Hello/list push · command dispatch · connection cleanup) and all wire
+//! encoding (`AgentEvent`→JSON text, `OutputFrame`→codec binary); the network layer receives only the opaque frames produced here.
 //!
-//! ★단일 writer 합류(FIFO)★: control 평면(`FrameOutboundSink`)과 출력 평면(`FrameOutputSink`), 사용량 평면
-//!   (`ConnUsageOutlet`)이 **같은 `FrameSink`** 로 나가므로, dispatch 가 SubscribeAck 를 replay binary 보다
-//!   먼저 넣으면 그 순서가 그대로 보존된다.
-//! ★블록 금지★: 세 출구의 enqueue 는 pump/manager 동기 스레드에서 불릴 수 있어 `FrameSink::try_send`
-//!   (논블록)만 쓴다. 큐 포화 시 종료 신호를 울리는 것은 `FrameSink` 구현(네트워크 행)의 몫이다.
+//! Single-writer merge (FIFO): the control plane (`FrameOutboundSink`), output plane (`FrameOutputSink`) and usage plane
+//! (`ConnUsageOutlet`) all go out through the same `FrameSink`, so a SubscribeAck enqueued before the replay binary stays before it.
+//! No blocking: the three outlets can be called from pump/manager sync threads, so only the non-blocking `FrameSink::try_send` is used;
+//! raising the close signal on a saturated queue is up to the `FrameSink` implementation (network layer).
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,15 +42,14 @@ use crate::usage_service::book::wire_vendor;
 use crate::usage_service::watch::{UsageEncoder, UsageFrame, UsageOutlet};
 use crate::usage_service::UsageService;
 
-// ── 출력 평면 sink ────────────────────────────────────────────────────────────────
+// ── output plane sink ────────────────────────────────────────────────────────────
 
-/// 한 연결의 한 에이전트 구독에 대응하는 `OutputSink`. pump 스레드가 `send` 를 호출한다.
-/// 큐가 full/closed 면 `SinkError` 반환(코어가 dead-sink 로 제거).
+/// The `OutputSink` for one agent subscription of one connection; the pump thread calls `send`.
+/// Returns `SinkError` when the queue is full/closed (the core removes it as a dead sink).
 pub struct FrameOutputSink {
     frames: Arc<dyn FrameSink>,
-    /// replay 구간 중 try_send 실패(frame drop)가 한 번이라도 있었는지.
-    /// handle_subscribe 가 ReplayComplete 직전 검사해 SubscribeAck.truncated 를 사후 보정한다.
-    /// 평소(라이브)엔 코어가 dead-sink 로 제거하므로 의미가 없고, replay 구간 정확성에만 쓴다.
+    /// Whether a try_send failure (frame drop) happened during the replay phase. handle_subscribe checks it just before ReplayComplete and
+    /// corrects SubscribeAck.truncated after the fact; it matters only for replay-phase accuracy (live, the core removes a dead sink).
     replay_dropped: Arc<AtomicBool>,
     sink_id: SinkId,
 }
@@ -70,14 +67,13 @@ impl FrameOutputSink {
         self.replay_dropped.clone()
     }
 
-    /// 이 seq 의 사건을 싣지 못했을 때 그 자리를 채운다 — 같은 agent·화신 표식·seq 의 tag1 `Error`
-    /// 자리채움(`engram_dashboard_protocol::placeholder_error_frame`).
+    /// Fills in for an event of this seq that could not be carried — a tag1 `Error` placeholder with the same agent, incarnation marker and seq
+    /// (`engram_dashboard_protocol::placeholder_error_frame`).
     ///
-    /// ★버리지 않는 이유(ADR-0231)★: 뷰는 live 에서 `seq > 마지막+1` 을 시한 없이 붙들므로 여기서 한 seq 를
-    /// 말없이 건너뛰면 그 뒤 프레임이 붙듦 상한까지 쌓이고 그 뷰가 멈춘다. 이 두 폐기 갈래 밖의 유실은 전부
-    /// 연결을 닫아 전량 replay 로 메워지므로, 영영 안 메워지는 구멍은 이 자리에서만 생겼다.
-    /// ★`SinkError` 로 돌려서는 안 된다★ — 코어가 이 sink 를 죽은 것으로 걷어, 연결은 산 채 그 에이전트의
-    /// 출력만 조용히 끊긴다. 반환은 평소 송신과 같다(큐가 차면 그때만 `SinkError`).
+    /// Not dropped (ADR-0231): a live view holds `seq > last+1` indefinitely, so a silently skipped seq piles later frames up to the hold cap
+    /// and stalls the view. Every other loss is closed by closing the connection and a full replay, so an unfilled hole could only arise here.
+    /// Must not return `SinkError` — the core would reap this sink as dead and that agent's output would stop silently while the connection
+    /// lives. The return equals a normal send (`SinkError` only when the queue is full).
     // ADR-0231
     pub(crate) fn send_placeholder(
         &self,
@@ -99,31 +95,30 @@ impl FrameOutputSink {
     }
 }
 
-/// agent 사건 → tag1 페이로드(wire `StructuredEvent` 의 JSON). `None` = 싣지 못한다 — 호출자가 자리채움을
-/// 보낸다(버리지 않는다 — [`FrameOutputSink::send_placeholder`]).
+/// agent event → tag1 payload (JSON of the wire `StructuredEvent`). `None` = cannot be carried — the caller sends a placeholder
+/// ([`FrameOutputSink::send_placeholder`]), never drops.
 fn structured_payload(ev: &OutputEvent, agent_id: AgentId) -> Option<Vec<u8>> {
-    // (1) agent→wire 변환. TerminalBytes 가 여기 오면(정상 경로상 tag0 로 갈려 안 옴 — 상류 배선 버그)
-    //     매핑 불가(None) → debug 는 조기 발견, release 는 warn 후 자리채움(연결 유지).
+    // (1) agent→wire conversion. TerminalBytes should never arrive here (the normal path routes it to tag0 — an upstream wiring bug): it cannot
+    //     be mapped (None) → debug catches it early, release warns and sends a placeholder (connection kept).
     let Some(wire) = output_event_to_wire(ev) else {
         debug_assert!(
             false,
-            "TerminalBytes(tag0 전용)가 Event(tag1) arm 에 도달 — 상류 payload 분기 버그"
+            "TerminalBytes (tag0 only) reached the Event (tag1) arm — upstream payload branch bug"
         );
         tracing::warn!(
             agent = %agent_id,
-            "tag1 인코딩 불가(TerminalBytes 가 Event arm 도달) — 자리채움으로 대신 보낸다"
+            "cannot encode as tag1 (TerminalBytes reached the Event arm) — sending a placeholder instead"
         );
         return None;
     };
-    // (2) JSON 직렬화. 실패는 거의 불가능(문자열/숫자 필드뿐)하나, 나면 이 frame 만 warn 후 자리채움으로
-    //     대신 보낸다(SinkError 로 연결을 죽이지 않음 — 직렬화 실패는 슬로우 소비자와 무관한 데이터
-    //     문제다).
+    // (2) JSON serialization. Failure is nearly impossible (string/number fields only); then only this frame warns and a placeholder goes out
+    //     — a serialization failure is a data problem, not a slow consumer, so no `SinkError` kills the connection.
     match serde_json::to_vec(&wire) {
         Ok(p) => Some(p),
         Err(e) => {
             tracing::warn!(
                 agent = %agent_id,
-                "StructuredEvent 직렬화 실패 — 자리채움으로 대신 보낸다: {e}"
+                "StructuredEvent serialization failed — sending a placeholder instead: {e}"
             );
             None
         }
@@ -132,16 +127,14 @@ fn structured_payload(ev: &OutputEvent, agent_id: AgentId) -> Option<Vec<u8>> {
 
 impl OutputSink for FrameOutputSink {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        // ★S15 B5/B7 payload 분기(ADR-0045)★: 콘솔 바이트는 tag0 terminal frame, 구조화 이벤트는 tag1
-        //   structured frame 으로 인코딩한다. sink 가 wire 인코딩을 소유(코어는 wire 모름, ADR-0003) —
-        //   Bytes 는 raw payload 를, Event 는 agent `OutputEvent` → wire `StructuredEvent`(daemon adapter)
-        //   → JSON payload 를 헤더에 실어 보낸다.
+        // Payload branch (ADR-0045): console bytes → a tag0 terminal frame, structured events → a tag1 structured frame. The sink owns the wire
+        //   encoding (the core knows no wire, ADR-0003).
         let buf = match frame.payload {
             OutputPayload::Bytes(b) => {
                 encode_terminal_frame(frame.agent_id, frame.epoch, frame.seq, b)
             }
-            // ★tag1 인코딩(B7)★: codec 은 payload 스키마 무지(opaque) — 직렬화 형식(JSON)·이벤트 타입은
-            //   여기(daemon)가 소유한다(ADR-0045 self-describing). 헤더 레이아웃은 tag0 과 동일, tag=1.
+            // tag1 encoding: the codec is opaque to the payload schema — the serialization format (JSON) and event types are the daemon's (ADR-0045
+            //   self-describing). Header layout is the same as tag0, tag=1.
             OutputPayload::Event(ev) => match structured_payload(ev, frame.agent_id) {
                 Some(payload) => {
                     encode_structured_frame(frame.agent_id, frame.epoch, frame.seq, &payload)
@@ -157,7 +150,7 @@ impl OutputSink for FrameOutputSink {
     }
 }
 
-// ── control 평면 sink(ConnectionCore.dispatch 의 응답 경로) ─────────────────────────
+// ── control plane sink (response path of ConnectionCore.dispatch) ─────────────────
 
 pub struct FrameOutboundSink {
     frames: Arc<dyn FrameSink>,
@@ -172,7 +165,7 @@ impl FrameOutboundSink {
 impl CoreOutboundSink for FrameOutboundSink {
     fn enqueue(&self, out: Outbound) -> Result<(), CoreSinkError> {
         let frame = match out {
-            // 직렬화 실패는 drop(event_json 동작).
+            // A serialization failure is a drop.
             Outbound::Event(ev) => match event_json(&ev) {
                 Some(text) => Frame::Text(text),
                 None => return Ok(()),
@@ -190,14 +183,12 @@ impl CoreOutboundSink for FrameOutboundSink {
     }
 }
 
-// ── 사용량 평면(TRD S21 usage-limit-slot §1-4) ────────────────────────────────────────
+// ── usage plane (TRD S21 usage-limit-slot §1-4) ────────────────────────────────────
 
-/// 한 연결의 사용량 출구 — `on_connect` 가 연결마다 새로 만들어 사용량 명부에 넘긴다.
+/// One connection's usage outlet — `on_connect` creates a new one per connection and hands it to the usage roster.
 ///
-/// ★`Clone` 을 달지 않는다★ — 칸(자물쇠)을 나눠 쥔 사본이 생기면 한 사본의 `revoke` 가 다른 칸의 출구를
-///   조용하게 만든다(`UsageWatch::attach` 의 계약).
-/// ★포화면 이 연결이 끝난다★ — `try_send` 실패는 프레임 출구(네트워크 행)가 종료 신호로 처리한다. 출력 평면
-///   sink 와 같은 결말이다.
+/// No `Clone`: a copy sharing the lock would let one copy's `revoke` silence another entry's outlet (contract of `UsageWatch::attach`).
+/// When saturated this connection ends: a `try_send` failure is a close signal for the frame outlet (network layer), as with the output plane sink.
 pub(crate) struct ConnUsageOutlet {
     frames: Mutex<Option<Arc<dyn FrameSink>>>,
 }
@@ -210,7 +201,7 @@ impl ConnUsageOutlet {
     }
 
     fn slot(&self) -> std::sync::MutexGuard<'_, Option<Arc<dyn FrameSink>>> {
-        // 칸 안의 일은 사본 뜨기·꺼내기뿐이라 poison 뒤에도 칸은 온전하다.
+        // Only copying and taking out happen inside, so the guard stays intact after a poison.
         sync::lock(&self.frames)
     }
 }
@@ -229,8 +220,8 @@ impl UsageOutlet for ConnUsageOutlet {
     }
 }
 
-/// 사용량 한 장 → [`AgentEvent::UsageLimitsUpdated`] JSON 한 줄. `subscribed` 는 스냅숏의 `vendor` 와 같은 변환으로
-/// wire 벤더가 된다(바꿀 수 없는 키는 빠진다).
+/// One usage sheet → one [`AgentEvent::UsageLimitsUpdated`] JSON line. `subscribed` becomes a wire vendor by the same conversion as the
+/// snapshot's `vendor` (an unconvertible key is dropped).
 pub(crate) struct UsageEventEncoder;
 
 impl UsageEncoder for UsageEventEncoder {
@@ -247,30 +238,25 @@ impl UsageEncoder for UsageEventEncoder {
     }
 }
 
-// ── 연결 수명 훅 ────────────────────────────────────────────────────────────────
+// ── connection lifetime hook ────────────────────────────────────────────────────
 
-/// 연결 1개에 대응하는 에이전트측 핸들러. `ConnectionCore`(dispatch)와 그 연결의 수명 상태를 묶는다.
+/// The agent-side handler for one connection: binds `ConnectionCore` (dispatch) and that connection's lifetime state.
 pub struct AgentConnection {
     core: Arc<ConnectionCore>,
     session: Arc<ConnectionSession>,
 }
 
-/// `on_text` 이 명령 디코드에 실패한 뒤에만 부른다(ADR-0129 0-4).
+/// Called only after `on_text` failed to decode a command (ADR-0129 0-4).
 ///
-/// ★왜 필요한가★: 인증은 이미 네트워크 행이 첫 프레임에서 끝냈으므로 그 뒤에 오는 핸드셰이크는
-/// **프로토콜 위반**이다. 그 프레임은 명령 enum 의 변형이 아니라(protocol `handshake::AuthFrame` — 0-4)
-/// 명령으로 디코드되지 않으니 여기서 되잡는다.
-///
-/// ★온전함이 아니라 **태그**로 판정한다★: 필드가 빠졌거나 본문 모양이 어긋난 Auth 프레임도 핸드셰이크로
-/// 센다. 온전한 것만 세면 낡은 클라가 ``unknown variant `Auth` `` 를 받는데, 이 서버가 첫 프레임으로
-/// 유일하게 받아 주는 것이 Auth 라서 그 답은 디버깅을 반대 방향으로 보낸다.
-/// ★위층 어휘가 늘지 않는다★: 최상위 키 하나만 보므로 명령 목록을 알 필요가 없고, 본문은
-/// `IgnoredAny` 로 건너뛰어 값 트리를 만들지 않는다 — 피어가 프레임마다 도달시킬 수 있는 경로라
-/// 할당을 얹지 않는다.
+/// The network layer already authenticated on the first frame, so a later handshake is a protocol violation; that frame is not a command
+/// variant (protocol `handshake::AuthFrame`), so it fails command decoding and is caught here.
+/// Decided by the tag, not by being intact: an Auth frame with a missing field or mismatched body also counts. Otherwise an old client would get
+/// ``unknown variant `Auth` ``, which misleads debugging since Auth is the only first frame this server accepts.
+/// The upper layer's vocabulary does not grow: only one top-level key is looked at and the body is skipped with `IgnoredAny` (no value tree) —
+/// a peer can reach this path on every frame, so no allocation is added.
 fn is_handshake_frame(text: &str) -> bool {
-    /// ★태그 문자열의 정본은 `engram_dashboard_protocol::handshake::AuthFrame`★ — 아래
-    /// `handshake_frame_is_recognized_after_auth` 가 그 타입을 직렬화한 바이트로 이 판정을 걸어,
-    /// 두 쪽이 갈라지면 깨지게 한다.
+    /// The canonical tag string is `engram_dashboard_protocol::handshake::AuthFrame`; `handshake_frame_is_recognized_after_auth` below runs this
+    /// check on that type's serialized bytes, so it breaks if the two sides diverge.
     #[derive(serde::Deserialize)]
     enum HandshakeTag {
         Auth(serde::de::IgnoredAny),
@@ -285,31 +271,28 @@ impl ConnectionHandler for AgentConnection {
         frames: &'a Arc<dyn FrameSink>,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            // ★Two frames, fixed★: the queue room is shared with the status fanout, so no safe number of frames
-            //   can be named (port contract) — only a constant count goes in here.
+            // Two frames, fixed: the queue room is shared with the status fanout, so no safe frame count can be named (port contract).
             if let Some(text) = event_json(&hello_event(env!("CARGO_PKG_VERSION").into())) {
                 let _ = frames.send(Frame::Text(text)).await;
             }
             if let Some(text) = event_json(&agent_list_event(self.core.manager())) {
                 let _ = frames.send(Frame::Text(text)).await;
             }
-            // ★Registered **after** the greeting★: the greeting is queued before the attach; a failed greeting closes
-            //   the connection and `on_disconnect` removes the entry. Still before any command — the network layer spawns the read task only
-            //   **after this call returns** (`link/server.rs`: on_connect await → read_task spawn), so a connection
-            //   that did not get here cannot send a single frame.
+            // Registered after the greeting: the greeting is queued before the attach, and a failed greeting closes the connection and `on_disconnect`
+            //   removes the entry. Still before any command — the network layer spawns the read task only after this call returns (`link/server.rs`),
+            //   so a connection that did not get here cannot send a frame.
             // ADR-0154
             self.core.commands().attach(conn_id, frames);
-            // ★사용량 칸도 인사 **뒤에** 만든다★ — 칸이 서면 구독 교체의 첫 한 장이 이 출구로 곧장 나가므로, 인사
-            //   두 장보다 앞설 수 없어야 한다. 빈 집합이라 구독 전에는 아무것도 안 나간다.
+            // The usage entry is created after the greeting too: once it exists the first sheet of a subscription replacement goes straight out this
+            //   outlet and must not precede the two greeting frames. The set is empty, so nothing goes out before subscribing.
             self.core
                 .usage()
                 .attach(conn_id, ConnUsageOutlet::new(frames.clone()));
         })
     }
 
-    /// ★이 호출들은 도착 순서대로, 서로 겹치지 않게 온다★(포트 계약) — 그 직렬성이 곧 순서 불변식의
-    /// 실물이다. 그래서 여기서 오래 붙들면 **같은 연결의 다음 명령이 함께 늦는다**. 어떤 명령을 그
-    /// 줄에서 떼어 낼지, 왜 그것만인지는 [`dispatch_order`] 가 정본이다.
+    /// These calls arrive in arrival order, never overlapping (port contract) — that serialization embodies the ordering invariant, so holding one
+    /// long delays the same connection's next command. Which commands detach from the lane, and why only those, is canonical in [`dispatch_order`].
     fn on_text<'a>(
         &'a self,
         conn_id: ConnId,
@@ -320,22 +303,18 @@ impl ConnectionHandler for AgentConnection {
         Box::pin(async move {
             match serde_json::from_str::<AgentCommand>(text) {
                 Ok(cmd) if dispatch_order(&cmd) == DispatchOrder::Detached => {
-                    // ★줄 밖으로 내보낸다 — 이 연결의 다음 명령을 막지 않게★.
-                    // ★The reply still goes out on **this connection's own frame outlet**★: the sink holds a copy of the
-                    //   connection's single outbound queue, so even if this task ends late the reply cannot leak elsewhere.
-                    //   That copy may outlive `on_disconnect` (⟳ holds it up to `REPLY_WAIT_MAX`); it keeps only the transport
-                    //   handle alive, not the link — the network layer closes the peer itself in every teardown branch
-                    //   (`link/server.rs`), so a late send just fails.
-                    // ★연결이 이미 정리된 뒤에도 이 태스크는 돈다★(네트워크 행의 abort 가 안 닿는다 —
-                    //   포트 계약). 그래도 **이 연결의 상태를 되살리지 않는다**: 떼어 낸 명령이 건드리는 것은
-                    //   전역 manager·사용량 서비스와 전-연결·구독자 브로드캐스트뿐이고, 명부·구독·lease 같은 연결
-                    //   귀속 상태에는 손대지 않는다(명부 쪽은 그래도 `refuse_if_detached` 가 한 겹 더 막는다).
+                    // Sent out of the lane so it does not block this connection's next command.
+                    // The reply still goes out on this connection's own frame outlet: the sink holds a copy of the connection's single outbound queue, so a late
+                    //   end of this task cannot leak the reply elsewhere. The copy may outlive `on_disconnect` (⟳ holds it up to `REPLY_WAIT_MAX`); it keeps only
+                    //   the transport handle alive, not the link — the network layer closes the peer in every teardown branch (`link/server.rs`), so a late send just fails.
+                    // This task keeps running after the connection is cleaned up (the network layer's abort does not reach it — port contract), but does not revive
+                    //   connection state: a detached command touches only the global manager, the usage service and all-connection / subscriber broadcasts, never the
+                    //   roster, subscriptions or leases (the roster side is blocked once more by `refuse_if_detached`).
                     let core = Arc::clone(&self.core);
                     let session = Arc::clone(&self.session);
                     tokio::spawn(async move {
-                        // ★떼어 낸 명령은 `Close` 를 내지 않는다★(`Close` 의 출처는 `StopDaemon` 과 replay 큐
-                        //   포화 둘뿐이고 둘 다 줄 안이다). 그래도 삼키지 않고 큐 안 마커로 돌려 놓는다 —
-                        //   분류가 어긋나 여기로 `Close` 가 오면 연결이 조용히 안 닫히는 편보다 낫다.
+                        // A detached command does not emit `Close` (it originates only from `StopDaemon` and replay-queue saturation, both in the lane). If a
+                        //   misclassification sent one here it becomes an in-queue marker rather than a silently unclosed connection.
                         if core.dispatch(cmd, &session, &sink).await == DispatchFlow::Close {
                             let _ =
                                 sink.enqueue(Outbound::Close("dispatch requested close".into()));
@@ -347,12 +326,13 @@ impl ConnectionHandler for AgentConnection {
                     DispatchFlow::Close => ConnFlow::Close,
                     DispatchFlow::Continue => ConnFlow::Continue,
                 },
-                // ★연결을 닫지 않는다★: Error 한 줄만 내고 살려 둔다 — 회귀 방어 `tests/ws_e2e.rs`
-                //   case21 이 후속 명령이 여전히 응답되는지까지 본다.
-                // ★순서가 이렇다★: 명령 파싱이 **먼저**다. 태그가 겹치지 않아 결과는 순서와 무관하지만,
-                //   정상 경로(명령)에 프레임마다 추가 파싱을 얹지 않으려는 것이다.
+                // Do not close the connection: emit one Error line and keep it alive (regression guard `tests/ws_e2e.rs` case21 also checks later commands are answered).
+                // Command parsing comes first: the tags do not overlap, so the result is order-independent, but this adds no extra parsing per frame on the normal path.
                 Err(_) if is_handshake_frame(text) => {
-                    tracing::warn!(conn = conn_id, "인증 완료된 연결에 2차 핸드셰이크 — 거절");
+                    tracing::warn!(
+                        conn = conn_id,
+                        "second handshake on an authenticated connection — refused"
+                    );
                     let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                         request_id: None,
                         message: "already authenticated".into(),
@@ -360,7 +340,7 @@ impl ConnectionHandler for AgentConnection {
                     ConnFlow::Continue
                 }
                 Err(e) => {
-                    tracing::warn!(conn = conn_id, "명령 파싱 실패: {e}");
+                    tracing::warn!(conn = conn_id, "command parse failed: {e}");
                     let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                         request_id: None,
                         message: format!("invalid command: {e}"),
@@ -379,8 +359,8 @@ impl ConnectionHandler for AgentConnection {
     ) -> BoxFuture<'a, ConnFlow> {
         let sink = FrameOutboundSink::new(frames.clone());
         Box::pin(async move {
-            // 클라→데몬 binary 는 프로토콜에 없다.
-            tracing::warn!(conn = conn_id, "예상치 못한 binary frame — close");
+            // The protocol has no client→daemon binary.
+            tracing::warn!(conn = conn_id, "unexpected binary frame — close");
             let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                 request_id: None,
                 message: "unexpected binary frame".into(),
@@ -390,17 +370,14 @@ impl ConnectionHandler for AgentConnection {
         })
     }
 
-    /// ★포화일 때만 불린다 — 분류만 하고 **처리하지 않는다**(읽기 루프 위에서 도는 sync 갈래)★.
+    /// Called only when saturated — it only classifies and does not process (a sync branch on top of the read loop).
     ///
-    /// ★거절도 답장이다★: `Refused` 를 고르기 전에 그 명령의 `request_id` 를 실은 `Error` 를 넣는다.
-    ///   빠뜨리면 보낸 쪽은 마감시각까지 답도 오류도 못 받는다(포트 계약의 의무 2).
-    /// ★★그 넣기가 **실패할 수 있다**★★ — 그때 `Refused` 를 돌려주면 「답장했다」고 거짓말하는 것이고,
-    ///   네트워크 행은 그 말을 믿고 원래 명령을 버린다. 보낸 쪽은 **명령도 그 거절도** 못 받는다.
-    ///   그래서 결과를 보고 [`Saturated::Unanswered`] 로 갈린다 — 그 값의 뜻과 처분(연결 종료)의 정본은
-    ///   그 variant 다. ★이 갈래가 나오는 조건은 양쪽 큐 동시 포화★: 도착순 줄이 찼고(그래서 여기
-    ///   왔고) 송신 큐도 찼다. 그 연결로는 더 받을 수도 더 답할 수도 없다.
-    /// ★파싱 실패도 여기로 온다★ — 그때는 실을 `request_id` 가 없다. `on_text` 의 파싱 실패 갈래와
-    ///   **같은 모양**(`request_id: None` 의 `Error`)으로 답한다: 줄이 찼다는 것 말고는 달라진 게 없다.
+    /// A refusal is also a reply: before choosing `Refused`, put in an `Error` carrying that command's `request_id`; otherwise the sender gets neither
+    /// reply nor error until the deadline (obligation 2 of the port contract).
+    /// That put-in can fail: returning `Refused` then would claim a reply was sent, the network layer drops the original command, and the sender gets
+    /// neither. So the result splits into [`Saturated::Unanswered`] (meaning and disposition — close the connection — canonical in that variant);
+    /// this occurs only when both queues are saturated at once (the lane was full, hence we got here, and the send queue too).
+    /// A parse failure also comes here with no `request_id` to carry; it answers in the same shape as the `on_text` parse-failure branch (`Error{request_id: None}`).
     fn on_inbound_saturated(
         &self,
         conn_id: ConnId,
@@ -412,17 +389,16 @@ impl ConnectionHandler for AgentConnection {
             if inbound_lane(cmd) == InboundLane::Bypass {
                 tracing::warn!(
                     conn = conn_id,
-                    "수신 줄 포화 — 취소 계열 명령을 줄 밖으로 통과시킨다"
+                    "inbound lane saturated — letting cancel-family commands through outside the lane"
                 );
                 return Saturated::Bypass;
             }
         }
-        // 첫 건만 warn — 포화는 프레임마다 나므로 래치가 없으면 로그가 이 한 사건으로 덮인다
-        //   (`stray_outcome_warned` 와 같은 규율).
+        // Warn only the first time — saturation happens on every frame, so without a latch this one event would swamp the log (as `stray_outcome_warned`).
         if !self.session.saturated_warned.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 conn = conn_id,
-                "수신 줄 포화 — 이 연결의 명령을 거절한다(이 연결에서 한 번만 남긴다)"
+                "inbound lane saturated — refusing this connection's command (logged once per connection)"
             );
         }
         let sink = FrameOutboundSink::new(frames.clone());
@@ -433,11 +409,10 @@ impl ConnectionHandler for AgentConnection {
         match refusal {
             Ok(()) => Saturated::Refused,
             Err(_) => {
-                // ★래치를 쓰지 않는다★ — 형제 경고(위 `saturated_warned`)는 프레임마다 나는 흔한
-                //   사건이라 눌러야 하지만, 이쪽은 그 직후 연결이 끝나므로 한 연결에 많아야 한 줄이다.
+                // No latch: the sibling warning (`saturated_warned`) is a common per-frame event, but this one is followed by the connection ending — at most one line per connection.
                 tracing::warn!(
                     conn = conn_id,
-                    "수신 줄 포화 거절을 송신 큐에도 못 넣었다 — 이 명령은 답장 없이 사라진다"
+                    "could not enqueue the saturation refusal on the send queue either — this command vanishes without a reply"
                 );
                 Saturated::Unanswered
             }
@@ -445,54 +420,44 @@ impl ConnectionHandler for AgentConnection {
     }
 
     fn on_disconnect(&self, conn_id: ConnId) {
-        // ── 명령 명부에서 이 연결의 이름 지우기(ADR-0150) — ★이 정리의 **첫 줄**이어야 한다★ ────
-        // 뒤로 밀면 그 앞 정리가 도는 **동안** 이 연결이 아직 붙어 있는 것으로 읽혀, 그 창에 겹쳐 든
-        //   등록이 통과한다(겹침 자체의 근거 = `CommandRoster` 헤더). 그러면 이미 죽은 연결이 산 연결이
-        //   얹은 이름을 도로 빼앗고, 그 뒤에 이 줄이 돌아 그 이름을 지운다 — 멀쩡한 연결의 명령이 조용히
-        //   사라진다. 맨 앞이면 그 창 자체가 없다(패닉으로 건너뛸 구간도 없어진다).
-        // ★이 줄이 명부가 든 **프레임 출구 사본**도 함께 놓는다★ — `on_connect` 에서 명부에 넣은
-        //   그 사본이고, 포트 계약이 「반환 시점까지 자기가 만든 사본을 전부 놓아야 한다」고 요구하는
-        //   대상 중 하나다(`conn_port::ConnectionHandler::on_disconnect`). 아래 구독 정리와 달리 이건
-        //   놓치는 경쟁이 없다 — 넣은 곳도 빼는 곳도 각각 한 곳이고 둘 다 명부의 한 잠금 안에서 돈다.
+        // ── remove this connection's name from the command roster (ADR-0150) — must be the first line of this cleanup ────
+        // If pushed back, this connection reads as attached while the earlier cleanup runs, and an overlapping registration passes (overlap basis: the
+        //   `CommandRoster` header): a dead connection would take back the name a live one put up, then this line later erases it — a healthy
+        //   connection's command silently disappears. At the very front the window does not exist (nor a panic-skippable stretch).
+        // This line also releases the frame outlet copy the roster holds (put in by `on_connect`) — one of the copies the port contract requires released
+        //   by return (`conn_port::ConnectionHandler::on_disconnect`). Put-in and take-out are one place each, inside the roster's one lock, so no race of missing it.
         // ADR-0154
         self.core.commands().detach(conn_id);
-        // ★The usage roster cell goes at the same place as the command roster entry★ — the frame-outlet copy the cell holds is
-        //   released inside this call (the port duty above). A copy taken briefly while the outlet sends one frame can outlive
-        //   this call — harmless, since that send is a single `try_send`. Nothing revives a cell, so a late subscription
-        //   swap that overlaps this cleanup is dropped (`UsageWatch::replace`).
+        // The usage roster cell goes at the same place: the frame outlet copy it holds is released inside this call (port duty above). A copy taken
+        //   briefly while the outlet sends one frame may outlive this call — harmless (a single `try_send`). Nothing revives a cell, so a late
+        //   subscription swap overlapping this cleanup is dropped (`UsageWatch::replace`).
         self.core.usage().detach(conn_id);
 
-        // ── 이 연결이 낸 명령 왕복 거두기(ADR-0154) ───────────────────────────────
-        // ★명부 정리 **뒤**다★: 순서가 뒤집히면 왕복이 풀려 답장을 내려는 순간 이 연결이 아직 명부에 있어,
-        //   이미 죽은 출구로 프레임을 한 장 쓰고 버린다(무해하지만 인과가 흐려진다).
-        // ★상관 표와 명부는 다른 표라 정리도 두 줄이다★ — 합치지 않는 근거는 `command_delivery` 헤더
-        //   (수명 단위가 다르다: 왕복 하나 대 연결 하나). 이 줄이 빠지면 답장을 받아 갈 곳이 사라진 항목이
-        //   마감시각까지 표에 앉고, 그 왕복을 돌던 태스크도 그때까지 안 끝난다.
+        // ── reap the command round trips this connection issued (ADR-0154) ───────────────────────
+        // After the roster cleanup: reversed, a released round trip replying while this connection is still in the roster writes a frame to a dead outlet (harmless, causality blurs).
+        // The correlation table and the roster are different tables (different lifetime units: one round trip vs one connection — `command_delivery`
+        //   header), so the cleanup is two lines. Without this line an entry with nowhere to take its reply sits until the deadline and its round-trip task does not end.
         let dropped = self.core.deliveries().drop_origin(conn_id);
         if dropped > 0 {
             tracing::debug!(
                 conn = conn_id,
                 dropped,
-                "연결 끊김 — 이 연결이 낸 명령 왕복을 거뒀다"
+                "disconnected — reaped the command round trips this connection issued"
             );
         }
 
         let manager = self.core.manager();
 
-        // ── 구독 누수 방지 ──────────────────────────────────────────────────────
-        // 안 하면 죽은 큐로 영원히 try_send 하는 좀비 sink 가 코어 subscribers 에 남는다(코어가
-        // try_send 실패로 결국 제거하긴 하나, 다음 emit 까지 잔존 — 명시적으로 끊는다).
+        // ── subscription leak prevention ──────────────────────────────────────────────────
+        // Without it a zombie sink that try_sends to a dead queue stays in the core subscribers until the next emit removes it — so cut it explicitly.
         //
-        // ★알려진 경쟁 — 이 스냅샷이 구독 하나를 놓칠 수 있다★:
-        //   `handle_subscribe` 는 코어에 sink 를 등록한 **뒤** `subs` 에 기록한다. 그 두 단계 사이엔
-        //   `.await` 가 없어 *취소*는 못 끼어들지만, ① 다른 워커에서 도는 read_task 가 아직 그 구간에
-        //   있는 동안 이 정리가 스냅샷을 뜨거나(`ConnectionHandler::on_disconnect` 문서의 abort-겹침
-        //   경쟁) ② 그 구간에서 패닉하면(훅 없는 시험 빌드 — 운영 프로세스에서는 훅이 데몬을 끝낸다 ·
-        //   ADR-0292) 코어에만 남고 여기엔 안 잡힌다.
-        // ★Two outcomes★: (a) a zombie sink stays until the next emit (the core's dead-sink removal recovers it)
-        //   (b) that sink holds a copy of the connection's frame outlet — the transport handle outlives the connection, but
-        //   not the link: the network layer closes the peer itself and aborts the losing tasks (`link/server.rs`), which is
-        //   why those aborts must not be removed.
+        // Known race — this snapshot can miss one subscription: `handle_subscribe` registers the sink with the core and then records it in `subs` with no
+        //   `.await` between, so cancellation cannot intervene, but (1) a read_task on another worker still in that window while this cleanup snapshots
+        //   (the abort-overlap race in the `ConnectionHandler::on_disconnect` doc), or (2) a panic in that window (a test build without the hook; in
+        //   production the hook ends the daemon — ADR-0292) leaves it only in the core.
+        // Two outcomes: (a) a zombie sink stays until the next emit (the core's dead-sink removal recovers it); (b) it holds a copy of the connection's
+        //   frame outlet — the transport handle outlives the connection, not the link: the network layer closes the peer and aborts the losing tasks
+        //   (`link/server.rs`), which is why those aborts must not be removed.
         let leftovers: Vec<(AgentId, SinkId)> = {
             let guard = self.session.subs.lock().expect("subs poisoned");
             guard.iter().map(|(a, s)| (*a, *s)).collect()
@@ -501,11 +466,9 @@ impl ConnectionHandler for AgentConnection {
             let _ = manager.unsubscribe(agent_id, sink_id);
         }
 
-        // ── 멀티뷰어 cleanup ───────────────────────────────────────────────────
-        // (a) viewport 재협상 — 남은 뷰어 기준 smallest 로 다시 resize(tmux detach 후 잔여 클라
-        //     기준으로 다시 키우는 것과 동일).
-        //     ★lock 순서★: remove_conn_viewports 가 multiview lock 안에서 협상값만 계산해 반환한 뒤
-        //     lock 을 푼 상태에서 manager.resize 를 부른다(lock 보유 중 코어 호출 금지).
+        // ── multi-viewer cleanup ──────────────────────────────────────────────────────
+        // (a) viewport renegotiation — resize to the smallest of the remaining viewers (as tmux growing back after a detach).
+        //     Lock order: remove_conn_viewports returns only the negotiated value computed inside the multiview lock; manager.resize runs with the lock released (never call the core while holding the lock).
         let owned: Vec<(AgentId, String)> = {
             let g = self
                 .session
@@ -519,10 +482,10 @@ impl ConnectionHandler for AgentConnection {
                 if let Some((cols, rows)) = negotiated {
                     let _ = manager.resize(agent_id, cols, rows);
                 }
-                // None = 남은 뷰어 없음 → 그대로 둔다(마지막 크기 유지).
+                // None = no viewers left → leave as is (keep the last size).
             }
         }
-        // (b) 입력 lease 자동 해제.
+        // (b) automatic input lease release.
         for agent_id in self.core.multiview().release_all_for_conn(conn_id) {
             broadcast_lease_changed(self.core.fanout(), agent_id, false);
         }
@@ -578,10 +541,8 @@ impl AgentConnections {
 }
 
 impl AgentConnections {
-    /// `handler_for` 의 본체 — **구체 타입**을 낸다. 이 갈래가 따로 있는 이유는 정리 순서를 보는 테스트가
-    /// 그 연결의 수명 상태(`session`)를 쥐어야 하는데 `dyn ConnectionHandler` 로는 못 꺼내기 때문이다.
-    /// 운영 경로는 아래 `handler_for` 하나뿐이라 **조립이 갈리지 않는다**(테스트가 제 손으로 조립하면
-    /// 그 사본이 운영과 조용히 어긋난다).
+    /// The body of `handler_for`, yielding the concrete type: tests checking cleanup order must hold the connection's lifetime state (`session`),
+    /// which a `dyn ConnectionHandler` hides. The production path is only `handler_for`, so assembly does not diverge.
     fn build(&self, conn_id: ConnId) -> Arc<AgentConnection> {
         let core = Arc::new(ConnectionCore::new(
             self.manager.clone(),
@@ -621,13 +582,13 @@ mod tests {
     use crate::test_doubles::FakeFrameSink;
     use tokio::sync::mpsc;
 
-    /// The network layer's real outlet (`link::server::ConnFrameSink`) needs a live transport peer and only that module
-    /// can build one (ADR-0129) — so this layer's tests use a double that depends only on the port contract (`conn_port`).
+    /// The network layer's real outlet (`link::server::ConnFrameSink`) needs a live transport peer that only that module can build (ADR-0129), so
+    /// these tests use a double depending only on the port contract (`conn_port`).
     fn frame_sink(tx: mpsc::Sender<Frame>) -> Arc<dyn FrameSink> {
         Arc::new(FakeFrameSink::new(tx))
     }
 
-    // ── 1. FrameOutputSink 가 conn_tx 에 binary frame 을 넣는지 ─────────────────
+    // ── 1. does FrameOutputSink put a binary frame into conn_tx ─────────────────
     #[tokio::test]
     async fn frame_output_sink_encodes_and_sends_binary() {
         let (tx, mut rx) = mpsc::channel::<Frame>(8);
@@ -650,11 +611,11 @@ mod tests {
                 assert_eq!(decoded.seq, 42);
                 assert_eq!(decoded.payload, b"abc");
             }
-            _ => panic!("Binary 가 아님"),
+            _ => panic!("not Binary"),
         }
     }
 
-    // ── 1b. (S15 B7) Event(구조화) payload 를 tag1 frame 으로 인코딩하는지 ──────
+    // ── 1b. (S15 B7) does it encode an Event (structured) payload as a tag1 frame ──────
     #[tokio::test]
     async fn frame_output_sink_encodes_event_as_tag1_structured_frame() {
         use engram_dashboard_agent::types::{
@@ -687,12 +648,12 @@ mod tests {
         match rx.recv().await.expect("one item") {
             Frame::Binary(buf) => {
                 let decoded = decode_frame(&buf).expect("decode");
-                assert_eq!(decoded.tag, FRAME_TAG_STRUCTURED_EVENT, "tag1 이어야 함");
+                assert_eq!(decoded.tag, FRAME_TAG_STRUCTURED_EVENT, "must be tag1");
                 assert_eq!(decoded.agent_id, agent_id);
                 assert_eq!(decoded.epoch, 3);
                 assert_eq!(decoded.seq, 100);
                 let parsed: WireStructuredEvent =
-                    serde_json::from_slice(decoded.payload).expect("payload JSON 파싱");
+                    serde_json::from_slice(decoded.payload).expect("payload JSON parse");
                 assert_eq!(
                     parsed,
                     WireStructuredEvent::ToolCall {
@@ -703,19 +664,18 @@ mod tests {
                         message_id: None,
                         category: Some(WireToolCategory::Read),
                     },
-                    "tag1 payload 가 wire StructuredEvent 로 무손실 복원"
+                    "tag1 payload restored losslessly as the wire StructuredEvent"
                 );
             }
-            other => panic!("Binary(tag1) 여야 함: {other:?}"),
+            other => panic!("expected Binary(tag1): {other:?}"),
         }
     }
 
     // ── 2. full → SinkError + replay_dropped ──────────────────────────────────
     #[tokio::test]
     async fn frame_output_sink_full_returns_error_and_marks_replay_dropped() {
-        // ★큐 포화의 out-of-band 종료 신호는 여기 관심사가 아니다★: 그건 프레임 출구 **구현**의
-        //   계약이라 `impl FrameSink for ConnFrameSink` 옆에서 지켜진다(★테스트 더블은 종료 신호를
-        //   울리지 않는다★). 함수명 대신 impl 블록을 가리키는 것은 개명·crate 분리에 끊기지 않게.
+        // The out-of-band close signal on queue saturation is not this test's concern: it is the contract of the frame outlet implementation, kept next
+        //   to `impl FrameSink for ConnFrameSink` (the test double does not raise it).
         let (tx, mut rx) = mpsc::channel::<Frame>(1);
         let sink = FrameOutputSink::new(frame_sink(tx));
         let replay_dropped = sink.replay_dropped_flag();
@@ -727,20 +687,19 @@ mod tests {
             payload: OutputPayload::Bytes(b"x"),
         };
         sink.send(frame(0)).expect("first ok");
-        assert!(sink.send(frame(1)).is_err(), "full 이면 SinkError");
+        assert!(sink.send(frame(1)).is_err(), "SinkError when full");
         assert!(
             replay_dropped.load(Ordering::Acquire),
-            "drop 시 replay_dropped set"
+            "replay_dropped set on drop"
         );
 
         assert!(matches!(rx.recv().await.unwrap(), Frame::Binary(_)));
     }
 
-    // ── 2a. 폐기 갈래의 자리채움(ADR-0231) ─────────────────────────────────────────
-    // ★갈래를 직접 때리지 않고 두 갈래가 부르는 자리채움을 잰다★ — 직렬화 실패는 지금 사건 모양(문자열·
-    //   숫자)으로 만들 수 없고, 잘못 온 `TerminalBytes` 는 debug 에서 `debug_assert` 가 먼저 멈춘다.
-    //   재는 것: 버린 seq 자리에 같은 seq 의 tag1 `Error` 가 나가고(뷰의 seq 줄기에 구멍이 없다), 반환이
-    //   `Ok` 라 sink 가 살아 다음 seq 도 나가며, 바이트가 셸의 자리채움과 같은 한 벌이다.
+    // ── 2a. placeholder for discard branches (ADR-0231) ─────────────────────────────
+    // Measures the placeholder both branches call, not the branches: a serialization failure cannot be produced with current event shapes, and a
+    //   stray `TerminalBytes` stops at `debug_assert` first in debug. Checked: a tag1 `Error` of the same seq replaces the discarded seq (no hole in
+    //   the view's seq stream), the return is `Ok` so the sink lives and the next seq goes out, and the bytes equal the shell's placeholder.
     #[tokio::test]
     async fn a_dropped_event_goes_out_as_a_placeholder_at_the_same_seq() {
         use engram_dashboard_protocol::{
@@ -757,24 +716,24 @@ mod tests {
             seq,
             payload: OutputPayload::Bytes(b"x"),
         };
-        sink.send(bytes(5)).expect("앞 프레임");
+        sink.send(bytes(5)).expect("the preceding frame");
         sink.send_placeholder(agent_id, 4, 6)
-            .expect("자리채움은 Ok — SinkError 면 코어가 sink 를 걷는다");
+            .expect("a placeholder is Ok — with SinkError the core would reap the sink");
         sink.send(bytes(7))
-            .expect("sink 가 살아 다음 seq 도 나간다");
+            .expect("the sink is alive and the next seq goes out too");
 
         let mut got = Vec::new();
         for _ in 0..3 {
-            match rx.recv().await.expect("세 장") {
+            match rx.recv().await.expect("three frames") {
                 Frame::Binary(buf) => got.push(buf),
-                other => panic!("Binary 여야 함: {other:?}"),
+                other => panic!("expected Binary: {other:?}"),
             }
         }
         let seqs: Vec<u64> = got
             .iter()
             .map(|b| decode_frame(b).expect("decode").seq)
             .collect();
-        assert_eq!(seqs, vec![5, 6, 7], "구멍 없는 seq 줄기");
+        assert_eq!(seqs, vec![5, 6, 7], "seq stream without holes");
 
         let placeholder = decode_frame(&got[1]).expect("decode");
         assert_eq!(placeholder.tag, FRAME_TAG_STRUCTURED_EVENT, "tag1");
@@ -791,7 +750,7 @@ mod tests {
         assert_eq!(
             got[1],
             placeholder_error_frame(agent_id, 4, 6),
-            "셸 중계의 자리채움과 바이트가 같다(한 벌)"
+            "bytes equal the shell relay's placeholder (a single set)"
         );
         assert_eq!(
             decode_frame(&got[2]).expect("decode").tag,
@@ -799,7 +758,7 @@ mod tests {
         );
     }
 
-    // ── 2b. 2차 핸드셰이크 판별(ADR-0129 0-4) ────────────────────────────────────
+    // ── 2b. second-handshake detection (ADR-0129 0-4) ────────────────────────────────
     #[test]
     fn handshake_frame_is_recognized_after_auth() {
         let frame = engram_dashboard_protocol::handshake::AuthFrame::Auth {
@@ -807,7 +766,7 @@ mod tests {
             protocol_version: 3,
         };
         assert!(is_handshake_frame(&serde_json::to_string(&frame).unwrap()));
-        // 필드 순서·공백이 달라도 같은 프레임이다(발신자마다 직렬화기가 다르다 — 손조립 JS 도 있다).
+        // The same frame even if field order or whitespace differ (each sender has its own serializer, even a hand-assembled JS one).
         assert!(is_handshake_frame(
             r#"{ "Auth": { "protocol_version": 3, "token": "deadbeef" } }"#
         ));
@@ -816,38 +775,37 @@ mod tests {
     #[test]
     fn malformed_handshake_frames_are_recognized_too() {
         for text in [
-            r#"{"Auth":{"token":"deadbeef"}}"#, // protocol_version 누락
-            r#"{"Auth":123}"#,                  // 본문이 객체가 아님
+            r#"{"Auth":{"token":"deadbeef"}}"#, // protocol_version missing
+            r#"{"Auth":123}"#,                  // body is not an object
             r#"{"Auth":null}"#,
         ] {
             assert!(
                 is_handshake_frame(text),
-                "Auth 태그를 단 어긋난 프레임도 핸드셰이크다: {text}"
+                "an Auth-tagged mismatched frame is also a handshake: {text}"
             );
         }
     }
 
     #[test]
     fn non_handshake_text_is_not_recognized() {
-        // ★일반 파싱 오류 경로를 잠식하면 안 된다★: 아래가 하나라도 true 가 되면 case23(깨진 JSON →
-        //   "invalid command")이 조용히 "already authenticated" 로 바뀐다.
+        // Must not eat into the ordinary parse-error path: otherwise case23 (broken JSON → "invalid command") silently becomes "already authenticated".
         for text in [
             r#"{"NotACommand":true}"#,
             r#"{"ListAgents":{"request_id":"00000000-0000-0000-0000-000000000000"}}"#,
-            r#""Auth""#,                 // 태그만 있고 본문이 없다 = 프레임이 아니다
-            r#"{"Auth":1,"Kill":2}"#,    // 최상위 키가 하나가 아니다
-            r#"{"auth":{"token":"x"}}"#, // 태그는 대소문자까지 wire 계약이다
+            r#""Auth""#,                 // only the tag, no body = not a frame
+            r#"{"Auth":1,"Kill":2}"#,    // the top-level key is not a single one
+            r#"{"auth":{"token":"x"}}"#, // the tag is a wire contract down to the case
             "not json at all",
             "",
         ] {
             assert!(
                 !is_handshake_frame(text),
-                "핸드셰이크가 아닌데 인정됐다: {text}"
+                "accepted as a handshake though it is not: {text}"
             );
         }
     }
 
-    // ── 3. control 평면: Outbound 3종이 프레임 3종으로 인코딩되는지 ───────────────
+    // ── 3. control plane: do the 3 Outbound kinds encode as 3 frame kinds ───────────────
     #[tokio::test]
     async fn frame_outbound_sink_maps_outbound_to_frames() {
         let (tx, mut rx) = mpsc::channel::<Frame>(8);
@@ -863,20 +821,19 @@ mod tests {
             .expect("close ok");
 
         match rx.recv().await.unwrap() {
-            Frame::Text(s) => assert!(s.contains("boom"), "Error 가 JSON text 로"),
-            other => panic!("Text 여야 함: {other:?}"),
+            Frame::Text(s) => assert!(s.contains("boom"), "Error as JSON text"),
+            other => panic!("expected Text: {other:?}"),
         }
         assert!(matches!(rx.recv().await.unwrap(), Frame::Binary(_)));
         match rx.recv().await.unwrap() {
             Frame::Close(r) => assert_eq!(r, "bye"),
-            other => panic!("Close 여야 함: {other:?}"),
+            other => panic!("expected Close: {other:?}"),
         }
     }
 
-    // ── 4. 명령 명부: 연결 정리가 그 주인의 이름을 지우는지(ADR-0155/0150) ──
+    // ── 4. command roster: does connection cleanup erase its owner's name (ADR-0155/0150) ──
 
-    /// 공장 하나가 만든 연결들이 **같은 명부**를 보는지까지 이 하네스가 본다 — 연결마다 새 명부가 나면
-    /// 아래 conn 2 의 조회가 빈 목록을 받는다.
+    /// Also checks that connections made by one factory see the same roster — a per-connection roster would give conn 2 an empty list.
     fn test_factory() -> AgentConnections {
         test_factory_with(
             Arc::new(crate::test_doubles::RecordingFanout::new()),
@@ -934,7 +891,7 @@ mod tests {
             Arc::new(crate::control::mcp_server::MessagingSlot::new()),
             commands,
             deliveries,
-            // 자기 명령이 없는 조립 — 이 하네스가 보는 것은 명부·정리 순서다.
+            // An assembly with no commands of its own — what this harness looks at is the roster and cleanup order.
             Arc::new(crate::command_delivery::NoLocalCommands),
             usage,
             shutdown_tx,
@@ -942,35 +899,30 @@ mod tests {
     }
 
     fn command_json(cmd: &AgentCommand) -> String {
-        serde_json::to_string(cmd).expect("명령 직렬화")
+        serde_json::to_string(cmd).expect("command serialization")
     }
 
-    /// ★기다림에 상한을 둔다 — 프레임이 이 연결로 안 오면 **hang 이 아니라 실패**여야 한다★
-    /// (상한은 판정 기준이 아니라 「깨졌다」의 관측 수단이다).
+    /// Cap the wait so a frame that never reaches this connection is a failure, not a hang.
     async fn next_event(rx: &mut mpsc::Receiver<Frame>) -> AgentEvent {
         let frame = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
             .await
-            .expect("프레임을 기다리다 상한을 넘겼다 — 이 연결로 오지 않는다")
-            .expect("프레임 하나");
+            .expect("exceeded the cap waiting for a frame — it does not arrive on this connection")
+            .expect("one frame");
         match frame {
-            Frame::Text(text) => serde_json::from_str(&text).expect("이벤트 디코드"),
-            other => panic!("Text 여야 함: {other:?}"),
+            Frame::Text(text) => serde_json::from_str(&text).expect("event decode"),
+            other => panic!("expected Text: {other:?}"),
         }
     }
 
-    /// ★끊기면 그 연결의 이름이 명부에서 **사라진다**★ — 자취를 남기면 주인 토큰이 연결마다 새로 나는
-    /// 탓에 재접속마다 쌓이고, 만료도 회수 경로도 없어 명부가 상한까지 영구히 찬다(ADR-0150 결정 3).
-    /// 조회하는 쪽을 **다른 연결**로 두는 것은 한 공장이 만든 연결들이 같은 명부를 본다는 것까지 함께
-    /// 보기 위해서다.
-    /// ★★이 변경의 daemon 쪽 회귀망★★ — 활성화 명령이 **도착순 줄 밖에서** 돌아, 뒤에 온 명령이 그
-    /// 결말을 기다리지 않는다는 관측이다. 옛 모양에서는 활성화 한 건(전형 2s·백스톱 15s)이 끝나야
-    /// 같은 연결의 다음 명령이 시작됐다.
+    /// On disconnect that connection's name disappears from the roster — a trace would make the owner token fresh per connection, so entries pile up on
+    /// every reconnect with no expiry or reclaim path until the cap (ADR-0150 decision 3). The looking-up side is another connection, which also shows
+    /// that connections of one factory see the same roster.
+    /// Daemon-side regression net: the activation command runs outside the arrival-order lane, so a later command does not wait for its outcome (once,
+    /// one activation — typically 2s, backstop 15s — had to finish before the next command of the connection started).
     ///
-    /// ★없는 프로필로 잰다★: 실 프로세스 없이 결정적으로 끝나면서도 **답이 나오는 경로는 같다**
-    /// (분류는 `manager` 조회 앞에서 끝나므로 성공·실패 갈래가 갈리지 않는다).
-    /// ★관측이 기대는 것 = `#[tokio::test]` 의 current-thread 런타임★ — 떼어 낸 태스크는 이 테스트가
-    /// 다시 await 할 때까지 폴링되지 않으므로, 그 사이에 인라인으로 돈 `ListAgents` 의 답이 먼저
-    /// 큐에 든다. 멀티스레드 런타임으로 바꾸면 이 순서는 보장이 아니라 확률이 된다.
+    /// Measured with a nonexistent profile: it ends deterministically with no real process while the reply path is the same (classification ends before
+    /// the `manager` lookup). The observation relies on the current-thread runtime of `#[tokio::test]`: a detached task is not polled until this test
+    /// awaits again, so the inline `ListAgents` reply lands first; on a multithreaded runtime that order would be probability.
     #[tokio::test]
     async fn a_later_command_is_answered_before_an_earlier_activation() {
         use engram_dashboard_protocol::RequestId;
@@ -995,28 +947,27 @@ mod tests {
         assert_eq!(
             conn.on_text(1, &spawn, &frames).await,
             ConnFlow::Continue,
-            "활성화는 연결을 닫지 않는다"
+            "activation does not close the connection"
         );
         conn.on_text(1, &list, &frames).await;
 
         match next_event(&mut rx).await {
             AgentEvent::AgentList { .. } => {}
             other => panic!(
-                "뒤에 온 ListAgents 가 활성화를 기다렸다 — head-of-line blocking 회귀: {other:?}"
+                "the later ListAgents waited for the activation — head-of-line blocking regression: {other:?}"
             ),
         }
-        // 떼어 냈어도 답은 **이 연결의 같은 출구**로 온다.
+        // Even when detached, the reply comes through this connection's same outlet.
         match next_event(&mut rx).await {
             AgentEvent::Error { message, .. } => assert!(
                 message.contains("profile not found"),
-                "떼어 낸 갈래의 답이 이 연결로 와야 한다: {message}"
+                "the detached branch's reply must come to this connection: {message}"
             ),
-            other => panic!("Error 여야 함: {other:?}"),
+            other => panic!("expected Error: {other:?}"),
         }
     }
 
-    /// 줄 **안**에 남는 명령은 `on_text` 이 반환하기 전에 답을 큐에 넣는다 — 위 시험의 짝이고, 둘이
-    /// 함께 서야 「전부 떼어 냈다」와 「하나도 못 뗐다」가 각각 잡힌다.
+    /// A command staying in the lane puts its reply in the queue before `on_text` returns — the counterpart of the test above; only together do "all detached" and "none detached" each get caught.
     #[tokio::test]
     async fn an_in_order_command_is_answered_before_on_text_returns() {
         use engram_dashboard_protocol::RequestId;
@@ -1037,15 +988,13 @@ mod tests {
         conn.on_text(1, &kill, &frames).await;
         assert!(
             rx.try_recv().is_ok(),
-            "줄 안 명령의 답은 on_text 반환 시점에 이미 큐에 있어야 한다"
+            "the reply of an in-lane command must already be in the queue by the time on_text returns"
         );
     }
 
-    /// 포화 갈래의 데몬 쪽 짝 — 네트워크 행의 회귀망
-    /// (`ws::tests::a_cancel_still_gets_through_a_saturated_inbound_queue`)이 배선을 재고, 여기서는
-    /// **이 핸들러가 무엇을 통과시키고 무엇을 어떻게 거절하는가**를 잰다.
-    ///
-    /// ★거절이 말이 없으면 조용한 유실과 구별되지 않는다★ — 그래서 `request_id` 가 실려 오는지까지 본다.
+    /// The daemon-side counterpart of the saturation branch: the network layer's net (`ws::tests::a_cancel_still_gets_through_a_saturated_inbound_queue`)
+    /// measures the wiring; this measures what this handler lets through, what it refuses and how. A wordless refusal is indistinguishable from a
+    /// silent loss, so the `request_id` is checked too.
     #[tokio::test]
     async fn a_saturated_queue_passes_kill_and_refuses_the_rest_out_loud() {
         use engram_dashboard_protocol::RequestId;
@@ -1066,11 +1015,11 @@ mod tests {
         assert_eq!(
             conn.on_inbound_saturated(1, &kill, &frames),
             Saturated::Bypass,
-            "취소는 막힌 줄을 건너뛴다"
+            "a cancel skips the blocked lane"
         );
         assert!(
             rx.try_recv().is_err(),
-            "Bypass 는 분류일 뿐이다 — 이 자리에서 처리하거나 답장하면 안 된다"
+            "Bypass is only a classification — it must not be processed or replied to here"
         );
 
         let write_req = RequestId::new();
@@ -1082,7 +1031,7 @@ mod tests {
         assert_eq!(
             conn.on_inbound_saturated(1, &write, &frames),
             Saturated::Refused,
-            "순서가 뜻을 갖는 명령은 건너뛰지 않는다"
+            "a command whose order has meaning is not skipped"
         );
         match next_event(&mut rx).await {
             AgentEvent::Error {
@@ -1092,43 +1041,42 @@ mod tests {
                 assert_eq!(
                     request_id,
                     Some(write_req),
-                    "거절이 어느 요청의 것인지 실려야 보낸 쪽이 재시도를 정한다"
+                    "the refusal must say whose request it is so the sender decides on a retry"
                 );
                 assert!(
                     message.contains("refused, not applied"),
-                    "적용되지 않았다는 사실이 문구에 있어야 한다: {message}"
+                    "the fact that it was not applied must be in the wording: {message}"
                 );
             }
-            other => panic!("Error 여야 함: {other:?}"),
+            other => panic!("expected Error: {other:?}"),
         }
 
-        // 파싱조차 안 되는 프레임도 침묵하지 않는다(실을 request_id 만 없다).
+        // Even a frame that cannot be parsed does not stay silent (only the request_id to carry is missing).
         assert_eq!(
             conn.on_inbound_saturated(1, "{\"NotACommand\":1}", &frames),
             Saturated::Refused
         );
         match next_event(&mut rx).await {
             AgentEvent::Error { request_id, .. } => assert_eq!(request_id, None),
-            other => panic!("Error 여야 함: {other:?}"),
+            other => panic!("expected Error: {other:?}"),
         }
     }
 
-    /// ★★거절을 **넣지 못했으면** 그렇게 보고한다★★ — `Refused` 로 뭉개면 네트워크 행이 없는 답장을
-    /// 믿고 원래 명령을 버리고, 보낸 쪽은 **명령도 거절도** 못 받는다(포트 계약의 의무 2).
+    /// If the refusal could not be put in, it reports so: folding it into `Refused` makes the network layer believe in a nonexistent reply, drop the
+    /// original command, and leave the sender with neither (obligation 2 of the port contract).
     ///
-    /// ★무대 = 양쪽 큐 동시 포화★: 수신 줄이 찼다는 것은 이 갈래가 불렸다는 사실이 이미 말하고, 송신
-    ///   큐는 용량 1 짜리를 미리 채워 포화로 만든다. 그 상태가 곧 이 값이 나오는 유일한 조건이다.
-    /// ★결정적이다★ — 시한도 스레드도 없다.
+    /// Both queues saturated at once: the full inbound lane is told by this branch being called, and the send queue is saturated by pre-filling a
+    /// capacity-1 one — the only condition yielding this value. Deterministic: no deadline, no thread.
     #[tokio::test]
     async fn a_refusal_that_cannot_be_enqueued_is_reported_as_unanswered() {
         use engram_dashboard_protocol::RequestId;
 
         let factory = test_factory();
         let conn = factory.handler_for(1);
-        // 용량 1 — 한 장을 미리 넣어 두면 그 뒤 `try_send` 는 전부 실패한다.
+        // Capacity 1 — once one frame is put in beforehand, every later `try_send` fails.
         let (tx, _rx) = mpsc::channel::<Frame>(1);
-        tx.try_send(Frame::Text("선점".into()))
-            .expect("한 칸은 채운다");
+        tx.try_send(Frame::Text("preempt".into()))
+            .expect("fill one entry");
         let frames = frame_sink(tx);
 
         let write = command_json(&AgentCommand::WriteStdin {
@@ -1139,7 +1087,7 @@ mod tests {
         assert_eq!(
             conn.on_inbound_saturated(1, &write, &frames),
             Saturated::Unanswered,
-            "거절 답장이 실패했는데 Refused 를 돌려주면 네트워크 행이 거짓을 믿는다"
+            "if Refused is returned though the refusal reply failed, the network layer believes a lie"
         );
     }
 
@@ -1155,7 +1103,7 @@ mod tests {
         let (onlooker_tx, mut onlooker_rx) = mpsc::channel::<Frame>(8);
         let owner_frames = frame_sink(owner_tx);
         let onlooker_frames = frame_sink(onlooker_tx);
-        // 운영 순서 그대로 — 등록은 `on_connect` 이 연결을 명단에 올린 뒤에만 받아들여진다.
+        // Exactly the production order — registration is accepted only after `on_connect` put the connection on the list.
         owner.on_connect(1, &owner_frames).await;
         onlooker.on_connect(2, &onlooker_frames).await;
         for _ in 0..2 {
@@ -1177,7 +1125,7 @@ mod tests {
         owner.on_text(1, &registration, &owner_frames).await;
         assert!(
             matches!(next_event(&mut owner_rx).await, AgentEvent::Ack { .. }),
-            "등록은 Ack"
+            "registration is Ack"
         );
 
         let list = command_json(&AgentCommand::ListCommands {
@@ -1186,10 +1134,14 @@ mod tests {
         onlooker.on_text(2, &list, &onlooker_frames).await;
         match next_event(&mut onlooker_rx).await {
             AgentEvent::CommandList { entries, .. } => {
-                assert_eq!(entries.len(), 1, "다른 연결도 같은 명부를 본다");
+                assert_eq!(
+                    entries.len(),
+                    1,
+                    "another connection sees the same roster too"
+                );
                 assert_eq!(entries[0].name, "tab.create");
             }
-            other => panic!("CommandList 여야 함: {other:?}"),
+            other => panic!("expected CommandList: {other:?}"),
         }
 
         owner.on_disconnect(1);
@@ -1197,37 +1149,39 @@ mod tests {
         onlooker.on_text(2, &list, &onlooker_frames).await;
         match next_event(&mut onlooker_rx).await {
             AgentEvent::CommandList { entries, .. } => {
-                assert!(entries.is_empty(), "자취 없이 사라진다: {entries:?}")
+                assert!(
+                    entries.is_empty(),
+                    "disappears without a trace: {entries:?}"
+                )
             }
-            other => panic!("CommandList 여야 함: {other:?}"),
+            other => panic!("expected CommandList: {other:?}"),
         }
 
-        // 정리가 **끝난 뒤** 도착한 프레임(겹침의 뒷자락) — 순서가 이미 갈린 상태라 이건 쉬운 쪽이다.
-        //   정리가 **도는 도중**의 겹침은 아래 `..._detached_before_the_rest_of_the_cleanup` 가 본다.
+        // A frame arriving after cleanup finished (the tail of the overlap) is the easy side; the overlap during cleanup is
+        //   `..._detached_before_the_rest_of_the_cleanup` below.
         owner.on_text(1, &registration, &owner_frames).await;
         match next_event(&mut owner_rx).await {
             AgentEvent::Error { message, .. } => assert!(
                 message.contains(crate::command_roster::DETACHED_REFUSAL),
-                "연결 수명 그물이 잡은 것이어야 한다: {message}"
+                "it must be what the connection lifetime net caught: {message}"
             ),
-            other => panic!("Error 여야 함: {other:?}"),
+            other => panic!("expected Error: {other:?}"),
         }
         onlooker.on_text(2, &list, &onlooker_frames).await;
         match next_event(&mut onlooker_rx).await {
             AgentEvent::CommandList { entries, .. } => assert!(
                 entries.is_empty(),
-                "늦은 등록이 이름을 되살리면 안 된다: {entries:?}"
+                "a late registration must not revive the name: {entries:?}"
             ),
-            other => panic!("CommandList 여야 함: {other:?}"),
+            other => panic!("expected CommandList: {other:?}"),
         }
     }
 
-    /// ★끊긴 연결이 **낸** 명령 왕복도 함께 거둔다★
+    /// Also reaps the command round trips issued by the disconnected connection.
     ///
-    /// 명부와 상관 표는 **다른 표**라(수명 단위가 다르다 — `command_delivery` 헤더) 정리도 두 줄이다.
-    /// 상관 표 쪽 줄이 빠지면 답장을 받아 갈 곳이 사라진 항목이 마감시각까지 표에 앉고 그 왕복을 돌던
-    /// 태스크도 그때까지 안 끝나는데, **런타임엔 아무 신호도 없다** — 그래서 이 테스트가 그 줄의 유일한
-    /// 그물이다(거두는 동작 자체의 갈래별 단언은 `command_delivery` 쪽에 있다).
+    /// The roster and the correlation table are different tables (different lifetime units — `command_delivery` header), so cleanup is two lines. Without the
+    /// correlation-table line an entry with nowhere to take its reply sits until the deadline with its round-trip task, and the runtime gives no signal — so
+    /// this test is that line's only net (per-branch reaping assertions are in `command_delivery`).
     // ADR-0154
     #[tokio::test]
     async fn a_disconnect_also_reclaims_that_connections_command_round_trips() {
@@ -1279,38 +1233,37 @@ mod tests {
             args: serde_json::json!({}),
         };
         let request = command_json(&AgentCommand::Command {
-            envelope: serde_json::value::to_raw_value(&envelope).expect("봉투 직렬화"),
+            envelope: serde_json::value::to_raw_value(&envelope).expect("envelope serialization"),
         });
         caller.on_text(2, &request, &caller_frames).await;
-        // 봉투가 주인에게 나간 것을 본 시점부터 그 왕복은 답을 기다리는 중이다.
+        // From the moment the envelope is seen to go out to the owner, that round trip is waiting for a reply.
         assert!(matches!(
             next_event(&mut owner_rx).await,
             AgentEvent::CommandRequest { .. }
         ));
-        assert_eq!(deliveries.in_flight(), 1, "왕복이 표에 앉아 있다");
+        assert_eq!(
+            deliveries.in_flight(),
+            1,
+            "the round trip sits in the table"
+        );
 
         caller.on_disconnect(2);
 
         assert_eq!(
             deliveries.in_flight(),
             0,
-            "정리가 이 연결의 왕복을 거둬야 한다"
+            "cleanup must reap this connection's round trips"
         );
     }
 
-    /// ★정리의 **첫 줄**이 `detach` 인지를 못으로 박는다★
+    /// Pins that the first line of cleanup is `detach`: if it slips back one position, this connection reads as attached while the preceding steps run, and an
+    /// overlapping registration passes — a dead connection takes back a live one's name.
     ///
-    /// `detach` 가 한 칸이라도 뒤로 밀리면, 그 앞 단계가 도는 **동안** 이 연결은 아직 붙어 있는 것으로
-    /// 읽힌다 — 그 창에 겹쳐 든 등록이 통과해 이미 죽은 연결이 산 연결의 이름을 도로 빼앗는다.
-    ///
-    /// ★관측 방법 — 정리의 **첫 단계에서** 세운다★: 정리 안에서 우리가 꽂을 수 있는 더블은 lease 해제
-    /// 통지 하나뿐인데 그건 **마지막** 단계라, 거기서 보면 「끝 직전엔 빠져 있다」밖에 못 본다(중간
-    /// 배치가 그대로 통과한다). 대신 첫 단계가 잡는 자물쇠(`session.subs`)를 시험이 먼저 쥐고 정리를
-    /// 다른 스레드에서 돌린다 — 정리는 그 자물쇠에서 멈추므로, 멈춘 동안 이 연결이 이미 명단에서
-    /// 빠져 있다면 `detach` 는 그 자물쇠보다 **앞**이다.
-    /// ★교착 없음★: 정리 스레드의 명부 잠금은 `detach` 안에서 끝나고(그 뒤 자물쇠를 기다린다), 시험
-    /// 스레드는 자물쇠를 쥔 채 명부를 **짧게** 잡았다 놓는다 — 서로를 기다리는 고리가 안 생긴다.
-    /// ★탐침이 명부를 건드리지 않는다★: 빈 차분은 통과해도 아무것도 안 바꾼다.
+    /// Observation: the only double pluggable into cleanup is the lease-release notice, but that is the last step (looking there shows only "absent just
+    /// before the end"; a middle placement passes). So the test first holds the lock the first step takes (`session.subs`) and runs cleanup on another
+    /// thread — it stops at that lock, so if this connection is already off the list while stopped, `detach` is ahead of that lock.
+    /// No deadlock: the cleanup thread's roster lock ends inside `detach`, and the test takes the roster briefly while holding its lock. The probe does
+    /// not touch the roster (an empty diff passes through).
     #[test]
     fn the_command_roster_is_detached_before_the_first_cleanup_step() {
         use std::time::{Duration, Instant};
@@ -1330,8 +1283,8 @@ mod tests {
         let held = session.subs.lock().expect("subs poisoned");
         let cleanup = std::thread::spawn(move || conn.on_disconnect(1));
 
-        // 정리가 자물쇠에서 멈춰 있는 동안 관측한다. 스레드가 아직 안 떴을 수 있어 잠깐 되풀이하되,
-        //   `detach` 가 자물쇠 뒤에 있으면 이 창에서는 **영영** 거절이 안 나므로 마감시각이 판정이 된다.
+        // Observe while cleanup is stopped at the lock. The thread may not have started yet, so repeat briefly; if `detach` is behind the lock a refusal
+        //   never appears in this window, so the deadline is the verdict.
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut refused = None;
         while Instant::now() < deadline {
@@ -1343,17 +1296,17 @@ mod tests {
         }
 
         drop(held);
-        cleanup.join().expect("정리 스레드");
+        cleanup.join().expect("cleanup thread");
 
-        let refused = refused.expect("정리가 첫 단계에 멈춘 동안 이 연결은 이미 빠져 있어야 한다");
+        let refused = refused.expect("while cleanup is stopped at the first step this connection must already be off the list");
         assert_eq!(
             refused.message(),
             crate::command_roster::DETACHED_REFUSAL,
-            "연결 수명 그물이 잡은 것이어야 한다"
+            "it must be what the connection lifetime net caught"
         );
     }
 
-    // ── 5. 사용량 평면(TRD S21 usage-limit-slot §4 「wire」·「데몬 연결 계층」) ──
+    // ── 5. usage plane (TRD S21 usage-limit-slot §4) ──
 
     mod usage {
         use super::*;
@@ -1369,12 +1322,12 @@ mod tests {
 
         const T0: i64 = 1_900_000_000;
         const FAR_RESET: i64 = T0 + 5 * 3_600;
-        /// 가짜 조회기가 돌려주는 5시간 창 사용률.
+        /// 5-hour window utilization the fake probe returns.
         const PROBED_PCT: f64 = 37.5;
 
         fn probe_of(kind: AgentBackendKind) -> &'static dyn UsageProbe {
-            let word = serde_json::to_value(kind).expect("wire 낱말");
-            usage_probe_for(word.as_str().expect("문자열")).expect("조회기")
+            let word = serde_json::to_value(kind).expect("wire word");
+            usage_probe_for(word.as_str().expect("string")).expect("probe")
         }
 
         fn key_of(kind: AgentBackendKind) -> UsageVendorKey {
@@ -1411,13 +1364,13 @@ mod tests {
             gate: fakes::ProbeGate,
         }
 
-        /// 칸 = claude 하나(가짜 조회기 — 시험이 놓아 줄 때까지 막힌다). codex 는 조회기가 있어 구독 집합에는 들지만
-        /// 이 서비스에 칸이 없어 한 장이 없다. 스케줄러는 없다 — 시각은 시험이 몬다.
+        /// Entry = one claude (fake probe — blocks until the test releases it). codex has a probe so it joins the subscription set, but this service has no
+        /// entry for it, so no sheet. No scheduler — the test drives the time.
         fn rig() -> Rig {
             rig_waiting(None)
         }
 
-        /// `reply_wait` = ⟳ 답장 대기 상한. `None` 이면 운영 상한 그대로다.
+        /// `reply_wait` = ⟳ reply wait cap; `None` means the production cap.
         fn rig_waiting(reply_wait: Option<Duration>) -> Rig {
             let clock = Arc::new(ManualUsageClock::new(Duration::from_secs(100), T0));
             let (probe, gate) = fakes::gated_probe(probe_of(Claude), PROBED_PCT, FAR_RESET);
@@ -1460,7 +1413,7 @@ mod tests {
                 }
             }
 
-            /// 붙고 인사 두 장을 비운다.
+            /// Attaches and drains the two greeting frames.
             async fn greeted(rig: &Rig, id: ConnId) -> Self {
                 let mut conn = Self::open(rig, id).await;
                 let events = conn.events();
@@ -1492,21 +1445,21 @@ mod tests {
                 .await;
             }
 
-            /// 지금 큐에 든 이벤트 전부 — 기다리지 않는다.
+            /// Every event currently in the queue — does not wait.
             fn events(&mut self) -> Vec<AgentEvent> {
                 let mut out = Vec::new();
                 while let Ok(frame) = self.rx.try_recv() {
                     match frame {
                         Frame::Text(text) => {
-                            out.push(serde_json::from_str(&text).expect("이벤트 디코드"))
+                            out.push(serde_json::from_str(&text).expect("event decode"))
                         }
-                        other => panic!("Text 여야 함: {other:?}"),
+                        other => panic!("expected Text: {other:?}"),
                     }
                 }
                 out
             }
 
-            /// 지금 큐에 든 사용량 한 장들 — 다른 이벤트가 끼어 있으면 실패다.
+            /// The usage sheets currently in the queue — a failure if another event is mixed in.
             fn sheets(&mut self) -> Vec<(UsageLimitSnapshot, Vec<AgentBackendKind>)> {
                 self.events()
                     .into_iter()
@@ -1515,14 +1468,13 @@ mod tests {
                             snapshot,
                             subscribed,
                         } => (snapshot, subscribed),
-                        other => panic!("사용량 한 장이어야 함: {other:?}"),
+                        other => panic!("expected a usage sheet: {other:?}"),
                     })
                     .collect()
             }
         }
 
-        /// 실물 인코더가 지은 한 줄이 실물 출구를 거쳐 그 연결의 프레임 출구에 **한 번** 든다. 거둔 출구는 조용하고
-        /// 프레임 출구 사본을 놓았다.
+        /// A line built by the real encoder goes through the real outlet into that connection's frame outlet once. A reaped outlet is silent and has released its frame-outlet copy.
         #[tokio::test]
         async fn the_encoded_line_reaches_the_frame_sink_once_through_the_outlet() {
             let (tx, mut rx) = mpsc::channel::<Frame>(8);
@@ -1547,9 +1499,9 @@ mod tests {
 
             deliver(&snapshot, vec![target()], &UsageEventEncoder);
             let Ok(Frame::Text(text)) = rx.try_recv() else {
-                panic!("Text 한 장이어야 함");
+                panic!("expected one Text frame");
             };
-            assert!(rx.try_recv().is_err(), "한 번만 든다");
+            assert!(rx.try_recv().is_err(), "enters only once");
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&text).unwrap(),
                 serde_json::to_value(AgentEvent::UsageLimitsUpdated {
@@ -1560,12 +1512,12 @@ mod tests {
             );
 
             outlet.revoke();
-            assert_eq!(Arc::strong_count(&frames), 1, "거두면 사본을 놓는다");
+            assert_eq!(Arc::strong_count(&frames), 1, "reaping releases the copy");
             deliver(&snapshot, vec![target()], &UsageEventEncoder);
-            assert!(rx.try_recv().is_err(), "거둔 출구는 조용하다");
+            assert!(rx.try_recv().is_err(), "a reaped outlet is silent");
         }
 
-        /// 첫 한 장은 인사 두 장 뒤에, 구독한 연결에만 간다.
+        /// The first sheet goes after the two greeting frames, and only to subscribed connections.
         #[tokio::test]
         async fn a_first_sheet_follows_the_greeting_and_reaches_only_the_subscriber() {
             let rig = rig();
@@ -1580,7 +1532,7 @@ mod tests {
                 subscribed,
             }] = events.as_slice()
             else {
-                panic!("인사 두 장 → 첫 한 장이어야 함: {events:?}");
+                panic!("expected two greetings → first sheet: {events:?}");
             };
             assert_eq!(snapshot.vendor, Claude);
             assert_eq!(subscribed, &[Claude]);
@@ -1588,12 +1540,11 @@ mod tests {
             assert_eq!(fakes::union(&rig.service), keys(&[Claude]));
         }
 
-        /// ⟳ 의 답은 조회 끝을 기다린 값 없는 `Ack` 이고 값은 구독한 연결에 방송으로 간다 — 보낸 연결이 구독하지
-        /// 않았으면 그 연결엔 한 장도 없다.
+        /// The reply to ⟳ is a valueless `Ack` sent after the probe ends, and the value goes by broadcast to subscribed connections — a sending connection that
+        /// is not subscribed gets no sheet.
         #[tokio::test]
         async fn a_refresh_answers_a_bare_ack_and_the_value_goes_to_the_subscriber() {
-            // ★대기 상한을 길게 잡는다★ — 막힌 조회 동안 「B 에 답이 아직 없다」를 단언하므로, 운영 상한(5초)이
-            //   느린 러너에서 먼저 끝나 답이 나가 버리면 거짓 실패한다.
+            // Set the wait cap long: during the blocked probe "B has no reply yet" is asserted, and the production cap (5s) ending first on a slow runner would fail falsely.
             let mut rig = rig_waiting(Some(Duration::from_secs(60)));
             let mut a = Conn::greeted(&rig, 1).await;
             let mut b = Conn::greeted(&rig, 2).await;
@@ -1607,28 +1558,34 @@ mod tests {
                 request_id: r,
             })
             .await;
-            // 조회가 막혀 있는 동안 — 「갱신 중」 한 장은 조회를 띄우기 전에 나갔고, 답은 아직이다.
+            // While the probe is blocked: the "refreshing" sheet went out before the probe launched, the reply not yet.
             tokio::time::timeout(Duration::from_secs(10), rig.gate.entered.recv())
                 .await
-                .expect("조회가 시작돼야 한다");
+                .expect("the probe must start");
             let started = a.sheets();
             assert!(
                 matches!(started.as_slice(), [(sheet, _)] if sheet.in_flight),
                 "{started:?}"
             );
-            assert!(b.events().is_empty(), "답은 조회 끝을 기다린다");
+            assert!(
+                b.events().is_empty(),
+                "the reply waits for the probe to end"
+            );
 
-            rig.gate.release.send(()).expect("막힌 조회");
-            // B 의 답을 받는 것이 동기화다 — 조회 끝의 한 장은 기다리는 요청을 깨우기 **전에** 나간다.
+            rig.gate.release.send(()).expect("blocked probe");
+            // Receiving B's reply is the synchronization — the end-of-probe sheet goes out before waking the waiting request.
             match next_event(&mut b.rx).await {
                 AgentEvent::Ack { request_id } => assert_eq!(request_id, r),
-                other => panic!("Ack 여야 함: {other:?}"),
+                other => panic!("expected Ack: {other:?}"),
             }
-            assert!(b.events().is_empty(), "구독 안 한 연결엔 값이 없다");
+            assert!(
+                b.events().is_empty(),
+                "no value for an unsubscribed connection"
+            );
 
             let ended = a.sheets();
             let [(done, subscribed)] = ended.as_slice() else {
-                panic!("조회 끝 한 장이어야 함: {ended:?}");
+                panic!("expected the end-of-probe sheet: {ended:?}");
             };
             assert!(!done.in_flight);
             assert_eq!(pct(done), Some(PROBED_PCT));
@@ -1637,7 +1594,7 @@ mod tests {
             assert!(started[0].0.revision < done.revision);
         }
 
-        /// 칸이 없는 벤더의 ⟳ 는 조용한 `Ack` 가 아니라 그 번호의 `Error` 다.
+        /// A ⟳ for a vendor with no entry is not a silent `Ack` but an `Error` of that number.
         #[tokio::test]
         async fn a_refresh_for_a_vendor_without_a_slot_is_an_error_with_its_request_id() {
             let rig = rig();
@@ -1657,7 +1614,7 @@ mod tests {
                     assert_eq!(request_id, Some(r));
                     assert!(message.starts_with("NOT_FOUND: "), "{message}");
                 }
-                other => panic!("Error 여야 함: {other:?}"),
+                other => panic!("expected Error: {other:?}"),
             }
         }
 
@@ -1677,8 +1634,7 @@ mod tests {
             assert!(b.events().is_empty());
         }
 
-        /// 끊기면 칸이 지워지고(합집합에서 빠짐) 출구가 쥔 프레임 출구 사본이 놓인다. 끊긴 뒤 겹쳐 든 늦은 교체는 칸을
-        /// 되살리지 않는다.
+        /// On disconnect the entry is erased (dropped from the union) and the frame-outlet copy the outlet holds is released; a late replacement overlapping after disconnect does not revive it.
         #[tokio::test]
         async fn a_disconnect_removes_the_slot_and_a_late_subscription_does_not_revive_it() {
             let rig = rig();
@@ -1693,7 +1649,7 @@ mod tests {
             assert_eq!(
                 Arc::strong_count(&a.frames),
                 1,
-                "두 명부가 쥔 프레임 출구 사본이 정리 안에서 놓인다"
+                "the frame-outlet copy held by the two rosters is released inside cleanup"
             );
 
             a.subscribe(&[Claude]).await;
@@ -1702,7 +1658,7 @@ mod tests {
             assert!(a.events().is_empty());
         }
 
-        /// 한 연결의 교체는 `on_text` 가 돌아오기 전에 서므로 도착순이다 — 마지막이 이긴다.
+        /// One connection's replacement takes effect before `on_text` returns, so it is arrival-ordered — the last one wins.
         #[tokio::test]
         async fn replacements_on_one_connection_apply_in_arrival_order() {
             let rig = rig();
@@ -1719,12 +1675,12 @@ mod tests {
             assert_eq!(
                 sheets.len(),
                 1,
-                "칸이 있는 벤더가 든 첫 교체만 한 장: {sheets:?}"
+                "only the first replacement carrying a vendor with an entry gives one sheet: {sheets:?}"
             );
             assert_eq!(sheets[0].1, [Claude, Codex]);
         }
 
-        /// 셸은 억제 없이 같은 집합을 다시 보낸다 — 그것이 되먹임을 만들지 않는다.
+        /// The shell resends the same set without suppression — that does not create a feedback loop.
         #[tokio::test]
         async fn a_same_set_replacement_sends_nothing() {
             let rig = rig();
@@ -1740,7 +1696,7 @@ mod tests {
             assert!(b.events().is_empty());
         }
 
-        /// 래치 예외 — 교체 시점에 리셋이 지난 창은 정확히 한 장, **교체 전** 집합을 싣고 나간다. 되풀어도 0.
+        /// Latch exception — a window whose reset has passed at replacement time goes out as exactly one sheet carrying the pre-replacement set; repeating gives 0.
         #[tokio::test]
         async fn a_latch_due_at_replacement_goes_out_once_with_the_set_before_it() {
             let rig = rig();
@@ -1753,10 +1709,10 @@ mod tests {
             a.subscribe(&[Claude]).await;
             let sheets = a.sheets();
             let [(latched, subscribed)] = sheets.as_slice() else {
-                panic!("래치 한 장이어야 함: {sheets:?}");
+                panic!("expected one latch sheet: {sheets:?}");
             };
-            assert!(latched.five_hour.as_ref().expect("창").expired);
-            assert_eq!(subscribed, &[Claude, Codex], "교체 전 집합");
+            assert!(latched.five_hour.as_ref().expect("window").expired);
+            assert_eq!(subscribed, &[Claude, Codex], "pre-replacement set");
 
             a.subscribe(&[Claude]).await;
             a.subscribe(&[Claude]).await;

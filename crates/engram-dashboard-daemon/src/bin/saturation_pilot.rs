@@ -1,13 +1,10 @@
-//! saturation-pilot — ADR-0090 Stage 2 컨텍스트 포화 실측 드라이버(실험 전용 bin).
+//! saturation-pilot — ADR-0090 Stage 2 context saturation measurement driver (experiment-only bin).
 //!
-//! ## 역할
-//! 실 claude 1스폰을 격리 워크스페이스에서 몰고, 배달은 **실 control 경로**(handle_send → wrap_message →
-//! write_stdin_observed)를 그대로 태운다 — 실험 경로 = 운영 경로 동일성이 결과 해석의 전제다(ADR-0090 d2).
-//! 순수 로직은 `experiment::{cli,filler,probe,record,transcript}` 소관이고 이 파일은 배선 + 턴 루프다.
+//! Drives one real claude spawn in an isolated workspace; delivery runs through the real control path (handle_send → wrap_message → write_stdin_observed) — experiment path = production path is the premise of interpreting results (ADR-0090 d2). Pure logic lives in `experiment::{cli,filler,probe,record,transcript}`; this file is wiring + the turn loop.
 //!
-//! ## 파일 경계 불변식
-//! - **summary 항상 기록** — 정상/타임아웃/abort/패닉 어떤 경로든 마지막에 summary 레코드를 쓴다.
-//! - **격리 워크스페이스** — fresh 임시 dir 이 cwd, 비밀 미기록, 종료 시 제거(--keep-workspace 예외).
+//! ## Invariants
+//! - Summary always written — whatever the path (normal/timeout/abort/panic), a summary record is written last.
+//! - Isolated workspace — a fresh temp dir is the cwd, secrets are not written, removed on exit (`--keep-workspace` excepted).
 // ADR-0090
 
 use std::collections::BTreeMap;
@@ -49,7 +46,7 @@ use engram_dashboard_daemon::experiment::record::{
 use engram_dashboard_daemon::experiment::transcript::{self, TranscriptSummary};
 use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, Entrance};
 
-// ── 하드 캡(ADR-0090 불변식) ────────────────────────────────────────────────────────
+// ── hard caps (ADR-0090 invariants) ────────────────────────────────────────────────────────
 const MAX_SPAWNS_PER_INVOCATION: u32 = 6;
 const MAX_TURNS_PER_RUN: u32 = 120;
 const MAX_WALLCLOCK_PER_RUN: Duration = Duration::from_secs(45 * 60);
@@ -76,14 +73,14 @@ fn main() {
         }
     };
 
-    // MCP 서버가 async 라 런타임이 필요하다 — 드라이버 본체는 blocking 이라 block_on 안에서 돈다.
+    // The MCP server is async, so a runtime is needed — the driver body is blocking, so it runs inside block_on.
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("tokio 런타임 생성 실패: {e}");
+            eprintln!("tokio runtime creation failed: {e}");
             std::process::exit(1);
         }
     };
@@ -96,10 +93,10 @@ async fn run_all(cfg: PilotConfig) -> i32 {
     let claude_version = capture_claude_version();
     let git_commit = capture_git_commit();
     if claude_version.is_none() {
-        // claude 부재면 실험 자체가 불성립 — 스킵하지 않고 실패시킨다.
+        // Without claude the experiment itself does not hold — fail instead of skipping.
         eprintln!(
-            "FATAL [saturation-pilot]: claude CLI 를 찾을 수 없습니다(`claude --version` 실패). \
-             stream-json 스폰 불가 — 실험 불성립. claude 설치/인증 확인 필요."
+            "FATAL [saturation-pilot]: cannot find the claude CLI (`claude --version` failed). \
+             cannot spawn stream-json — the experiment does not hold. Check the claude install/auth."
         );
         return 3;
     }
@@ -109,7 +106,10 @@ async fn run_all(cfg: PilotConfig) -> i32 {
         .clone()
         .unwrap_or_else(|| default_out_dir(&utc_stamp_compact()));
     if let Err(e) = std::fs::create_dir_all(&out_dir) {
-        eprintln!("출력 디렉토리 생성 실패({}): {e}", out_dir.display());
+        eprintln!(
+            "output directory creation failed ({}): {e}",
+            out_dir.display()
+        );
         return 1;
     }
     eprintln!("[pilot] out dir = {}", out_dir.display());
@@ -117,7 +117,7 @@ async fn run_all(cfg: PilotConfig) -> i32 {
     let runs = cfg.runs.min(MAX_SPAWNS_PER_INVOCATION);
     if runs < cfg.runs {
         eprintln!(
-            "[pilot] runs {} → {} 로 클램프(MAX_SPAWNS_PER_INVOCATION)",
+            "[pilot] runs {} → clamped to {} (MAX_SPAWNS_PER_INVOCATION)",
             cfg.runs, runs
         );
     }
@@ -156,18 +156,17 @@ async fn run_one(
     let run_started = Instant::now();
     let run_id = AgentId::new_v4().to_string();
 
-    // ★finding 8★: 워크스페이스를 **결과 파일보다 먼저** 만든다 — 순서를 뒤집으면 workspace 생성 실패 시
-    //   빈 run-N.jsonl 이 잔존한다.
+    // The workspace is made before the result file — reversed, a failed workspace creation would leave an empty run-N.jsonl.
     let workspace = std::env::temp_dir().join(format!("engram-pilot-ws-{run_id}"));
     if let Err(e) = std::fs::create_dir_all(&workspace) {
-        eprintln!("워크스페이스 생성 실패: {e}");
+        eprintln!("workspace creation failed: {e}");
         return 1;
     }
 
     let mut writer = match JsonlWriter::create(out_file) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("JSONL 파일 생성 실패({}): {e}", out_file.display());
+            eprintln!("JSONL file creation failed ({}): {e}", out_file.display());
             let _ = std::fs::remove_dir_all(&workspace);
             return 1;
         }
@@ -180,8 +179,7 @@ async fn run_one(
         registry,
         messaging,
         mcp_handle,
-        // ★이 이름을 `..` 로 접거나 지우지 말 것★ — 묶어 두는 것이 곧 수거기를 이 스코프 끝까지 살리는
-        //   일이다(사유 = `Wiring` 의 그 칸). 접으면 그 자리에서 drop 돼 자리 표가 닫힌다.
+        // ★Do not fold this name into `..` or remove it★ — binding it keeps the reaper alive to the end of this scope (see that field of `Wiring`); otherwise it drops at once and the seat table closes.
         _relay_sweeper,
         data_dir,
         profile_dir,
@@ -189,10 +187,8 @@ async fn run_one(
     } = match wire(&run_id).await {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("배선 실패: {e}");
-            // ★accepted residual(wiring 실패)★: 배선 실패는 setup abort 라 헤더 이전이다. 빈 run 파일이
-            //   남으면 사후 파싱이 "0바이트 = 뭐가 잘못됐지?" 로 헷갈리므로, 최소 마커 한 줄을 남겨 원인을
-            //   명시한다(over-engineer 금지 — 한 줄). 이 파일은 헤더가 없으므로 정식 레코드 스키마가 아님.
+            eprintln!("wiring failed: {e}");
+            // Accepted residual: a wiring failure is a setup abort before the header. An empty run file would confuse post-hoc parsing, so one minimal marker line states the cause (not the formal record schema).
             writer.write_raw_line(r#"{"aborted":"wiring_failed"}"#);
             let _ = std::fs::remove_dir_all(&workspace);
             return 1;
@@ -204,13 +200,12 @@ async fn run_one(
         seen: delivery_seen.clone(),
     }));
 
-    // 헤더는 스폰 뒤에 쓴다 — 세션 id 로 트랜스크립트를 먼저 찾아야 resolved_model/transcript_available 을
-    //   담을 수 있다.
+    // The header is written after the spawn — the transcript must be found by session id first to fill resolved_model/transcript_available.
     let agent = match spawn_pilot_agent(&manager, &workspace, &cfg.model) {
         Some(a) => a,
         None => {
             eprintln!(
-                "FATAL [saturation-pilot]: claude(stream-json) 스폰 실패 — 실험 불성립(부재/인증)."
+                "FATAL [saturation-pilot]: claude (stream-json) spawn failed — the experiment does not hold (missing/auth)."
             );
             writer.write(&Record::Header(HeaderRecord {
                 claude_version,
@@ -251,32 +246,29 @@ async fn run_one(
         }
     };
 
-    // ★세션 id 와 transcript 탭은 첫 전송 뒤에 찾는다(ADR-0226)★: 세션 id 는 첫 제출 전에는 영속되지
-    //   않아 스폰 직후 명부를 읽으면 언제나 비어 있다. 찾는 자리 = `RunState::learn_session_id`, 탭은 그
-    //   뒤 `refresh_real_context` 가 찾는다. 그 전까지는 문자 추정이다.
-    eprintln!("[pilot] transcript tap 은 첫 전송 뒤에 찾는다 — 그 전까지 문자 추정(best-effort)");
+    // ★The session id and transcript tap are found after the first send (ADR-0226)★: the session id is not persisted before the first submit, so the roster right after spawn is empty. See `RunState::learn_session_id` and `refresh_real_context`; until then it is a character estimate.
+    eprintln!("[pilot] the transcript tap is found after the first send — character estimate until then (best-effort)");
 
     let obs = Arc::new(TurnObserver::new());
     let sink_id = match manager.subscribe(agent.id, obs.clone()) {
         Ok(id) => Some(id),
         Err(e) => {
-            eprintln!("구독 실패: {e}");
+            eprintln!("subscribe failed: {e}");
             None
         }
     };
 
-    // ── 런 상태 ──
+    // ── run state ──
     let mut state = RunState::new(None, None);
 
-    // ★finding 10 — 헤더-first 계약★: HeaderRecord 는 **파일의 첫 줄**이다. 이 write 를 첫 task 턴 뒤로
-    //   미루면 turn 이 헤더보다 앞선다. 그래서 헤더 시점에는 transcript 탭이 언제나 없다(위 주석).
+    // ★Header-first contract★: HeaderRecord is the first line of the file; a write after the first task turn would put a turn ahead of it. So the transcript tap is always absent at header time.
     writer.write(&Record::Header(HeaderRecord {
         claude_version,
         daemon_git_commit: git_commit,
         model_pin: cfg.model.clone(),
         resolved_model: None,
         resolved_model_note: Some(
-            "트랜스크립트 부재(스폰 시점 — 첫 전송 뒤에 찾는다) — 실 usage·모델 id 는 런 끝 재파싱으로 확정, 진행은 문자 추정 폴백"
+            "transcript missing (at spawn time — found after the first send) — the real usage and model id are settled by the end-of-run reparse; progress falls back to character estimates"
                 .to_string(),
         ),
         transcript_available: false,
@@ -287,9 +279,7 @@ async fn run_one(
         config: config_json,
     }));
 
-    // ★finding 8 — 패닉 경로에서도 cleanup 보장★: 감싸지 않으면 mid-run 패닉이 아래 cleanup 호출을
-    //   건너뛰어 claude 가 살아남고 temp dir 이 남는다. 정리 리소스(manager/mcp_handle/paths)는 이 스코프에
-    //   남겨야 패닉해도 회수된다 — 본체가 move 하는 건 state/writer 뿐이다.
+    // ★Cleanup guaranteed even on the panic path★: unwrapped, a mid-run panic would skip the cleanup below, leaving claude alive and the temp dir behind. Cleanup resources (manager/mcp_handle/paths) stay in this scope; the body moves only state/writer.
     let run_ctx = RunDriveCtx {
         manager: &manager,
         registry: &registry,
@@ -307,7 +297,7 @@ async fn run_one(
     let (abort_reason, total_turns, max_ctx) = match drive_result {
         Ok(outcome) => outcome,
         Err(_) => {
-            eprintln!("[pilot] run {run_idx} PANICKED — cleanup 강제 실행(finding 8)");
+            eprintln!("[pilot] run {run_idx} PANICKED — forcing cleanup (finding 8)");
             let panic_ts = state
                 .transcript_path
                 .as_deref()
@@ -351,16 +341,14 @@ async fn run_one(
 
     if abort_reason.is_some() {
         eprintln!("[pilot] run {run_idx} aborted: {abort_reason:?}");
-        // abort 는 graceful — nonzero 로 상위에 알리되 파일은 온전.
+        // abort is graceful — reports nonzero upward, but the file is intact.
         return 4;
     }
     eprintln!("[pilot] run {run_idx} done: turns={total_turns} max_ctx={max_ctx}");
     0
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════
-// drive_run — 동기 런 본체(턴 루프 + 파이널라이즈)
-// ═══════════════════════════════════════════════════════════════════════════════════
+// ── drive_run — the synchronous run body (turn loop + finalize) ──
 
 struct RunDriveCtx<'a> {
     manager: &'a Arc<AgentManager>,
@@ -374,8 +362,7 @@ struct RunDriveCtx<'a> {
     cfg: &'a PilotConfig,
 }
 
-/// ★finding 5/6★: 모든 턴(fill·주입·프로브·FINAL 전부) **직전**에 이 게이트를 통과해야 한다 — 루프
-///   바깥의 후처리 phase 도 예외가 아니다.
+/// Every turn (fill · inject · probe · FINAL) must pass this gate right before it — the post-processing phase outside the loop is no exception.
 fn cap_gate(ctx: &RunDriveCtx, state: &RunState) -> Result<(), String> {
     if ctx.run_started.elapsed() >= MAX_WALLCLOCK_PER_RUN {
         return Err("MAX_WALLCLOCK_PER_RUN reached".to_string());
@@ -442,7 +429,7 @@ fn drive_run(
     let mut next_inject = 0usize;
     let mut pending_probes: Vec<PendingProbe> = Vec::new();
 
-    // ── Fill + Inject + Probe 루프 ──
+    // ── Fill + Inject + Probe loop ──
     if abort_reason.is_none() {
         loop {
             if let Err(r) = cap_gate(ctx, state) {
@@ -477,10 +464,7 @@ fn drive_run(
                                 codeword: inj.codeword,
                             });
                             next_inject += 1;
-                            // ★finding 5 — 주입 턴은 probe gap 을 소비하지 않는다★: 여기서 대기 프로브의
-                            //   gap 을 깎으면 방금 넣은 주입 턴 자신과 **다른 주입들**까지 gap 을 먹어
-                            //   `--probe-gap-turns` 정의("주입 후 fill 턴 수")와 어긋난다. gap 감소는 아래
-                            //   fill 턴 처리 지점 **한 곳**에서만 일어난다.
+                            // ★An inject turn does not consume the probe gap★: decrementing a waiting probe's gap here would let the just-injected turn and other injections eat it, contradicting `--probe-gap-turns` ("fill turns after injection"). The gap decrement happens only in the fill turn handling below.
                             continue;
                         }
                         InjectOutcome::Abort(r) => {
@@ -537,7 +521,7 @@ fn drive_run(
         }
     }
 
-    // 남은 프로브는 gap 여부 무관하게 소진한다 — 런 끝 회상도 측정 대상이라서.
+    // Remaining probes are used up regardless of the gap — recall at the end of the run is measured too.
     if abort_reason.is_none() {
         let leftover: Vec<PendingProbe> = std::mem::take(&mut pending_probes);
         for probe in leftover {
@@ -552,18 +536,13 @@ fn drive_run(
         }
     }
 
-    // ★finding 3 fix — 강제 /compact phase 제거★: 이전엔 포화 도달 시 리터럴 `/compact` 를 평범한 유저
-    //   TEXT 로 보내 반응을 관측하는 phase 가 있었으나, stream-json headless 에는 대화형 슬래시 인터셉트가
-    //   없어 `/compact` 는 native compaction 을 **트리거하지 못하는** 평문일 뿐이라 오해를 부르는 관측이었다.
-    //   그래서 phase 전체를 삭제한다. compaction 관측은 **organic native 압축**을 트랜스크립트 compact-marker
-    //   캡처(transcript.compact_marker_lines)로만 잡는다 — 스모크가 organic 압축이 실제로 일어나고 캡처됨을
-    //   증명했다(런 끝 authoritative 파싱 경로가 이미 그 마커를 CompactSignal 로 기록한다).
+    // ★Forced /compact phase removed — do not revive★: stream-json headless has no interactive slash interception, so a literal `/compact` sent as user text cannot trigger native compaction and gives a misleading observation. Compaction is observed only by capturing the transcript compact-marker of organic native compaction (transcript.compact_marker_lines); the end-of-run authoritative parse already records it as CompactSignal.
 
     if abort_reason.is_none() {
         match cap_gate(ctx, state) {
             Ok(()) => {
                 let final_probe = PendingProbe {
-                    k: u32::MAX, // 표식: FINAL(주입 없음).
+                    k: u32::MAX, // marker: FINAL (no injection).
                     remaining_gap: 0,
                     sender_name: String::new(),
                     msg_id: String::new(),
@@ -586,7 +565,7 @@ fn drive_run(
         }
     }
 
-    // ★런 끝 authoritative 파싱(ADR-0090 Fix 1)★: 턴별 best-effort 탭보다 이게 최종 진실이다.
+    // ★End-of-run authoritative parse (ADR-0090 Fix 1)★: the final truth over the per-turn best-effort tap.
     let final_transcript: Option<TranscriptSummary> = state
         .transcript_path
         .as_deref()
@@ -644,13 +623,11 @@ fn drive_run(
             .max()
     });
     let max_ctx = max_real.unwrap_or(state.max_context_tokens);
-    // ★finding 8★: writer io_errors 를 abort_reason 에 반영(조용한 기록 손실 가시화).
+    // Reflect writer io_errors in abort_reason (makes silent record loss visible).
     if writer.io_errors > 0 && abort_reason.is_none() {
         abort_reason = Some(format!("{} JSONL write/flush errors", writer.io_errors));
     }
-    // ★finding 1★: 헤더의 resolved_model 은 스폰 직후(트랜스크립트 미기록)라 대개 None 이다 — 런 끝
-    //   authoritative 파싱이 확정한 모델 id·탭 존재·경로를 summary 에도 실어야 재현성 핀(ADR-0088 d5a)이
-    //   남는다. 헤더만 읽으면 핀이 유실된 것으로 보인다.
+    // ★The header's resolved_model is right after spawn (transcript not yet written), so usually None — the model id · tap existence · path settled by the end-of-run parse must also be carried in the summary so the reproducibility pin (ADR-0088 d5a) is not lost.
     let summary_resolved_model = final_transcript
         .as_ref()
         .and_then(|ts| ts.resolved_model.clone());
@@ -671,42 +648,33 @@ fn drive_run(
     (abort_reason, state.turn_idx, max_ctx)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════
-// 배선
-// ═══════════════════════════════════════════════════════════════════════════════════
+// ── wiring ──
 
 struct Wiring {
     manager: Arc<AgentManager>,
     registry: Arc<ControlRegistry>,
-    /// C1: 발송 3분기 담당(handle_send 에 넘긴다).
+    /// 3-way send branch (handed to handle_send).
     messaging: Arc<engram_dashboard_messaging::service::MessagingService>,
     mcp_handle: McpServerHandle,
-    /// ★수거기는 **이 구조체가** 들고 있어야 한다★ — `wire()` 의 지역 변수로 두면 함수를 빠져나올 때
-    /// 그 자리에서 자리 표가 닫혀(`CommandDeliveries::drain`) 그 뒤 이 서버의 모든 중계가 「종료 중」으로
-    /// 반려된다. 명부가 비어 오늘은 중계가 없어 조용한 것이고, 그것이 이 파일럿으로 중계를 태워 보려는
-    /// 다음 사람에게 남는 함정이다(같은 형태를 세 픽스처에서 이미 밟았다).
+    /// ★This struct must hold the reaper★ — as a local of `wire()`, the seat table closes the moment the function returns (`CommandDeliveries::drain`) and every later relay of this server is bounced as 「shutting down」. The roster is empty so no relays happen today; that is the trap for whoever runs relays through this pilot (the same shape was already stepped on in three fixtures).
     _relay_sweeper: engram_dashboard_daemon::command_delivery::BusSweeper,
     data_dir: PathBuf,
-    /// ★finding 9★: per-run profile/preset 임시 dir — cleanup 이 이것도 지워야 temp 가 안 샌다.
+    /// Per-run profile/preset temp dir — cleanup must delete it too so temp does not leak.
     profile_dir: PathBuf,
     preset_dir: PathBuf,
 }
 
-/// control_send.rs 의 wire() 순서를 미러한다.
+/// Mirrors the wire() order of control_send.rs.
 async fn wire(tag: &str) -> Result<Wiring, String> {
     let registry = Arc::new(ControlRegistry::new());
     let slot = Arc::new(ManagerSlot::new());
     let messaging_slot =
         Arc::new(engram_dashboard_daemon::control::mcp_server::MessagingSlot::new());
-    // ★스모크/하네스에는 붙을 클라이언트가 없다★ — 명부 통지 팬아웃 슬롯은 빈 채로 표에 넘긴다
-    //   (통지 생략이 정상인 조립이다, ADR-0132). 표 자체는 채운다 — 비우면 `/control/agent` 가 503 만
-    //   내는 죽은 라우트가 되어, 이 bin 으로 그 계열을 태워 볼 수 없다.
+    // ★No client to attach★ — the roster notification fanout slot is handed to the table empty (skipping notifications is normal here, ADR-0132). The table itself is filled — left empty, `/control/agent` would only give 503.
     let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
     let command_slot = Arc::new(CommandTableSlot::new());
-    // ★수거기는 반환물이 든다★ — 여기서 `_` 로 묶으면 함수를 빠져나오는 순간 표가 닫힌다(`Wiring` 의 그 칸).
-    // ★1단계 표를 **슬롯으로** 물린다★ — 운영 조립(`lib.rs`)과 같은 모양이다. `without_commands()` 로
-    //   두면 판정부가 보는 표와 버스가 보는 표가 서로 다른 부가 되어, 이 서버의 `/control/call` 이
-    //   `agent.*` 를 자기 이름으로 알아보지 못한다.
+    // ★The return value holds the reaper★ — bind it here with `_` and the table closes when the function returns (see that field of `Wiring`).
+    // ★Attach the stage-1 table through the slot★ — same shape as production `lib.rs`; with `without_commands()` the decider's and the bus's tables differ and `/control/call` would not recognize `agent.*`.
     let (relay_bus, relay_sweeper) = engram_dashboard_daemon::command_delivery::CommandBus::new(
         engram_dashboard_daemon::command_roster::CommandRoster::new(),
         engram_dashboard_daemon::command_delivery::CommandDeliveries::new(),
@@ -732,8 +700,8 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         registry.clone(),
         url,
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
-        None, // send_exe: 파일럿은 handle_send 직접 호출이라 CLI 경로 불요.
-        // ADR-0092: 파일럿은 프라이밍 무관(주입 확립은 priming_smoke bin) — Noop 으로 오늘 동작 불변.
+        None, // send_exe: the pilot calls handle_send directly, so the CLI path is not needed.
+        // ADR-0092: the pilot is unrelated to priming (injection is established by the priming_smoke bin) — Noop.
         Arc::new(engram_dashboard_daemon::control::priming::NoopPrimingProvider),
     ));
 
@@ -785,7 +753,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
     })
 }
 
-/// control_send.rs 의 spawn_json_agent 미러.
+/// Mirror of control_send.rs's spawn_json_agent.
 fn spawn_pilot_agent(
     manager: &Arc<AgentManager>,
     workspace: &std::path::Path,
@@ -794,7 +762,7 @@ fn spawn_pilot_agent(
     let profile = AgentProfile::new(
         format!("pilot-{}", &AgentId::new_v4().to_string()[..8]),
         AgentCommand::Claude {
-            // ★모델 핀★: extra_args 로 --model 주입(백엔드 코드 무변경 — ADR-0090 d3).
+            // ★Model pin★: `--model` through extra_args (no backend code change — ADR-0090 d3).
             extra_args: vec!["--model".to_string(), model.to_string()],
             output_format: AgentOutputFormat::StreamJson,
         },
@@ -816,9 +784,7 @@ fn spawn_pilot_agent(
     None
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════
-// 출력 관측 sink
-// ═══════════════════════════════════════════════════════════════════════════════════
+// ── output observation sink ──
 
 struct NoopStatus;
 impl StatusSink for NoopStatus {
@@ -838,24 +804,23 @@ impl DeliveryObserver for DeliveryCapture {
 struct TurnObserver {
     id: SinkId,
     inner: Mutex<ObserverInner>,
-    /// MessageDone 카운트(턴 종료 신호) — Condvar 대기의 조건.
+    /// MessageDone count (turn end signal) — the Condvar wait condition.
     done_count: AtomicU64,
     cv: Condvar,
-    /// 터미널 상태 도달(에이전트 죽음) 감지 — status sink 가 아니라 여기선 미사용(별도 list 체크).
+    /// Terminal state reached (agent death) — not the status sink; unused here.
     _reserved: (),
 }
 
 #[derive(Default)]
 struct ObserverInner {
     response_buf: String,
-    /// 최근 usage(input/output).
+    /// Latest usage (input/output).
     last_usage: Option<(u64, u64)>,
-    /// 디코딩된 이벤트 variant 히스토그램.
+    /// Histogram of decoded event variants.
     histogram: BTreeMap<String, u64>,
-    /// compact 근사 신호(Structured/Error 텍스트에서 "compact" 발견).
+    /// Approximate compact signal ("compact" in Structured/Error text).
     compact_signals: Vec<CompactSignalRecord>,
-    /// ★finding 3★: 현재 턴에서 관측된 **비-compaction** API 에러 메시지(있으면). MessageDone 이 뒤따라도
-    ///   이 턴은 실패로 봐야 한다 — 안 그러면 abort_reason:null 로 실패가 은폐된다.
+    /// The non-compaction API error observed in the current turn (if any). Even if MessageDone follows, the turn counts as failed — else the failure hides as abort_reason:null.
     turn_error: Option<String>,
 }
 
@@ -870,9 +835,7 @@ impl TurnObserver {
         }
     }
 
-    /// ★load-bearing(finding 1/2)★: **caller MUST wait_turn_end before the next stdin write** — begin_turn
-    ///   으로 리셋한 뒤 stdin write 를 하고 그 턴의 wait_turn_end 로 펜싱해야 한다. 펜싱 없이 다음 stdin
-    ///   write 를 하면 이전 턴의 늦은 MessageDone 이 다음 wait 를 조기 해제해 응답이 엉뚱한 턴에 귀속된다.
+    /// ★Load-bearing: the caller MUST wait_turn_end before the next stdin write★ — begin_turn reset, write stdin, fence with that turn's wait_turn_end. Without the fence, the previous turn's late MessageDone releases the next wait early and the reply is attributed to the wrong turn.
     fn begin_turn(&self) {
         let mut g = self.inner.lock().unwrap();
         g.response_buf.clear();
@@ -888,12 +851,11 @@ impl TurnObserver {
         self.done_count.load(Ordering::Acquire)
     }
 
-    /// done_count 가 `baseline` 을 초과할 때까지(=이번 턴의 MessageDone) 대기. 타임아웃이면 false.
+    /// Waits until done_count exceeds `baseline` (= this turn's MessageDone). Returns false on timeout.
     fn wait_turn_end(&self, baseline: u64, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         let guard = self.inner.lock().unwrap();
-        // done_count 는 atomic 이라 lock 밖에서 바뀌지만, Condvar 대기는 이 lock 을 놓고 자므로
-        //   notify 를 놓치지 않게 wait_timeout 루프로 확인한다(spurious wake 방어).
+        // done_count is atomic and changes outside the lock, but the Condvar wait sleeps with this lock released, so loop on wait_timeout to not miss a notify (spurious wakes).
         let mut g = guard;
         loop {
             if self.done_count.load(Ordering::Acquire) > baseline {
@@ -928,7 +890,7 @@ impl TurnObserver {
 impl OutputSink for TurnObserver {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
         let OutputPayload::Event(ev) = frame.payload else {
-            // json 에이전트는 Event 만 오지만(TerminalBytes 아님), 방어적으로 Bytes 는 무시.
+            // A json agent gets only Events (not TerminalBytes); Bytes is ignored defensively.
             return Ok(());
         };
         let mut g = self.inner.lock().unwrap();
@@ -947,7 +909,7 @@ impl OutputSink for TurnObserver {
                 g.last_usage = Some((*input_tokens, *output_tokens));
             }
             OutputEvent::MessageDone { .. } => {
-                // lock 밖 atomic 증가 후 대기자 깨움. lock 보유 중이지만 짧다.
+                // Wake waiters after the atomic increment outside the lock; the lock is held only briefly.
                 self.done_count.fetch_add(1, Ordering::Release);
                 self.cv.notify_all();
             }
@@ -960,10 +922,7 @@ impl OutputSink for TurnObserver {
                 }
             }
             OutputEvent::Error(msg) => {
-                // ★finding 3(substring) fix★: OutputEvent::Error 는 텍스트에 "compact" 가 들어 있어도
-                //   **항상 실 에러**다 — substring 이 에러를 무해 신호로 강등하지 못한다. 이전엔 "compact"
-                //   포함 시 turn_error 를 안 세우고 compact 신호로만 기록해, "compaction failed" 류 실 API
-                //   에러가 성공(abort_reason:null)으로 삼켜졌다.
+                // ★OutputEvent::Error is always a real error even if its text contains "compact"★ — a substring must not demote an error to a harmless compact signal (real API errors like "compaction failed" were swallowed as success, abort_reason:null).
                 if g.turn_error.is_none() {
                     g.turn_error = Some(cap_response(msg));
                 }
@@ -983,7 +942,7 @@ impl OutputSink for TurnObserver {
     }
 }
 
-/// 디코딩된 OutputEvent → 히스토그램 키(variant 이름). raw stream-json 타입이 아님(honest scope).
+/// Decoded OutputEvent → histogram key (variant name), not the raw stream-json type.
 fn decoded_variant_key(ev: &OutputEvent) -> String {
     match ev {
         OutputEvent::TerminalBytes(_) => "TerminalBytes",
@@ -1000,33 +959,28 @@ fn decoded_variant_key(ev: &OutputEvent) -> String {
     .to_string()
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════
-// 턴 드라이버
-// ═══════════════════════════════════════════════════════════════════════════════════
+// ── turn driver ──
 
 enum TurnResult {
     Ok,
     Stalled,
     Terminal,
-    /// ★finding 3★: 턴은 MessageDone 으로 끝났으나 그 사이 비-compaction API 에러가 관측됐다 — 실패.
+    /// The turn ended with MessageDone, but a non-compaction API error was observed in between — failure.
     Error(String),
 }
 
-/// 문자→토큰 근사 비율(영문 대략 4 char/token). fill 진행 추정에만 쓰는 heuristic.
+/// Character→token ratio (about 4 char/token for English) — a heuristic for fill progress estimates only.
 const CHARS_PER_TOKEN_EST: u64 = 4;
 
 struct RunState {
     turn_idx: u32,
-    /// fill 진행/주입 문턱 판정 기준(= 우리가 보낸 누적 문자의 토큰 추정).
+    /// Basis for fill progress/injection threshold decisions (= token estimate of the cumulative characters sent).
     max_context_tokens: u64,
     doc_counter: u32,
     estimate_samples: Vec<UsageSample>,
-    /// ★파일럿 발견(2026-07-20 스모크 실측)★: 스폰 경로의 디코딩된 `Usage.input_tokens` 는 그 턴의
-    ///   **증분 입력**(≈3)만 보고한다. 그래서 fill 진행/주입 문턱 판정은 usage 가 아니라 **우리가 보낸
-    ///   누적 문자수의 토큰 추정**으로 한다(우리가 통제·결정적).
+    /// ★Measured★: on the spawn path the decoded `Usage.input_tokens` reports only that turn's incremental input (≈3), so thresholds use the token estimate of cumulative characters sent (controlled · deterministic), not usage.
     cumulative_chars_sent: u64,
-    /// 트랜스크립트 탭 경로(있으면). 턴마다 이 파일을 재파싱해 **가장 최신 실 usage** 를 뽑는다(best-effort).
-    ///   ADR-0008 경계: 이건 측정 탭일 뿐 — 부재해도 하네스는 정상 동작한다(문자 추정 폴백).
+    /// Transcript tap path (if any). The file is reparsed each turn for the latest real usage (best-effort). ADR-0008 boundary: only a measurement tap — absent, the harness falls back to the character estimate.
     transcript_path: Option<PathBuf>,
     session_id: Option<String>,
     latest_real_context: Option<u64>,
@@ -1057,7 +1011,7 @@ impl RunState {
         (self.cumulative_chars_sent / CHARS_PER_TOKEN_EST).max(self.max_context_tokens)
     }
 
-    /// 전송이 성공한 **뒤에** 부른다 — 세션 id 는 첫 제출이 영속하므로(ADR-0226) 그 전에는 명부에 없다.
+    /// Called after a send succeeds — the session id is persisted by the first submit (ADR-0226), so it is not in the roster before that.
     fn learn_session_id(&mut self, manager: &AgentManager, agent_id: AgentId) {
         if self.session_id.is_none() {
             self.session_id = manager
@@ -1123,7 +1077,7 @@ fn drive_turn(
     let baseline = obs.done_snapshot();
     let t0 = Instant::now();
 
-    // 유저 턴 전송 = write_stdin(세션이 wrap_user_turn 으로 감쌈). ADR-0231: 파일럿은 사람이 아니다 — `Mail`.
+    // User turn send = write_stdin (the session wraps it with wrap_user_turn). ADR-0231: the pilot is not a person — `Mail`.
     if manager
         .write_stdin(agent_id, prompt.as_bytes(), InputOrigin::Mail)
         .is_err()
@@ -1156,7 +1110,7 @@ fn drive_turn(
     state.account_context(prompt.len());
     state.refresh_real_context();
 
-    // 항상 1건 기록해 실측만 있고 디코딩 usage 는 없는 턴도 계열에 남긴다.
+    // Always write 1 record so turns with only measured values and no decoded usage stay in the series.
     let usage = Some(state.usage_snapshot(obs.last_usage()));
     state.push_estimate_sample(false);
 
@@ -1168,10 +1122,10 @@ fn drive_turn(
         usage,
         wallclock_ms,
     }));
-    let _ = doc_n; // doc 번호는 sha 로 이미 대조 가능 — 레코드에 별도 미기록(원문 미기록 불변식).
+    let _ = doc_n; // the doc number can already be checked through the sha — not written separately to the record (the no-original-text invariant).
     state.turn_idx += 1;
 
-    // turn_idx 는 이미 올렸으니 이 턴은 소비된 것으로 셈 — 캡·계열 일관.
+    // turn_idx was already raised, so this turn counts as consumed — caps and series stay consistent.
     if let Some(e) = obs.turn_error() {
         return TurnResult::Error(e);
     }
@@ -1184,8 +1138,7 @@ struct InjectionMeta {
     codeword: String,
 }
 
-/// ★finding 1★: 주입도 첫급 턴이라 스톨/실패면 런을 중단해야 한다(부분 상태로 다음 프로브가 오귀속되지
-/// 않게).
+/// An injection is a first-class turn too, so a stall/failure must abort the run (the next probe must not be misattributed with partial state).
 enum InjectOutcome {
     Ok(InjectionMeta),
     Abort(String),
@@ -1207,18 +1160,16 @@ fn do_injection(
     state: &mut RunState,
     writer: &mut JsonlWriter,
 ) -> InjectOutcome {
-    // 발신자 신원 발급(control_send.rs 패턴 — 등록된 발신자 토큰).
+    // Issue the sender identity (the control_send.rs pattern — a registered sender token).
     let sender = AgentId::new_v4();
     registry.issue(sender, 0, format!("pilot-sender-{k}-{run_id}"), true);
     let from = BoundIdentity {
         agent_id: sender,
         epoch: 0,
     };
-    let sender_name = sender.to_string()[..8].to_string(); // profile 부재 → id 앞8자 fallback.
+    let sender_name = sender.to_string()[..8].to_string(); // no profile → fallback to the first 8 chars of the id.
 
-    // ★프레이밍(스모크 실측 2026-07-20)★: 명령형 "report ..." 문구는 인젝션으로 오인돼 거부됐다 —
-    //   그래서 회상 대상(codeword)을 담되 **친근한 메모**로 프레이밍한다(명령 없음). 회상은 나중 프로브
-    //   질문이 요청하므로, 이 메시지 본문은 codeword 를 자연스럽게 담기만 하면 된다.
+    // ★Framing★: an imperative "report ..." wording was mistaken for an injection and refused — so it holds the recall target (codeword) but is framed as a friendly memo (no command). Recall is requested by the later probe question.
     let codeword = codeword_for(seed, k);
     let body = format!(
         "Just a friendly note to keep in mind for later: our shared codeword for this session is {codeword} (reference {run_id}-{k}). No action needed right now — thanks!"
@@ -1226,7 +1177,7 @@ fn do_injection(
     let body_len = body.len();
     let body_sha256 = sha256_hex(body.as_bytes());
 
-    // 수신자 지목 = 정확한 AgentId 문자열(profile name 대신 id — 스폰 name 과 무관하게 견고).
+    // Recipient target = the exact AgentId string (robust regardless of the spawn name).
     let to = agent_id.to_string();
 
     obs.begin_turn();
@@ -1249,7 +1200,7 @@ fn do_injection(
     let v = result.to_json();
     let msg_id = v["id"].as_str().unwrap_or("").to_string();
 
-    // 배달 관측(성공 시 새 레코드 1건).
+    // Delivery observation (1 new record on success).
     let delivery = {
         let g = delivery_seen.lock().unwrap();
         g.get(before).cloned()
@@ -1262,9 +1213,8 @@ fn do_injection(
             o.to_epoch,
             o.error.clone(),
         ),
-        // C1: 관측 레코드 부재 시 응답 `results[]` 로 판정한다.
-        //   ★행 상태를 본다(리뷰 C5)★: 개편 이후 `results` 는 **실패 행**도 담으므로(ADR-0111 부분 진행)
-        //   존재 여부로 판정하면 아무에게도 안 간 발송이 delivered 로 기록돼 용량 파일럿 데이터가 오염된다.
+        // With no observation record, decide by the response `results[]`.
+        //   ★Look at the row status★: `results` holds failed rows too (ADR-0111 partial progress), so deciding by existence would record a send that reached nobody as delivered and pollute the pilot data.
         None => (
             v.get("results")
                 .and_then(|r| r.as_array())
@@ -1292,13 +1242,11 @@ fn do_injection(
         to_epoch,
         error: error.clone(),
     }));
-    let _ = agent_epoch; // epoch 핀 없음(ADR-0086 F5/ADR-0089) — to_epoch 은 관측만.
+    let _ = agent_epoch; // no epoch pin (ADR-0086 F5/ADR-0089) — to_epoch is observation only.
 
-    // ★배달 실패면 stdin 에 실제 user 턴이 안 들어갔다 — wait_turn_end 를 기다리면 헛되이 타임아웃한다.
-    //   그래서 배달 실패 시엔 펜싱을 건너뛴다.
+    // ★On a delivery failure no real user turn went into stdin★ — waiting for wait_turn_end would time out in vain, so skip the fencing.
     if !delivered {
-        // ★turn-index 연속성 계약(finding 1)★: turn_idx 를 소비하는 **모든** 경로는 TurnRecord 를 남긴다 —
-        //   실패 경로에서도. 안 그러면 전역 turn 인덱스 수열에 구멍이 나 소비 인덱스↔레코드 매핑이 깨진다.
+        // ★Turn-index continuity contract★: every path that consumes turn_idx leaves a TurnRecord, failure paths included — else the index sequence gets holes and the index↔record mapping breaks.
         writer.write(&Record::Turn(TurnRecord {
             idx: state.turn_idx,
             kind: "inject".to_string(),
@@ -1372,10 +1320,7 @@ fn run_probe(
     state: &mut RunState,
     writer: &mut JsonlWriter,
 ) -> Result<(), String> {
-    // ★패턴 브레이크(round-3 fix, ADR-0090)★: 이전 라운드에선 프로브가 fill 패턴에 갇혀 `received N` 만
-    //   돌려줬다(회상이 아니라 패턴락을 측정 — 판정 도구 무효). 그래서 프로브 문구가 **명시적으로**
-    //   "이번 한 답만 문서 연습을 멈춰라 · `received N` 으로 답하지 마라" 고 패턴을 끊고, 완결 문장으로
-    //   발신자/메시지 id/codeword 를 진술하게 한다.
+    // ★Pattern break (ADR-0090)★: the probe got stuck in the fill pattern and returned only `received N` (measuring pattern lock, not recall). So the probe wording explicitly breaks the pattern ("stop the document exercise for this one answer only · do not answer with `received N`") and asks for sender/message id/codeword in complete sentences.
     let question =
         "Let's PAUSE the document exercise for just this one reply — please do NOT answer \
          `received N` this time. Earlier in this same session, a friendly note from another \
@@ -1386,7 +1331,7 @@ fn run_probe(
             .to_string();
     let out = send_and_collect(manager, agent_id, obs, &question, state, "probe", writer);
 
-    // body 는 프로브 질문(원과제 필러가 아니라 실험 메타라 sha256+len 기록 OK).
+    // body is the probe question (experiment meta, not the original task filler, so recording sha256+len is OK).
     writer.write(&Record::Turn(TurnRecord {
         idx: out.turn_idx,
         kind: "probe".to_string(),
@@ -1465,21 +1410,20 @@ fn run_final_report(
     }
 }
 
-/// ★finding 2★: 이전엔 String 만 돌려줘 타임아웃·write 실패가 부분 텍스트로 조용히 완료됐다(turn_idx
-/// 미증가·stall 미기록·abort 미게이트).
+/// Returns more than a String so a timeout or write failure no longer completes silently as partial text (turn_idx not incremented · stall not recorded · abort not gated).
 struct CollectOutcome {
     response: String,
-    /// Some 이면 호출자는 이 사유로 런을 abort 해야 한다(늦은 result 가 다음 wait 를 조용히 완료 못 하게).
+    /// If Some, the caller must abort the run with this reason (so a late result cannot silently complete the next wait).
     abort: Option<String>,
-    /// ★finding 4★: send_and_collect 가 turn_idx 를 올리기 **전** 값 = 이 턴의 인덱스.
+    /// The value before send_and_collect raises turn_idx = this turn's index.
     turn_idx: u32,
-    /// ★finding 4★: 이 턴의 usage 스냅샷. 스톨/write-fail 시엔 None(usage 를 못 잡은 턴).
+    /// This turn's usage snapshot. None on stall/write-fail.
     usage: Option<UsageSnapshot>,
-    /// ★finding 4★: 이 턴의 실 벽시계 ms(TurnRecord 용 — 조작된 0 금지). 스톨/write-fail 시엔 대기한 ms.
+    /// This turn's real wall-clock ms (no fabricated 0); on stall/write-fail, the ms waited.
     wallclock_ms: u64,
 }
 
-/// turn 레코드는 쓰지 않고(호출자가 감쌈) usage 샘플/turn_idx 는 갱신한다.
+/// Does not write the turn record (the caller wraps it) but updates the usage sample/turn_idx.
 fn send_and_collect(
     manager: &Arc<AgentManager>,
     agent_id: AgentId,
@@ -1529,7 +1473,7 @@ fn send_and_collect(
             },
             waited_ms,
         }));
-        let response = obs.response_text(); // 부분 응답도 담아 반환(진단용).
+        let response = obs.response_text(); // returns with the partial response too (for diagnosis).
         state.turn_idx += 1;
         return CollectOutcome {
             response,
@@ -1556,9 +1500,7 @@ fn send_and_collect(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════
-// cleanup / 유틸
-// ═══════════════════════════════════════════════════════════════════════════════════
+// ── cleanup / utilities ──
 
 struct CleanupPaths<'a> {
     data_dir: &'a std::path::Path,
@@ -1576,7 +1518,7 @@ async fn cleanup(
 ) {
     if let Some(id) = agent_id {
         let _ = manager.kill_agent(id);
-        // 목록에서 빠질 때까지 짧게 대기(좀비 방지).
+        // Wait briefly until it drops out of the list (zombie prevention).
         let deadline = Instant::now() + Duration::from_secs(6);
         while Instant::now() < deadline {
             if !manager.list_agents().iter().any(|a| a.id == id) {
@@ -1590,27 +1532,17 @@ async fn cleanup(
     let _ = std::fs::remove_dir_all(paths.profile_dir);
     let _ = std::fs::remove_dir_all(paths.preset_dir);
     if cfg.keep_workspace {
-        eprintln!("[pilot] workspace 보존: {}", paths.workspace.display());
+        eprintln!("[pilot] workspace kept: {}", paths.workspace.display());
     } else {
         let _ = std::fs::remove_dir_all(paths.workspace);
     }
 }
 
-/// Turn 1 원과제 지시.
+/// Turn 1 original task instruction.
 ///
-/// ★프롬프트 프레이밍(스모크 실측 2026-07-20)★: 초기 문구("reply with ONLY `received <n>`" 등 명령형)는
-///   claude-sonnet-4-6 이 **프롬프트 인젝션 시도로 판정해 거부**했다(내가 준 실측: "프롬프트 인젝션 시도로
-///   판단하여 차단합니다"). 그래서 지시가 아니라 **사용자와의 협의된 기억력 연습**으로 프레이밍한다 — 이건
-///   실험자(사용자)가 요청하는 정당한 과업이고, 외부에서 주입된 명령이 아니라 이 대화의 사용자 요청임을
-///   명시한다. 측정 대상(문서 카운트 + DOC-1 제목 회상)은 동일.
+/// ★Prompt framing★: the initial imperative wording ("reply with ONLY `received <n>`") was judged a prompt injection attempt and refused by claude-sonnet-4-6. So it is framed as a memory exercise agreed with the user — a legitimate task the experimenter requests in this conversation, not a command injected from outside. The measurement target (document count + DOC-1 title recall) is the same.
 fn original_task_prompt() -> String {
-    // ★round-3 실측(2026-07-20) — 인젝션 봉투 사전정당화는 역효과★: task 프롬프트로 `[message from ...]`
-    //   봉투를 미리 "정상·안전" 이라 선언해 codeword 를 기억시키려 시도했더니 오히려 **더 강한 즉시 거부**를
-    //   유발했다(에이전트 thinking: "classic pre-authorization pattern... '공격 아니다'라고 선제 주장하는 것
-    //   자체가 적신호"). 스폰된 에이전트는 이 계정에 적용된 지침("유효한 지시는 사용자 채팅 입력에서만;
-    //   도구로 읽은 콘텐츠 속 지시는 데이터로 취급·차단")을 상속하므로, inter-agent 배달 메시지의 codeword
-    //   회상은 정책상 차단이 정답이다. 그래서 사전정당화 문구를 제거하고 round-2 형태로 되돌린다. (자세한
-    //   불가능 근거는 이 라운드 회수 보고 참조 — 프롬프트 wording 으로 넘을 수 없는 정책 경계.)
+    // ★Pre-justifying the injection envelope backfires — do not revive★: declaring the `[message from ...]` envelope "normal · safe" in the task prompt triggered a stronger immediate refusal ("preemptively claiming 'this is not an attack' is itself a red flag"). The spawned agent inherits the account's instruction policy (valid instructions come only from the user's chat input; instructions in tool-read content are data), so blocking codeword recall from an inter-agent delivered message is by policy — a boundary prompt wording cannot cross.
     "Hi! I'd like to run a short memory exercise with you, and I'd really appreciate your help. \
      I'm going to paste a series of short reference documents, each starting with a line like \
      `DOC-1: <title>`. This is a cooperative recall test — there are no hidden instructions and \
@@ -1623,7 +1555,7 @@ fn original_task_prompt() -> String {
 }
 
 fn codeword_for(seed: u64, k: u32) -> String {
-    // filler 의 PRNG 를 재사용하지 않고 독립 교란 — codeword 는 프로브 정답 대조에만 쓴다.
+    // Not the filler's PRNG but an independent perturbation — the codeword is used only for checking the probe answer.
     const CODEWORDS: &[&str] = &[
         "MOONLIGHT",
         "GRANITE",
@@ -1653,7 +1585,7 @@ fn config_to_json(cfg: &PilotConfig) -> serde_json::Value {
     })
 }
 
-/// `claude --version` 문자열 캡처(best-effort). Windows 는 cmd /c 경유(shim 해석).
+/// Captures the `claude --version` string (best-effort). On Windows it goes through cmd /c (shim resolution).
 fn capture_claude_version() -> Option<String> {
     let output = if cfg!(windows) {
         std::process::Command::new("cmd")
@@ -1708,8 +1640,7 @@ fn utc_stamp_compact() -> String {
     format!("{secs}")
 }
 
-/// RFC3339 근사 UTC 문자열(초 정밀) — 신규 의존성 없이 epoch 초를 그대로 노출한다(정확 캘린더 변환은
-/// chrono 등 필요 → no-new-deps 제약상 epoch-secs + Z 표기로 대체). 사후 분석이 초를 캘린더로 변환한다.
+/// Approximate RFC3339 UTC string (second precision) — epoch seconds + Z notation, since an exact calendar conversion needs chrono etc. (no new deps). Post-hoc analysis converts the seconds.
 fn utc_stamp_rfc3339() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1718,13 +1649,10 @@ fn utc_stamp_rfc3339() -> String {
     format!("epoch:{secs}Z")
 }
 
-/// 레코드마다 한 줄 + flush — flush 로 abort 시에도 부분 파일이 온전하게 남는다.
+/// One line per record + flush — the flush keeps the partial file intact even on abort.
 ///
-/// ★finding 10 fix★: 파일을 **truncate(create+write)** 로 연다(append 아님). 이전엔 append 라 같은
-///   --out 을 재사용하면 두 런의 레코드가 run-0.jsonl 안에 뒤섞였다(파싱 시 런 경계 붕괴). 헤더-first
-///   계약은 호출자(run body)가 HeaderRecord 를 가장 먼저 write 해 지킨다.
-/// ★finding 8 fix★: write/flush 에러를 무시하지 않고 누적 카운트한다 — summary 직전 이 카운트를 보고
-///   기록 손실 여부를 진단할 수 있다(디스크 풀 등 조용한 실패 가시화).
+/// The file is opened with truncate (create+write), not append: appending mixed two runs' records in run-0.jsonl when `--out` was reused. The header-first contract is kept by the caller writing the HeaderRecord first.
+/// Write/flush errors are counted cumulatively, not ignored — the count before the summary diagnoses lost records (e.g. full disk).
 struct JsonlWriter {
     file: std::fs::File,
     io_errors: u64,
@@ -1743,8 +1671,7 @@ impl JsonlWriter {
         self.write_raw_line(&line);
     }
 
-    /// 임의의 원시 한 줄을 write + flush. 헤더 이전 setup abort 마커(wiring_failed) 전용 — 정식 레코드가
-    /// 아니라 스키마 밖 진단 라인이므로 Record 를 거치지 않는다(accepted residual).
+    /// Writes an arbitrary raw line + flush. Only for the setup-abort marker before the header (wiring_failed) — a diagnostic line outside the schema, not a formal record (accepted residual).
     fn write_raw_line(&mut self, line: &str) {
         if writeln!(self.file, "{line}").is_err() {
             self.io_errors += 1;

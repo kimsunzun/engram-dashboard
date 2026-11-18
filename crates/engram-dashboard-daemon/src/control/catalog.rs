@@ -1,24 +1,15 @@
-//! 계열을 가리지 않는 제어 입구 둘 — **발견**(`/control/commands`)과 **전체 이름 호출**(`/control/call`).
+//! The two control entrances that do not distinguish families — discovery (`/control/commands`) and full-name call (`/control/call`).
 //!
-//! ★역할★: 이웃 `agent.rs` 가 `agent` 한 계열의 어휘(`{verb}`)를 지는 어댑터라면, 여기는 **이름을 그대로
-//!   받는** 어댑터다. 동사 표도 계열 지식도 없고, 검문·실행은 **1단계 포트**를 거쳐 이웃 `commands` 의 공통
-//!   입구(`call_daemon_command`)가 그대로 한다(그 포트를 쓰는 이유 = [`handle_call`] 의 그 문단) — 이 파일이
-//!   더하는 것은 셋이다: (a) 두 출처를 한 목록으로 접는 병합 규칙 (b) 이 표면의 어휘로 쓰는 회복 안내
-//!   (c) 표의 결말 → wire 봉투.
+//! Unlike `agent.rs` (the `{verb}` vocabulary of one family), this takes the name as is: no verb table, no family knowledge; checking and
+//! execution go through the stage-1 port to `commands::call_daemon_command` (why that port: the [`handle_call`] paragraph). This file adds
+//! (a) the merge rule folding two sources into one list, (b) recovery guidance in this surface's vocabulary, (c) table outcome → wire envelope.
 //!
-//! ★`help` 는 열어보지 않는다(하드 제약)★: 병합도 목록도 그 문자열을 **바이트 그대로** 나른다 —
-//!   파싱·검증·분기 금지(ADR-0156). 데몬은 그 안에 무엇이 들었는지 알 필요가 없고, 알면 주인이 모양을
-//!   바꿀 때마다 데몬이 함께 깨진다.
+//! `help` is not opened (hard constraint): merge and list carry it byte for byte — no parsing, validation or branching (ADR-0156).
 //!
-//! ★목록의 도달성 칸(`callable`)과 [`handle_call`] 의 결말은 **같은 사실**에서 나와야 한다★: 그 칸이
-//!   기계가 분기할 수 있는 유일한 자리라, 갈리는 순간 발견은 부를 수 없는 이름을 부를 수 있다고
-//!   가르치거나 그 반대가 된다. 그 사실이 무엇인지는 [`handle_list`].
+//! The list's `callable` and the outcome of [`handle_call`] must come from the same fact (the only machine-branchable field); that fact is in [`handle_list`].
 //!
-//! ★남의 이름은 **버스로 넘긴다**★(ADR-0160): 데몬 자기 표에 없고 주인이 붙어 있으면 [`CallOutcome::Relay`]
-//!   가 되어 부르는 쪽이 배달 기계에 태운다. 여기서 배달을 하지 않는 이유는 이 파일이 blocking 이라서다 —
-//!   왕복은 async 다.
-//!
-//! tauri import 0(daemon crate).
+//! Someone else's names go to the bus (ADR-0160): a name not in the daemon's own table with an owner attached becomes [`CallOutcome::Relay`]
+//! for the caller to deliver — this file is blocking, the round trip is async.
 // ADR-0155
 // ADR-0156
 // ADR-0160
@@ -35,29 +26,20 @@ use super::agent::{preview, preview_within, CommandArgs};
 use super::ingress::ControlQueryResult;
 use crate::command_delivery::LocalCommands;
 
-/// 발견 목록의 병합 규칙 — ★이 규칙이 사는 자리는 여기 하나다★.
+/// The merge rule of the discovery list — this rule lives here only.
 ///
-/// 두 표면(WS 의 `ListCommands` 와 HTTP 의 `/control/commands`)이 이 함수를 부른다. 사본을 두면 두
-/// 목록이 갈리고, 갈린 순간 발견은 **어느 한쪽에게 거짓말**이 된다.
+/// WS `ListCommands` and HTTP `/control/commands` both call it; a copy would make discovery lie to one side.
+/// - Combine `mine` (the daemon's own table) and `registered` (attached owners' roster); without its own table `agent.*` would be delivered yet invisible.
+/// - On the same name the daemon's wins — delivery is stage 1 own table, stage 2 roster (`command_delivery::deliver`); otherwise the caller would
+///   fit arguments with someone else's `help` and be bounced by the daemon handler.
+/// - Sort by name once at the end (the concatenation is not ordered).
 ///
-/// 규칙 셋:
-/// - `mine`(데몬 자기 표)과 `registered`(붙어 있는 주인들의 명부)를 합친다. 자기 표를 빼면 `agent.*` 는
-///   배달되는데 발견에는 안 보여, 부를 수 있는 이름을 물어본 LLM 이 그 목록만 믿고 영영 안 부른다.
-/// - 같은 이름이 양쪽에 있으면 **데몬 것이 이긴다** — 배달이 그렇게 정해져 있기 때문이다(내 표가 1단계,
-///   명부가 2단계 — `command_delivery::deliver`). 목록이 반대로 말하면 호출자는 남의 `help` 로 인자를
-///   맞춘 뒤 데몬 핸들러에게 반려당한다.
-/// - 두 출처를 이어 붙였으므로 마지막에 이름순으로 한 번 정렬한다(각각은 이름순인데 합치면 아니다).
-///
-/// ★이 dedup 은 **오늘 도달 불가한 상태**를 위한 것이다 — 그래도 지운다는 뜻이 아니다★: 겹침을 만들려면
-///   데몬 표가 비어 있는 사이에 등록이 도착해야 하는데(`refuse_names_i_answer` 는 그 순간의 표를 본다),
-///   조립된 서버 둘은 **연결을 받기 전에** 슬롯을 채운다. 표를 늦게 꽂는 조립이 **불가능하지는** 않고
-///   (슬롯은 정의상 늦은 주입이다) 그때 이 자리가 유일한 그물이다. 이 판정은 두 출처를 합치는 함수의
-///   **자기 정합성**이지 특정 조립 순서에 기댄 것이 아니다.
-/// ★반환 타입은 **WS 투영**이다 — 그 `available` 은 WS 의 뜻(주인이 붙어 있다)으로만 참이다★: 주인이
-///   끊기면 그 이름이 명부에서 사라지므로(ADR-0150 결정 3) 실려 오는 항목은 전부 살아 있는 등록이다(그
-///   칸의 정본 주석 = `CommandListEntry`). **HTTP 목록은 그 칸을 다시 내보내지 않는다** — 그쪽이 말하는
-///   것은 「이 입구가 실행할 수 있나」라 재료가 하나 더 있고(데몬 자기 표), 같은 이름의 칸을 두 뜻으로
-///   재사용하면 그 칸으로 분기한 호출자가 어느 뜻인지 못 가린다([`handle_list`]).
+/// The dedup covers a state unreachable today, but do not delete it: an overlap needs a registration arriving while the daemon table is empty
+/// (`refuse_names_i_answer` looks at the table then), and the assembled servers fill the slot before accepting connections; a late-plugged assembly
+/// is possible (the slot is late injection), and then this is the only net.
+/// The return type is the WS projection: its `available` is true only in the WS sense (an owner is attached; a disconnected owner's names leave the
+/// roster — ADR-0150 decision 3; field truth: `CommandListEntry`). The HTTP list does not re-emit that field — it says "can this entrance
+/// execute it" (one more input, the daemon's own table), and one name with two meanings would mislead a branching caller ([`handle_list`]).
 pub fn merge(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> Vec<CommandListEntry> {
     let mine: Vec<CommandListEntry> = mine
         .into_iter()
@@ -81,37 +63,27 @@ pub fn merge(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> Vec<Comman
     entries
 }
 
-/// 발견 응답 — `{ "commands": [ { "name", "help", "callable" }, … ] }`.
+/// The discovery response — `{ "commands": [ { "name", "help", "callable" }, … ] }`.
 ///
-/// ★`callable` = **이 입구가 지금 그 이름을 실행할 수 있다**★(계약): 참이면 `/control/call` 이 그 이름을
-///   실제로 돈다 — 데몬 자기 표의 이름은 그 자리에서 돌고, 남의 이름은 그 주인에게 중계된다(ADR-0160).
-///   ★도달성을 말하는 칸은 이것 하나여야 한다★ — WS 투영의 `available` 을 여기 다시 실으면 같은 이름의
-///   칸이 표면마다 다른 뜻을 갖고, 그 칸으로 분기한 호출자는 부를 수 없는 이름을 부를 수 있다고 읽는다.
-/// ★판정 재료는 [`handle_call`] 과 **같은 사실 둘**이다★ — 그 이름이 데몬 자기 표에 있거나(여기서 `mine`,
-///   저기서 `CommandTable::contains` — 같은 표의 같은 명단이다) 명부가 주인을 답하거나(여기서
-///   `registered`, 저기서 `OwnerLookupSource::lookup`). 재료를 갈라 두면 목록과 실행이 서로 다른 답을 한다.
-/// ★그래서 오늘 이 칸은 [`merge`] 가 낸 모든 행에서 참이다 — 그렇다고 상수로 접지 말 것★: 참인 이유는
-///   합치는 두 출처가 **둘 다 도달 가능해서**이지 이 칸이 뜻을 잃어서가 아니다. 세 번째 출처(주인 없이
-///   선언만 아는 이름 따위)가 [`merge`] 에 들어오는 날, 파생해 두었으면 그 행만 거짓이 되고 상수로
-///   박아 두었으면 발견이 없는 도달성을 광고한다.
+/// `callable` = this entrance can execute that name now (contract): own-table names run on the spot, others are relayed to their owner (ADR-0160).
+/// It must be the only reachability field — carrying the WS `available` again would give one name two meanings per surface.
+/// Inputs are the same two facts as [`handle_call`]: the name is in the daemon's own table (`mine` / `CommandTable::contains`) or the roster
+/// answers an owner (`registered` / `OwnerLookupSource::lookup`); split inputs give different answers.
+/// Today it is true on every [`merge`] row, but do not fold it into a constant: that is because both sources are reachable, and a future third
+/// source (declared names without an owner) would then falsely advertise reachability.
 ///
-/// ★인자가 값인 이유(슬롯·핸들이 아니라)★: 두 출처를 **어디서 읽었는지**를 이 함수가 모르게 해야 WS 쪽과
-///   같은 [`merge`] 를 태울 수 있다. 읽는 시점은 부르는 쪽이 정한다.
-/// ★반쪽 목록도 내보낸다(표 슬롯이 비어 있으면 `mine` 이 빈 벡터)★ — 그것이 같은 상태에서 WS 목록이
-///   내는 답이고, 두 표면이 **같은 상태에서 다른 답**을 내지 않는 것이 이 라우트의 요점이다. 조립된 서버
-///   둘은 연결을 받기 전에 표를 꽂으므로 운영에서 이 갈래는 나지 않는다.
+/// Arguments are values, not slots, so this rides the same [`merge`] as WS; the read time is the caller's. Half lists are emitted too (an empty
+/// table slot gives empty `mine`) — the same answer WS gives in that state; the assembled servers plug the table in before accepting connections.
 pub fn handle_list(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> ControlQueryResult {
-    // 이름만 뜬다 — `help` 는 복사하지 않는다(이 판정에 필요 없고, 그 블롭이 이 목록에서 가장 큰 것이다).
+    // Only names are taken — `help` is not copied (not needed for this decision, and that blob is the largest thing in this list).
     let callable: BTreeSet<String> = mine
         .iter()
         .map(|decl| decl.name.clone())
         .chain(registered.iter().map(|entry| entry.name.clone()))
         .collect();
-    // ★`json!` 을 쓰지 않는 이유는 **복사**다★: 그 매크로는 리터럴이 아닌 자리를 `to_value(&expr)` 로 펼치고
-    //   (`serialize_str` 이 `to_owned` 한다) `help` 블롭이 행마다 한 번 더 복제된다 — 명부 상한(4096 × 4 KiB)
-    //   에서 요청마다 나는 그 사본이 이 응답의 가장 큰 비용이다. 손으로 조립하면 아래 String 은 **옮겨진다**.
-    //   ★덤으로 실패 경로가 사라진다★: `to_value` 를 안 거치므로 `json!` 이 숨기는 `.unwrap()` 자체가 없다
-    //   (가둠 표시 밖이라 그 패닉은 500 이 아니라 데몬 종료다 — 훅 · ADR-0292).
+    // No `json!`: it expands non-literal places with `to_value(&expr)`, duplicating the `help` blob per row — at the roster cap (4096 × 4 KiB) the
+    //   largest cost of this response. Hand assembly moves the Strings, and drops the `.unwrap()` `json!` hides (outside the containment mark that
+    //   panic is a daemon exit — hook · ADR-0292).
     let commands: Vec<serde_json::Value> = merge(mine, registered)
         .into_iter()
         .map(|entry| {
@@ -128,60 +100,40 @@ pub fn handle_list(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> Cont
     ControlQueryResult::Ok(serde_json::Value::Object(root))
 }
 
-/// `/control/call` 요청 바디 — `{ "name": "<전체 이름>", "args": { … } }`.
+/// The `/control/call` request body — `{ "name": "<full name>", "args": { … } }`.
 ///
-/// ★인자를 `args` 안에 넣는다(꼭대기에 펼치지 않는다)★: 이웃 `/control/agent` 는 `verb` 만 자기 어휘라
-///   나머지를 통째로 인자로 펼치지만, 여기 꼭대기 어휘는 `name` 이고 **`name` 은 실제 인자 이름이기도
-///   하다**(`agent.rename` 이 그 칸을 쓴다). 펼치면 그 동사를 이 입구로 부를 수 없다.
-/// ★`args` 부재 = 인자 없음★ — 인자가 하나도 없는 명령(`agent.list`)이 빈 객체를 실을 의무를 지지 않는다.
-/// ★중복 키는 꼭대기에서도 `args` 안에서도 반려된다★ — 어느 값을 고를 근거가 없으므로 고르지 않는다
-///   (ADR-0157). 안쪽 규율의 정본은 [`CommandArgs`].
-/// ★모르는 꼭대기 칸은 **무시한다**(`args` 안과 규율이 다르다)★: 홉 간 additive 진화를 살리려면 이 봉투에
-///   칸이 하나 늘어도 옛 데몬이 받아야 한다. 인자를 `args` 에 안 넣고 꼭대기에 실은 요청은 **조용히 통과하지
-///   않는다** — 그 명령의 필수 칸이 비어 `INVALID_ARGUMENT` 로 선언된 칸 전량과 함께 반려된다.
-/// ★`request_id` 는 **선택**이다 — 있으면 호출자 것을 쓰고 없으면 데몬이 낸다★(ADR-0161 결정 1).
+/// Arguments go inside `args`: `name` is also a real argument name (`agent.rename`), so spreading at the top (as `/control/agent` does with
+/// only `verb`) would make that verb uncallable here. `args` absent = no arguments.
+/// Duplicate keys are bounced at the top and inside `args` (no basis to pick one — ADR-0157; inner discipline: [`CommandArgs`]).
+/// Unknown top-level fields are ignored (additive evolution across hops); a request putting arguments at the top does not pass silently — its
+/// required fields are empty, so it is bounced with `INVALID_ARGUMENT` listing all declared fields.
+/// `request_id` is optional — the caller's is used, else the daemon issues one (ADR-0161 decision 1). It exists because delivery's duplicate
+/// prevention triggers only when the same number comes again; a retry must resend the same one. Old requests without it still work, without even the in-flight guarantee (ADR-0161 Impact).
 ///
-/// 이 칸이 사는 이유는 하나다: 배달의 중복 방지는 **같은 번호가 다시 왔을 때만** 걸리므로, 데몬이 요청마다
-/// 새 번호를 만들면 그 장치는 구조적으로 한 번도 안 걸린다. 재시도가 같은 번호를 되보내야 걸릴 기회가 생긴다.
+/// ## The guarantee today holds only while the round trip is open (known gap)
 ///
-/// ## ★오늘 이 칸이 실제로 사는 보장 = **왕복이 열려 있는 동안뿐**이다(알려진 갭)★
+/// A re-query overlapping an in-progress round trip is bounced by the seat table ([`Seat::Taken`](crate::command_delivery) ·
+/// [`Seat::Conflict`](crate::command_delivery)) or merged; one after completion is applied again, because:
+/// 1. a relayed name releases its seat as the reply frame goes out ([`CommandDeliveries::release`](crate::command_delivery));
+///    [`SeatState::Retained`](crate::command_delivery) attaches only to the daemon's own stage-1 seats;
+/// 2. the daemon's own names (`agent.*`) are answered on the spot by [`handle_call`], never reaching the seat table.
 ///
-/// 이 문으로 온 번호가 지금 막는 것은 「진행 중인 왕복과 겹친 재질의」뿐이다 — 그 갈래는 자리 표가
-/// [`Seat::Taken`](crate::command_delivery)·[`Seat::Conflict`](crate::command_delivery) 로 반려하거나
-/// 합친다. **왕복이 끝난 뒤에 온 재질의는 다시 적용된다.** 사유가 둘이고 둘 다 이 문에 걸린다:
-///
-/// 1. **중계된 이름**(대시보드 것)은 답장 프레임이 나가는 순간 자리를 놓는다
-///    ([`CommandDeliveries::release`](crate::command_delivery)) — 번호를 붙드는
-///    [`SeatState::Retained`](crate::command_delivery) 는 데몬 **자기** 1단계 자리에만 붙는다.
-/// 2. **데몬 자기 이름**(`agent.*`)은 [`handle_call`] 이 그 자리에서 답하므로 자리 표를 아예 안 거친다 —
-///    즉 그 보유 장치에 닿을 경로가 이 입구에는 없다.
-///
-/// ★그래서 「완료 후 재질의가 `ALREADY_APPLIED` 로 막힌다」로 적지 말 것★ — 이 입구에서는 거짓이다.
-/// 완료분을 되돌려주는 진짜 dedup 저장소가 없는 것이 그 뿌리이고(그 부재의 정본 = `command_delivery` 의
-/// `no_retry`), 이 문의 좌석을 완료 뒤에도 붙들게 할지는 **미결**이다(사용자 결정 대기).
-///
-/// ★없는 요청도 계속 받는다★ — 하위 호환이고, 그 경로는 위 in-flight 보장조차 안 걸린다(번호가 매번
-/// 새것이라 겹칠 것이 없다 — ADR-0161 영향 절).
-/// ★봉투가 아니라 이 HTTP 바디만 늘어난다★ — ADR-0160 「봉투 무변경」이 그대로 유효하다.
+/// Do not write "a re-query after completion is blocked with `ALREADY_APPLIED`" — false here: there is no dedup store returning completed results
+/// (`no_retry` in `command_delivery`), and holding seats after completion is unresolved (awaiting a user decision).
+/// Only this HTTP body grows, not the envelope (ADR-0160 "envelope unchanged").
 #[derive(Debug, Default)]
 pub struct CallRequest {
-    /// ★필수인데 부재를 허용하는 이유는 이웃과 같다★ — 없으면 역직렬화가 실패해 **사유 없는 반려**로
-    ///   끝난다. 빈 문자열로 받아 아래 dispatch 가 「모르는 명령」을 내면 호출자가 발견 목록으로 갈 수 있다.
+    /// Required yet absence-tolerant, as in the neighbor: failing deserialization would bounce with no reason; an empty string gives "unknown command" and the caller can go to the discovery list.
     pub name: String,
     pub args: CommandArgs,
-    /// 호출자가 실어 보낸 요청 번호의 **원문**. `None` = 안 실었다.
-    ///
-    /// ★문자열로 받아 [`handle_call`] 에서 판정한다 — 역직렬화 단계에서 파싱하지 않는다★: 여기서 실패하면
-    /// 바디 전체가 [`malformed_body`] 로 접혀 「JSON 모양이 틀렸다」가 되는데, 틀린 것은 **이 칸 하나**다.
-    /// 호출자는 그 문구를 읽고 멀쩡한 봉투 모양을 의심한다.
+    /// The raw text of the caller's request number; `None` = not sent. Not parsed at deserialization: failing there would fold the body into
+    /// [`malformed_body`] ("the JSON shape is wrong") when only this one field is wrong.
     pub request_id: Option<String>,
 }
 
 impl<'de> serde::Deserialize<'de> for CallRequest {
-    /// ★객체만 받는다 — `#[derive(Deserialize)]` 로 되돌리지 마라★: 파생 구현은 **JSON 배열**도 필드
-    /// 순서열로 읽어들여, `["agent.list"]` 가 `agent.list` **실행**이 된다(실측 — 이 자리를 손으로 쓰게 만든
-    /// 사고 그대로다). 이웃 `AgentRequest` 가 그 함정을 안 밟는 것은 `#[serde(flatten)]` 이 map 전용
-    /// 역직렬화를 강제하기 때문이라, 그 형태를 안 쓰는 여기서는 벽을 직접 세워야 한다.
+    /// Objects only — do not revert to `#[derive(Deserialize)]`: the derive also reads a JSON array as a field sequence, so `["agent.list"]`
+    /// would execute `agent.list` (measured). The neighbor `AgentRequest` is safe because `#[serde(flatten)]` forces map-only deserialization.
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         struct Visitor;
 
@@ -238,46 +190,35 @@ impl<'de> serde::Deserialize<'de> for CallRequest {
     }
 }
 
-/// 전체 이름 호출을 이 자리에서 끝냈나, 아니면 버스로 넘겨야 하나.
-///
-/// ★두 갈래를 한 타입으로 가르는 이유★: 넘기는 갈래는 **async 왕복**이라 이 blocking 함수 안에서 끝낼 수
-/// 없다. 산문으로 「빈손이면 넘겨라」를 남기면 넘기지 않는 호출자가 표현 가능하고, 그때 증상은 대시보드
-/// 명령이 조용히 다시 `UNSUPPORTED` 가 되는 것이다.
+/// Did the full-name call finish on the spot, or must it be handed to the bus? The handing branch is an async round trip and cannot finish inside
+/// this blocking function; as prose, a caller that does not hand over would be representable (dashboard commands silently `UNSUPPORTED` again).
 // ADR-0160
 #[derive(Debug)]
 pub enum CallOutcome {
-    /// 이 데몬이 답했다(실행했거나 반려했거나 그런 이름을 모른다) — 그대로 나간다.
+    /// This daemon answered (executed, bounced, or does not know the name) — goes out as is.
     Answered(ControlQueryResult),
-    /// 남의 이름이고 주인이 붙어 있다 — 부르는 쪽이 배달 기계에 태운다.
-    ///
-    /// ★인자를 그대로 넘긴다★: 이 데몬의 표에 없는 이름은 대조할 선언이 없어 검문받지 않고(그게 옳다 —
-    /// 홉 간 additive 진화가 그 관용에 걸려 있다) 손도 대지 않는다(`call_daemon_command` 의 미스 계약).
+    /// Someone else's name with an owner attached — the caller puts it on the delivery machine. Arguments pass as is: no declaration to compare
+    /// against (tolerance is what additive evolution hangs on) and none touched (the miss contract of `call_daemon_command`).
     Relay {
         name: String,
         args: serde_json::Value,
-        /// 이 왕복의 번호 — 호출자가 실어 보낸 것이거나(ADR-0161 결정 1) 여기서 발급한 것이다.
-        ///
-        /// ★발급을 어댑터로 미루지 않는 이유★: 미루면 「호출자 것을 쓴다」와 「데몬이 낸다」의 갈림이
-        /// 판정부 밖에 남아, 검증을 통과한 값이 쓰이는지 어댑터를 읽어야 알 수 있다.
+        /// The number of this round trip — the caller's (ADR-0161 decision 1) or one issued here. Issuing is not deferred to the adapter, or one would
+        /// have to read the adapter to know whether the validated value is used.
         request_id: RequestId,
     },
 }
 
-/// 호출자가 자기 요청 번호를 싣는 칸의 이름 — 역직렬화와 안내 문구가 같은 철자를 써야 한다.
+/// The field name where the caller puts its request number — deserialization and guidance wording must spell it the same.
 const CALLER_REQUEST_ID_FIELD: &str = "request_id";
 
-/// 호출자가 준 번호의 원문 → [`RequestId`].
+/// The raw text of the caller-given number → [`RequestId`].
 ///
-/// ★UUID 문법을 요구하는 것이 곧 길이·문자셋 검증이다★(ADR-0161 결정 5): [`RequestId`] 가 UUID 한 개를
-/// 감싼 타입이라(도구 crate `envelope.rs`) 다른 문법을 받아들이려면 **봉투의 타입**을 바꿔야 하고, 그건
-/// ADR-0160 「봉투 무변경」이 막는다. 그래서 바깥에서 온 임의 길이 문자열이 자리 표의 키가 되는 길이 없다.
-/// ★단 받는 모양이 하이픈 36자 하나는 아니다★ — `Uuid::parse_str` 는 hyphenated 말고 simple(32 hex)·
-/// braced(`{…}`)·urn(`urn:uuid:…`) 도 받는다. 그래도 위 문장이 서는 이유는 그 넷이 **전부 유계**라서다
-/// (가장 긴 urn 형이 45자). 안내 문구는 그 사실대로 적는다 — 「36자」로 적으면 통과하는 값을 두고 호출자가
-/// 자기 봉투를 의심한다.
-/// ★값의 **내용**은 검사하지 않는다★ — nil 이나 v4 아닌 값도 통과한다. 그 사실에 기대는 자리가 없어야 한다
-/// (그 전제의 정본 = `command_delivery` 의 `CommandDeliveries::complete`).
-/// ★반려 문구에 호출자 원문을 [`preview`] 로 줄여 싣는다★ — 그 값이 요청만큼 클 수 있다.
+/// Requiring UUID syntax is the length · charset validation (ADR-0161 decision 5): [`RequestId`] wraps one UUID (tool crate `envelope.rs`) and
+/// another syntax would change the envelope's type, blocked by ADR-0160. So no arbitrary-length outside string becomes a seat table key.
+/// The accepted shape is not only hyphenated 36 characters: `Uuid::parse_str` also takes simple · braced · urn, all bounded (urn longest, 45);
+/// the guidance wording says so — "36 characters" would make the caller suspect a passing value.
+/// The content is not checked (nil or non-v4 pass); no place may rely on it (`CommandDeliveries::complete` in `command_delivery`).
+/// The bounce wording carries the raw text shrunk with [`preview`].
 fn caller_request_id(raw: &str) -> Result<RequestId, ControlQueryResult> {
     uuid::Uuid::parse_str(raw).map(RequestId).map_err(|_| {
         ControlQueryResult::Error {
@@ -290,29 +231,23 @@ fn caller_request_id(raw: &str) -> Result<RequestId, ControlQueryResult> {
     })
 }
 
-/// 전체 이름 호출 — HTTP 어댑터가 유일하게 부르는 진입점.
+/// Full-name call — the only entry point the HTTP adapter calls.
 ///
-/// ★blocking 함수다(호출자 계약)★: 표의 핸들러는 전부 blocking 이다(이웃 `commands` 의 공통 입구 doc) —
-///   그래서 async 런타임 스레드가 아니라 blocking 풀에서 불러야 한다.
-/// ★`registered` 는 **미스 갈래에서만** 읽는다★: 이름이 이 표의 것이면 명부를 볼 이유가 없고, 명부 조회는
-///   공유 잠금을 건드린다. 잠금은 그 호출 안에서 끝난다(ADR-0006 — [`OwnerLookupSource`] 의 존재 이유).
-/// ★조회와 배달 사이에 주인이 끊길 수 있다 — 그 경합은 여기서 못 닫는다★: 배달이 그 상태를 자기 어휘로
-///   답한다(`route` 의 명부 재조회 · `OwnerLink::send` 의 찢어진 창). 여기서 잠금을 배달까지 들고 가면
-///   느린 명령 하나가 등록·연결 정리·다른 배달을 전부 세운다.
-/// ★호출자 번호는 **무엇을 하기 전에** 판정한다★: 뒤로 미루면 같은 잘못된 값이 데몬 자기 이름에는 통하고
-///   남의 이름에만 반려되어, 이 입구의 계약이 이름에 따라 갈린다.
+/// Blocking (caller contract): the table's handlers are all blocking, so call it on the blocking pool.
+/// `registered` is read only on the miss branch — the roster lookup touches a shared lock, ending within that call (ADR-0006, why
+/// [`OwnerLookupSource`] exists).
+/// The owner can disconnect between lookup and delivery; that race cannot be closed here — delivery answers it in its own vocabulary (`route`'s
+/// re-lookup · `OwnerLink::send`'s torn window), and carrying the lock into delivery would let one slow command stall registration · cleanup · other deliveries.
+/// The caller number is decided before doing anything, or the contract would split by name (bad numbers passing for own names, bounced for others).
 ///
-/// ## ★1단계 표를 **버스가 든 그 한 부**로 받는다 — `&CommandTable` 로 되돌리지 말 것★
+/// ## The stage-1 table is the one copy the bus holds — do not revert to `&CommandTable`
 ///
-/// 이 함수의 판정(내가 답하나 / 중계하나)과 배달 기계의 판정([`LocalCommands::claim`] — 자리의 `local`
-/// 표식과 `CommandBus::invoke` 의 중계 거절이 그 값을 쓴다)은 **같은 사실**이어야 한다. 표를 인자로 따로
-/// 받으면 어댑터가 버스와 **다른 부**를 넘기는 조립이 표현 가능해지고, 그 상태의 증상이 조용하다: 이 함수는
-/// 「내 이름이 아니다」라며 중계로 보내는데 버스는 그 이름을 자기 것이라며 `INTERNAL` 로 반려한다(또는 그
-/// 반대로, 거절이 조용한 no-op 이 되어 취소 한 번에 자리가 영구히 남는 갈래가 열린다). 포트로 받으면 어댑터가
-/// 넘길 수 있는 것이 **버스의 그 한 부**뿐이라 그 어긋남이 표현되지 않는다.
-/// ★그래서 검문·실행도 이 포트를 거친다★ — 실물 구현이 이웃 `commands` 의 공통 입구로 몰기 때문에
-/// (`commands::DaemonLocalCommands::run`) ADR-0157 검문은 그대로 걸린다. [`CommandTable::call`] 을 여기서
-/// 직접 부르는 두 번째 경로를 만들지 말 것.
+/// This decision (answer / relay) and delivery's ([`LocalCommands::claim`] — the seat's `local` marker and `CommandBus::invoke`'s relay refusal)
+/// must be the same fact. A separate table argument would allow an adapter passing a different copy than the bus, with a quiet symptom: relay
+/// for "not my name" while the bus bounces it as its own with `INTERNAL`, or a silent no-op refusal leaving a seat forever. As a port, the
+/// adapter can only pass that one copy.
+/// Checking and execution go through this port too (`commands::DaemonLocalCommands::run`, so the ADR-0157 check applies); do not add a path
+/// calling [`CommandTable::call`] directly.
 // ADR-0157
 // ADR-0160
 pub fn handle_call(
@@ -332,8 +267,7 @@ pub fn handle_call(
         None => RequestId::new(),
     };
 
-    // ★라우팅 권위는 `claim` 하나다★([`LocalCommands::claim`] doc) — 그 값이 자리의 `local` 표식을 정하므로,
-    //   여기서 다른 술어로 갈래를 고르면 이 함수와 배달이 서로 다른 답을 한다.
+    // The routing authority is `claim` alone ([`LocalCommands::claim`]): it decides the seat's `local` marker, so another predicate here would diverge from delivery.
     if locals.claim(&name).is_none() {
         return match registered.lookup(&name) {
             OwnerLookup::Available(_) => CallOutcome::Relay {
@@ -344,19 +278,17 @@ pub fn handle_call(
             OwnerLookup::Unknown => CallOutcome::Answered(unknown_name(&name)),
         };
     }
-    // 연결 없는 입구라 호출자는 `None` = 입력 임대 비보유자다(ADR-0231).
+    // No connection, so the caller is `None` = not an input lease holder (ADR-0231).
     CallOutcome::Answered(match locals.run(&name, &mut args, "cli", None) {
         Some(Ok(payload)) => ControlQueryResult::Ok(payload),
         Some(Err(e)) => refused(e),
-        // ★계약 위반이라 **다음 단계로 흘리지 않는다**★: `claim` 이 내 것이라 답했으므로 이 이름은 중계
-        //   대상이 아니고, 중계로 떨어뜨리면 버스가 같은 근거로 그것을 다시 거절한다(무한한 것은 아니지만
-        //   호출자에게는 무의미한 왕복이다). 배달이 같은 어긋남을 같은 코드로 드러낸다
-        //   (`command_delivery` 의 `fold_local`).
+        // A contract violation does not flow to the next stage: `claim` said mine, so relaying would be refused again by the bus (a meaningless round
+        //   trip). Delivery exposes the same mismatch with the same code (`fold_local` in `command_delivery`).
         None => {
             tracing::error!(
                 entrance = "cli",
                 command = %crate::connection_core::sanitize_for_log(&name),
-                "1단계 표가 자기 이름이라 해 놓고 빈손을 냈다 — 라우팅 권위(`claim`)와 실행이 갈렸다"
+                "the stage-1 table claimed the name as its own and came up empty-handed — the routing authority (`claim`) and execution diverged"
             );
             refused(CommandError::of(
                 ErrorCode::Internal,
@@ -369,11 +301,10 @@ pub fn handle_call(
     })
 }
 
-/// 배달이 돌려준 결말 → wire 봉투.
+/// The outcome delivery returned → wire envelope.
 ///
-/// ★성공 payload 는 주인이 만든 것이라 **열어보지 않는다**★ — 이 데몬은 `args` 도 결과도 파싱하지 않는다
-/// (ADR-0081 「데몬 opaque」). 실패는 이 표면의 다른 반려와 **같은 함수**를 탄다([`refused`]) — 갈라 두면
-/// 같은 코드가 입구 안에서 자리마다 다른 문구·다른 회복 안내를 달고 나간다.
+/// The success payload was made by the owner and is not opened (ADR-0081 "daemon opaque"). Failures ride [`refused`] like the other bounces —
+/// split, the same code would carry different wording and guidance per place.
 // ADR-0160
 pub fn relayed(reply: CommandReply) -> ControlQueryResult {
     match reply.outcome {
@@ -382,13 +313,12 @@ pub fn relayed(reply: CommandReply) -> ControlQueryResult {
     }
 }
 
-/// 표의 실패 → wire 봉투. 코드는 타입드 어휘 그대로 나간다(TRD §4-⑦).
+/// The table's failure → wire envelope; the code goes out as the typed vocabulary (TRD §4-⑦).
 ///
-/// ★회복 안내는 **고칠 수 있는 실패에만** 붙인다★: 대상 부재·상태 충돌·내부 실패에 「목록을 보라」를 달면
-///   호출자는 없는 오타를 찾는다. 이 입구는 계열을 모르므로 계열별 조회 동사를 제안할 수 없고, 그래서
-///   나머지 코드에는 표가 준 문구만 싣는다(지어낸 경로보다 침묵이 정직하다).
-/// ★문구는 **양 끝을 남기고** 줄인다★: 표의 인자 반려는 호출자가 친 것을 앞에, 선언된 칸 전량을 뒤에
-///   두므로 머리만 남기면 고칠 재료가 사라진다(그 레이아웃과 상한 선택의 근거 = [`MESSAGE_PREVIEW_CHARS`]).
+/// Recovery guidance only on fixable failures: "look at the list" on a missing target · state conflict · internal failure sends the caller after
+/// a nonexistent typo. This entrance does not know families, so it cannot suggest a per-family query verb; other codes carry only the table's wording.
+/// The wording is shrunk keeping both ends: the argument bounce puts the caller's input first and all declared fields last, so head-only loses
+/// the material to fix (layout and cap: [`MESSAGE_PREVIEW_CHARS`]).
 fn refused(e: CommandError) -> ControlQueryResult {
     let message = preview_within(e.message(), MESSAGE_PREVIEW_CHARS);
     let hint = match e.code() {
@@ -403,38 +333,30 @@ fn refused(e: CommandError) -> ControlQueryResult {
     }
 }
 
-/// 표가 준 반려 문구 **하나 전체**가 차지해도 되는 몫(문자 수).
+/// The part (in characters) one whole bounce wording the table gave may take.
 ///
-/// ★설계된 최악을 **안 자르는** 값이어야 한다★: 인자 검문의 최악 문구는 도구 crate 가 이미 캡한다 — 이름
-/// 하나가 128 B(`quoted_input`), 개수가 여덟(`MAX_NAMED_UNKNOWN`)이라 실측 최악이 약 1.4 KB다. 그 아래로
-/// 잡으면 **설계된 경우에** 가운데가 잘려 나가고, 그건 상한이 지키려던 것과 무관한 손실이다.
-/// ★그래도 상한을 두는 이유★: 이 자리에 오는 문구 전부가 그렇게 캡되지는 않는다 —
-/// `commands::drive_to_completion` 은 호출자가 보낸 명령 이름을 원문 그대로 넣는다. 이 수는 그 갈래의
-/// **꼬리를 유한하게** 만드는 것이지 평균 크기를 줄이는 장치가 아니다.
-/// 아래 수는 그 1.4 KB 위의 여유이지 계약이 아니다.
+/// It must not cut the designed worst case: the argument check's worst wording is capped by the tool crate (128 B per name via `quoted_input`,
+/// eight names `MAX_NAMED_UNKNOWN`, ~1.4 KB measured), and cutting below that loses the middle in the designed case.
+/// The cap still exists because not every wording is so capped (`commands::drive_to_completion` puts the caller's command name in verbatim); it
+/// bounds that tail, not the average. The number is slack above 1.4 KB, not a contract.
 const MESSAGE_PREVIEW_CHARS: usize = 2048;
 
-/// 이 입구가 아는 **유일한** 회복 경로 — 부를 수 있는 이름과 그 칸을 아는 것은 발견 목록뿐이다.
+/// The only recovery path this entrance knows — only the discovery list knows callable names and their fields.
 ///
-/// ★CLI 동사를 지어내지 않는다★: 데몬이 소유한 것은 **라우트**이지 CLI 철자가 아니고, 이 목록을 렌더할
-///   CLI 동사는 아직 없다. 그래서 우리가 가진 이름(그 라우트)만 적고 화면 이름은 CLI 가 자기 것을 붙인다.
-/// ★`engram help` 로 되돌리지 마라★: 그 화면은 **정적**이라(`control/help.rs` 가 본문 파일에서 낸다) 계열 이름 둘만
-///   내고 칸은 하나도 안 낸다 — `agent.*` 밖의 이름은 원리상 거기 나올 수 없다. 즉 이 안내가 존재하는
-///   바로 그 경우(모르는 이름 · 틀린 칸)를 답할 수 없는 곳으로 보내는 것이 된다.
-/// ★ADR-0132 결정 4(발견은 help 로만)를 이 자리의 근거로 쓰지 말 것★ — 그 결정은 명령을 나열하는 대신
-///   **정적 계열 화면**을 고른 것이고, 여기가 가리키는 것은 런타임 목록이라 방향이 반대다.
-/// ★경로 문자열은 라우트 상수와 갈리면 안 된다★ — 아래 테스트가 그 상수를 태워 대조한다.
-// ADR-0156 (칸을 나르는 것은 불투명 `help` 블롭이고, 그 블롭을 내려 주는 표면이 이 목록이다)
+/// No made-up CLI verbs: the daemon owns the route, not CLI spelling, and no CLI verb renders this list yet.
+/// Do not revert to `engram help`: that screen is static (`control/help.rs`), gives two family names and no field, so names outside `agent.*`
+/// cannot appear — it would send exactly the cases this guidance exists for (unknown name · wrong field) somewhere that cannot answer.
+/// ADR-0132 decision 4 (discovery only through help) is not the basis here: it chose a static family screen instead of listing commands, the opposite of this runtime list.
+/// The path string must not diverge from the route constant (the test below checks).
+// ADR-0156 (what carries the fields is the opaque `help` blob, and the surface that hands that blob down is this list)
 const CATALOG_RECOVERY: &str =
     "list the command catalog (POST /control/commands) for every callable name and its fields";
 
-/// 아무도 그 이름을 선언하지 않았다 — 데몬 표에도 없고 붙어 있는 주인도 없다.
+/// Nobody declared that name — not in the daemon table and no attached owner.
 ///
-/// ★「남의 이름이라 못 닿는다」(`UNSUPPORTED`)를 여기 되살리지 마라★: 그 갈래는 이제 배달로 간다
-///   ([`CallOutcome::Relay`] · ADR-0160). 되살리면 방금 목록에서 `tab.create` 를 배운 호출자가 그 이름을
-///   부를 수 없게 되고, 목록의 도달성 칸([`handle_list`])도 함께 거짓이 된다.
-/// ★주인이 방금 끊긴 이름도 여기로 온다★ — 끊긴 주인의 이름은 명부에서 사라지므로(ADR-0150 결정 3)
-///   「한 번도 없던 이름」과 구분할 재료가 이 데몬에 없다. 그 구분 손실은 그 결정이 감수한 것이다.
+/// Do not revive "someone else's name, unreachable" (`UNSUPPORTED`): that branch goes to delivery ([`CallOutcome::Relay`] · ADR-0160); reviving
+/// it would make a name just learned from the list uncallable and the list's reachability field ([`handle_list`]) false.
+/// A name whose owner just disconnected comes here too (ADR-0150 decision 3): no material to tell it from a name that never existed — an accepted loss.
 fn unknown_name(name: &str) -> ControlQueryResult {
     ControlQueryResult::Error {
         code: ErrorCode::UnknownCommand.as_str(),
@@ -445,14 +367,11 @@ fn unknown_name(name: &str) -> ControlQueryResult {
     }
 }
 
-/// 바디 자체가 JSON 계약을 못 지킨 경우의 반려 — 어댑터가 부른다.
+/// The bounce when the body failed the JSON contract — called by the adapter.
 ///
-/// ★빈 body 400 을 쓰지 않는 이유는 이웃과 같다★: 이 라우트의 호출자는 자기교정하는 LLM 이라 사유가
-///   실려야 한다. serde 의 문구(어느 필드가 어떤 타입이어야 하는지·중복 키·JSON 구문 위치)를 그대로 싣고,
-///   바디 원문은 [`preview`] 로 줄인다.
-/// ★[`CATALOG_RECOVERY`] 를 여기 붙이지 마라★: 여기서 틀린 것은 **바디의 JSON 모양**이지 명령 이름도 칸도
-///   아니다. 카탈로그를 보라고 하면 호출자는 멀쩡한 이름을 의심하며 목록을 뒤지고, 정작 고칠 봉투 모양은
-///   그대로 둔 채 다시 보낸다. 고칠 재료는 이 문구가 이미 들고 있다 — serde 의 사유와 기대하는 모양.
+/// No empty-body 400: the callers are self-correcting LLMs, so serde's wording (field type · duplicate keys · syntax position) goes out, with the raw body shrunk by [`preview`].
+/// Do not attach [`CATALOG_RECOVERY`]: what is wrong is the body's JSON shape, not the name or fields — pointing at the catalog would make the
+/// caller dig through the list while the envelope shape stays broken; this wording already holds the material to fix.
 pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
     ControlQueryResult::Error {
         code: ErrorCode::InvalidArgument.as_str(),
@@ -471,12 +390,10 @@ mod tests {
     use super::*;
     use crate::command_delivery::NoLocalCommands;
 
-    /// 이름 **하나**를 자기 것이라 답하는 1단계 표 — 실물(`commands::DaemonLocalCommands`)의 성질만 흉내
-    /// 낸다: `claim` 과 `run` 이 **같은 명단**을 본다(그 어댑터가 `OnceLock` 표 하나를 보므로 그렇다).
+    /// A stage-1 table answering one name as its own — imitates only the real one's property (`commands::DaemonLocalCommands`): `claim` and `run` look at the same list.
     ///
-    /// ★실물을 끌어오지 않는 이유★: `agent.*` 표는 `AgentManager` 를 쥐고 그 뒤에 디스크·프로필 락이 딸려
-    /// 온다(`commands::make_daemon_table`). 이 파일이 재는 것은 **판정**(내가 답하나 / 중계하나 / 모르나)이라
-    /// 그 실물이 필요 없고, 끌어오면 이 시험이 재는 것이 판정에서 조립으로 옮겨간다(ADR-0012).
+    /// The real `agent.*` table holds an `AgentManager` (disk · profile locks, `commands::make_daemon_table`); this file measures the decision
+    /// (answer / relay / unknown), and pulling it in would shift the test to the assembly (ADR-0012).
     struct Holds(&'static str);
 
     impl LocalCommands for Holds {
@@ -523,13 +440,12 @@ mod tests {
         entries.iter().map(|e| e.name.as_str()).collect()
     }
 
-    /// ★안내가 가리키는 곳이 **실재하고, 그 질문에 답할 수 있는 곳**이어야 한다★: 상수는 포맷으로 조립할
-    /// 수 없어 경로를 손으로 적었고, 그 손이 미끄러지면 없는 주소를 치게 한다. 라우트 상수를 태워 대조한다.
+    /// Where the guidance points must exist and be able to answer: a const cannot be built with format, so the path is hand-written; this exercises the route constant to check.
     #[test]
     fn the_recovery_points_at_the_route_that_can_actually_answer_it() {
         assert!(
             CATALOG_RECOVERY.contains(super::super::mcp_server::CONTROL_COMMANDS_PATH),
-            "회복 안내가 발견 라우트와 갈렸다: {CATALOG_RECOVERY}"
+            "the recovery guidance diverged from the discovery route: {CATALOG_RECOVERY}"
         );
     }
 
@@ -550,15 +466,14 @@ mod tests {
                 .find(|e| e.name == "agent.list")
                 .map(|e| e.help.as_str()),
             Some("mine"),
-            "겹치면 데몬 표의 help 가 남는다"
+            "on overlap the daemon table's help remains"
         );
     }
 
-    /// ★`help` 는 불투명 문자열 한 칸이다★ — JSON 이 아닌 값도 바이트 그대로 나가야 한다. 데몬이
-    /// 파싱·검증을 끼우면 여기서 깨진다.
+    /// `help` is one opaque string field — even a non-JSON value must go out byte for byte.
     #[test]
     fn the_listing_carries_the_help_bytes_untouched() {
-        let opaque = "not json at all — 임의의 바이트 {[(";
+        let opaque = "not json at all — arbitrary bytes {[(";
         let result = handle_list(vec![decl("agent.list", opaque)], vec![]);
 
         let json = result.to_json();
@@ -566,12 +481,10 @@ mod tests {
         assert_eq!(json["commands"][0]["help"], opaque);
     }
 
-    /// ★목록이 가르친 이름은 [`handle_call`] 이 전부 알아본다 — 그리고 그 밖의 이름은 모른다★.
+    /// [`handle_call`] recognizes every name the list taught and does not know names outside it.
     ///
-    /// ★`callable == true` 만 단언하지 않는 이유★: 그 칸은 오늘 [`merge`] 의 모든 행에서 참이라(두 출처가
-    /// 둘 다 도달 가능하다) 그 단언은 **상수를 단언한 것**과 구분되지 않는다. 실제로 지켜야 하는 성질은
-    /// 「목록과 실행이 같은 두 사실에서 나온다」이고, 그것은 두 함수를 같은 입력에 태워야 관측된다.
-    /// ★음성 대조를 함께 둔다★ — 없으면 아래 루프는 어떤 구현에서도 초록이다.
+    /// Asserting only `callable == true` would be indistinguishable from asserting a constant (true on every [`merge`] row today); the property is
+    /// "list and execution come from the same two facts", seen only by running both on the same input. A negative control keeps the loop from being green for any implementation.
     #[test]
     fn every_name_the_listing_teaches_is_a_name_the_call_route_recognises() {
         let registered = Registered("tab.create");
@@ -580,23 +493,22 @@ mod tests {
             vec![entry("tab.create", "theirs")],
         )
         .to_json();
-        let rows = json["commands"].as_array().expect("배열");
-        assert_eq!(rows.len(), 2, "전제: 두 출처가 다 실렸다: {json}");
+        let rows = json["commands"].as_array().expect("array");
+        assert_eq!(rows.len(), 2, "premise: both sources were carried: {json}");
 
-        // 1단계 표는 비워 둔다 — 여기서 재는 것은 **알아보나**이지 결말이 아니다.
+        // The stage-1 table is left empty — this measures recognition, not the outcome.
         let table = NoLocalCommands;
         for row in rows {
-            let name = row["name"].as_str().expect("이름");
+            let name = row["name"].as_str().expect("name");
             assert_eq!(row["callable"], true, "{json}");
-            // `agent.list` 는 이 빈 표에 없으므로 명부로 떨어진다 — 그래서 이 루프가 재는 것은 명부 쪽
-            //   절반이고, 표 쪽 절반은 실제 표를 든 통합 시험이 잰다.
+            // `agent.list` is not in this empty table so it falls to the roster: this loop measures the roster-side half; the table-side half is the integration test with a real table.
             let known = !matches!(
                 handle_call(&table, &registered, call_of(name)),
                 CallOutcome::Answered(ControlQueryResult::Error { code, .. }) if code == "UNKNOWN_COMMAND"
             );
             assert!(
                 known || name == "agent.list",
-                "목록이 가르친 이름을 호출 판정이 모른다: {name}"
+                "the call decision does not know a name the list taught: {name}"
             );
         }
 
@@ -605,22 +517,20 @@ mod tests {
                 handle_call(&table, &registered, call_of("nobody.declares.this")),
                 CallOutcome::Answered(ControlQueryResult::Error { ref code, .. }) if code == &"UNKNOWN_COMMAND"
             ),
-            "음성 대조 — 목록에 없는 이름은 모르는 명령이어야 한다"
+            "negative control — a name not in the list must be an unknown command"
         );
 
-        // WS 투영의 칸은 이 표면에 새어 나오지 않는다 — 도달 규칙이 달라 뜻이 둘이 된다.
+        // The WS projection's field must not leak here — differing reachability rules would give it two meanings.
         assert!(
             rows.iter().all(|r| r["available"].is_null()),
-            "WS 의 available 이 이 목록에 실렸다: {json}"
+            "WS's available was carried in this list: {json}"
         );
     }
 
-    /// ★호출자가 준 번호를 그대로 쓴다 — 그리고 문법에 안 맞으면 **그 칸을 지목해** 반려한다★
-    /// (ADR-0161 결정 1·5).
+    /// The caller-given number is used as is, and one that does not fit the syntax is bounced naming that field (ADR-0161 decisions 1·5).
     ///
-    /// 번호를 여기서 새로 만들면 배달의 중복 방지가 구조적으로 안 걸린다 — 그 성질이 이 칸의 존재 이유
-    /// 전부다. ★그 성질이 오늘 어디까지 서는지는 [`CallRequest::request_id`] 가 적는다(왕복이 열려 있는
-    /// 동안뿐)★ — 이 시험이 재는 것은 **번호가 그대로 쓰이는가** 하나다.
+    /// A new number here would keep delivery's duplicate prevention from ever triggering. How far that holds today: [`CallRequest::request_id`]
+    /// (only while the round trip is open); this test measures only whether the number is used as is.
     #[test]
     fn a_caller_supplied_request_id_is_used_as_is_and_a_malformed_one_names_that_field() {
         let table = NoLocalCommands;
@@ -634,18 +544,21 @@ mod tests {
         };
         match handle_call(&table, &registered, req) {
             CallOutcome::Relay { request_id, .. } => {
-                assert_eq!(request_id, mine, "호출자가 준 번호를 그대로 써야 한다")
+                assert_eq!(
+                    request_id, mine,
+                    "the caller-given number must be used as is"
+                )
             }
-            other => panic!("중계여야: {other:?}"),
+            other => panic!("must be a relay: {other:?}"),
         }
 
-        // 안 실으면 데몬이 낸다 — 하위 호환(그 경로는 중복 방지가 하나도 안 걸린다는 것이 계약이다).
+        // If not sent, the daemon issues one — backward compatible (on that path no duplicate prevention triggers).
         match handle_call(&table, &registered, call_of("tab.create")) {
             CallOutcome::Relay { .. } => {}
-            other => panic!("번호 없는 요청도 받아야: {other:?}"),
+            other => panic!("a request without a number must be accepted too: {other:?}"),
         }
 
-        // ★바깥에서 온 값이라 문법을 검증한다★ — 그리고 그 반려는 **바디 전체가 틀렸다**가 아니어야 한다.
+        // A value from outside, so its syntax is validated — and that bounce must not say the whole body is wrong.
         for bad in ["", "not-a-uuid", &"9".repeat(4096)] {
             let req = CallRequest {
                 name: "tab.create".to_string(),
@@ -657,21 +570,23 @@ mod tests {
                     assert_eq!(code, "INVALID_ARGUMENT", "{hint}");
                     assert!(
                         hint.contains(CALLER_REQUEST_ID_FIELD),
-                        "어느 칸이 틀렸는지 말해야: {hint}"
+                        "must say which field is wrong: {hint}"
                     );
-                    assert!(hint.len() < 4096, "문구가 요청만큼 커졌다: {}", hint.len());
+                    assert!(
+                        hint.len() < 4096,
+                        "the wording grew with the request: {}",
+                        hint.len()
+                    );
                 }
-                other => panic!("반려여야: {other:?}"),
+                other => panic!("must be a bounce: {other:?}"),
             }
         }
     }
 
-    /// 잘못된 번호는 **이름을 가리지 않고** 같은 답을 낸다 — 안 그러면 이 입구의 계약이 이름에 따라 갈린다.
+    /// A wrong number gives the same answer regardless of the name — otherwise the contract would split by name.
     ///
-    /// ★그래서 1단계 표가 그 이름을 **실제로 쥐고 있어야** 이 시험이 자기 이름을 잰다★: 빈 표를 넘기면
-    /// `agent.list` 도 중계 갈래로 떨어져, 시험 이름이 주장하는 축(자기 이름에서도 같은 반려)을 한 번도
-    /// 태우지 않는다. 형제([`a_caller_supplied_request_id_is_used_as_is_and_a_malformed_one_names_that_field`])
-    /// 는 빈 표로 중계 갈래를 재므로, 둘이 합쳐 두 갈래를 덮는다.
+    /// The stage-1 table must really hold that name: an empty table would drop `agent.list` into the relay branch too and never run the claimed axis.
+    /// The sibling ([`a_caller_supplied_request_id_is_used_as_is_and_a_malformed_one_names_that_field`]) covers the relay branch with an empty table.
     #[test]
     fn a_malformed_request_id_is_refused_even_for_a_name_this_daemon_holds() {
         let req = CallRequest {
@@ -683,17 +598,14 @@ mod tests {
             CallOutcome::Answered(ControlQueryResult::Error { code, .. }) => {
                 assert_eq!(code, "INVALID_ARGUMENT")
             }
-            other => panic!("반려여야: {other:?}"),
+            other => panic!("must be a bounce: {other:?}"),
         }
     }
 
-    /// ★1단계 표가 **자기 것이라 해 놓고 빈손**을 내면 중계로 흘리지 않는다★
-    ///
-    /// 흘리면 그 이름은 명부에 주인이 없어 「모르는 명령」으로 나가거나(있으면) 버스가 같은 근거로 다시
-    /// 거절한다 — 어느 쪽이든 호출자는 **자기가 고칠 수 없는 배선 결함**을 자기 잘못으로 읽는다. 배달도 같은
-    /// 어긋남을 같은 코드로 드러낸다(`command_delivery` 의 `fold_local`).
-    /// ★이 상태는 실물 어댑터에서는 날 수 없다★(`claim`·`run` 이 같은 `OnceLock` 표를 본다) — 그래서 여기
-    /// 이중인격 표를 손으로 세운다. 다른 구현을 꽂는 날 그 성질을 함께 가져와야 한다는 것이 이 시험의 값이다.
+    /// If the stage-1 table claims a name as its own and comes up empty-handed, it does not flow to relay: the caller would read a wiring defect it
+    /// cannot fix as its own mistake ("unknown command", or a second bus refusal). Delivery exposes the same mismatch with the same code (`fold_local`).
+    /// The real adapter cannot reach this state (`claim`·`run` share one `OnceLock` table), so a split-personality table is hand-built; the test's
+    /// value is that any other implementation plugged in later must keep the property.
     #[test]
     fn a_table_that_claims_a_name_but_answers_nothing_is_not_relayed() {
         struct ClaimsButAnswersNothing;
@@ -718,7 +630,7 @@ mod tests {
             }
         }
 
-        // 주인이 붙어 있는 이름으로 태운다 — 중계로 흘렸다면 여기가 `Relay` 가 된다.
+        // A name with an owner attached — if it flowed to relay, this would become `Relay`.
         match handle_call(
             &ClaimsButAnswersNothing,
             &Registered("tab.create"),
@@ -726,66 +638,61 @@ mod tests {
         ) {
             CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
                 assert_eq!(code, "INTERNAL", "{hint}");
-                assert!(hint.contains("tab.create"), "어느 이름인지 말해야: {hint}");
+                assert!(hint.contains("tab.create"), "must say which name: {hint}");
             }
-            other => panic!("INTERNAL 반려여야: {other:?}"),
+            other => panic!("must be an INTERNAL bounce: {other:?}"),
         }
     }
 
     #[test]
     fn an_absent_args_object_is_the_same_as_an_empty_one() {
         let with: CallRequest =
-            serde_json::from_str(r#"{"name":"agent.list","args":{}}"#).expect("역직렬화");
+            serde_json::from_str(r#"{"name":"agent.list","args":{}}"#).expect("deserialization");
         let without: CallRequest =
-            serde_json::from_str(r#"{"name":"agent.list"}"#).expect("역직렬화");
+            serde_json::from_str(r#"{"name":"agent.list"}"#).expect("deserialization");
         assert_eq!(with.args.len(), without.args.len());
         assert_eq!(without.name, "agent.list");
     }
 
-    /// ★`name` 은 꼭대기 어휘이면서 실제 인자 이름이기도 하다★ — 인자를 꼭대기에 펼치는 형태로 되돌리면
-    /// `agent.rename` 을 이 입구로 부를 수 없게 된다.
+    /// `name` is top-level vocabulary and also a real argument name — spreading arguments at the top would make `agent.rename` uncallable here.
     #[test]
     fn a_command_argument_called_name_survives_alongside_the_command_name() {
         let req: CallRequest =
             serde_json::from_str(r#"{"name":"agent.rename","args":{"target":"a","name":"b"}}"#)
-                .expect("역직렬화");
+                .expect("deserialization");
 
         assert_eq!(req.name, "agent.rename");
         assert_eq!(req.args["name"], "b");
         assert_eq!(req.args["target"], "a");
     }
 
-    /// ★배열 바디는 **호출이 아니다**★ — 파생 역직렬화로 되돌리면 `["agent.list"]` 가 필드 순서열로 읽혀
-    /// 그 명령이 **실행된다**(실측). 부작용 있는 입구에서 그 관용은 사고다.
+    /// An array body is not a call — derived deserialization would read `["agent.list"]` as a field sequence and execute it (measured); at an entrance with side effects that tolerance is an accident.
     #[test]
     fn a_json_array_is_not_a_command_call() {
         for body in [r#"["agent.list"]"#, r#"["agent.new",{"cwd":"C:/x"}]"#] {
             assert!(
                 serde_json::from_str::<CallRequest>(body).is_err(),
-                "객체가 아닌 바디는 반려여야: {body}"
+                "a non-object body must be bounced: {body}"
             );
         }
     }
 
-    /// 모르는 꼭대기 칸은 무시하되(홉 간 additive 진화) **인자를 잃은 요청이 조용히 성공하지는 않는다** —
-    /// 그 판정은 표의 입구 검문이 지므로 여기서는 칸이 `args` 로 안 새는 것만 못박는다.
+    /// Unknown top-level fields are ignored (additive evolution), but a request that lost its arguments does not silently succeed — the table's entrance check carries that; here only that fields do not leak into `args`.
     #[test]
     fn an_unknown_top_level_field_is_ignored_and_never_becomes_an_argument() {
         let req: CallRequest =
             serde_json::from_str(r#"{"name":"agent.move","target":"a","parent":"lead"}"#)
-                .expect("역직렬화");
+                .expect("deserialization");
 
         assert_eq!(req.name, "agent.move");
         assert!(
             req.args.is_empty(),
-            "꼭대기 칸이 인자로 새면 `args` 규율이 무의미해진다: {:?}",
+            "if a top-level field leaks into the arguments, the `args` discipline becomes meaningless: {:?}",
             *req.args
         );
     }
 
-    /// ★꼭대기 칸만 본다★ — `args` 안의 중복은 [`CommandArgs`] 소유이고 그쪽 자리에서 이미 재고 있다.
-    /// 여기서 겹쳐 재면 이 파일이 안 가진 규율을 이 파일이 지키는 것처럼 읽힌다(그 합성이 실제로 도는지는
-    /// 라우트를 태우는 통합 시험이 본다).
+    /// Top-level fields only — duplicates inside `args` are owned and measured by [`CommandArgs`]; measuring them here would read as this file guarding a discipline it lacks.
     #[test]
     fn a_duplicate_name_is_refused() {
         assert!(
@@ -798,7 +705,7 @@ mod tests {
         .is_err());
     }
 
-    /// 이름 하나에 주인이 붙어 있다고 답하는 명부.
+    /// A roster that answers that one name has an owner attached.
     struct Registered(&'static str);
 
     impl OwnerLookupSource for Registered {
@@ -818,9 +725,7 @@ mod tests {
         }
     }
 
-    /// ★목록이 가르친 이름은 **버스로 간다**★ — 여기서 반려로 접으면 대시보드 명령 열다섯이 다시 닫힌다
-    /// (ADR-0160). 그리고 아무도 선언하지 않은 이름은 여전히 「모르는 명령」이어야 한다 — 두 사실을 한
-    /// 갈래로 뭉치면 호출자는 실재하는 이름을 계속 바꿔 가며 재시도한다.
+    /// The names the list taught go to the bus — folding them into a bounce would close the fifteen dashboard commands again (ADR-0160); a name nobody declared must stay "unknown command", or the caller keeps changing a real name.
     #[test]
     fn a_name_with_a_connected_owner_goes_to_the_bus_and_an_unknown_one_is_refused() {
         let table = NoLocalCommands;
@@ -829,9 +734,11 @@ mod tests {
         match handle_call(&table, &registered, call_of("tab.create")) {
             CallOutcome::Relay { name, args, .. } => {
                 assert_eq!(name, "tab.create");
-                assert!(args.is_object(), "인자는 그대로 넘어간다: {args}");
+                assert!(args.is_object(), "arguments are passed on as is: {args}");
             }
-            CallOutcome::Answered(other) => panic!("주인이 붙은 이름은 중계여야: {other:?}"),
+            CallOutcome::Answered(other) => {
+                panic!("a name with an owner attached must be relayed: {other:?}")
+            }
         }
 
         match handle_call(&table, &registered, call_of("nope.nope")) {
@@ -840,12 +747,11 @@ mod tests {
                 assert!(hint.contains("nope.nope"), "{hint}");
                 assert!(hint.contains(CATALOG_RECOVERY), "{hint}");
             }
-            other => panic!("모르는 이름은 반려여야: {other:?}"),
+            other => panic!("an unknown name must be bounced: {other:?}"),
         }
     }
 
-    /// 중계된 결말은 **주인이 만든 것**이다 — 성공 payload 는 열어보지 않고, 실패는 이 표면의 다른 반려와
-    /// 같은 함수를 탄다(회복 안내 규율까지 같이 걸린다).
+    /// A relayed outcome is made by the owner — the success payload is not opened, and failures ride the same function as other bounces (recovery guidance discipline applies).
     #[test]
     fn a_relayed_outcome_keeps_the_owners_answer() {
         let id = RequestId::new();
@@ -866,14 +772,14 @@ mod tests {
                 assert!(hint.contains("ghost"), "{hint}");
                 assert!(
                     hint.contains(CATALOG_RECOVERY),
-                    "고칠 수 있는 실패다: {hint}"
+                    "it is a fixable failure: {hint}"
                 );
             }
-            other => panic!("반려여야: {other:?}"),
+            other => panic!("must be a bounce: {other:?}"),
         }
     }
 
-    /// 고칠 인자가 없는 실패에 「목록을 보라」를 달면 호출자는 없는 오타를 찾는다.
+    /// "Look at the list" on a failure with no argument to fix sends the caller after a nonexistent typo.
     #[test]
     fn the_recovery_is_attached_only_to_faults_the_catalog_can_fix() {
         let fixable = refused(CommandError::invalid_argument("bad field"));
@@ -893,29 +799,26 @@ mod tests {
                 assert!(!unfixable.contains(CATALOG_RECOVERY), "{unfixable}");
                 assert!(unfixable.contains("ghost"), "{unfixable}");
             }
-            other => panic!("둘 다 반려여야: {other:?}"),
+            other => panic!("both must be bounces: {other:?}"),
         }
     }
 
-    /// ★반려 문구는 요청만큼 커지지 않는다 — **어느 갈래로 나가든**★: 호출자 문자열은 이름으로도
-    /// (`unknown_name`) 표가 준 문구 안으로도(`refused` — `check_args` 가 친 키를 원문 그대로 넣는다)
-    /// 들어온다. 한 갈래만 재면 다른 갈래는 1 MiB 바디 상한이 유일한 방벽인 채로 남고, 그 상태에서 이
-    /// 테스트는 **파일 전체의 성질처럼 읽혀** 없는 보장을 광고한다.
+    /// The bounce wording does not grow with the request, whichever branch it goes out by: caller strings enter as the name (`unknown_name`) and inside
+    /// the table's wording (`refused` — `check_args` puts the typed key in verbatim). Measuring one branch would leave the other with only the 1 MiB
+    /// body cap and make this test read as a whole-file property.
     ///
-    /// 아래 수는 **여유이지 계약이 아니다** — 계약은 「요청 크기와 무관」이고, 그것을 세우는 것은 갈래마다의
-    /// `preview_within`·`preview` 다(몫이 다르므로 한 수로 좁게 못 잡는다).
+    /// The number below is slack, not a contract — the contract is independence from request size, established by per-branch `preview_within`·`preview`.
     #[test]
     fn every_refusal_branch_is_reported_within_a_bound() {
         let huge = "k".repeat(500_000);
         let branches = [
             unknown_name(&huge),
-            // 중계된 실패도 이 표면의 반려로 나간다 — 주인이 보낸 문구가 요청만큼 클 수 있다.
+            // A relayed failure also goes out as this surface's bounce — the owner's wording can be as large as the request.
             relayed(CommandReply::err(
                 RequestId::new(),
                 CommandError::of(ErrorCode::Conflict, format!("owner said: {huge}")),
             )),
-            // 표의 문구는 자기 입력을 캡하지만(`quoted_input`), 캡하지 않는 생산자도 있다
-            //   (`commands::drive_to_completion`) — 그쪽이 오는 모양으로 잰다.
+            // The table's wording caps its own input (`quoted_input`), but some producers do not (`commands::drive_to_completion`) — measured in the shape that side arrives in.
             refused(CommandError::invalid_argument(format!(
                 "not an argument of '{huge}': … — declared arguments: target, name"
             ))),
@@ -925,28 +828,23 @@ mod tests {
         for branch in branches {
             match branch {
                 ControlQueryResult::Error { code, hint } => {
-                    assert!(
-                        hint.contains("truncated"),
-                        "잘랐다고 말한다({code}): {hint}"
-                    );
+                    assert!(hint.contains("truncated"), "says it cut ({code}): {hint}");
                     assert!(
                         hint.len() < 4096,
-                        "문구가 요청만큼 커졌다({code}): {} 바이트",
+                        "the wording grew with the request ({code}): {} bytes",
                         hint.len()
                     );
                 }
-                other => panic!("반려여야: {other:?}"),
+                other => panic!("must be a bounce: {other:?}"),
             }
         }
     }
 
-    /// ★자르기는 **양 끝을 남긴다**★ — 머리에는 호출자가 친 것이, 꼬리에는 다음에 할 일이 앉는다.
-    /// 머리만 남기는 형태로 되돌리면 정확히 그 「할 일」이 사라진다(표의 인자 반려는 선언된 칸 전량을
-    /// 문구 **뒤**에 단다).
+    /// Cutting keeps both ends — the caller's input at the head, the next thing to do at the tail; head-only would lose that (the table's argument
+    /// bounce attaches all declared fields after the wording).
     ///
-    /// 여기 입력은 어떤 상한도 안 통과한 **가상의 최악**이다 — 설계된 최악은 이보다 훨씬 작아 안 잘린다
-    /// (그 경우는 통합 시험 `an_unknown_field_is_refused_with_the_declared_argument_list` 계열이 실제
-    /// 라우트로 잰다). 여기서 재는 것은 「잘릴 때 무엇이 남는가」다.
+    /// The input is a hypothetical worst case that passed no cap (the designed worst case is much smaller and uncut — measured on a real route by
+    /// the `an_unknown_field_is_refused_with_the_declared_argument_list` family); this measures what remains when cut.
     #[test]
     fn truncation_keeps_both_ends_so_the_next_step_survives() {
         let refusal = refused(CommandError::invalid_argument(format!(
@@ -956,19 +854,19 @@ mod tests {
 
         match refusal {
             ControlQueryResult::Error { hint, .. } => {
-                assert!(hint.contains("truncated"), "잘랐다고 말한다: {hint}");
+                assert!(hint.contains("truncated"), "says it cut: {hint}");
                 assert!(
                     hint.contains("not an argument of 'agent.rename'"),
-                    "머리(무엇이 틀렸나)가 남아야: {hint}"
+                    "the head (what was wrong) must remain: {hint}"
                 );
                 for declared in ["declared arguments", "target", "name"] {
                     assert!(
                         hint.contains(declared),
-                        "꼬리(무엇으로 고치나)가 잘려 나갔다({declared}): {hint}"
+                        "the tail (what to fix it with) was cut off ({declared}): {hint}"
                     );
                 }
             }
-            other => panic!("반려여야: {other:?}"),
+            other => panic!("must be a bounce: {other:?}"),
         }
     }
 }

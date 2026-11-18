@@ -1,11 +1,8 @@
 //! The first-frame auth decision — token (constant time) and protocol version.
 //!
-//! Both expected values are **injected** by the assembly (`run_accept_loop`): this module decides only "is the token the
-//! client stated equal to the one I was given" and "is the version the client stated equal to the one I was given" — it
-//! reads neither daemon.json nor the protocol version constant.
+//! Both expected values are injected by the assembly (`run_accept_loop`): this module only decides whether the stated token and version equal the ones it was given — it reads neither daemon.json nor the protocol version constant.
 //!
-//! ★The refusal text never quotes the frame★ — the frame can carry the token, so logs carry only serde's error class
-//! and position (`docs/reference/logging-conventions.md`).
+//! ★The refusal text never quotes the frame★ — the frame can carry the token, so logs carry only serde's error class and position (`docs/reference/logging-conventions.md`).
 // ADR-0310
 
 use engram_dashboard_protocol::handshake::AuthFrame;
@@ -17,8 +14,7 @@ pub(crate) struct AuthCheck {
     protocol_version: u32,
 }
 
-/// Why the first frame was refused. `message` goes to the client as the handshake `Error` text and as the close
-/// reason; `kind` picks the close code (`RejectKind::close_code`).
+/// Why the first frame was refused. `message` goes to the client as the handshake `Error` text and the close reason; `kind` picks the close code (`RejectKind::close_code`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Refusal {
     pub(crate) kind: RejectKind,
@@ -51,7 +47,7 @@ impl AuthCheck {
             }) => {
                 // Security: no logging of the token value.
                 if !constant_time_eq(token.expose(), &self.token) {
-                    tracing::warn!(%peer, "auth 실패: 토큰 불일치 — close");
+                    tracing::warn!(%peer, "auth failed: token mismatch — close");
                     // A stale credential may pass on the next dial (TRD trd-3 §3-0 ⑤ D20 ①) — only the close code says so.
                     return Err(Refusal {
                         kind: RejectKind::Retryable,
@@ -63,42 +59,39 @@ impl AuthCheck {
                         %peer,
                         client = protocol_version,
                         server = self.protocol_version,
-                        "auth 실패: protocol_version 불일치 — close"
+                        "auth failed: protocol_version mismatch — close"
                     );
                     return Err(Refusal::terminal(format!(
                         "protocol_version mismatch: client {protocol_version} != server {}",
                         self.protocol_version
                     )));
                 }
-                tracing::info!(%peer, "auth 성공");
+                tracing::info!(%peer, "auth succeeded");
                 Ok(())
             }
-            // ★The boundary of the two failure messages★: this module does not know upper-layer commands, so it cannot decide "parses as an
-            //   upper-layer command but is not auth" — instead it uses the error classification serde already computed (zero re-parsing):
-            //     · data error  = JSON is valid but not this shape → "expected auth"
-            //     · anything else (syntax/eof/io) = not JSON at all → "the frame itself is wrong"
-            //   It is diagnostic text for humans; no sender branches on the wording.
-            // ★Do not carry the error as `{e}`★: the Display of `{"Auth":"<토큰>"}` emits that string as is, and the token leaks into
-            //   the log. Leave only the classification and position — the regression defense is
-            //   `auth_parse_failure_log_fields_do_not_carry_the_payload` below.
+            // ★Boundary of the two failure messages★: this module does not know upper-layer commands, so it cannot decide "parses as a command but is not auth" — it uses the error classification serde already computed:
+            //     · data error = valid JSON, wrong shape → "expected auth"
+            //     · anything else (syntax/eof/io) = not JSON → "the frame itself is wrong"
+            //   Diagnostic text for humans; no sender branches on the wording.
+            // ★Do not carry the error as `{e}`★: Display of `{"Auth":"<token>"}` emits that string and leaks the token into the log. Leave only classification and position — regression defense: `auth_parse_failure_log_fields_do_not_carry_the_payload` below.
             Err(e) if e.is_data() => {
                 tracing::warn!(
                     %peer,
                     kind = ?e.classify(),
                     line = e.line(),
                     column = e.column(),
-                    "첫 frame 이 Auth 가 아님 — close"
+                    "first frame is not Auth — close"
                 );
                 Err(Refusal::terminal("expected Auth as first frame"))
             }
-            // For the same reason as the branch above, do not carry Display (the token can arrive on this branch too).
+            // Same reason — do not carry Display (the token can arrive on this branch too).
             Err(e) => {
                 tracing::warn!(
                     %peer,
                     kind = ?e.classify(),
                     line = e.line(),
                     column = e.column(),
-                    "첫 frame 파싱 실패 — close"
+                    "first frame parse failed — close"
                 );
                 Err(Refusal::terminal("invalid first frame"))
             }
@@ -107,12 +100,12 @@ impl AuthCheck {
 
     /// A binary first frame — auth is a text frame.
     pub(crate) fn refuse_binary(&self, peer: &str) -> Refusal {
-        tracing::warn!(%peer, "첫 frame 이 Text 가 아님 — close");
+        tracing::warn!(%peer, "first frame is not Text — close");
         Refusal::terminal("expected Auth text frame")
     }
 }
 
-/// Exposing the length is harmless since the token length is fixed (64 hex chars).
+/// Exposing the length is harmless: the token length is fixed (64 hex chars).
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let a = a.as_bytes();
     let b = b.as_bytes();
@@ -131,8 +124,7 @@ mod tests {
     use super::*;
     use engram_dashboard_protocol::Secret;
 
-    /// An arbitrary protocol version. ★Deliberately not the production version★ — a check that read the constant back
-    /// instead of the injected value would diverge from it.
+    /// An arbitrary protocol version. ★Deliberately not the production version★ — a check reading the constant back instead of the injected value would diverge from it.
     const TEST_WIRE_VERSION: u32 = 4242;
 
     fn auth_text(token: &str, protocol_version: u32) -> String {
@@ -146,8 +138,14 @@ mod tests {
     #[test]
     fn constant_time_eq_correctness() {
         let a = "a".repeat(64);
-        assert!(constant_time_eq(&a, &"a".repeat(64)), "동일 토큰은 true");
-        assert!(!constant_time_eq(&a, &"b".repeat(64)), "다른 토큰은 false");
+        assert!(
+            constant_time_eq(&a, &"a".repeat(64)),
+            "identical tokens give true"
+        );
+        assert!(
+            !constant_time_eq(&a, &"b".repeat(64)),
+            "different tokens give false"
+        );
         assert!(!constant_time_eq(&a, &"a".repeat(63)));
         assert!(!constant_time_eq(&a, &"a".repeat(65)));
         let mut almost = "a".repeat(64);
@@ -162,12 +160,12 @@ mod tests {
         let e = serde_json::from_str::<AuthFrame>(&format!(r#"{{"Auth":"{token}"}}"#)).unwrap_err();
         assert!(
             e.to_string().contains(&token),
-            "Display 가 토큰을 싣지 않으면 이 테스트가 지키는 게 없다: {e}"
+            "if Display does not carry the token, this test guards nothing: {e}"
         );
         let logged = format!("{:?} {} {}", e.classify(), e.line(), e.column());
         assert!(
             !logged.contains(&token),
-            "로깅 필드에 토큰이 실렸다: {logged}"
+            "the token got into a logging field: {logged}"
         );
     }
 
@@ -214,7 +212,7 @@ mod tests {
                 TEST_WIRE_VERSION + 1,
                 TEST_WIRE_VERSION
             ),
-            "두 숫자 모두 주입값 기준이어야(상수 하드코딩이면 어긋난다)"
+            "both numbers must be based on the injected value (a hardcoded constant would diverge)"
         );
         assert_eq!(refusal.kind, RejectKind::Terminal);
     }
