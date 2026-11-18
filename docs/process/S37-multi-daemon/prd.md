@@ -93,12 +93,12 @@ Measured on two PCs (A, B) unless stated.
 - D4 — Helper servers (decided 2026-11-19): one network setting — n0 public relay + address lookup (default) / a server the user hosts (`iroh-relay` + `iroh-dns-server` URLs) / off — plus an optional address per trusted PC. All paths are tried together and a direct path always wins over the relay; there is no user-set priority. Engram runs no server of its own. User: 「유료로되면 못쓴다는거네」 → 「우리서버는 없어. 상대방이 알아서 서버 구축하는건 있고」 → 「다 입력해도 되는거고 우선순위는 어찌된다는거?」 (answer: automatic, direct first).
 - D5 — Inbound limits (decided 2026-11-19): Reason Network's values — per PC 60 mails/min, per agent pair 12 per 10 min, body 64 KB — held as one limits value the daemon passes in, so a future settings system can expose them; there is no settings module yet, so v1 has no user-facing setting for them. User: 「resason network 에 맞춰서 두던지. 그리고 설정값으로 빼둘 수 있도록. 아직 설정값 자체는 base 모듈에 없어서 나중에 개발하면 수정해야되겠지만」.
 - D6 — Same-LAN discovery (decided 2026-11-19): on by default, kept as a setting (Syncthing local discovery is on by default). It only finds where an already-trusted PC is; connections are still limited to trusted PCs. Side effect: other LAN devices can see this PC's ID. User: 「손해 없음 켬으로해」.
+- D7 — When the feature runs (decided 2026-11-19): only while at least one trusted PC is registered; it starts on the first `peer.add` and stops when the last PC is removed, so users who never pair contact nothing. User: 「pc 하나 이상 등록한 뒤부터」.
 
 ### Open
 
 Conventions are named in each line; ★ = main default.
 
-- D7 — When the feature runs: only after at least one trusted PC is registered ★ (no helper-server contact for users who never pair; convention not found — Syncthing and Reason Network run their networking whenever installed) / always.
 
 Main defaults (internal, reported): iroh 1.x as the link library behind the transport seam; identity = iroh secret key in the daemon state folder; trusted list = a JSON file under the base `file` rules (ADR-0291); request deadline = the existing shared deadline; delivery results map onto the transport request/response correlation.
 
