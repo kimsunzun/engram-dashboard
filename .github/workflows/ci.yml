@@ -526,6 +526,11 @@ jobs:
         shell: bash
         run: cargo fmt --check
 
+      # Hangul stays out of code and config (ADR-0383) — rules and allowlist live in scripts/check-hangul.mjs.
+      - name: Hangul check
+        shell: bash
+        run: node scripts/check-hangul.mjs
+
       # ★The common trap of all grep gates below — the exit code is inverted★
       # rg ends with "0 if it finds a match, 1 if not, 2 or more on error". But the passing condition of these gates
       # is **0 matches**. So using rg's exit code as the step's success directly inverts the decision exactly.
