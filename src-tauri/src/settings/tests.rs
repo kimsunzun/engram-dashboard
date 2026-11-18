@@ -87,7 +87,10 @@ fn writes_are_refused_until_enabled() {
     {
         let disk = files.disk();
         assert_eq!(disk.writes, 0);
-        assert_eq!(disk.copies, 0, "nothing is copied aside before the gate either");
+        assert_eq!(
+            disk.copies, 0,
+            "nothing is copied aside before the gate either"
+        );
     }
     assert_eq!(svc.get(None).unwrap().rev, 0);
 
@@ -1109,7 +1112,8 @@ fn readers_do_not_wait_for_a_write_in_flight() {
     // A bound reached only on failure — if a read queues behind a write, it cuts here and releases the write.
     let read = read_rx.recv_timeout(Duration::from_secs(10));
     release.send(()).unwrap();
-    let (snapshot, effective) = read.expect("the read waited for the in-progress write's disk wait");
+    let (snapshot, effective) =
+        read.expect("the read waited for the in-progress write's disk wait");
 
     assert_eq!(snapshot.rev, 0);
     assert_eq!(snapshot.items[0].value, "dark");

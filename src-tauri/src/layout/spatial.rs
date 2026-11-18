@@ -221,7 +221,9 @@ mod tests {
     }
 
     fn spatial_of(list: &[SlotSpatial], id: Uuid) -> &SlotSpatial {
-        list.iter().find(|s| s.slot_id == id).expect("the slot must exist")
+        list.iter()
+            .find(|s| s.slot_id == id)
+            .expect("the slot must exist")
     }
 
     // `split_in_tree` always splits at 0.5, so a tree whose ratio · shape is set directly is built with this helper.
@@ -306,10 +308,18 @@ mod tests {
 
         let t = spatial_of(&sp, top);
         let b = spatial_of(&sp, bottom);
-        assert_eq!(t.neighbors.down, Some(bottom), "below the top slot = the bottom slot");
+        assert_eq!(
+            t.neighbors.down,
+            Some(bottom),
+            "below the top slot = the bottom slot"
+        );
         assert_eq!(t.neighbors.up, None);
         assert_eq!(t.neighbors.left, None);
-        assert_eq!(b.neighbors.up, Some(top), "above the bottom slot = the top slot");
+        assert_eq!(
+            b.neighbors.up,
+            Some(top),
+            "above the bottom slot = the top slot"
+        );
         assert_eq!(b.neighbors.down, None);
         assert_eq!(t.ordinal, 0);
         assert_eq!(b.ordinal, 1);
@@ -332,7 +342,11 @@ mod tests {
         let sp = compute_spatial(&node);
 
         let s_rb = spatial_of(&sp, rb);
-        assert_eq!(s_rb.neighbors.up, Some(rt), "above bottom-right = top-right");
+        assert_eq!(
+            s_rb.neighbors.up,
+            Some(rt),
+            "above bottom-right = top-right"
+        );
         assert_eq!(
             s_rb.neighbors.left,
             Some(left),
@@ -342,7 +356,11 @@ mod tests {
         assert_eq!(s_rb.neighbors.right, None);
 
         let s_rt = spatial_of(&sp, rt);
-        assert_eq!(s_rt.neighbors.down, Some(rb), "below top-right = bottom-right");
+        assert_eq!(
+            s_rt.neighbors.down,
+            Some(rb),
+            "below top-right = bottom-right"
+        );
         assert_eq!(s_rt.neighbors.left, Some(left), "left of top-right = left");
 
         // left (full left side): on the right both rt/rb are candidates → one of the larger overlap (both equal at 0.5). Only existence is asserted.
@@ -490,7 +508,10 @@ mod tests {
         let tree = thin_tree();
         for n in [1, 2, 3] {
             let r = rect_of(&tree, n);
-            assert!(r.x1 - r.x0 < 1e-4, "the width of leaf {n} must be below 1e-4 — {r:?}");
+            assert!(
+                r.x1 - r.x0 < 1e-4,
+                "the width of leaf {n} must be below 1e-4 — {r:?}"
+            );
         }
 
         let sp = compute_spatial(&tree);
@@ -595,7 +616,10 @@ mod tests {
         let tree = ulp_tree();
         let (lt, lb, rb) = (rect_of(&tree, 1), rect_of(&tree, 2), rect_of(&tree, 5));
         // Measure the premise — without the 1 ulp mismatch this test measures nothing.
-        assert_eq!(lt.x1, rb.x0, "same root boundary — passes the adjacency decision");
+        assert_eq!(
+            lt.x1, rb.x0,
+            "same root boundary — passes the adjacency decision"
+        );
         assert_eq!(
             lt.y1.to_bits() - rb.y0.to_bits(),
             1,
@@ -642,7 +666,11 @@ mod tests {
         assert_eq!(rect_of(&tree, 17).x1, z.x0);
 
         let sp = compute_spatial(&tree);
-        assert_eq!(sp.len(), 18, "a zero-area leaf is in the list too (no panic)");
+        assert_eq!(
+            sp.len(),
+            18,
+            "a zero-area leaf is in the list too (no panic)"
+        );
         assert_eq!(spatial_of(&sp, id(18)).neighbors, Neighbors::default_none());
         for s in &sp {
             let n = s.neighbors;
@@ -664,7 +692,11 @@ mod tests {
         let order: Vec<Uuid> = sp.iter().map(|s| s.slot_id).collect();
         assert_eq!(order, (1..=18).map(id).collect::<Vec<_>>());
 
-        assert_eq!(compute_spatial(&tree), sp, "computing twice gives the same result");
+        assert_eq!(
+            compute_spatial(&tree),
+            sp,
+            "computing twice gives the same result"
+        );
     }
 
     #[test]
@@ -679,7 +711,11 @@ mod tests {
 
         let g = geometry::compute(&node);
         let z = rect_of(&node, 1000);
-        assert_eq!((z.x0, z.x1), (0.0, 0.0), "z must have width 0 at the origin");
+        assert_eq!(
+            (z.x0, z.x1),
+            (0.0, 0.0),
+            "z must have width 0 at the origin"
+        );
         assert_eq!(g.slots[0].slot_id, id(1000), "z is first in preorder");
         assert_eq!(
             g.slots.iter().filter(|r| !has_area(r)).count(),
@@ -708,7 +744,11 @@ mod tests {
         let inner = spatial_of(&sp, id(DEPTH)).neighbors;
         assert_eq!(inner.left, None, "z is nobody's neighbour");
         assert_eq!(inner.right, Some(id(DEPTH - 1)));
-        assert_eq!(compute_spatial(&node), sp, "computing twice gives the same result");
+        assert_eq!(
+            compute_spatial(&node),
+            sp,
+            "computing twice gives the same result"
+        );
     }
 
     // ── determinism ──────────────────────────────────────────────────────────────

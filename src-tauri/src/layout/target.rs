@@ -24,7 +24,10 @@ pub enum Target {
     Tab(ViewId),
     TabOf(Uuid),
     /// Area given by id — if `view` is given, it must be an area of that tab.
-    Slot { view: Option<ViewId>, slot: Uuid },
+    Slot {
+        view: Option<ViewId>,
+        slot: Uuid,
+    },
     SlotOf(Uuid),
     /// The area a word picks in the visible tab of window `window` (a label — the caller already resolved the window argument; `None` = main) (same rule as `slot.resolveSpatial` · ADR-0068).
     At {

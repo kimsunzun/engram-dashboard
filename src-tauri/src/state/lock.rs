@@ -181,7 +181,10 @@ mod tests {
 
         let second = acquire_with(&run_dir, LOCK_WAIT, || time.now.get(), |d| time.sleep(d));
 
-        assert!(second.is_none(), "if it is not released even after waiting, proceeds without the lock");
+        assert!(
+            second.is_none(),
+            "if it is not released even after waiting, proceeds without the lock"
+        );
         assert_eq!(time.elapsed(), LOCK_WAIT);
         assert_eq!(
             time.sleeps.get(),
@@ -209,7 +212,10 @@ mod tests {
             },
         );
 
-        assert!(second.is_some(), "takes it on the first try after it is released");
+        assert!(
+            second.is_some(),
+            "takes it on the first try after it is released"
+        );
         assert_eq!(time.sleeps.get(), 3);
         assert_eq!(time.elapsed(), RETRY_PAUSE * 3);
         drop(second);

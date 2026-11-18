@@ -182,7 +182,9 @@ impl Undelivered {
 impl fmt::Display for Undelivered {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (tried, failed) = match self {
-            Undelivered::NoWindows => return f.write_str("there is no window to receive the notification"),
+            Undelivered::NoWindows => {
+                return f.write_str("there is no window to receive the notification")
+            }
             Undelivered::Refused { tried, failed } => (tried, failed),
         };
         write!(f, "{}/{tried} windows did not receive it — ", failed.len())?;
@@ -656,7 +658,10 @@ mod tests {
                 Some(UiTheme::EInk)
             );
             assert_eq!(mgr.attrs_rev(), attrs_rev + 1);
-            assert_eq!(mgr.version, version, "a window theme does not bump the layout version");
+            assert_eq!(
+                mgr.version, version,
+                "a window theme does not bump the layout version"
+            );
         }
     }
 
@@ -954,7 +959,10 @@ mod tests {
 
         assert!(message.starts_with(POPUP), "{message}");
         assert!(message.contains(CLOSED), "{message}");
-        assert!(message.ends_with("2 other windows did not receive it either"), "{message}");
+        assert!(
+            message.ends_with("2 other windows did not receive it either"),
+            "{message}"
+        );
     }
 
     /// When sending, hold only the gate — if sending while holding the model lock, it is a deadlock the moment the receiving side reads the layout.

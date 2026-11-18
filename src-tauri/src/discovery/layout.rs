@@ -218,7 +218,10 @@ mod tests {
             empty_daemon.ends_with(".engram-dev"),
             "empty env value: must be the same as unset {empty_daemon:?}"
         );
-        assert_eq!(set_daemon, tmp, "env temp path: the daemon must be that path as is");
+        assert_eq!(
+            set_daemon, tmp,
+            "env temp path: the daemon must be that path as is"
+        );
 
         for (label, shell_root, daemon_root) in [
             ("no env", &unset_shell, &unset_daemon),

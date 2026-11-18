@@ -185,7 +185,8 @@ pub(crate) async fn forward_to_daemon(
     // Reply serialization: the daemon reply (Ack/Spawned/…) is an externally-tagged AgentEvent, so serializing it gives the `{"Ack":{"request_id":…}}` shape the frontend handleEvent expects. Disconnect: if `send_command` returns Err (disconnected / no response received) that message goes to the frontend so ProtocolClient.sendCommand's `send().catch` rejects the pending (no permanent hang).
     // A reply that never comes while the link stays up (the daemon drops one answer) is bounded by the transport's request timeout — the shared one of every round trip (ADR-0181 · ADR-0310 D15 ① · `daemon_client::connection::link_policy`), text `link::errors::reply_timeout_text`. No second timeout here. A command sent while the connection is live but not yet opened by the driver first waits for the open, bounded by the same value — worst case about twice it (the open gap is normally milliseconds).
     let event = client.send_command(agent_cmd).await?;
-    let value = serde_json::to_value(&event).map_err(|e| format!("failed to serialize reply: {e}"))?;
+    let value =
+        serde_json::to_value(&event).map_err(|e| format!("failed to serialize reply: {e}"))?;
     Ok(Some(value))
 }
 

@@ -258,7 +258,7 @@ mod tests {
         assert!(register.starts_with("데몬이 이 셸의 명령 등록을 통째로 거절했습니다.\n")); // hangul-ok: the Korean UI table
         assert!(update.starts_with("데몬이 화면 명령 명단 갱신을 거절했습니다.\n")); // hangul-ok: the Korean UI table
         assert!(register.contains("(원인이 고쳐질 때까지)")); // hangul-ok: the Korean UI table
-        // The shell bridge holds the rejected name without reverting it, so with the declaration unchanged that name may be carried again on the next full registration and rejected. But if the webview reports a changed list again, or the rejection stands only on the delta (CONFLICT with someone else's name, etc.), it does not repeat — so "may be"; do not revert it to "shell commands stay as they are", nor to a definitive form. The English "may" is the same.
+                                                              // The shell bridge holds the rejected name without reverting it, so with the declaration unchanged that name may be carried again on the next full registration and rejected. But if the webview reports a changed list again, or the rejection stands only on the delta (CONFLICT with someone else's name, etc.), it does not repeat — so "may be"; do not revert it to "shell commands stay as they are", nor to a definitive form. The English "may" is the same.
         assert!(update.contains(
             "원인을 고치지 않은 채 재연결하면 이 셸의 명령 등록 전체가 거절될 수 있습니다." // hangul-ok: the Korean UI table
         ));

@@ -7,7 +7,9 @@ pub(super) enum Kind {
         px: (f64, f64),
         rem: Option<(f64, f64)>,
     },
-    CssNumber { range: (f64, f64) },
+    CssNumber {
+        range: (f64, f64),
+    },
 }
 
 pub(super) struct SettingDef {
@@ -364,7 +366,10 @@ mod tests {
         assert!(select("ui.").iter().map(|d| d.key).eq(["ui.language"]));
         assert!(select("").is_empty());
         assert!(select(".").is_empty());
-        assert!(select("THEME.DEFAULT").is_empty(), "keys are case-sensitive");
+        assert!(
+            select("THEME.DEFAULT").is_empty(),
+            "keys are case-sensitive"
+        );
     }
 
     // ── Choice ──
@@ -390,7 +395,11 @@ mod tests {
         assert_eq!(ok(k, " 0.90Rem "), "0.9rem");
         assert_eq!(ok(k, ".5rem"), "0.5rem");
         assert_eq!(ok(k, "1EM"), "1em");
-        assert_eq!(ok(k, "+13px"), "13px", "the + sign is accepted and dropped in the canonical form");
+        assert_eq!(
+            ok(k, "+13px"),
+            "13px",
+            "the + sign is accepted and dropped in the canonical form"
+        );
     }
 
     #[test]
@@ -458,7 +467,10 @@ mod tests {
         let e = refused("chat.style.fontSize", "secret-token-48rem");
         assert!(e.contains("px 8~48"), "{e}");
         assert!(e.contains("rem 0.5~3"), "{e}");
-        assert!(!e.contains("secret"), "does not echo the received value: {e}");
+        assert!(
+            !e.contains("secret"),
+            "does not echo the received value: {e}"
+        );
         let e = refused("theme.default", "x");
         assert!(e.contains("dark · light · e-ink"), "{e}");
     }

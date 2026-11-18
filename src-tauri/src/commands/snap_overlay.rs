@@ -40,7 +40,10 @@ pub fn report_max_button_rect(
         },
         Box::new(move |hover| {
             if let Err(e) = emitter.emit_to(emitter.label(), EVT_SNAP_HOVER, hover) {
-                tracing::warn!(window = emitter.label(), "{EVT_SNAP_HOVER} emit failed: {e}");
+                tracing::warn!(
+                    window = emitter.label(),
+                    "{EVT_SNAP_HOVER} emit failed: {e}"
+                );
             }
         }),
     )

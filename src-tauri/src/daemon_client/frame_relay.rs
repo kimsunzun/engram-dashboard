@@ -248,7 +248,11 @@ mod tests {
 
         assert_eq!(h.delivered_seqs(), vec![5, 6, 7], "a seq run without holes");
         let (labels, bytes) = &h.delivered[1];
-        assert_eq!(labels, &vec![MAIN_WINDOW_LABEL.to_string()], "to the viewing window");
+        assert_eq!(
+            labels,
+            &vec![MAIN_WINDOW_LABEL.to_string()],
+            "to the viewing window"
+        );
         assert_eq!(decode_frame(bytes).unwrap().tag, FRAME_TAG_STRUCTURED_EVENT);
         assert_eq!(
             bytes,
@@ -273,13 +277,20 @@ mod tests {
             FrameRelay::Continue,
             "an old incarnation's unknown tag is filtered without disconnecting"
         );
-        assert!(h.delivered.is_empty(), "an old incarnation is filtered even for the placeholder");
+        assert!(
+            h.delivered.is_empty(),
+            "an old incarnation is filtered even for the placeholder"
+        );
 
         assert_eq!(
             h.feed(&with_tag(encode_terminal_frame(agent, 3, 7, b"new"), 0x09)),
             FrameRelay::Continue
         );
-        assert_eq!(h.delivered_seqs(), vec![7], "the current incarnation's placeholder passes");
+        assert_eq!(
+            h.delivered_seqs(),
+            vec![7],
+            "the current incarnation's placeholder passes"
+        );
     }
 
     // An unknown tag is also a progress signal — it is evidence that the daemon is alive and flowing that agent's replay, so it postpones the no-progress expiry
@@ -316,9 +327,18 @@ mod tests {
         let (a, b) = (AgentId::new_v4(), AgentId::new_v4());
         let mut log = UnknownTagLog::default();
         assert!(log.first_sighting(a, 7), "the first is warn");
-        assert!(!log.first_sighting(a, 7), "the second of the same pair is debug");
-        assert!(log.first_sighting(a, 9), "a different tag is counted separately");
-        assert!(log.first_sighting(b, 7), "a different agent is counted separately");
+        assert!(
+            !log.first_sighting(a, 7),
+            "the second of the same pair is debug"
+        );
+        assert!(
+            log.first_sighting(a, 9),
+            "a different tag is counted separately"
+        );
+        assert!(
+            log.first_sighting(b, 7),
+            "a different agent is counted separately"
+        );
     }
 
     #[test]

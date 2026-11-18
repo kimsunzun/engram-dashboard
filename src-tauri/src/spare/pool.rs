@@ -87,12 +87,8 @@ pub enum NoBuild {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimStep {
     Claimed(SpareClaim),
-    Wait {
-        build: u64,
-    },
-    Fresh {
-        build: bool,
-    },
+    Wait { build: u64 },
+    Fresh { build: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,7 +121,10 @@ pub enum Listen {
     NotPool,
     Kept,
     /// The field's window could not set up listening — the field was emptied (the caller closes that window; its `Destroyed` does not rebuild). `disabled_now` = the pool was turned off by this failure.
-    Removed { claimed: bool, disabled_now: bool },
+    Removed {
+        claimed: bool,
+        disabled_now: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -610,7 +609,10 @@ mod tests {
         assert!(!pool.build_failed(P2));
         assert!(pool.build_failed(P1));
         assert_eq!(pool.slot(), &Slot::Empty);
-        assert!(!pool.mark_built(P1), "a failed build cannot mark it as built");
+        assert!(
+            !pool.mark_built(P1),
+            "a failed build cannot mark it as built"
+        );
     }
 
     // ── handover ──
@@ -690,7 +692,10 @@ mod tests {
         assert_eq!(pool.slot(), &Slot::Empty);
         assert_eq!(pool.awaiting_reveal(), Some((P1, claim.generation)));
         assert_eq!(pool.reveal_generation(P1), Some(claim.generation));
-        assert!(!pool.contains(P1), "after confirmation it is a model window");
+        assert!(
+            !pool.contains(P1),
+            "after confirmation it is a model window"
+        );
         assert_eq!(pool.commit(&claim, true, now()), CommitDecision::Stale);
     }
 
@@ -708,7 +713,10 @@ mod tests {
         assert_eq!(pool.awaiting_reveal(), None);
         assert!(pool.contains(P1));
         assert_eq!(pool.take_built(None), ClaimStep::Fresh { build: false });
-        assert!(!pool.release(&claim), "a window decided to be closed does not go back");
+        assert!(
+            !pool.release(&claim),
+            "a window decided to be closed does not go back"
+        );
         assert_eq!(pool.commit(&claim, true, now()), CommitDecision::Stale);
         assert!(pool.close_failed(&claim));
         assert_eq!(pool.slot(), &Slot::Empty);

@@ -1089,11 +1089,11 @@ mod tests {
         };
         for text in [
             // hangul-ok-begin: the Korean word-table entries
-            "빈 칸", // hangul-ok: the Korean word-table entry
-            "에이전트", // hangul-ok: the Korean word-table entry
-            "에이전트 트리", // hangul-ok: the Korean word-table entry
-            "프리셋", // hangul-ok: the Korean word-table entry
-            "사용량", // hangul-ok: the Korean word-table entry
+            "빈 칸",           // hangul-ok: the Korean word-table entry
+            "에이전트",        // hangul-ok: the Korean word-table entry
+            "에이전트 트리",   // hangul-ok: the Korean word-table entry
+            "프리셋",          // hangul-ok: the Korean word-table entry
+            "사용량",          // hangul-ok: the Korean word-table entry
             "알 수 없는 내용", // hangul-ok: the Korean word-table entry
             // hangul-ok-end
             "Empty slot",

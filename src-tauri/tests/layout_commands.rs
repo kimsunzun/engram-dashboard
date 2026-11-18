@@ -756,7 +756,11 @@ fn the_table_holds_exactly_the_declared_commands() {
             "window.unmaximize",
         ]
     );
-    assert_eq!(names.len(), COMMAND_SPECS.len(), "declared but not plugged in");
+    assert_eq!(
+        names.len(),
+        COMMAND_SPECS.len(),
+        "declared but not plugged in"
+    );
 }
 
 /// The generation number is pinned by hand (macro contract: raise it when a declaration changes), otherwise two shells with different vocabularies report the same generation. The names-only golden above cannot catch this.
@@ -1110,7 +1114,10 @@ async fn an_unapplicable_request_keeps_the_services_reason() {
         .await,
     );
     assert_eq!(err.code(), ErrorCode::Conflict);
-    assert!(!err.message().is_empty(), "if the reason goes out empty it cannot be fixed");
+    assert!(
+        !err.message().is_empty(),
+        "if the reason goes out empty it cannot be fixed"
+    );
     assert_eq!(world.main_tabs(), before, "if refused, nothing changes");
     assert!(
         world.windows.closed.lock().unwrap().is_empty(),
@@ -1191,7 +1198,7 @@ async fn window_state_verbs_reach_the_port_with_the_resolved_label() {
 async fn a_window_state_refusal_is_a_conflict_with_the_ports_reason() {
     let (world, queue, receiver) = queued();
     world.control.answer_with(Err(
-        "a hidden window — first window.raise or window.showAll".to_string()
+        "a hidden window — first window.raise or window.showAll".to_string(),
     ));
     let err = error_of(
         call(
@@ -1580,7 +1587,10 @@ async fn a_window_id_reaches_the_same_window_as_its_label() {
         .outcome
         .expect("window creation");
     let popout = created["window"].as_str().expect("label").to_string();
-    let window_id = created["window_id"].as_str().expect("persistent id").to_string();
+    let window_id = created["window_id"]
+        .as_str()
+        .expect("persistent id")
+        .to_string();
     assert_ne!(window_id, popout);
 
     let created = call(
@@ -2059,7 +2069,11 @@ async fn popout_of_a_missing_slot_is_refused_without_opening_a_window() {
     );
 
     assert_eq!(err.code(), ErrorCode::Conflict);
-    assert!(err.message().contains("slot not found"), "{}", err.message());
+    assert!(
+        err.message().contains("slot not found"),
+        "{}",
+        err.message()
+    );
     assert!(
         world.windows.opened.lock().unwrap().is_empty(),
         "if refused, no window is opened either"
@@ -3294,7 +3308,11 @@ async fn restore_status_carries_saves_always_and_durable_only_while_awaiting() {
             .await
             .outcome
             .expect("success reply");
-        assert_eq!(none["saves"], json!(saves), "a value even with no copy — {saves}");
+        assert_eq!(
+            none["saves"],
+            json!(saves),
+            "a value even with no copy — {saves}"
+        );
         assert_eq!(none["durable"], json!(null));
 
         world.crash_copy_awaits_with(0, saves, StateFileStatus::Ok);
@@ -3327,7 +3345,11 @@ async fn restore_status_carries_saves_always_and_durable_only_while_awaiting() {
             .outcome
             .expect("success reply");
         assert_eq!(answered["crash_copy"], json!("answered"));
-        assert_eq!(answered["durable"], json!(null), "outside awaiting it is null");
+        assert_eq!(
+            answered["durable"],
+            json!(null),
+            "outside awaiting it is null"
+        );
         assert_eq!(
             answered["saves"],
             json!(saves),
@@ -3479,7 +3501,11 @@ async fn restore_accept_swaps_the_screen_through_the_shared_coordinator_off_the_
     assert_eq!(accepted, json!({"restored_windows": 2, "durable": false}));
     assert_eq!(world.main_tab_name(), "last tab");
     let opened = screen.opened.lock().unwrap().clone();
-    assert_eq!(opened, [popup_label(1)], "a new pop-out gets the label of the shared issuer");
+    assert_eq!(
+        opened,
+        [popup_label(1)],
+        "a new pop-out gets the label of the shared issuer"
+    );
     let mut windows = world.state.0.lock().unwrap().list_windows();
     windows.sort();
     assert_eq!(windows, [MAIN_WINDOW_LABEL.to_string(), popup_label(1)]);
@@ -3577,7 +3603,8 @@ fn both_ratio_commands_define_the_ratio_as_the_a_side_share() {
 #[test]
 fn set_ratio_advertises_its_three_outcomes_by_name() {
     let spec = spec_of("split.setRatio").expect("is declared");
-    let shape: serde_json::Value = serde_json::from_str(spec.ok_schema).expect("the schema is JSON");
+    let shape: serde_json::Value =
+        serde_json::from_str(spec.ok_schema).expect("the schema is JSON");
     assert_eq!(
         shape["properties"]["outcome"]["enum"],
         json!(["Applied", "Unchanged", "TooSmall"]),
@@ -3590,7 +3617,8 @@ fn set_ratio_advertises_its_three_outcomes_by_name() {
 #[test]
 fn both_surfaces_spell_the_split_ratio_outcome_the_same_way() {
     let spec = spec_of("split.setRatio").expect("is declared");
-    let shape: serde_json::Value = serde_json::from_str(spec.ok_schema).expect("the schema is JSON");
+    let shape: serde_json::Value =
+        serde_json::from_str(spec.ok_schema).expect("the schema is JSON");
     let advertised = shape["properties"]["outcome"]["enum"]
         .as_array()
         .expect("enum list")
@@ -3643,7 +3671,10 @@ async fn set_ratio_writes_through_the_apply_service_and_clamps_out_of_range_valu
         .iter()
         .find(|r| r.slot_id == x)
         .expect("x");
-    assert_eq!(left.x1, 0.3, "0.3 becomes the share of the a (left) area as is");
+    assert_eq!(
+        left.x1, 0.3,
+        "0.3 becomes the share of the a (left) area as is"
+    );
 
     for (asked, clamped) in [(1.5, tree::RATIO_MAX), (-1.0, tree::RATIO_MIN)] {
         let ok = world
@@ -3737,7 +3768,11 @@ async fn set_ratio_refuses_malformed_ids_and_non_numbers_before_applying() {
     );
     assert!(err.message().contains("split.list"), "{}", err.message());
     assert!(!err.message().contains("tab.list"), "{}", err.message());
-    assert_eq!(world.main_tabs().version, version, "a rejection changes nothing");
+    assert_eq!(
+        world.main_tabs().version,
+        version,
+        "a rejection changes nothing"
+    );
 }
 
 #[tokio::test]
@@ -3756,7 +3791,11 @@ async fn set_ratio_on_a_missing_split_keeps_the_services_reason() {
                 .await,
         );
         assert_eq!(err.code(), ErrorCode::Conflict);
-        assert!(err.message().contains("split not found"), "{}", err.message());
+        assert!(
+            err.message().contains("split not found"),
+            "{}",
+            err.message()
+        );
     }
 }
 
@@ -3868,7 +3907,11 @@ async fn split_list_names_the_slots_on_each_side_in_preorder() {
             .await,
     );
     assert_eq!(err.code(), ErrorCode::Conflict);
-    assert!(err.message().contains("view not found"), "{}", err.message());
+    assert!(
+        err.message().contains("view not found"),
+        "{}",
+        err.message()
+    );
 }
 
 /// A split too deep to be representable goes out as `CONFLICT` + reason (without a panic or no response).
@@ -4073,7 +4116,10 @@ async fn spawn_into_absorbs_the_spelling_a_person_would_type() {
                 .await
                 .unwrap_or_else(|_| panic!("{word}: did not get as far as the spawn"))
                 .expect("the spawn request comes");
-        assert_eq!(cwd, "C:/work/engram", "{word}: the cwd spelling was not carried over");
+        assert_eq!(
+            cwd, "C:/work/engram",
+            "{word}: the cwd spelling was not carried over"
+        );
         assert_eq!(backend, Some(want), "{word}: read as a different backend");
         answer
             .send(Ok("agent-1".to_string()))
@@ -4321,7 +4367,8 @@ async fn wire_round_trip(name: &str, args: serde_json::Value) -> WireTrip {
     let Frame::Text(text) = frames.remove(0) else {
         panic!("the outcome is a Text frame");
     };
-    let outcome: AgentCommand = serde_json::from_str(&text).expect("the outcome frame is an AgentCommand");
+    let outcome: AgentCommand =
+        serde_json::from_str(&text).expect("the outcome frame is an AgentCommand");
     assert_eq!(
         command_request_id(&outcome),
         None,
@@ -4348,7 +4395,11 @@ async fn a_daemon_frame_reaches_the_service_and_the_answer_goes_back_correlated(
         .as_str()
         .expect("the success outcome carries the new tab id");
     let tabs = world.main_tabs();
-    assert_eq!(tabs.tabs.len(), 2, "the apply service actually made the tab");
+    assert_eq!(
+        tabs.tabs.len(),
+        2,
+        "the apply service actually made the tab"
+    );
     assert_eq!(view_id, tabs.active.to_string());
 }
 
@@ -4395,11 +4446,7 @@ fn the_registration_packet_is_the_one_the_connection_sends() {
         plugged
     );
     for decl in &decls {
-        assert!(
-            !decl.help.trim().is_empty(),
-            "{}: help is empty",
-            decl.name
-        );
+        assert!(!decl.help.trim().is_empty(), "{}: help is empty", decl.name);
     }
     assert_eq!(catalog_version, CATALOG_VERSION);
     assert!(!owner.as_str().is_empty());
@@ -4615,7 +4662,11 @@ async fn the_registration_packet_carries_shell_names_once_and_leaves_daemon_name
     let decls = decls_from_wire(&decls).expect("the registration field the shell wrapped unpacks");
     for name in &shell_names {
         let carried: Vec<_> = decls.iter().filter(|d| d.name == *name).collect();
-        assert_eq!(carried.len(), 1, "{name}: a shell table name is carried only once");
+        assert_eq!(
+            carried.len(),
+            1,
+            "{name}: a shell table name is carried only once"
+        );
         assert!(
             !carried[0].help.contains(&view_decl(name).help.summary),
             "{name}: what is carried must be the shell table's declaration — the description the webview reported was carried"
@@ -4628,11 +4679,7 @@ async fn the_registration_packet_carries_shell_names_once_and_leaves_daemon_name
         "names the daemon answers are not filtered by the shell — the wall is the daemon's registration refusal"
     );
     for decl in &decls {
-        assert!(
-            !decl.help.trim().is_empty(),
-            "{}: help is empty",
-            decl.name
-        );
+        assert!(!decl.help.trim().is_empty(), "{}: help is empty", decl.name);
     }
 }
 
@@ -4690,7 +4737,11 @@ async fn a_non_host_report_does_not_change_what_is_advertised() {
         "a report from a non-host window makes no diff"
     );
     let advertised: Vec<String> = bridge.declarations().into_iter().map(|d| d.name).collect();
-    assert_eq!(advertised, vec!["tab.next".to_string()], "the advertisement is the host's only");
+    assert_eq!(
+        advertised,
+        vec!["tab.next".to_string()],
+        "the advertisement is the host's only"
+    );
 
     let (_world, receiver) = with_view(Arc::clone(&bridge));
     let mail = Mailbox::default();
@@ -4765,7 +4816,10 @@ async fn a_report_and_its_delta_go_out_as_one_unit() {
         "the second report overtook the first send — the daemon is left holding the union"
     );
     // Tells "has not started" from "is blocked" — the earlier assertion alone would pass for a merely sluggish task.
-    assert!(!second.is_finished(), "the second report finished without passing the gate");
+    assert!(
+        !second.is_finished(),
+        "the second report finished without passing the gate"
+    );
 
     gate.add_permits(1);
     first.await.expect("first report");
@@ -4957,7 +5011,8 @@ async fn a_report_that_arrives_after_the_table_still_rides_the_next_registration
     let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
     let (_world, receiver) = with_view(Arc::clone(&bridge));
 
-    let before = registration_command(&receiver).expect("a packet comes out even with the shell part alone");
+    let before =
+        registration_command(&receiver).expect("a packet comes out even with the shell part alone");
     let AgentCommand::RegisterCommands { decls, .. } = before else {
         panic!("RegisterCommands");
     };
@@ -5036,7 +5091,10 @@ async fn a_name_the_shell_table_answers_is_left_out_and_still_runs_in_the_shell(
     );
     mail.settle(1).await;
 
-    assert!(mail.only().outcome.is_ok(), "the shell apply service answered");
+    assert!(
+        mail.only().outcome.is_ok(),
+        "the shell apply service answered"
+    );
     assert_eq!(world.main_tabs().tabs.len(), 2, "a tab was actually added");
     assert!(seen.try_recv().is_err(), "nothing went down to the webview");
 }
@@ -5056,7 +5114,10 @@ async fn a_name_only_the_webview_owns_is_delivered_there_and_answered() {
     );
 
     let (target, request) = seen.recv().await.expect("goes down to the webview");
-    assert_eq!(target, MAIN_WINDOW_LABEL, "goes to the window that reported");
+    assert_eq!(
+        target, MAIN_WINDOW_LABEL,
+        "goes to the window that reported"
+    );
     assert_eq!(request.name, "tab.next");
     assert_eq!(request.args, json!({ "window": "main" }));
     assert_eq!(
@@ -5064,7 +5125,10 @@ async fn a_name_only_the_webview_owns_is_delivered_there_and_answered() {
         request_id.to_string(),
         "the correlation key is the same across the whole span"
     );
-    assert!(mail.len() == 0, "there is no outcome before the webview answers");
+    assert!(
+        mail.len() == 0,
+        "there is no outcome before the webview answers"
+    );
 
     bridge
         .settle(
@@ -5144,7 +5208,10 @@ async fn repeating_the_same_report_asks_for_no_delta_and_main_keeps_the_destinat
     );
 
     let again = bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.next")]);
-    assert!(!again.changed(), "with the same list there is no diff to send");
+    assert!(
+        !again.changed(),
+        "with the same list there is no diff to send"
+    );
     assert_eq!(
         bridge.host().as_deref(),
         Some(MAIN_WINDOW_LABEL),
@@ -5195,7 +5262,10 @@ async fn a_reported_shape_becomes_a_catalog_item_in_the_same_dialect() {
     let item: serde_json::Value =
         serde_json::from_str(&outcome.accepted[0].help).expect("help is JSON");
     assert_eq!(item["name"], "tab.next");
-    assert_eq!(item["summary"], "moves that window's active tab to the next tab");
+    assert_eq!(
+        item["summary"],
+        "moves that window's active tab to the next tab"
+    );
     assert_eq!(item["args"]["properties"]["window"]["type"], "string");
     assert_eq!(
         item["args"]["properties"]["window"]["enum"][1],
@@ -5511,7 +5581,11 @@ async fn tab_move_by_agent_carries_its_tab_into_another_window_keeping_what_is_s
 
     assert_eq!(world.tab_ids(&pop), [p0, a, p1]);
     assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [b]);
-    assert_eq!(world.tabs(&pop).active, p0, "the destination window's visible tab stays");
+    assert_eq!(
+        world.tabs(&pop).active,
+        p0,
+        "the destination window's visible tab stays"
+    );
     assert_eq!(
         world.main_tabs().active,
         b,
@@ -5541,7 +5615,10 @@ async fn tab_move_by_agent_carries_its_tab_into_another_window_keeping_what_is_s
     );
     assert_eq!(layout[1]["agent"], "alpha");
     assert_eq!(layout[1]["content"], "Agent");
-    assert!(layout[0].get("agent").is_none(), "an empty area has no agent field");
+    assert!(
+        layout[0].get("agent").is_none(),
+        "an empty area has no agent field"
+    );
 }
 
 #[tokio::test]
@@ -5633,7 +5710,11 @@ async fn tab_move_by_agent_moves_the_tab_it_is_in_now_not_the_one_it_left() {
         [p0, b],
         "the tab that agent holds now is the one that goes"
     );
-    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a], "the tab it left stays");
+    assert_eq!(
+        world.tab_ids(MAIN_WINDOW_LABEL),
+        [a],
+        "the tab it left stays"
+    );
 }
 
 #[tokio::test]
@@ -5931,11 +6012,19 @@ async fn tab_dock_by_agents_attaches_beside_the_agents_slot_and_answers_the_surv
     )
     .await;
 
-    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a], "the attached tab disappears");
+    assert_eq!(
+        world.tab_ids(MAIN_WINDOW_LABEL),
+        [a],
+        "the attached tab disappears"
+    );
     assert_eq!(world.main_tabs().active, a);
     assert_eq!(world.focused(a), Some(beta_slot), "focus stays");
     assert_eq!(answer["changed"], true);
-    assert_eq!(answer["tab"], json!(a.to_string()), "the surviving destination tab");
+    assert_eq!(
+        answer["tab"],
+        json!(a.to_string()),
+        "the surviving destination tab"
+    );
     assert_eq!(answer["tab_index"], 0);
     assert_eq!(answer["window"], MAIN_WINDOW_LABEL);
     let layout = rows(&answer, "layout");
@@ -5980,7 +6069,10 @@ async fn tab_dock_by_a_spatial_word_reads_it_in_the_named_windows_shown_tab() {
     let layout = rows(&answer, "layout");
     assert_eq!(layout.len(), 3);
     let right_column = layout.iter().filter(|row| row["x"] == json!(0.5)).count();
-    assert_eq!(right_column, 2, "the right area is split top-bottom: {layout:?}");
+    assert_eq!(
+        right_column, 2,
+        "the right area is split top-bottom: {layout:?}"
+    );
 }
 
 #[tokio::test]
@@ -6374,12 +6466,20 @@ async fn a_dock_reply_is_the_snapshot_of_the_lock_that_committed_it() {
     )
     .await;
 
-    assert_eq!(world.slots(b).len(), 2, "the interleaved write entered the model");
+    assert_eq!(
+        world.slots(b).len(),
+        2,
+        "the interleaved write entered the model"
+    );
     let moved: Vec<_> = rows(&answer, "layout")
         .into_iter()
         .filter(|row| row["window"] == json!(pop))
         .collect();
-    assert_eq!(moved.len(), 1, "the answer is the single area at the moment of the move: {moved:?}");
+    assert_eq!(
+        moved.len(),
+        1,
+        "the answer is the single area at the moment of the move: {moved:?}"
+    );
     assert_eq!(moved[0]["w"], json!(1.0));
 }
 
@@ -6488,7 +6588,11 @@ async fn slot_verbs_by_agent_or_spatial_word_change_that_slot_and_answer_its_tab
         .expect("split");
     world.show(a, left, alpha, "alpha");
     world.name(beta, "beta");
-    assert_eq!(world.focused(a), Some(right), "a split focuses the new area");
+    assert_eq!(
+        world.focused(a),
+        Some(right),
+        "a split focuses the new area"
+    );
 
     let answer = ok_of(&receiver, &queue, "slot.focus", json!({ "slot_of": ALPHA })).await;
     assert_eq!(world.focused(a), Some(left));
@@ -6800,7 +6904,11 @@ async fn old_id_calls_still_apply_and_gain_the_layout_field() {
     .await;
     assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a]);
     let layout = rows(&answer, "layout");
-    assert_eq!(layout.len(), 1, "the row of the tab now visible in that window");
+    assert_eq!(
+        layout.len(),
+        1,
+        "the row of the tab now visible in that window"
+    );
     assert_eq!(layout[0]["tab_active"], true);
 }
 
@@ -7017,7 +7125,10 @@ async fn tab_verbs_pick_their_tab_by_agent_and_take_the_window_from_it() {
         json!({ "view_id": p0.to_string() }),
     )
     .await;
-    assert!(rows(&answer, "layout").is_empty(), "the window closed with it");
+    assert!(
+        rows(&answer, "layout").is_empty(),
+        "the window closed with it"
+    );
     assert_eq!(world.windows.closed.lock().unwrap().as_slice(), [pop]);
 }
 
@@ -7218,7 +7329,11 @@ async fn spawn_into_at_places_the_new_agent_in_the_slot_the_word_picks() {
     .outcome
     .expect("placed in a new tab");
     let layout = rows(&ok, "layout");
-    assert_eq!(layout.len(), 1, "the id edition (new tab) carries the placed tab's rows too");
+    assert_eq!(
+        layout.len(),
+        1,
+        "the id edition (new tab) carries the placed tab's rows too"
+    );
     assert_eq!(
         (layout[0]["window"].clone(), layout[0]["tab_index"].clone()),
         (json!(MAIN_WINDOW_LABEL), json!(1))
@@ -7245,7 +7360,11 @@ async fn a_slot_write_reply_is_the_snapshot_of_the_lock_that_wrote_it() {
     )
     .await;
 
-    assert_eq!(world.slots(a).len(), 3, "the interleaved write entered the model");
+    assert_eq!(
+        world.slots(a).len(),
+        3,
+        "the interleaved write entered the model"
+    );
     assert_eq!(
         rows(&answer, "layout").len(),
         2,

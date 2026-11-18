@@ -560,7 +560,11 @@ mod tests {
                 focused: true,
                 ..state
             };
-            assert_eq!(plan(action, focused), want, "the same even for the foreground window — {action:?}");
+            assert_eq!(
+                plan(action, focused),
+                want,
+                "the same even for the foreground window — {action:?}"
+            );
         }
     }
 
@@ -706,7 +710,10 @@ mod tests {
             self.note("show", label);
             let mut windows = self.windows.borrow_mut();
             let window = windows.get_mut(label).expect("OS window");
-            assert!(!window.held, "revealed window {label} that is waiting for first paint");
+            assert!(
+                !window.held,
+                "revealed window {label} that is waiting for first paint"
+            );
             window.visible = true;
             Ok(())
         }
@@ -897,7 +904,10 @@ mod tests {
             assert!(!ops.window(POP).maximized, "show_first={show_first}");
             assert!(ops.deferred().is_empty(), "show_first={show_first}");
             if !show_first {
-                assert!(!model_maximized(&layout, POP), "the model mark is lowered too");
+                assert!(
+                    !model_maximized(&layout, POP),
+                    "the model mark is lowered too"
+                );
             }
         }
     }
@@ -1118,7 +1128,10 @@ mod tests {
             })]
         );
         let held = ops.window(POP);
-        assert!(held.held && !held.visible, "the waiting window is not touched");
+        assert!(
+            held.held && !held.visible,
+            "the waiting window is not touched"
+        );
         assert!(
             !ops.calls().iter().any(|call| call.ends_with(POP)),
             "{:?}",
@@ -1161,7 +1174,10 @@ mod tests {
         assert!(ops.window(MAIN_WINDOW_LABEL).visible);
         assert!(ops.window(POP2).visible);
         let held = ops.window(POP);
-        assert!(held.held && !held.visible, "the waiting window is not touched");
+        assert!(
+            held.held && !held.visible,
+            "the waiting window is not touched"
+        );
         assert!(
             !ops.calls().iter().any(|call| call.ends_with(POP)),
             "{:?}",
@@ -1654,7 +1670,11 @@ mod tests {
             assert_eq!(mgr.slot_content(main_tab, slot), Ok(content));
             assert!(!mgr.windows.contains_key(POP));
         }
-        assert_eq!(host.host.closed(), [POP, POP], "close button · reaping the opened window");
+        assert_eq!(
+            host.host.closed(),
+            [POP, POP],
+            "close button · reaping the opened window"
+        );
 
         let docked = layout
             .0
@@ -1710,7 +1730,10 @@ mod tests {
         let mut mgr = layout.0.lock().unwrap();
         assert!(!mgr.windows.contains_key(POP));
         mgr.assert_number_invariants();
-        assert!(mgr.release_closing(POP), "the number is held until that `Destroyed`");
+        assert!(
+            mgr.release_closing(POP),
+            "the number is held until that `Destroyed`"
+        );
     }
 
     // ── close join (§5-4) · close if empty (§5-5) ──
@@ -1787,7 +1810,10 @@ mod tests {
             "the OS window is already gone"
         );
         assert_eq!(host.closed(), [POP]);
-        assert!(control.calls().is_empty(), "does not call the window state port");
+        assert!(
+            control.calls().is_empty(),
+            "does not call the window state port"
+        );
     }
 
     // ── window list (§6-3) ──

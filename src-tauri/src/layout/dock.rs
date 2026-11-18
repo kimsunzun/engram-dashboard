@@ -306,7 +306,11 @@ mod tests {
         assert!(close(1.0 - DOCK_NEW_SHARE, 2.0 / 3.0));
         for r in [DOCK_NEW_SHARE, 1.0 - DOCK_NEW_SHARE] {
             assert!((tree::RATIO_MIN..=tree::RATIO_MAX).contains(&r), "{r}");
-            assert_eq!(tree::clamp_ratio(r), r, "geometry must not read a different ratio");
+            assert_eq!(
+                tree::clamp_ratio(r),
+                r,
+                "geometry must not read a different ratio"
+            );
         }
     }
 
@@ -527,7 +531,10 @@ mod tests {
             );
             let len = o.1 - o.0;
             assert!(close((n.1 - n.0) / len, 1.0 / 3.0), "{side:?}: new 1/3");
-            assert!(close((k.1 - k.0) / len, 2.0 / 3.0), "{side:?}: existing 2/3");
+            assert!(
+                close((k.1 - k.0) / len, 2.0 / 3.0),
+                "{side:?}: existing 2/3"
+            );
         }
     }
 
@@ -570,7 +577,11 @@ mod tests {
     fn a_deep_child_of_the_incoming_tab_that_would_collapse_is_zero_area() {
         // Target: left/right halving chain of 40 levels — deepest area width 2^-40 (at the right end).
         let (t, deepest) = half_chain(SplitDir::LeftRight, 40, 10_000);
-        assert_eq!(zero_area_count(&t), 0, "precondition: every target has an area");
+        assert_eq!(
+            zero_area_count(&t),
+            0,
+            "precondition: every target has an area"
+        );
         // To insert: left/right halving chain of 20 levels — on its own even the deepest area has width 2^-20.
         let (moved, _) = half_chain(SplitDir::LeftRight, 20, 30_000);
         assert_eq!(
@@ -623,7 +634,10 @@ mod tests {
         );
         // Premise: attaching at the outer left shrinks the target to 2/3 and the target areas collapse, while the inserted area has size.
         let g = geometry::compute(&wrapped(id(1), DockSide::Left, t.clone(), slot(9)));
-        assert!(has_area(&rect_of(&g, id(9))), "precondition: the inserted area has an area");
+        assert!(
+            has_area(&rect_of(&g, id(9))),
+            "precondition: the inserted area has an area"
+        );
         assert!(
             g.slots.iter().any(|r| r.slot_id != id(9) && !has_area(r)),
             "precondition: the target area newly collapses"
@@ -714,7 +728,10 @@ mod tests {
         // A zero-size area that was already on the inserted side is not a reason either.
         let (moved, _) = half_chain(SplitDir::TopBottom, 60, 30_000);
         let moved_zero = zero_area_count(&moved);
-        assert!(moved_zero > 0, "precondition: a zero-area area was planted in what is inserted");
+        assert!(
+            moved_zero > 0,
+            "precondition: a zero-area area was planted in what is inserted"
+        );
         let result = docked_tree(
             &slot(1),
             DockAnchor::Outer,

@@ -17,7 +17,10 @@ pub enum Routable {
         token: HandleToken,
         item: Incoming<ShellWire>,
     },
-    Ended { key: DaemonKey, token: HandleToken },
+    Ended {
+        key: DaemonKey,
+        token: HandleToken,
+    },
 }
 
 /// Spawns the pump on the current tokio runtime — in the same driver step as the `Registry::add` and `RouteState::adopt` of `token` (see `adopt`). The task ends after the inbox's end, or once the driver is gone.

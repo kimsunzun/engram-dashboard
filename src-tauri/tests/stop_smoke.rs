@@ -244,7 +244,10 @@ fn diag_send_with_close_mode(mode: &str) -> bool {
     use tokio_tungstenite::tungstenite::{self, Message};
 
     let exe = daemon_exe_path();
-    assert!(exe.is_file(), "daemon exe not found — cargo build -p ...-daemon");
+    assert!(
+        exe.is_file(),
+        "daemon exe not found — cargo build -p ...-daemon"
+    );
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
     let mut child = Command::new(&exe)

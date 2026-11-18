@@ -332,7 +332,8 @@ mod tests {
     fn split_nested_targets_deep_leaf() {
         let (mut node, id) = single_slot();
         let mid = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
-        let deep = split_in_tree(&mut node, mid, SplitDir::TopBottom).expect("nested split succeeds");
+        let deep =
+            split_in_tree(&mut node, mid, SplitDir::TopBottom).expect("nested split succeeds");
         assert!(contains_slot(&node, id));
         assert!(contains_slot(&node, mid));
         assert!(contains_slot(&node, deep));
@@ -344,7 +345,10 @@ mod tests {
         let (mut node, _id) = single_slot();
         let before = node.clone();
         assert!(split_in_tree(&mut node, Uuid::new_v4(), SplitDir::LeftRight).is_none());
-        assert_eq!(node, before, "splitting a nonexistent slot leaves the tree unchanged");
+        assert_eq!(
+            node, before,
+            "splitting a nonexistent slot leaves the tree unchanged"
+        );
     }
 
     fn count_splits(node: &LayoutNode) -> usize {
@@ -393,7 +397,9 @@ mod tests {
         let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
         assert!(close_in_tree(&mut node, new_id));
         match &node {
-            LayoutNode::Slot { id: rid, .. } => assert_eq!(*rid, id, "sibling a is promoted to root"),
+            LayoutNode::Slot { id: rid, .. } => {
+                assert_eq!(*rid, id, "sibling a is promoted to root")
+            }
             _ => panic!("after close it must be a single slot"),
         }
         assert!(!contains_slot(&node, new_id));
@@ -439,7 +445,11 @@ mod tests {
     fn close_inside_a_child_keeps_the_parent_split_id() {
         let (mut node, x, y, z, root, _inner) = nested_split();
         assert!(close_in_tree(&mut node, y));
-        assert_eq!(split_id(&node), root, "a split whose only children changed keeps its id");
+        assert_eq!(
+            split_id(&node),
+            root,
+            "a split whose only children changed keeps its id"
+        );
         let LayoutNode::Split { a, b, .. } = &node else {
             unreachable!()
         };
@@ -453,7 +463,10 @@ mod tests {
     fn close_root_slot_resets_to_empty() {
         let id = Uuid::new_v4();
         let mut node = agent_slot(id, "agent-x");
-        assert!(close_in_tree(&mut node, id), "closing the root slot is true");
+        assert!(
+            close_in_tree(&mut node, id),
+            "closing the root slot is true"
+        );
         match &node {
             LayoutNode::Slot { id: rid, content } => {
                 assert_ne!(*rid, id, "new empty slot id");
@@ -527,7 +540,10 @@ mod tests {
             Uuid::new_v4(),
             SlotContent::AgentList
         ));
-        assert_eq!(node, before, "setting a nonexistent slot leaves the tree unchanged");
+        assert_eq!(
+            node, before,
+            "setting a nonexistent slot leaves the tree unchanged"
+        );
     }
 
     // ── ratio clamp ────────────────────────────────────────────────────────
@@ -564,7 +580,11 @@ mod tests {
             0.3,
             "the received value goes in as is (f64)"
         );
-        assert_eq!(ratio_of(&node, root), SPLIT_RATIO, "other splits stay as they are");
+        assert_eq!(
+            ratio_of(&node, root),
+            SPLIT_RATIO,
+            "other splits stay as they are"
+        );
 
         assert!(set_ratio_in_tree(&mut node, root, 0.7));
         assert_eq!(ratio_of(&node, root), 0.7);
@@ -578,7 +598,10 @@ mod tests {
         assert!(!set_ratio_in_tree(&mut node, Uuid::new_v4(), 0.3));
         // An area id is not a split id.
         assert!(!set_ratio_in_tree(&mut node, x, 0.3));
-        assert_eq!(node, before, "writing a nonexistent split leaves the tree unchanged");
+        assert_eq!(
+            node, before,
+            "writing a nonexistent split leaves the tree unchanged"
+        );
 
         let (mut lone, id) = single_slot();
         let before = lone.clone();

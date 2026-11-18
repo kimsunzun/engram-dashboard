@@ -179,7 +179,8 @@ impl State {
     }
 }
 
-const NOT_FOUND: &str = "unknown settings key, or a prefix matching no key — see settings.schema for the list";
+const NOT_FOUND: &str =
+    "unknown settings key, or a prefix matching no key — see settings.schema for the list";
 
 fn select(selector: Option<&str>) -> Result<Vec<&'static SettingDef>, SettingsError> {
     let defs = match selector {
@@ -258,7 +259,8 @@ impl SettingsService {
     ) -> Result<SetOutcome, SettingsError> {
         if key.ends_with('.') {
             return Err(SettingsError::InvalidArgument(
-                "set takes exactly one key — prefixes work only with get · reset · schema".to_string(),
+                "set takes exactly one key — prefixes work only with get · reset · schema"
+                    .to_string(),
             ));
         }
         let def =

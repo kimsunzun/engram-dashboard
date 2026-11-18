@@ -311,7 +311,11 @@ mod tests {
         let after = Duration::from_secs(3);
         let deadline = tokio::spawn(complete_when_overdue(spare.clone(), label, after, build));
         tokio::time::sleep(after - Duration::from_millis(1)).await;
-        assert_eq!(built.load(Ordering::SeqCst), 0, "does not build before the deadline");
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            0,
+            "does not build before the deadline"
+        );
         deadline.await.unwrap();
         assert_eq!(built.load(Ordering::SeqCst), 1);
         assert_eq!(spare.awaiting_reveal(), None);
@@ -330,7 +334,10 @@ mod tests {
     async fn the_safety_deadline_after_the_window_is_gone_builds_nothing() {
         let (spare, label) = adopted();
         let (built, build) = counter();
-        assert!(spare.on_destroyed(&label), "destroyed comes first and builds");
+        assert!(
+            spare.on_destroyed(&label),
+            "destroyed comes first and builds"
+        );
         complete_when_overdue(spare, label, Duration::from_secs(3), build).await;
         assert_eq!(built.load(Ordering::SeqCst), 0);
     }

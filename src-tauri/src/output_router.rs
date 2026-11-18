@@ -329,7 +329,10 @@ mod tests {
         assign_to_main(&mut mgr, "not-a-uuid");
         let router = OutputRouter::new();
         let delta = router.rebuild(&mgr);
-        assert!(delta.is_empty(), "an unparsable slot is not a subscription target either");
+        assert!(
+            delta.is_empty(),
+            "an unparsable slot is not a subscription target either"
+        );
         let (probe, _) = agent();
         assert!(router.targets(probe).is_empty());
     }
@@ -484,7 +487,10 @@ mod tests {
 
         mgr.switch_tab(MAIN_WINDOW_LABEL, v1).unwrap();
         let d1 = router.rebuild(&mgr);
-        assert!(d1.is_empty(), "switch_tab is keep-alive, so the delta is a no-op");
+        assert!(
+            d1.is_empty(),
+            "switch_tab is keep-alive, so the delta is a no-op"
+        );
         assert_eq!(targets_set(&router, a1), vec!["main".to_string()]);
         assert_eq!(targets_set(&router, b1), vec!["main".to_string()]);
     }
@@ -507,7 +513,11 @@ mod tests {
 
         mgr.close_tab(MAIN_WINDOW_LABEL, v2).unwrap();
         let d = router.rebuild(&mgr);
-        assert_eq!(d.to_unsubscribe, vec![b1], "Unsubscribe the closed tab's agent");
+        assert_eq!(
+            d.to_unsubscribe,
+            vec![b1],
+            "Unsubscribe the closed tab's agent"
+        );
         assert!(d.to_subscribe.is_empty());
         assert!(router.targets(b1).is_empty());
         assert_eq!(targets_set(&router, a1), vec!["main".to_string()]);
@@ -643,7 +653,10 @@ mod tests {
             assert!(!mgr.views.contains_key(&v), "no View left");
             assert!(!mgr.view_owner.contains_key(&v), "no view_owner left");
         }
-        assert!(!mgr.windows.contains_key("slot-popup-1"), "window entry removed");
+        assert!(
+            !mgr.windows.contains_key("slot-popup-1"),
+            "window entry removed"
+        );
         assert!(
             mgr.closing_numbers().is_empty(),
             "Destroyed releases the number right away"
@@ -669,7 +682,11 @@ mod tests {
         cleanup_window_core(&mut mgr, &router, "slot-popup-1", DropCause::CloseRequested);
 
         assert!(!mgr.windows.contains_key("slot-popup-1"));
-        assert_eq!(mgr.closing_numbers(), [2], "the OS window remains and holds the number");
+        assert_eq!(
+            mgr.closing_numbers(),
+            [2],
+            "the OS window remains and holds the number"
+        );
         mgr.assert_number_invariants();
     }
 
@@ -702,9 +719,15 @@ mod tests {
 
         let before_views = mgr.views.len();
         let delta = cleanup_window_core(&mut mgr, &router, MAIN_WINDOW_LABEL, DropCause::Destroyed);
-        assert!(delta.is_empty(), "a main cleanup request gives an empty delta (no-op)");
+        assert!(
+            delta.is_empty(),
+            "a main cleanup request gives an empty delta (no-op)"
+        );
         assert_eq!(mgr.views.len(), before_views, "main View unchanged");
-        assert!(mgr.windows.contains_key(MAIN_WINDOW_LABEL), "main window kept");
+        assert!(
+            mgr.windows.contains_key(MAIN_WINDOW_LABEL),
+            "main window kept"
+        );
         assert_eq!(targets_set(&router, aid), vec!["main".to_string()]);
     }
 
@@ -723,7 +746,10 @@ mod tests {
         assert_eq!(d_cmd.to_unsubscribe, vec![aid]);
 
         let d_late = cleanup_window_core(&mut mgr, &router, "slot-popup-1", DropCause::Destroyed);
-        assert!(d_late.is_empty(), "re-cleaning an already cleaned window gives an empty delta");
+        assert!(
+            d_late.is_empty(),
+            "re-cleaning an already cleaned window gives an empty delta"
+        );
     }
 
     // ── move_slot_to_window phase-C model level (F4 edge + target vanished) ────────────────────────────
@@ -778,7 +804,10 @@ mod tests {
             mgr.slot_content(src, slot),
             Ok(ref c) if *c == src_content
         );
-        assert!(!still_ours, "reassigned, so still_ours=false → close skipped");
+        assert!(
+            !still_ours,
+            "reassigned, so still_ours=false → close skipped"
+        );
         assert_eq!(mgr.slot_agent(src, slot).unwrap(), Some(other.to_string()));
 
         let router = OutputRouter::new();

@@ -270,7 +270,9 @@ fn ensure_with(
             // ★Do not abort inside the loop★: one transient open failure (third party, narrow share) would throw away **all of the remaining wait**; reading again at the next tick is enough, and a truly unreadable file ends in the timeout.
             // ★Do not log at the default level every tick★: polling would flood the log. Hold only the last reason and emit it once at the timeout.
             Err(e) => {
-                tracing::debug!("polling read of {DAEMON_FILE} failed — retrying on the next tick: {e}");
+                tracing::debug!(
+                    "polling read of {DAEMON_FILE} failed — retrying on the next tick: {e}"
+                );
                 last_reason = Some(format!("failed to read {DAEMON_FILE}: {e}"));
             }
         }

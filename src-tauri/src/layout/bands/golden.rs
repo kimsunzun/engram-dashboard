@@ -461,7 +461,11 @@ fn every_band_case_of_the_golden_holds() {
         let name = &case.name;
         let input = case.input();
         let incoming = parse_shape(&case.shape);
-        assert_eq!(encode_shape(&incoming), case.shape, "{name}: shape round trip");
+        assert_eq!(
+            encode_shape(&incoming),
+            case.shape,
+            "{name}: shape round trip"
+        );
         let e = Eval::new(&input, &incoming);
         assert_eq!(value(&e.zone()), case.zone, "{name}: zone");
         assert_eq!(value(&e.blocked()), value(&case.blocked), "{name}: blocked");

@@ -605,7 +605,10 @@ fn the_fake_window_host_keeps_the_port_contract() {
         size: Some((300.0, 200.0)),
     };
     *w.host.during_move.lock().unwrap() = Some(Box::new(|state: &LayoutState| {
-        assert!(state.0.try_lock().is_ok(), "the interjection is outside the lock");
+        assert!(
+            state.0.try_lock().is_ok(),
+            "the interjection is outside the lock"
+        );
     }));
     w.host.move_window(&label, &size_only).unwrap();
     assert_eq!(
@@ -616,7 +619,10 @@ fn the_fake_window_host_keeps_the_port_contract() {
     assert_eq!(w.host.moves.lock().unwrap().len(), 2);
 
     w.host.open_at("slot-popup-99", &at, false).unwrap();
-    assert!(w.host.is_open("slot-popup-99"), "open_at also counts as an opened window");
+    assert!(
+        w.host.is_open("slot-popup-99"),
+        "open_at also counts as an opened window"
+    );
     assert_eq!(
         w.host.opened_at.lock().unwrap().last(),
         Some(&("slot-popup-99".to_string(), at, false))
@@ -766,7 +772,11 @@ fn create_window_opens_the_prewarmed_window_inserts_then_commits_before_the_plac
     let next = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels)
         .unwrap()
         .window;
-    assert_eq!(next, popup_label(2), "with no window to hand over, the issuer's new label");
+    assert_eq!(
+        next,
+        popup_label(2),
+        "with no window to hand over, the issuer's new label"
+    );
 }
 
 // If the handed-over window's `open` is `Err`, the window port has already withdrawn that window — no commit, no take-back, and the model is unchanged.
@@ -864,7 +874,11 @@ fn assert_new_window_announced(w: &World, label: &str, tab: &str) {
     let number = number_of(w, label);
     assert_eq!(notified.number, number);
     assert_eq!(notified.title, format!("{tab} - Engram:{number}"));
-    assert_eq!(notified.version, w.version(), "{label} — the version that inserted the new window");
+    assert_eq!(
+        notified.version,
+        w.version(),
+        "{label} — the version that inserted the new window"
+    );
 }
 
 // The identity in the new-window answer equals that window's tab list — persistent id · number (TRD S26-window-chrome §5-3 · §10-2).
@@ -893,7 +907,10 @@ fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
         assert_new_window_announced(&w, &created.window, "Empty slot");
         assert_answer_names(&w, &created);
         if let Some(spare) = spare {
-            assert_eq!(created.window, spare, "answers with the prewarmed window's label");
+            assert_eq!(
+                created.window, spare,
+                "answers with the prewarmed window's label"
+            );
         }
         labels.push(created.window);
 
@@ -913,7 +930,10 @@ fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
             },
         );
         if let Some(spare) = spare {
-            assert_eq!(moved.window, spare, "answers with the prewarmed window's label");
+            assert_eq!(
+                moved.window, spare,
+                "answers with the prewarmed window's label"
+            );
         }
         labels.push(moved.window);
 
@@ -931,7 +951,10 @@ fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
         assert_eq!(opened.window, out.window);
         assert_answer_names(&w, &opened);
         if let Some(spare) = spare {
-            assert_eq!(out.window, spare, "answers with the prewarmed window's label");
+            assert_eq!(
+                out.window, spare,
+                "answers with the prewarmed window's label"
+            );
         }
         labels.push(out.window);
     }
@@ -945,7 +968,11 @@ fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
     assert!(ids.iter().all(|id| Uuid::parse_str(id).is_ok()), "{ids:?}");
     ids.sort();
     ids.dedup();
-    assert_eq!(ids.len(), labels.len(), "the persistent id differs per window");
+    assert_eq!(
+        ids.len(),
+        labels.len(),
+        "the persistent id differs per window"
+    );
 }
 
 // While a closed popout's OS window still exists (the fake `close` emits no `Destroyed`) its number is not reused; once the `Destroyed` number release frees it, the next new window gets it (AC20 ②). Only `release_window_number` of the cleanup-less branch is callable from outside; the cleanup branch (`drop_window_in_model`) is measured by the shell unit test.
@@ -960,7 +987,11 @@ fn a_closed_popouts_number_waits_for_its_destroyed() {
     assert_eq!(&*w.host.closed.lock().unwrap(), &[a.clone(), b.clone()]);
 
     let c = w.popup();
-    assert_eq!(number_of(&w, &c), 4, "skips the numbers of the two closing windows");
+    assert_eq!(
+        number_of(&w, &c),
+        4,
+        "skips the numbers of the two closing windows"
+    );
 
     engram_dashboard_lib::layout::release_window_number(&w.state, &b);
     let d = w.popup();
@@ -981,7 +1012,11 @@ fn switch_tab_changes_active_tab() {
     apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, first).unwrap();
     assert_eq!(w.main_active(), first);
     assert_ne!(w.main_active(), second);
-    assert_eq!(w.last_tabs().active, first, "the tab notification carries the active tab");
+    assert_eq!(
+        w.last_tabs().active,
+        first,
+        "the tab notification carries the active tab"
+    );
 }
 
 #[test]
@@ -1007,7 +1042,11 @@ fn switch_tab_if_switches_when_active_matches() {
     let w = World::new();
     let first = w.main_active();
     let dragged = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-    assert_eq!(w.main_active(), dragged, "precondition: the new tab is active");
+    assert_eq!(
+        w.main_active(),
+        dragged,
+        "precondition: the new tab is active"
+    );
     w.ev.take_order();
     let resyncs = w.resyncs();
 
@@ -1015,7 +1054,11 @@ fn switch_tab_if_switches_when_active_matches() {
         apply::switch_tab_if(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, first, dragged).unwrap();
     assert!(switched);
     assert_eq!(w.main_active(), first);
-    assert_eq!(w.last_tabs().active, first, "the tab notification carries the active tab");
+    assert_eq!(
+        w.last_tabs().active,
+        first,
+        "the tab notification carries the active tab"
+    );
     assert_eq!(w.resyncs(), resyncs + 1);
     assert_notified(&w, "switch_tab_if");
 }
@@ -1088,7 +1131,10 @@ fn close_tab_keeps_main_alive_with_fresh_tab() {
     let tabs = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL).unwrap();
     assert_eq!(tabs.tabs.len(), 1, "main has at least 1 tab (invariant 4)");
     assert_ne!(tabs.active, only, "replaced by a new empty tab");
-    assert!(w.host.closed.lock().unwrap().is_empty(), "main OS window kept");
+    assert!(
+        w.host.closed.lock().unwrap().is_empty(),
+        "main OS window kept"
+    );
     assert_eq!(w.tab_events(), 1);
 }
 
@@ -1152,7 +1198,10 @@ fn close_window_drops_model_closes_os_window_and_unsubscribes() {
 fn close_window_main_is_rejected_and_os_window_untouched() {
     let w = World::new();
     let err = apply::close_window(&w.state, &w.subs, &w.host, MAIN_WINDOW_LABEL).unwrap_err();
-    assert!(err.contains("the main window cannot be closed"), "err={err}");
+    assert!(
+        err.contains("the main window cannot be closed"),
+        "err={err}"
+    );
     assert!(
         w.host.closed.lock().unwrap().is_empty(),
         "on refusal, no OS window close"
@@ -1265,7 +1314,10 @@ fn close_slot_removes_slot_and_unsubscribes_vanished_agent() {
     let slot = w.empty_slot(view);
     let agent = Uuid::new_v4();
     apply::assign_agent(&w.state, &w.subs, &w.ev, view, slot, agent.to_string()).unwrap();
-    assert!(w.unsubscribed().is_empty(), "no unsubscribe right after assignment");
+    assert!(
+        w.unsubscribed().is_empty(),
+        "no unsubscribe right after assignment"
+    );
 
     apply::close_slot(&w.state, &w.subs, &w.ev, view, slot).unwrap();
 
@@ -1319,7 +1371,11 @@ fn focus_slot_unknown_slot_is_err() {
     let before = w.snapshot(view).focused_slot_id;
     let err = apply::focus_slot(&w.state, &w.ev, view, Uuid::new_v4()).unwrap_err();
     assert!(err.contains("slot not found"), "err={err}");
-    assert_eq!(w.snapshot(view).focused_slot_id, before, "no partial change");
+    assert_eq!(
+        w.snapshot(view).focused_slot_id,
+        before,
+        "no partial change"
+    );
 }
 
 // ── rename_tab (ADR-0057 tab notification only) ───────────────────────────────
@@ -1399,7 +1455,11 @@ fn agent_names_updated_announces_only_the_window_whose_tab_name_changed() {
         sent.version > version,
         "a new version number — the web discards the same version"
     );
-    assert_eq!(w.layout_events(), layouts, "the name is not in the view snapshot");
+    assert_eq!(
+        w.layout_events(),
+        layouts,
+        "the name is not in the view snapshot"
+    );
     assert_eq!(w.resyncs(), resyncs, "output routing unchanged");
     assert_eq!(
         apply::list_tabs(&w.state, &popup).unwrap().version,
@@ -1706,9 +1766,15 @@ fn move_slot_to_window_detaches_content_into_a_new_window() {
         &[moved.window.clone()],
         "a new window records its first place after entering the model"
     );
-    assert!(!w.slots(view).contains(&slot), "the original slot is closed (MOVE)");
+    assert!(
+        !w.slots(view).contains(&slot),
+        "the original slot is closed (MOVE)"
+    );
     let landed = apply::list_tabs(&w.state, &moved.window).unwrap();
-    assert_eq!(landed.active, moved.tab, "the new tab is that window's active tab");
+    assert_eq!(
+        landed.active, moved.tab,
+        "the new tab is that window's active tab"
+    );
     let landed_slot = w.slots(moved.tab)[0];
     assert_eq!(
         tree::find_slot(&w.snapshot(moved.tab).layout, landed_slot),
@@ -1850,7 +1916,10 @@ fn move_slot_to_window_opens_the_prewarmed_window_and_commits_after_the_notifica
     )
     .unwrap();
 
-    assert_eq!(moved.window, spare, "opens with the handed-over window's label");
+    assert_eq!(
+        moved.window, spare,
+        "opens with the handed-over window's label"
+    );
     assert_eq!(
         w.journal.take(),
         [
@@ -1922,7 +1991,11 @@ fn move_slot_to_window_whose_prewarmed_window_fails_to_open_rolls_back_without_a
         w.journal.take(),
         [format!("claim:{spare}"), format!("open:{spare}")]
     );
-    assert_eq!(w.view_count(), views_before, "the temporary View was reaped");
+    assert_eq!(
+        w.view_count(),
+        views_before,
+        "the temporary View was reaped"
+    );
     assert_eq!(
         tree::find_slot(&w.snapshot(view).layout, slot),
         Some(&content)
@@ -2080,8 +2153,8 @@ fn move_slot_to_window_moves_an_empty_slot_and_promotes_its_sibling() {
     let w = World::new();
     let view = w.main_active();
     let slot = w.empty_slot(view);
-    let sibling =
-        apply::split_slot(&w.state, &w.subs, &w.ev, view, slot, SplitDir::LeftRight).expect("split");
+    let sibling = apply::split_slot(&w.state, &w.subs, &w.ev, view, slot, SplitDir::LeftRight)
+        .expect("split");
 
     let moved = apply::move_slot_to_window(
         &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
@@ -2119,7 +2192,10 @@ fn move_slot_to_window_of_a_lone_empty_slot_leaves_a_fresh_empty_slot() {
 
     let left = w.slots(view);
     assert_eq!(left.len(), 1);
-    assert_ne!(left[0], slot, "it is a newly standing area, not the moved one");
+    assert_ne!(
+        left[0], slot,
+        "it is a newly standing area, not the moved one"
+    );
     assert_eq!(
         tree::find_slot(&w.snapshot(view).layout, left[0]),
         Some(&SlotContent::Empty)
@@ -2147,7 +2223,10 @@ fn move_slot_to_window_refuses_a_missing_slot_or_view_with_the_real_cause() {
     .unwrap_err();
     assert!(err.contains("view not found"), "err={err}");
 
-    assert!(w.host.opened.lock().unwrap().is_empty(), "does not open a window either");
+    assert!(
+        w.host.opened.lock().unwrap().is_empty(),
+        "does not open a window either"
+    );
     assert_eq!(w.view_count(), views_before, "leaves no temporary View");
 }
 
@@ -2252,7 +2331,11 @@ fn move_slot_to_window_rejects_a_target_whose_os_window_is_gone() {
         tabs_before,
         "no tab is pushed into a window with no screen"
     );
-    assert_eq!(w.view_count(), views_before, "the temporary View is reclaimed too");
+    assert_eq!(
+        w.view_count(),
+        views_before,
+        "the temporary View is reclaimed too"
+    );
 }
 
 #[test]
@@ -2476,7 +2559,11 @@ async fn spawn_into_reports_live_agent_when_placement_fails() {
     .await
     .unwrap_err();
 
-    assert_eq!(spawner.calls(), 1, "the spawn already happened (no hard rollback)");
+    assert_eq!(
+        spawner.calls(),
+        1,
+        "the spawn already happened (no hard rollback)"
+    );
     assert!(
         err.contains(&agent.to_string()),
         "the living agent id is embedded in the error to prevent an invisible agent: err={err}"
@@ -2590,7 +2677,11 @@ async fn spawn_into_passes_a_daemon_refusal_through_without_placing() {
     .await
     .unwrap_err();
 
-    assert_eq!(spawner.calls(), 1, "the shell does not look at the policy and asks the daemon");
+    assert_eq!(
+        spawner.calls(),
+        1,
+        "the shell does not look at the policy and asks the daemon"
+    );
     assert_eq!(
         &*spawner.backends.lock().unwrap(),
         &[Some(AgentBackendKind::Codex)],
@@ -2654,7 +2745,11 @@ fn set_split_ratio_applied_notifies_the_layout_once_with_the_new_ratio_and_rects
         "exactly 1 layout notification"
     );
     assert_eq!(w.tab_events(), tabs_before, "0 tab notifications");
-    assert_eq!(w.resyncs(), resyncs_before, "routing unchanged — no re-sync");
+    assert_eq!(
+        w.resyncs(),
+        resyncs_before,
+        "routing unchanged — no re-sync"
+    );
 
     let snap = w.last_layout();
     assert_eq!(snap.view_id, view);
@@ -2671,7 +2766,10 @@ fn set_split_ratio_applied_notifies_the_layout_once_with_the_new_ratio_and_rects
         .iter()
         .find(|r| r.split_id == split)
         .expect("split rectangle");
-    assert_eq!(rect.at, 0.3, "the rectangle is computed with the new ratio too");
+    assert_eq!(
+        rect.at, 0.3,
+        "the rectangle is computed with the new ratio too"
+    );
     let left = snap
         .slot_rects
         .iter()
@@ -2767,7 +2865,10 @@ fn set_split_ratio_returns_the_notified_snapshots_version_not_a_later_one() {
 }
 
 fn assert_notified(w: &World, write: &str) {
-    assert!(!w.ev.take_order().is_empty(), "{write}: there must be a notification");
+    assert!(
+        !w.ev.take_order().is_empty(),
+        "{write}: there must be a notification"
+    );
 }
 
 #[tokio::test]
@@ -2917,7 +3018,9 @@ impl TitleCheck {
                 .iter()
                 .rev()
                 .find(|t| &t.label == label)
-                .unwrap_or_else(|| panic!("{write}: did not announce {label}, whose title changed"));
+                .unwrap_or_else(|| {
+                    panic!("{write}: did not announce {label}, whose title changed")
+                });
             assert_eq!(last.title, after[label], "{write}: {label}");
             assert!(
                 last.version > self.version,
@@ -3151,7 +3254,11 @@ fn sync_titles_announces_every_window_once_at_the_current_version() {
     );
     assert_eq!(w.layout_events(), 0);
     assert_eq!(w.version(), version, "does not raise the version");
-    assert_eq!(w.resyncs(), 1, "no re-sync — the earlier 1 belongs to window creation");
+    assert_eq!(
+        w.resyncs(),
+        1,
+        "no re-sync — the earlier 1 belongs to window creation"
+    );
 }
 
 #[test]
@@ -3266,7 +3373,10 @@ fn list_tabs_returns_tabs_active_and_version() {
 
     assert_eq!(after.label, MAIN_WINDOW_LABEL);
     assert_eq!(after.tabs.len(), before.tabs.len() + 1);
-    assert!(after.version > before.version, "version increases with every change");
+    assert!(
+        after.version > before.version,
+        "version increases with every change"
+    );
 }
 
 #[test]
@@ -3396,11 +3506,18 @@ fn assert_invariants(w: &World) {
         );
         for view in &wt.tabs {
             assert_eq!(mgr.view_owner.get(view), Some(label), "① tab {view}");
-            assert!(mgr.views.contains_key(view), "① the View of tab {view} is missing");
+            assert!(
+                mgr.views.contains_key(view),
+                "① the View of tab {view} is missing"
+            );
         }
         tabs += wt.tabs.len();
     }
-    assert_eq!(mgr.views.len(), tabs, "② a View with no window, or a tab of two windows");
+    assert_eq!(
+        mgr.views.len(),
+        tabs,
+        "② a View with no window, or a tab of two windows"
+    );
     assert_eq!(mgr.view_owner.len(), tabs, "① leftover ownership pairs");
     assert!(
         mgr.windows
@@ -3623,14 +3740,21 @@ fn dock_tab_seam_moves_the_tab_under_one_lock_and_notifies_after_it() {
             rows: Vec::new(),
         }
     );
-    assert_eq!(w.resyncs(), resyncs + 1, "one re-sync — inside the lock (probe)");
+    assert_eq!(
+        w.resyncs(),
+        resyncs + 1,
+        "one re-sync — inside the lock (probe)"
+    );
     assert_eq!(
         w.subs.router.targets(agent).to_vec(),
         [MAIN_WINDOW_LABEL.to_string()],
         "the moved agent's output goes to the target window"
     );
     assert!(w.unsubscribed().is_empty(), "the subscription is not cut");
-    assert!(w.slots(target).contains(&slot), "inserted into the target tab");
+    assert!(
+        w.slots(target).contains(&slot),
+        "inserted into the target tab"
+    );
     assert_eq!(w.owner(source), None, "the source View is erased");
     assert_eq!(
         w.notified_views(),
@@ -4119,7 +4243,11 @@ fn dock_tab_new_window_closes_the_opened_window_when_phase_c_refuses() {
         "reaps the window just opened"
     );
     assert!(!w.window_exists(&opened[0]));
-    assert_eq!(w.owner(source), None, "a closed tab does not attach to the new window");
+    assert_eq!(
+        w.owner(source),
+        None,
+        "a closed tab does not attach to the new window"
+    );
     assert!(w.host.placed.lock().unwrap().is_empty());
     assert_eq!(w.resyncs(), resyncs);
     assert_eq!(w.ev.take_order(), Vec::<&str>::new());
@@ -4140,7 +4268,10 @@ fn dock_tab_new_window_opens_the_prewarmed_window_and_commits_after_the_notifica
         .dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Reveal)
         .unwrap();
 
-    assert_eq!(out.window, spare, "opens with the handed-over window's label");
+    assert_eq!(
+        out.window, spare,
+        "opens with the handed-over window's label"
+    );
     assert!(out.prewarmed && !out.reused);
     assert_eq!(
         &*w.host.opened_at.lock().unwrap(),
@@ -4455,7 +4586,11 @@ fn dock_tab_reuse_move_failure_is_window_open_and_undoes_nothing() {
         let step = format!("{failing:?}");
         assert_eq!(ends[0].field("step"), Some(step.as_str()));
         assert_eq!(ends[0].field("label"), Some(label.as_str()));
-        assert_eq!(w.host.steps(), called, "{failing:?}: stops at the first failure");
+        assert_eq!(
+            w.host.steps(),
+            called,
+            "{failing:?}: stops at the first failure"
+        );
         assert_eq!(
             w.host.moves.lock().unwrap().len(),
             1,
@@ -4736,7 +4871,11 @@ fn a_drop_whose_tab_left_its_source_window_moves_it_from_where_it_is_now() {
         .expect("tab bar");
     assert_eq!(out.window, MAIN_WINDOW_LABEL);
     assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [t, m0]);
-    assert_eq!(w.tabs_of(&popout), [p], "removed from the current window (pop-out)");
+    assert_eq!(
+        w.tabs_of(&popout),
+        [p],
+        "removed from the current window (pop-out)"
+    );
     assert_invariants(&w);
 
     let (w, _, t, popout, p) = setup();
@@ -4834,7 +4973,11 @@ fn a_tab_bar_drop_lands_in_the_tab_list_as_it_is_now_and_clamps_to_its_end() {
     let c = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
     w.tab_drop(&drop, MAIN_WINDOW_LABEL).expect("accepts");
     assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [m0, t, a, c]);
-    assert_eq!(w.active_of(MAIN_WINDOW_LABEL), t, "the dropped tab is shown");
+    assert_eq!(
+        w.active_of(MAIN_WINDOW_LABEL),
+        t,
+        "the dropped tab is shown"
+    );
     assert_invariants(&w);
 
     let w = World::new();
@@ -4968,7 +5111,11 @@ fn a_same_window_seam_applies_whichever_tab_the_window_shows_now() {
         let w = World::new();
         let i = w.main_active();
         let d = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
-        assert_eq!(w.active_of(MAIN_WINDOW_LABEL), d, "the pressed tab is active");
+        assert_eq!(
+            w.active_of(MAIN_WINDOW_LABEL),
+            d,
+            "the pressed tab is active"
+        );
         (w, i, d)
     };
 
@@ -4983,11 +5130,7 @@ fn a_same_window_seam_applies_whichever_tab_the_window_shows_now() {
     apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, i).unwrap();
     let out = w.tab_drop(&drop, MAIN_WINDOW_LABEL).unwrap();
     assert_eq!(out.window, MAIN_WINDOW_LABEL);
-    assert_eq!(
-        w.tabs_of(MAIN_WINDOW_LABEL),
-        [i],
-        "d attached to i's seam"
-    );
+    assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [i], "d attached to i's seam");
 
     let (w, i, d) = setup();
     let x = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
@@ -5349,7 +5492,6 @@ fn locate_by_spatial_word_reads_the_visible_tab_of_the_window() {
     assert_eq!(gone.by(), TargetBy::Spatial);
 }
 
-
 // Sequential, so it cannot catch the regression "resolve in one lock, move in another". That beside-area · tab-row docking resolves and moves in one lock is kept by structure: the resolving closure receives the lock's `&ViewManager` only as an argument (`dock_in_place` of `apply.rs`). What really races between locks is only new-window docking (two locks; the two tests below — window port · window move interjection). No test-only interjection door exists in production code: where that door sits is exactly the gap measured, so regressed code could move it too.
 #[test]
 fn a_tab_the_agent_left_after_its_name_was_resolved_is_never_moved() {
@@ -5375,7 +5517,11 @@ fn a_tab_the_agent_left_after_its_name_was_resolved_is_never_moved() {
         matches!(&err, TargetDockError::Subject(LocateError::AgentNotShown { agent, .. }) if *agent == resolved),
         "{err:?}"
     );
-    assert_eq!(w.tabs_of(&label), tabs, "the tab that agent left stays in place");
+    assert_eq!(
+        w.tabs_of(&label),
+        tabs,
+        "the tab that agent left stays in place"
+    );
     assert_eq!(w.version(), version);
     assert_eq!(w.resyncs(), resyncs);
     assert_eq!(w.ev.take_order(), Vec::<&str>::new());
@@ -5436,7 +5582,10 @@ fn a_detach_whose_target_changes_while_the_window_opens_withdraws_it_and_moves_n
             .map(|(label, _, _)| label.clone())
             .collect();
         assert_eq!(opened.len(), 1);
-        assert!(!w.window_exists(&opened[0]), "the opened window does not enter the model");
+        assert!(
+            !w.window_exists(&opened[0]),
+            "the opened window does not enter the model"
+        );
         let journal = w.journal.take();
         match &spare {
             Some(spare) => {
@@ -5639,7 +5788,10 @@ fn a_target_dock_that_changes_nothing_says_so() {
             FocusPolicy::Keep,
         )
         .unwrap();
-    assert!(out.reused && !out.changed, "a pop-out that is already alone");
+    assert!(
+        out.reused && !out.changed,
+        "a pop-out that is already alone"
+    );
     assert_eq!(out.window, lone_label);
     assert_eq!(w.version(), version);
 
@@ -5705,7 +5857,10 @@ fn a_seam_dock_without_a_share_takes_the_mouse_formula_or_half_when_unmeasured()
             )
             .unwrap();
 
-        assert_eq!(out.tab, target_tab, "resulting tab = the surviving target tab");
+        assert_eq!(
+            out.tab, target_tab,
+            "resulting tab = the surviving target tab"
+        );
         assert_eq!(w.owner(source), None);
         let added: Vec<f64> = apply::list_splits(&w.state, target_tab)
             .unwrap()
@@ -5915,7 +6070,10 @@ fn tab_writes_by_target_take_the_window_from_the_tab() {
     let only = w.active_of(&label);
     let closed =
         apply::close_tab_at(&w.state, &w.subs, &w.ev, &w.host, None, &Target::Tab(only)).unwrap();
-    assert_eq!(closed.out, None, "if it is the last tab the window closes with it");
+    assert_eq!(
+        closed.out, None,
+        "if it is the last tab the window closes with it"
+    );
     assert_eq!(&*w.host.closed.lock().unwrap(), &[label.clone()]);
     assert_invariants(&w);
 }
@@ -6188,7 +6346,10 @@ fn layout_rows_list_every_slot_in_window_tab_tree_order_with_normalized_boxes() 
         let listed = apply::list_tabs(&w.state, &row.window).unwrap();
         let meta = &listed.tabs[row.tab_index as usize];
         assert_eq!(row.tab, meta.id);
-        assert_eq!(row.tab_name, meta.name, "tab name = the visible name of the tab row");
+        assert_eq!(
+            row.tab_name, meta.name,
+            "tab name = the visible name of the tab row"
+        );
         assert_eq!(row.window_id, listed.window_id);
     }
     assert_eq!(rows[0].agent_id, Some(agent.to_string()));
@@ -6414,7 +6575,10 @@ fn a_reused_detach_whose_tab_left_and_whose_window_closed_answers_moved_by_targe
                     FocusPolicy::Keep,
                 )
                 .unwrap();
-            assert!(out.reused, "the id edition stays as is — success + no identity");
+            assert!(
+                out.reused,
+                "the id edition stays as is — success + no identity"
+            );
             assert_eq!(out.window, label);
             assert_eq!(out.identity, None);
         }

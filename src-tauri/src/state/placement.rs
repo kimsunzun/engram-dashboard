@@ -239,7 +239,6 @@ impl DeferredMaximize {
     }
 }
 
-
 /// Boot steps 8 and 9 — create the static window (main) the config declares at the saved placement (a hidden main's maximize is deferred until shown — [`DeferredMaximize`]), open the restored popout windows (one that cannot be opened is removed from the model), and push the effective theme to all windows once (§5-6). The caller holds no lock; the subscription recompute that follows (⑩) is the caller's — the model after this function is the final window set.
 /// - Call it after the run marker (⑤) (I6): if the app dies while creating windows the next boot reads it as abnormal. The user setup always comes after the boot step plugins, so inside setup it holds.
 /// - `boot_hidden` = a `--hidden` boot — main is not shown even at first paint and waits for the tray show. Popouts are still raised so they are visible at first paint, and the caller's hide withdraws that raise and keeps them hidden together with main (user decision F13 · `crate::first_paint`).
@@ -387,7 +386,9 @@ fn confirm_created(
         return Ok(());
     };
     Err(match webview_version() {
-        Err(runtime) => format!("the window was not created because the WebView runtime was not found: {runtime}"),
+        Err(runtime) => format!(
+            "the window was not created because the WebView runtime was not found: {runtime}"
+        ),
         Ok(_) => format!("the window was not created — the runtime does not know that window: {e}"),
     })
 }
@@ -1676,7 +1677,9 @@ mod tests {
     fn a_deferred_maximize_that_fails_to_apply_stays_pending_for_the_next_show() {
         let deferred = DeferredMaximize::default();
         assert!(
-            !deferred.apply("slot-popup-5", |_| panic!("not applied when nothing is deferred")),
+            !deferred.apply("slot-popup-5", |_| panic!(
+                "not applied when nothing is deferred"
+            )),
             "nothing is deferred"
         );
 
@@ -2015,7 +2018,11 @@ mod tests {
         };
         let land_with =
             |size| resolve_place("slot-popup-1", &at, size, &[PRIMARY], Fallback::StayPut);
-        assert_eq!(land_with((300.0, 200.0)), None, "measured by the window size it is off screen");
+        assert_eq!(
+            land_with((300.0, 200.0)),
+            None,
+            "measured by the window size it is off screen"
+        );
         assert!(
             land_with((720.0, 500.0)).is_some(),
             "premise: measured by the default size it overlaps"

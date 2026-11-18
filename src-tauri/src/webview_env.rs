@@ -549,7 +549,11 @@ mod tests {
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         for value in conf["app"]["windows"].as_array().unwrap() {
             for key in ["decorations", "shadow"] {
-                assert!(value.get(key).is_none(), "window {} key {key}", value["label"]);
+                assert!(
+                    value.get(key).is_none(),
+                    "window {} key {key}",
+                    value["label"]
+                );
             }
         }
     }
@@ -593,7 +597,9 @@ mod tests {
         let script = theme_script("slot-popup-3", UiTheme::Light);
         let read = r#"try{var s=sessionStorage.getItem("engram.theme.slot-popup-3");if(["dark","light","e-ink"].indexOf(s)>=0)t=s;}catch(_){}"#;
         assert!(script.contains(read), "{script}");
-        let baked = script.find("var t='light';").expect("the theme at creation");
+        let baked = script
+            .find("var t='light';")
+            .expect("the theme at creation");
         let first_write = script.find(".dataset.theme=t;").expect("baking in");
         let memory = script.find(read).unwrap();
         assert!(

@@ -104,18 +104,10 @@ pub(super) type Overrides = BTreeMap<&'static str, String>;
 pub(super) enum LoadNote {
     Missing,
     Unusable(String),
-    Newer {
-        found: u64,
-    },
+    Newer { found: u64 },
     ReadFailed(String),
-    BadValue {
-        key: &'static str,
-        reason: String,
-    },
-    Loaded {
-        overrides: usize,
-        unknown: usize,
-    },
+    BadValue { key: &'static str, reason: String },
+    Loaded { overrides: usize, unknown: usize },
 }
 
 impl LoadNote {
@@ -208,7 +200,9 @@ pub(super) fn load(files: &dyn SettingsFiles) -> (Overrides, Vec<LoadNote>) {
 
 #[derive(Debug)]
 pub(super) enum WriteError {
-    Newer { found: u64 },
+    Newer {
+        found: u64,
+    },
     /// Could not read the current file (lock budget spent · permission): neither overwritten nor copied aside, since its content is unknown.
     Unreadable(io::Error),
     Io(io::Error),
@@ -328,7 +322,10 @@ pub(super) mod fake {
                 ));
             }
             if disk.unusable {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "fake limit exceeded"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "fake limit exceeded",
+                ));
             }
             disk.text
                 .clone()
@@ -683,7 +680,11 @@ mod tests {
             files.json(),
             serde_json::json!({"$version": 1, "theme.default": "light", "chat.style.userPy": "9px"})
         );
-        assert_eq!(files.disk().copies, 0, "a missing file has nothing to copy aside");
+        assert_eq!(
+            files.disk().copies,
+            0,
+            "a missing file has nothing to copy aside"
+        );
     }
 
     #[test]

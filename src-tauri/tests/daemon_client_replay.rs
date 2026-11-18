@@ -85,11 +85,7 @@ fn decode_marker(frame: &[u8]) -> (AgentId, u32, Marker) {
     let epoch = u32::from_be_bytes(frame[17..21].try_into().unwrap());
     let generation = u64::from_be_bytes(frame[21..29].try_into().unwrap());
     let flags = frame[29];
-    assert_eq!(
-        flags & !0b0000_0111,
-        0,
-        "undefined flag bit: {flags:#010b}"
-    );
+    assert_eq!(flags & !0b0000_0111, 0, "undefined flag bit: {flags:#010b}");
     let replay_from = u64::from_be_bytes(frame[30..38].try_into().unwrap());
     (
         agent,
@@ -116,15 +112,26 @@ fn refusal_releases_slot_so_the_next_request_can_send_again() {
     assert!(first.send_now, "an idle request subscribes immediately");
 
     let plan = plan_subscribe_refusal(&mut fs, &subs, agent, now);
-    let frame = plan.marker_frame.expect("the first refusal yields a failure marker");
+    let frame = plan
+        .marker_frame
+        .expect("the first refusal yields a failure marker");
     let (got_agent, _epoch, marker) = decode_marker(&frame);
     assert_eq!(got_agent, agent, "the marker is addressed to its own agent");
-    assert_eq!(marker.generation, first.generation, "what is released is that generation");
-    assert!(marker.failed, "refusal = failure marker (so the view does not wait 10 s)");
+    assert_eq!(
+        marker.generation, first.generation,
+        "what is released is that generation"
+    );
+    assert!(
+        marker.failed,
+        "refusal = failure marker (so the view does not wait 10 s)"
+    );
     assert!(plan.next_subscribe.is_none(), "no queue means no next one");
 
     let next = fs.request_replay(agent, now);
-    assert!(next.send_now, "released, so the new Subscribe goes out immediately");
+    assert!(
+        next.send_now,
+        "released, so the new Subscribe goes out immediately"
+    );
 }
 
 // The `next_subscribe` arm is this suite's second reason to exist: deleted (or not built), the merged generation's Subscribe cannot go out and the symptom is exactly the zombie — the slot is released but no one asks again.
@@ -144,8 +151,14 @@ fn refusal_hands_the_coalesced_generation_a_subscribe_to_send() {
 
     let plan = plan_subscribe_refusal(&mut fs, &subs, agent, now);
     let (_, epoch, marker) = decode_marker(&plan.marker_frame.expect("failure marker"));
-    assert_eq!(marker.generation, first.generation, "what is released is the earlier generation");
-    assert_eq!(epoch, 7, "carries the last known epoch (not an authoritative value)");
+    assert_eq!(
+        marker.generation, first.generation,
+        "what is released is the earlier generation"
+    );
+    assert_eq!(
+        epoch, 7,
+        "carries the last known epoch (not an authoritative value)"
+    );
 
     match plan
         .next_subscribe
@@ -157,8 +170,15 @@ fn refusal_hands_the_coalesced_generation_a_subscribe_to_send() {
             after_seq,
         } => {
             assert_eq!(agent_id, agent);
-            assert_eq!(epoch, Some(7), "re-subscribes with the currently known epoch");
-            assert_eq!(after_seq, None, "a re-replay is always in full (from-oldest)");
+            assert_eq!(
+                epoch,
+                Some(7),
+                "re-subscribes with the currently known epoch"
+            );
+            assert_eq!(
+                after_seq, None,
+                "a re-replay is always in full (from-oldest)"
+            );
         }
         other => panic!("should be Subscribe: {other:?}"),
     }
@@ -179,7 +199,10 @@ fn refusal_leaves_an_acked_healthy_subscription_alone() {
     fs.on_ack(agent, false, false, 0, now);
 
     let plan = plan_subscribe_refusal(&mut fs, &subs, agent, now);
-    assert!(plan.marker_frame.is_none(), "no failure marker for an acked slot");
+    assert!(
+        plan.marker_frame.is_none(),
+        "no failure marker for an acked slot"
+    );
     assert!(plan.next_subscribe.is_none(), "no queue advance either");
     assert!(
         !fs.request_replay(agent, now).send_now,
@@ -245,7 +268,10 @@ fn a_refusal_delivers_a_failure_marker_to_the_windows_showing_that_agent() {
     let now = Instant::now();
 
     let first = fs.request_replay(agent, now);
-    assert!(first.send_now, "precondition: this generation went out on the wire");
+    assert!(
+        first.send_now,
+        "precondition: this generation went out on the wire"
+    );
 
     let (out, follow) = feed(
         &AgentEvent::SubscribeFailed {
@@ -267,8 +293,14 @@ fn a_refusal_delivers_a_failure_marker_to_the_windows_showing_that_agent() {
     );
     let (got_agent, _epoch, marker) = decode_marker(frame);
     assert_eq!(got_agent, agent, "the marker is addressed to its own agent");
-    assert_eq!(marker.generation, first.generation, "what is released is that generation");
-    assert!(marker.failed, "refusal = failure marker (so the view does not wait 10 s)");
+    assert_eq!(
+        marker.generation, first.generation,
+        "what is released is that generation"
+    );
+    assert!(
+        marker.failed,
+        "refusal = failure marker (so the view does not wait 10 s)"
+    );
     assert!(
         matches!(follow, ReplayFollowUp::Handled(None)),
         "no queue means no next Subscribe"
@@ -306,7 +338,10 @@ fn a_refusal_hands_back_the_coalesced_generations_subscribe() {
         &router,
         now,
     );
-    assert!(ack_out.0.is_empty(), "the Ack itself sends nothing to the window");
+    assert!(
+        ack_out.0.is_empty(),
+        "the Ack itself sends nothing to the window"
+    );
     assert!(matches!(ack_follow, ReplayFollowUp::Handled(None)));
 
     // That Ack was from a time when nothing was in-flight, so it does not create a slot — now issue the two real requests.
@@ -326,8 +361,14 @@ fn a_refusal_hands_back_the_coalesced_generations_subscribe() {
     );
 
     let (_, epoch, marker) = decode_marker(&out.0[0].1);
-    assert_eq!(marker.generation, first.generation, "what is released is the earlier generation");
-    assert_eq!(epoch, 7, "carries the last known epoch (not an authoritative value)");
+    assert_eq!(
+        marker.generation, first.generation,
+        "what is released is the earlier generation"
+    );
+    assert_eq!(
+        epoch, 7,
+        "carries the last known epoch (not an authoritative value)"
+    );
     assert!(
         !marker.continues_conversation,
         "the earlier Ack (flag true) sat in no slot and the refused slot never received an Ack — bit2 is 0"
@@ -340,8 +381,15 @@ fn a_refusal_hands_back_the_coalesced_generations_subscribe() {
             after_seq,
         })) => {
             assert_eq!(agent_id, agent);
-            assert_eq!(epoch, Some(7), "re-subscribes with the currently known epoch");
-            assert_eq!(after_seq, None, "a re-replay is always in full (from-oldest)");
+            assert_eq!(
+                epoch,
+                Some(7),
+                "re-subscribes with the currently known epoch"
+            );
+            assert_eq!(
+                after_seq, None,
+                "a re-replay is always in full (from-oldest)"
+            );
         }
         other => panic!("the merged generation's Subscribe must come out: {other:?}"),
     }
@@ -392,15 +440,15 @@ fn a_replay_complete_delivers_a_success_marker_to_the_same_windows() {
     assert_eq!(epoch, 3, "carries the completed replay's epoch");
     assert_eq!(marker.generation, first.generation);
     assert!(!marker.failed, "completion = success marker");
-    assert!(marker.truncated, "the Ack's truncated propagates to the marker");
+    assert!(
+        marker.truncated,
+        "the Ack's truncated propagates to the marker"
+    );
     assert!(
         !marker.continues_conversation,
         "the Ack said it is not a continuing incarnation"
     );
-    assert!(
-        matches!(follow, ReplayFollowUp::Handled(None)),
-        "no queue"
-    );
+    assert!(matches!(follow, ReplayFollowUp::Handled(None)), "no queue");
 }
 
 // The Ack's resume marker reaches bit2 of the bytes going to the window (ADR-0226) — the webview uses this bit to draw loading instead of the first screen. truncated · the marker value are flipped relative to the test right above, so a swapped wiring turns one of the two red.
@@ -490,7 +538,10 @@ fn a_replay_complete_carries_the_acks_replay_from() {
     assert_eq!(out.0.len(), 1, "one completion = one marker");
     let (_, _, marker) = decode_marker(&out.0[0].1);
     assert!(!marker.failed);
-    assert_eq!(marker.replay_from, 40, "the Ack's replay head reaches the marker");
+    assert_eq!(
+        marker.replay_from, 40,
+        "the Ack's replay head reaches the marker"
+    );
 }
 
 // Events outside the replay family must not be swallowed by this function — swallowed, inbound commands and broadcast would vanish entirely (their only entrance is this function's `NotHandled` branch).

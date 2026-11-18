@@ -227,7 +227,9 @@ impl UsageNudger {
 }
 
 enum DriverCmd {
-    IsLive { reply: oneshot::Sender<bool> },
+    IsLive {
+        reply: oneshot::Sender<bool>,
+    },
     /// Start a handle for the key (the first one or a re-add) unless the current peer is live (`first` gets `Ok`) or a close came after `closes` was read (`first` gets an error); otherwise `first` gets the new handle's first answer.
     Add {
         closes: u64,
@@ -238,7 +240,9 @@ enum DriverCmd {
     /// The explicit close (`daemon_close`): no band for the rest of the handle.
     Close,
     /// Write `Unsubscribe` on the open connection; with none open there is nothing to undo (the daemon drops a connection's subscriptions with it).
-    Unsubscribe { agent_id: AgentId },
+    Unsubscribe {
+        agent_id: AgentId,
+    },
     /// Start the agent's replay or join the one in flight (single flight — ADR-0046 M1); `reply` gets the generation assigned (a joined request writes nothing and still gets one), or [`REPLAY_UNSENT`] / [`NOT_CONNECTED`] when none can be served (no open connection, no window shows the agent, or its `Subscribe` could not be written).
     RequestReplay {
         agent_id: AgentId,
@@ -249,15 +253,21 @@ enum DriverCmd {
     /// Start the boot hold (module doc) — bounded by [`BOOT_START_CAP`] from now.
     HoldForBootStart,
     /// The main window's daemon search began with timeout `search`: the hold now ends `search` + [`BOOT_START_MARGIN`] from now, replacing the 60 s cap. Nothing when no hold is on.
-    BoundBootStart { search: Duration },
+    BoundBootStart {
+        search: Duration,
+    },
     /// The main window's boot start answered — the hold ends now. Nothing when no hold is on.
-    EndBootStartHold { why: &'static str },
+    EndBootStartHold {
+        why: &'static str,
+    },
     #[cfg(test)]
     CurrentHandle {
         reply: oneshot::Sender<Option<HandleToken>>,
     },
     #[cfg(test)]
-    BootStartHeld { reply: oneshot::Sender<bool> },
+    BootStartHeld {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 impl LinkClient {

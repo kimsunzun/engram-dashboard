@@ -168,7 +168,9 @@ impl InboundSlot {
 
     pub fn set(&self, receiver: Arc<InboundReceiver>) {
         if self.0.set(receiver).is_err() {
-            tracing::warn!("the inbound receiver is already plugged in — ignoring the second install");
+            tracing::warn!(
+                "the inbound receiver is already plugged in — ignoring the second install"
+            );
         }
     }
 

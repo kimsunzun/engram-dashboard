@@ -54,7 +54,10 @@ pub fn release_window_number(state: &LayoutState, label: &str) {
         return;
     }
     let Ok(mut mgr) = state.0.lock() else {
-        tracing::warn!(label, "releasing the window number: lock poisoned — skipping");
+        tracing::warn!(
+            label,
+            "releasing the window number: lock poisoned — skipping"
+        );
         return;
     };
     mgr.release_closing(label);

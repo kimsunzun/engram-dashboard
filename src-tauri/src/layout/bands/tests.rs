@@ -94,7 +94,10 @@ fn picked(w: &WindowTargets, p: PointCss) -> Option<(u128, DockSide)> {
     let near = bands_at(w, p);
     let a = choose(&all, p).map(|i| &all[i]);
     let b = choose(&near, p).map(|i| &near[i]);
-    assert_eq!(a, b, "{p:?}: picked from all = picked from only the areas under the point");
+    assert_eq!(
+        a, b,
+        "{p:?}: picked from all = picked from only the areas under the point"
+    );
     a.map(|h| match h.anchor {
         DockAnchor::Outer => (0, h.side),
         DockAnchor::Slot(s) => (s.as_u128(), h.side),
@@ -121,9 +124,17 @@ fn the_zone_is_half_open_on_both_axes() {
     let z = strip_zone(AREA);
     for (p, inside, why) in [
         (pt(4.0, 10.0), true, "left edge of the drag area"),
-        (pt(3.999, 10.0), false, "just before the left of the first tab"),
+        (
+            pt(3.999, 10.0),
+            false,
+            "just before the left of the first tab",
+        ),
         (pt(503.999, 10.0), true, "end of the drag area"),
-        (pt(504.0, 10.0), false, "right edge of the drag area = the `+` place"),
+        (
+            pt(504.0, 10.0),
+            false,
+            "right edge of the drag area = the `+` place",
+        ),
         (pt(200.0, -15.0), true, "first line of the 15 above"),
         (pt(200.0, -15.001), false, "outside the 15 above"),
         (pt(200.0, 42.999), true, "last of the 15 below"),
@@ -246,7 +257,11 @@ fn outer_strips_are_20_px_and_shrink_to_a_tiny_canvas() {
 fn subtracting_keeps_exactly_the_uncovered_pixels() {
     let r = px(10, 10, 30, 30);
     assert_eq!(subtract(r, px(40, 40, 50, 50)), vec![r], "no overlap");
-    assert_eq!(subtract(r, px(30, 10, 40, 30)), vec![r], "only the edges touch");
+    assert_eq!(
+        subtract(r, px(30, 10, 40, 30)),
+        vec![r],
+        "only the edges touch"
+    );
     assert!(subtract(r, px(0, 0, 100, 100)).is_empty(), "fully covered");
     assert_eq!(
         subtract(r, px(0, 0, 100, 15)),
@@ -351,8 +366,16 @@ fn picking_on_a_left_right_split_follows_the_band_order_and_half_open_edges() {
             Some((0, Bottom)),
             "outer corner — nearer edge (bottom)",
         ),
-        (pt(19.9, 400.0), Some((0, Left)), "end of the outer left band"),
-        (pt(300.0, 14.9), None, "inside the tab bar zone — not a band"),
+        (
+            pt(19.9, 400.0),
+            Some((0, Left)),
+            "end of the outer left band",
+        ),
+        (
+            pt(300.0, 14.9),
+            None,
+            "inside the tab bar zone — not a band",
+        ),
         (
             pt(300.0, 15.0),
             Some((0, Top)),
@@ -379,7 +402,11 @@ fn picking_on_a_left_right_split_follows_the_band_order_and_half_open_edges() {
             Some((0, Right)),
             "first pixel of the outer right band",
         ),
-        (pt(900.0, 780.0), Some((0, Bottom)), "first pixel of the outer bottom band"),
+        (
+            pt(900.0, 780.0),
+            Some((0, Bottom)),
+            "first pixel of the outer bottom band",
+        ),
         (
             pt(900.0, 779.9),
             Some((2, Bottom)),
@@ -387,19 +414,39 @@ fn picking_on_a_left_right_split_follows_the_band_order_and_half_open_edges() {
         ),
         (pt(300.0, 400.0), None, "center of area 1"),
         (pt(900.0, 400.0), None, "center of area 2"),
-        (pt(600.0, 400.0), Some((2, Left)), "shared edge = the right area"),
+        (
+            pt(600.0, 400.0),
+            Some((2, Left)),
+            "shared edge = the right area",
+        ),
         (
             pt(599.9, 400.0),
             Some((1, Right)),
             "just before the shared edge = the left area",
         ),
         (pt(79.9, 400.0), Some((1, Left)), "end of the left band"),
-        (pt(80.0, 400.0), None, "the right edge of the left band is outside"),
-        (pt(540.0, 400.0), Some((1, Right)), "first pixel of the right band"),
+        (
+            pt(80.0, 400.0),
+            None,
+            "the right edge of the left band is outside",
+        ),
+        (
+            pt(540.0, 400.0),
+            Some((1, Right)),
+            "first pixel of the right band",
+        ),
         (pt(539.9, 400.0), None, "just before the right band"),
         (pt(300.0, 99.9), Some((1, Top)), "end of the top band"),
-        (pt(300.0, 100.0), None, "the bottom edge of the top band is outside"),
-        (pt(300.0, 700.0), Some((1, Bottom)), "first pixel of the bottom band"),
+        (
+            pt(300.0, 100.0),
+            None,
+            "the bottom edge of the top band is outside",
+        ),
+        (
+            pt(300.0, 700.0),
+            Some((1, Bottom)),
+            "first pixel of the bottom band",
+        ),
         (pt(300.0, 699.9), None, "just above the bottom band"),
         (
             pt(650.0, 60.0),
@@ -708,7 +755,11 @@ fn an_edge_slots_zone_lines_start_from_its_band_frame() {
         (DockAnchor::Slot(id(3)), DockSide::Bottom, 0.5),
         "min(original height 300, area height 272 ÷ 2) ÷ 272"
     );
-    assert_eq!(all[i].landing, px(0, 408, 882, 544), "bottom half of area 3");
+    assert_eq!(
+        all[i].landing,
+        px(0, 408, 882, 544),
+        "bottom half of area 3"
+    );
     assert_eq!(
         slot_zones(&w, &all, pt(441.0, 510.0)),
         Some(SlotZones {
@@ -716,7 +767,11 @@ fn an_edge_slots_zone_lines_start_from_its_band_frame() {
             centre: rect(108.0, 299.0, 774.0, 497.0),
         })
     );
-    assert_eq!(slot_zones(&w, &all, pt(441.0, 530.0)), None, "outer bottom band");
+    assert_eq!(
+        slot_zones(&w, &all, pt(441.0, 530.0)),
+        None,
+        "outer bottom band"
+    );
 }
 
 #[test]
@@ -801,7 +856,11 @@ fn a_small_slot_still_gets_a_minimum_band_it_can_dock_to() {
         .iter()
         .find(|b| b.anchor == DockAnchor::Slot(id(2)) && b.side == DockSide::Left)
         .expect("left band of the small area");
-    assert_eq!(band.band, px(1150, 20, 1162, 780), "top and bottom are inside the outer band");
+    assert_eq!(
+        band.band,
+        px(1150, 20, 1162, 780),
+        "top and bottom are inside the outer band"
+    );
     assert_eq!(band.landing.x1 - band.landing.x0, 25);
     assert_eq!(picked(&w, pt(1155.0, 400.0)), Some((2, DockSide::Left)));
 }
@@ -891,7 +950,11 @@ fn a_blocked_outer_top_band_does_not_cover_the_slot_band_beneath() {
         .iter()
         .find(|b| b.anchor == DockAnchor::Slot(id(1)) && b.side == DockSide::Top)
         .expect("the top band of 「A」 was not blocked");
-    assert_eq!(top.band, px(20, 0, 1180, 40), "a blocked top edge does not push");
+    assert_eq!(
+        top.band,
+        px(20, 0, 1180, 40),
+        "a blocked top edge does not push"
+    );
     assert!(top.areas.contains(&px(20, 15, 1180, 40)), "{:?}", top.areas);
     assert_eq!(picked(&w, pt(300.0, 20.0)), Some((1, DockSide::Top)));
     assert_eq!(
@@ -1234,7 +1297,11 @@ fn render_dock_constants() -> String {
 fn export_bindings_dock_constants() {
     let path = dock_constants_path();
     let text = render_dock_constants();
-    assert_eq!(text, render_dock_constants(), "two renderings give the same bytes");
+    assert_eq!(
+        text,
+        render_dock_constants(),
+        "two renderings give the same bytes"
+    );
     std::fs::write(&path, &text).expect("write DockConstants.ts");
     let written = std::fs::read_to_string(&path).expect("read DockConstants.ts");
     // If another export (such as the ts-rs `DockConstants` type) overwrites the same path, the signature here breaks — there is a race with parallel tests,
@@ -1250,7 +1317,8 @@ fn export_bindings_dock_constants() {
         .and_then(|(_, rest)| rest.split_once(CONSTANTS_TAIL))
         .map(|(json, _)| json)
         .expect("DOCK_CONSTANTS body");
-    let read: serde_json::Value = serde_json::from_str(json).expect("the DOCK_CONSTANTS body is JSON");
+    let read: serde_json::Value =
+        serde_json::from_str(json).expect("the DOCK_CONSTANTS body is JSON");
     assert_eq!(
         read,
         serde_json::to_value(current_constants()).unwrap(),
@@ -1295,5 +1363,8 @@ fn generated_bindings_never_differ_only_by_case() {
         by_fold.entry(f.to_lowercase()).or_default().push(f);
     }
     let clashes: Vec<&Vec<&str>> = by_fold.values().filter(|v| v.len() > 1).collect();
-    assert!(clashes.is_empty(), "generated files differing only in case: {clashes:?}");
+    assert!(
+        clashes.is_empty(),
+        "generated files differing only in case: {clashes:?}"
+    );
 }

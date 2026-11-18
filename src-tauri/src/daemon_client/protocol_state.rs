@@ -346,7 +346,10 @@ mod tests {
     fn epoch_change_ack_returns_true() {
         let mut st = subscribed_with_ack(10);
         let changed = apply_subscribe_ack(&mut st, 11);
-        assert!(changed, "epoch 11→10 change — window render_seq reset needed");
+        assert!(
+            changed,
+            "epoch 11→10 change — window render_seq reset needed"
+        );
         assert_eq!(st.epoch, Some(11));
     }
 
@@ -460,7 +463,11 @@ mod tests {
             }));
             match classified {
                 Err(failure @ CommandFailure::Daemon { .. }) => {
-                    assert_eq!(failure.to_string(), message, "Display = the daemon's original text")
+                    assert_eq!(
+                        failure.to_string(),
+                        message,
+                        "Display = the daemon's original text"
+                    )
                 }
                 other => panic!("a daemon Error must be Daemon — {message:?}: {other:?}"),
             }
@@ -705,7 +712,8 @@ mod tests {
             } }
         }))
         .unwrap();
-        match reseal_webview_command_slots(sent).expect("a failure reply without the three fields gets resealed too")
+        match reseal_webview_command_slots(sent)
+            .expect("a failure reply without the three fields gets resealed too")
         {
             AgentCommand::CommandOutcome { reply } => assert!(
                 reply.get().contains(r#""detail":{"n":1}"#),
@@ -990,9 +998,12 @@ mod tests {
 
         let asked =
             command_request_id(&sent).expect("if the request cannot create a pending slot, the reply cannot wake it even when it comes");
-        let woke =
-            event_reply_request_id(&answered).expect("if the reply is outside correlation, there is no pair to wake that slot");
-        assert_eq!(asked, woke, "both legs must see the same key for the round trip to close");
+        let woke = event_reply_request_id(&answered)
+            .expect("if the reply is outside correlation, there is no pair to wake that slot");
+        assert_eq!(
+            asked, woke,
+            "both legs must see the same key for the round trip to close"
+        );
         assert_eq!(
             asked.0, envelope.request_id.0,
             "must be the uuid the envelope carries as is"

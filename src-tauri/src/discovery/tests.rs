@@ -130,7 +130,10 @@ fn check_writable_keeps_intermediate_folders_it_did_not_create() {
     let mid_left = mid.exists();
     let ours_left = mid.join("b").exists();
     let _ = std::fs::remove_dir_all(&root);
-    assert!(mid_left, "an intermediate folder that already existed must remain");
+    assert!(
+        mid_left,
+        "an intermediate folder that already existed must remain"
+    );
     assert!(!ours_left, "the layer we created must be rolled back");
 }
 
@@ -142,7 +145,10 @@ fn check_writable_does_not_remove_pre_existing_folders() {
     check_data_dir_writable(&target).expect("passes");
     let survived = target.exists();
     let _ = std::fs::remove_dir_all(&root);
-    assert!(survived, "the check must not delete a folder that already existed");
+    assert!(
+        survived,
+        "the check must not delete a folder that already existed"
+    );
 }
 
 /// R10: if the target path is a file, `create_dir_all` surely fails — passing by looking at the parent would show the user a timeout instead of a message.
@@ -199,7 +205,10 @@ fn real_reader_treats_a_partially_written_file_as_not_ready() {
         matches!(empty, Err(DiscoveryError::Parse(_))),
         "an empty file must be Parse too: {empty:?}"
     );
-    assert!(matches!(whole, Ok(Some(_))), "must be readable once complete: {whole:?}");
+    assert!(
+        matches!(whole, Ok(Some(_))),
+        "must be readable once complete: {whole:?}"
+    );
 }
 
 #[test]
@@ -357,7 +366,11 @@ fn attach_to_live_daemon_skips_the_pre_spawn_gate() {
     )
     .expect("must attach to a live daemon regardless of the gate");
     assert_eq!(got.pid, 100);
-    assert_eq!(gate_calls.get(), 0, "the attach path does not call the gate");
+    assert_eq!(
+        gate_calls.get(),
+        0,
+        "the attach path does not call the gate"
+    );
 }
 
 #[test]
@@ -434,7 +447,10 @@ fn gate_failure_leaves_an_existing_portfile_intact() {
         matches!(err, DiscoveryError::DataDirUnwritable { .. }),
         "{err:?}"
     );
-    assert!(survived, "even when the gate blocks, someone else's portfile must not be deleted");
+    assert!(
+        survived,
+        "even when the gate blocks, someone else's portfile must not be deleted"
+    );
     assert_eq!(
         same,
         Some(serde_json::to_vec(&existing).unwrap()),
@@ -471,7 +487,10 @@ fn a_dead_looking_portfile_is_never_deleted() {
 
     let survived = path.exists();
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(survived, "a dead decision alone does not delete someone else's portfile");
+    assert!(
+        survived,
+        "a dead decision alone does not delete someone else's portfile"
+    );
     assert_eq!(spawner.count.get(), 1, "it spawns instead");
 }
 
@@ -777,7 +796,10 @@ fn timeout_recovers_old_daemon_if_still_live() {
         Duration::from_millis(150),
     )
     .expect("recovers if the old daemon is actually live");
-    assert_eq!(got.pid, 42, "recovers the info of the old daemon seen as dead");
+    assert_eq!(
+        got.pid, 42,
+        "recovers the info of the old daemon seen as dead"
+    );
 }
 
 #[test]

@@ -35,7 +35,9 @@ pub enum Unusable {
     /// Corrupt — the base `file` decision's reason text as is (`exceeded the {cap} byte cap` · not UTF-8 · `not JSON` · `not a JSON object` · `` `version` is not an integer of 1 or more `` · the head cannot be read).
     #[error("{0}")]
     Corrupt(String),
-    #[error("newer format than this shell (version {found} — this shell goes up to {STATE_VERSION})")]
+    #[error(
+        "newer format than this shell (version {found} — this shell goes up to {STATE_VERSION})"
+    )]
     NewerVersion { found: u64 },
 }
 
@@ -60,10 +62,16 @@ pub enum DecodeWarning {
         index: usize,
         reason: String,
     },
-    ThemeDropped { window_id: String, raw: String },
+    ThemeDropped {
+        window_id: String,
+        raw: String,
+    },
     /// A popout's window number field has a value that is not an integer in `1..=MAX_SAVED_NUMBER` — only that field folds to `None` and the window is kept (TRD S26-window-chrome §3-3). Absent · `null` · main's field do not raise this warning. `raw` = the JSON raw text of the received value, with the same cap as `ThemeDropped`.
     // ADR-0300
-    NumberDropped { window_id: String, raw: String },
+    NumberDropped {
+        window_id: String,
+        raw: String,
+    },
 }
 
 impl fmt::Display for DecodeWarning {
@@ -85,7 +93,10 @@ impl fmt::Display for DecodeWarning {
                 )
             }
             DecodeWarning::NumberDropped { window_id, raw } => {
-                write!(f, "number {raw} of window {window_id} is unusable — discarding it")
+                write!(
+                    f,
+                    "number {raw} of window {window_id} is unusable — discarding it"
+                )
             }
         }
     }

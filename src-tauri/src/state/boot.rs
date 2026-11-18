@@ -206,7 +206,9 @@ pub enum Guard {
     StateUnreadable(String),
     /// Same field as ⅰ — `state.json` was written by a version newer than this shell. Neither copied aside, overwritten nor deleted.
     // ADR-0291 R2: copying aside and overwriting would make the newer version lose its own screen state when it comes up again (nobody reads `.corrupt`).
-    StateNewer { found: u64 },
+    StateNewer {
+        found: u64,
+    },
     /// ⅱ The copy that had to be made could not be — write failure · copy read IO failure · a newer version's copy that must not be overwritten (N6). One reason line.
     CrashCopyNotWritten(String),
 }
@@ -349,14 +351,14 @@ pub fn decide_boot(inputs: BootInputs) -> BootPlan {
             match copy {
                 AbsentCopy::Newer => {
                     plan.guard = Some(Guard::CrashCopyNotWritten(
-                        "a copy written by a newer version is in place, so it is not overwritten".to_string(),
+                        "a copy written by a newer version is in place, so it is not overwritten"
+                            .to_string(),
                     ))
                 }
-                AbsentCopy::Unread => {
-                    plan.guard = Some(Guard::CrashCopyNotWritten(
-                        "the copy could not be read, so it is unknown whether overwriting it is fine".to_string(),
-                    ))
-                }
+                AbsentCopy::Unread => plan.guard = Some(Guard::CrashCopyNotWritten(
+                    "the copy could not be read, so it is unknown whether overwriting it is fine"
+                        .to_string(),
+                )),
                 AbsentCopy::Unusable => plan
                     .actions
                     .extend([BootAction::CopyAsideCrashCopy, BootAction::WriteCrashCopy]),
@@ -774,7 +776,9 @@ fn judge_before_marker(files: &impl BootFiles, plan: &BootPlan) -> Result<(), Gu
 
 fn copy_state_aside_before_marker(files: &impl BootFiles, current: &file::Loaded) {
     let what = match current {
-        file::Loaded::Parsed(file::Parsed::Usable { .. }) => "the state.json placed after the decision",
+        file::Loaded::Parsed(file::Parsed::Usable { .. }) => {
+            "the state.json placed after the decision"
+        }
         _ => "the state.json that became unusable after the decision",
     };
     match files.copy_aside_state() {
@@ -1142,7 +1146,11 @@ mod tests {
     #[test]
     fn the_boot_table_decides_every_row() {
         let rows = rows();
-        assert_eq!(rows.len(), 36, "row count — when adding or removing rows, fix this number too");
+        assert_eq!(
+            rows.len(),
+            36,
+            "row count — when adding or removing rows, fix this number too"
+        );
         for row in rows {
             let claim = match row.state {
                 StateRead::Usable { .. } => file::Claim::Adopted,
@@ -1152,7 +1160,11 @@ mod tests {
                 state: row.state,
                 crash_copy: row.crash_copy,
             });
-            assert_eq!(plan.claim, claim, "{} — the writer's start decision axis", row.name);
+            assert_eq!(
+                plan.claim, claim,
+                "{} — the writer's start decision axis",
+                row.name
+            );
             assert_eq!(plan.model, row.model, "{} — model", row.name);
             assert_eq!(plan.actions, row.actions, "{} — actions", row.name);
             assert_eq!(plan.crash_copy, row.ask, "{} — asks", row.name);
@@ -1671,7 +1683,10 @@ mod tests {
         let marker = write_run_marker(&files, &mut plan, vec![a_window()], 9);
 
         assert_eq!(plan.crash_copy, Some(awaiting_of(crash_file())));
-        assert!(files.crash_written().is_empty(), "the copy is not overwritten (D2-6)");
+        assert!(
+            files.crash_written().is_empty(),
+            "the copy is not overwritten (D2-6)"
+        );
         assert_eq!(marker, MarkerOutcome::Written);
         assert_eq!(
             files.call_names(),

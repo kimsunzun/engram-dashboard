@@ -256,11 +256,7 @@ mod tests {
         let a = slot_of(&g, 1);
         let b = slot_of(&g, 2);
         assert_eq!((a.x0, a.y0, a.x1, a.y1), (0.0, 0.0, 0.25, 1.0), "a = left");
-        assert_eq!(
-            (b.x0, b.y0, b.x1, b.y1),
-            (0.25, 0.0, 1.0, 1.0),
-            "b = right"
-        );
+        assert_eq!((b.x0, b.y0, b.x1, b.y1), (0.25, 0.0, 1.0, 1.0), "b = right");
         assert_eq!(
             split_of(&g, 100),
             SplitRect {
@@ -281,7 +277,11 @@ mod tests {
         let a = slot_of(&g, 1);
         let b = slot_of(&g, 2);
         assert_eq!((a.x0, a.y0, a.x1, a.y1), (0.0, 0.0, 1.0, 0.75), "a = top");
-        assert_eq!((b.x0, b.y0, b.x1, b.y1), (0.0, 0.75, 1.0, 1.0), "b = bottom");
+        assert_eq!(
+            (b.x0, b.y0, b.x1, b.y1),
+            (0.0, 0.75, 1.0, 1.0),
+            "b = bottom"
+        );
         let s = split_of(&g, 100);
         assert_eq!(s.dir, SplitDir::TopBottom);
         assert_eq!(s.at, 0.75, "the at of a top-bottom split is a y-axis value");
@@ -301,7 +301,10 @@ mod tests {
         );
 
         assert!(same(s1.x1, s4.x0) && same(s1.x1, s5.x0));
-        assert!(same(s3.x1, s4.x0), "the right end of a deep leaf is the same value too");
+        assert!(
+            same(s3.x1, s4.x0),
+            "the right end of a deep leaf is the same value too"
+        );
         assert!(same(s1.y1, s2.y0) && same(s1.y1, s3.y0));
         assert!(same(s2.x1, s3.x0));
         assert!(same(s4.y1, s5.y0));
@@ -563,7 +566,10 @@ mod tests {
             let g = compute(&split(100, SplitDir::LeftRight, ratio, slot(1), slot(2)));
             assert_eq!(split_of(&g, 100).at, want, "ratio {ratio}");
             let (a, b) = (slot_of(&g, 1), slot_of(&g, 2));
-            assert!(a.x0 < a.x1 && b.x0 < b.x1, "ratio {ratio}: no zero-area leaf");
+            assert!(
+                a.x0 < a.x1 && b.x0 < b.x1,
+                "ratio {ratio}: no zero-area leaf"
+            );
         }
     }
 

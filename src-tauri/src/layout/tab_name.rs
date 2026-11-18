@@ -145,11 +145,11 @@ mod tests {
     #[test]
     fn every_table_word_is_a_word_and_nothing_else_is() {
         for text in [
-            "빈 칸", // hangul-ok: the Korean UI table
-            "에이전트", // hangul-ok: the Korean UI table
-            "에이전트 트리", // hangul-ok: the Korean UI table
-            "프리셋", // hangul-ok: the Korean UI table
-            "사용량", // hangul-ok: the Korean UI table
+            "빈 칸",           // hangul-ok: the Korean UI table
+            "에이전트",        // hangul-ok: the Korean UI table
+            "에이전트 트리",   // hangul-ok: the Korean UI table
+            "프리셋",          // hangul-ok: the Korean UI table
+            "사용량",          // hangul-ok: the Korean UI table
             "알 수 없는 내용", // hangul-ok: the Korean UI table
             "Empty slot",
             "Agent",
@@ -402,7 +402,11 @@ mod tests {
         for view in [boot, tab, popout, detached] {
             assert_eq!(mgr.views[&view].name, TabName::Auto, "{view}");
         }
-        assert_eq!(name_of(&mgr, detached), "에이전트 트리", "name of the moved area"); // hangul-ok: the Korean UI table
+        assert_eq!(
+            name_of(&mgr, detached),
+            "에이전트 트리",
+            "name of the moved area"
+        ); // hangul-ok: the Korean UI table
         let listed = mgr.list_tabs(MAIN_WINDOW_LABEL).unwrap();
         assert!(listed.tabs.iter().all(|t| !t.named));
     }

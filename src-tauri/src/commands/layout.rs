@@ -106,7 +106,9 @@ impl AgentSpawner for DaemonSpawner<'_> {
                 AgentEvent::Spawned { agent, .. } => Ok(agent.id.to_string()),
                 // ADR-0279: daemon rejection messages (policy rejections included) go through without a prefix. Today `send_command` folds `Error` first into `Err(message)` (verbatim — the origin-preserving sibling is `send_command_with_origin`, ADR-0281) so it does not reach this arm; if that folding changes it arrives here.
                 AgentEvent::Error { message, .. } => Err(message),
-                other => Err(format!("unexpected spawn response (expected Spawned): {other:?}")),
+                other => Err(format!(
+                    "unexpected spawn response (expected Spawned): {other:?}"
+                )),
             }
         })
     }

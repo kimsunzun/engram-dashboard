@@ -355,7 +355,11 @@ mod tests {
             }
             other => panic!("should be a success marker: {other:?}"),
         }
-        assert_eq!(fs.request_replay(a, now).generation, 2, "gen is monotonic (no reset to 0)");
+        assert_eq!(
+            fs.request_replay(a, now).generation,
+            2,
+            "gen is monotonic (no reset to 0)"
+        );
         fs.on_ack(a, false, false, 0, now);
         assert!(matches!(
             fs.on_complete(a, now),
@@ -385,7 +389,10 @@ mod tests {
         fs.on_ack(a, false, false, 0, now);
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, send_next } => {
-                assert_eq!(marker.generation, 1, "what resolves is the current in-flight (gen1)");
+                assert_eq!(
+                    marker.generation, 1,
+                    "what resolves is the current in-flight (gen1)"
+                );
                 assert!(send_next, "merged queue → one next Subscribe fired");
             }
             other => panic!("should be a success marker: {other:?}"),
@@ -459,8 +466,14 @@ mod tests {
         fs.on_ack(a, false, false, 0, start + Duration::from_millis(400));
         match fs.on_complete(a, start + Duration::from_millis(500)) {
             Resolution::Emit { marker, send_next } => {
-                assert_eq!(marker.generation, 1, "★the success marker is gen1 — not gen2★");
-                assert!(!marker.failed, "late Complete = success (replay actually completed)");
+                assert_eq!(
+                    marker.generation, 1,
+                    "★the success marker is gen1 — not gen2★"
+                );
+                assert!(
+                    !marker.failed,
+                    "late Complete = success (replay actually completed)"
+                );
                 assert!(send_next, "only now is the merged gen2 Subscribe fired");
             }
             other => panic!("a late Complete is a success marker: {other:?}"),
@@ -489,11 +502,20 @@ mod tests {
         assert_eq!(expired[0].1.generation, 1);
         assert!(expired[0].1.failed);
         let w = fs.request_replay(a, start + Duration::from_millis(300));
-        assert!(!w.send_now, "a zombie holds the slot → new request merged (not fired immediately)");
+        assert!(
+            !w.send_now,
+            "a zombie holds the slot → new request merged (not fired immediately)"
+        );
         fs.on_disconnect();
         let after = fs.request_replay(a, start + Duration::from_millis(400));
-        assert_eq!(after.generation, 3, "gen_counter is monotonic (no reset to 0 even after a zombie)");
-        assert!(after.send_now, "disconnect emptied the slot; fired immediately");
+        assert_eq!(
+            after.generation, 3,
+            "gen_counter is monotonic (no reset to 0 even after a zombie)"
+        );
+        assert!(
+            after.send_now,
+            "disconnect emptied the slot; fired immediately"
+        );
     }
 
     // ── progress-based deadline ────────────────────────────────────────────────────────────
@@ -539,7 +561,10 @@ mod tests {
         for _ in 0..5 {
             now += Duration::from_millis(80); // progress before the deadline (100ms).
             fs.note_progress(a, now);
-            assert!(fs.check_deadlines(now).is_empty(), "while progressing, no expiry");
+            assert!(
+                fs.check_deadlines(now).is_empty(),
+                "while progressing, no expiry"
+            );
         }
         assert!(matches!(
             fs.on_complete(a, now),
@@ -562,7 +587,9 @@ mod tests {
 
         match fs.on_refused(a, now) {
             RefusalOutcome::Released { marker, send_next } => {
-                let m = marker.expect("the first refusal yields a failure marker (so the view does not wait 10 s)");
+                let m = marker.expect(
+                    "the first refusal yields a failure marker (so the view does not wait 10 s)",
+                );
                 assert_eq!(m.generation, 1);
                 assert!(m.failed);
                 assert!(!send_next, "no queue means no next Subscribe");
@@ -573,7 +600,10 @@ mod tests {
         // The heart of the defect — before the fix `send_now=false` repeated forever.
         let next = fs.request_replay(a, now);
         assert_eq!(next.generation, 2, "gen is monotonic");
-        assert!(next.send_now, "released, so the new Subscribe goes out immediately");
+        assert!(
+            next.send_now,
+            "released, so the new Subscribe goes out immediately"
+        );
     }
 
     #[test]
@@ -587,7 +617,11 @@ mod tests {
 
         match fs.on_refused(a, now) {
             RefusalOutcome::Released { marker, send_next } => {
-                assert_eq!(marker.expect("failure marker").generation, 1, "what is released is gen1");
+                assert_eq!(
+                    marker.expect("failure marker").generation,
+                    1,
+                    "what is released is gen1"
+                );
                 assert!(send_next, "fire the merged gen2 Subscribe now");
             }
             other => panic!("should be a release: {other:?}"),
@@ -619,7 +653,11 @@ mod tests {
 
         match fs.on_refused(a, now) {
             RefusalOutcome::Released { marker, send_next } => {
-                assert_eq!(marker.expect("failure marker").generation, 1, "first refusal = gen1");
+                assert_eq!(
+                    marker.expect("failure marker").generation,
+                    1,
+                    "first refusal = gen1"
+                );
                 assert!(send_next, "now gen2 goes out on the wire");
             }
             other => panic!("should be a release: {other:?}"),
@@ -627,7 +665,11 @@ mod tests {
         // The second refusal arrives — at that point gen2 is the only outstanding one.
         match fs.on_refused(a, now) {
             RefusalOutcome::Released { marker, send_next } => {
-                assert_eq!(marker.expect("failure marker").generation, 2, "second refusal = gen2");
+                assert_eq!(
+                    marker.expect("failure marker").generation,
+                    2,
+                    "second refusal = gen2"
+                );
                 assert!(!send_next, "queue drained");
             }
             other => panic!("should be a release: {other:?}"),
@@ -698,7 +740,11 @@ mod tests {
         let mut fs = ReplayFlightSet::new(dl());
         let a = aid(1);
         let now = t0();
-        assert_eq!(fs.on_refused(a, now), RefusalOutcome::Ignore, "unknown agent");
+        assert_eq!(
+            fs.on_refused(a, now),
+            RefusalOutcome::Ignore,
+            "unknown agent"
+        );
         fs.request_replay(a, now);
         fs.on_refused(a, now);
         assert_eq!(
@@ -720,7 +766,10 @@ mod tests {
         fs.on_disconnect(); // Send failure → the caller drops the connection.
         let next = fs.request_replay(a, now);
         assert_eq!(next.generation, 2, "gen is monotonic (1 used up → 2)");
-        assert!(next.send_now, "disconnect cleanup emptied the slot; fired again immediately");
+        assert!(
+            next.send_now,
+            "disconnect cleanup emptied the slot; fired again immediately"
+        );
         fs.on_ack(a, false, false, 0, now);
         assert!(matches!(
             fs.on_complete(a, now),
@@ -741,8 +790,14 @@ mod tests {
         fs.request_replay(a, now); // gen2 queue
         fs.on_disconnect();
         let out = fs.request_replay(a, now);
-        assert_eq!(out.generation, 3, "gen_counter stays monotonic (2 used up → 3)");
-        assert!(out.send_now, "disconnect emptied in-flight; fired immediately");
+        assert_eq!(
+            out.generation, 3,
+            "gen_counter stays monotonic (2 used up → 3)"
+        );
+        assert!(
+            out.send_now,
+            "disconnect emptied in-flight; fired immediately"
+        );
     }
 
     // ── truncated flag propagation ──────────────────────────────────────────────────────────
@@ -755,7 +810,10 @@ mod tests {
         fs.on_ack(a, true, false, 0, now); // The daemon cut the past beyond the lower bound.
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, .. } => {
-                assert!(marker.truncated, "SubscribeAck.truncated propagates to the marker");
+                assert!(
+                    marker.truncated,
+                    "SubscribeAck.truncated propagates to the marker"
+                );
                 assert!(!marker.failed);
             }
             other => panic!("should be a success marker: {other:?}"),
@@ -859,8 +917,14 @@ mod tests {
         fs.on_ack(a, false, true, 0, now);
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, .. } => {
-                assert!(marker.continues_conversation, "the Ack's flag goes into the success marker");
-                assert!(!marker.truncated, "does not leak into the neighboring field");
+                assert!(
+                    marker.continues_conversation,
+                    "the Ack's flag goes into the success marker"
+                );
+                assert!(
+                    !marker.truncated,
+                    "does not leak into the neighboring field"
+                );
                 assert!(!marker.failed);
             }
             other => panic!("should be a success marker: {other:?}"),
@@ -878,7 +942,10 @@ mod tests {
         let expired = fs.check_deadlines(start + Duration::from_millis(200));
         assert_eq!(expired.len(), 1);
         assert!(expired[0].1.failed);
-        assert!(!expired[0].1.continues_conversation, "a failure marker has flag 0");
+        assert!(
+            !expired[0].1.continues_conversation,
+            "a failure marker has flag 0"
+        );
         match fs.on_complete(a, start + Duration::from_millis(300)) {
             Resolution::Emit { marker, .. } => {
                 assert!(!marker.failed);
@@ -899,7 +966,10 @@ mod tests {
         let start = t0();
         fs.request_replay(a, start);
         let expired = fs.check_deadlines(start + Duration::from_millis(200));
-        assert!(!expired[0].1.continues_conversation, "expiry before Ack = flag 0");
+        assert!(
+            !expired[0].1.continues_conversation,
+            "expiry before Ack = flag 0"
+        );
         fs.on_ack(a, false, true, 0, start + Duration::from_millis(300));
         assert!(matches!(
             fs.on_complete(a, start + Duration::from_millis(400)),
@@ -970,7 +1040,10 @@ mod tests {
         fs.on_ack(a, true, false, 40, now);
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, .. } => {
-                assert_eq!(marker.replay_from, 40, "the Ack's replay_from goes into the success marker");
+                assert_eq!(
+                    marker.replay_from, 40,
+                    "the Ack's replay_from goes into the success marker"
+                );
                 assert!(marker.truncated, "the neighboring field stays as it is");
             }
             other => panic!("should be a success marker: {other:?}"),

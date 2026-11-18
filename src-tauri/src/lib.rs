@@ -45,7 +45,9 @@ impl crate::daemon_client::AgentNamesSink for LayoutAgentNames {
             &crate::commands::layout::TauriEvents { app: &self.app },
             &names,
         ) {
-            tracing::warn!("could not update the agent name ledger (tab names follow from the next list): {e}");
+            tracing::warn!(
+                "could not update the agent name ledger (tab names follow from the next list): {e}"
+            );
         }
     }
 }

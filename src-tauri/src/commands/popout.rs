@@ -351,9 +351,9 @@ fn build_window(
         None => (cascade_position(label), POPOUT_DEFAULT_SIZE),
     };
     // Do not build without the webview environment — a window that skipped the finish diverges in environment from other windows (ADR-0054).
-    let env = app
-        .try_state::<Arc<WebviewEnv>>()
-        .ok_or_else(|| "runtime window creation failed: webview environment is not registered".to_owned())?;
+    let env = app.try_state::<Arc<WebviewEnv>>().ok_or_else(|| {
+        "runtime window creation failed: webview environment is not registered".to_owned()
+    })?;
     env.finish(
         WebviewWindowBuilder::new(app, label, WebviewUrl::App(window_url(label).into()))
             // The title of an unnumbered window outside the model (including a hidden prewarmed window) — once it enters the model, the tab notification overwrites it (TRD S26-window-chrome §4-4).
@@ -371,7 +371,10 @@ fn build_window(
 // The Destroyed event → the lib.rs Destroyed arm → `cleanup_popup_window` cleans the remainder. Window closed = backend single source (§5-2/G2): no separate `view:closed` goes to the frontend (double firing · reentry). The registry is not touched here (Destroyed→cleanup cleans it), so it is not an argument (F5).
 pub fn destroy_window(app: &AppHandle, label: &str) {
     if let Err(e) = try_destroy_window(app, label) {
-        tracing::warn!(label, "destroy_window failed (the window may already be closed): {e}");
+        tracing::warn!(
+            label,
+            "destroy_window failed (the window may already be closed): {e}"
+        );
     }
 }
 
@@ -380,7 +383,10 @@ pub(crate) fn try_destroy_window(app: &AppHandle, label: &str) -> Result<(), Str
     match app.get_webview_window(label) {
         Some(w) => w.destroy().map_err(|e| e.to_string()),
         None => {
-            tracing::debug!(label, "destroy_window: no OS window (already closed) — no-op");
+            tracing::debug!(
+                label,
+                "destroy_window: no OS window (already closed) — no-op"
+            );
             Ok(())
         }
     }
@@ -745,7 +751,11 @@ mod close_request_tests {
     // ADR-0057 ① ② — no windowless View (including a temporary View the rollback could not withdraw) remains · window number invariant (TRD S26-window-chrome §10-1).
     fn assert_owned(mgr: &ViewManager) {
         let tabs: usize = mgr.windows.values().map(|w| w.tabs.len()).sum();
-        assert_eq!(mgr.views.len(), tabs, "a View that belongs to no window's tabs remained");
+        assert_eq!(
+            mgr.views.len(),
+            tabs,
+            "a View that belongs to no window's tabs remained"
+        );
         for (label, w) in &mgr.windows {
             for view in &w.tabs {
                 assert_eq!(mgr.view_owner.get(view), Some(label));
@@ -889,7 +899,11 @@ mod close_request_tests {
         )
         .unwrap_err();
         assert_eq!(err, LayoutError::WindowClosed(fresh.into()).to_string());
-        assert_eq!(*host.closed.lock().unwrap(), [fresh], "reaps the window just opened");
+        assert_eq!(
+            *host.closed.lock().unwrap(),
+            [fresh],
+            "reaps the window just opened"
+        );
         assert!(
             host.placed.lock().unwrap().is_empty(),
             "the place of a window not in the model is not recorded"
@@ -982,7 +996,9 @@ mod close_request_tests {
             "acceptance deleted the old pop-out"
         );
         assert!(!mgr.views.contains_key(&old_popout));
-        let tabs = mgr.list_tabs(&label).expect("the new window is a model window");
+        let tabs = mgr
+            .list_tabs(&label)
+            .expect("the new window is a model window");
         assert_eq!(tabs.tabs.len(), 1, "one empty tab");
         assert_eq!(mgr.owner_of(tabs.active), Some(&label));
     }
@@ -1005,7 +1021,10 @@ mod close_request_tests {
             let mgr = rig.state.0.lock().unwrap();
             assert!(!mgr.windows.contains_key(POPUP));
             for q in [q1, q2] {
-                assert!(!mgr.views.contains_key(&q), "all of that window's tabs are removed");
+                assert!(
+                    !mgr.views.contains_key(&q),
+                    "all of that window's tabs are removed"
+                );
             }
         }
         assert!(
@@ -1015,7 +1034,11 @@ mod close_request_tests {
         assert_eq!(rig.routed(shared), [MAIN_WINDOW_LABEL]);
 
         // The following `Destroyed` — doing the same share again changes nothing.
-        assert_eq!(rig.destroyed(POPUP), Some(0), "the close request already deleted it");
+        assert_eq!(
+            rig.destroyed(POPUP),
+            Some(0),
+            "the close request already deleted it"
+        );
         assert_eq!(rig.fingerprint(), after);
         assert!(rig.routed(only_popout).is_empty());
         assert_eq!(rig.routed(shared), [MAIN_WINDOW_LABEL]);
@@ -1051,7 +1074,11 @@ mod close_request_tests {
         rig.add_tab(POPUP);
         rig.add_tab(POPUP);
         assert_eq!(rig.destroyed(POPUP), Some(2));
-        assert_eq!(rig.destroyed(POPUP), Some(0), "the second has nothing to delete");
+        assert_eq!(
+            rig.destroyed(POPUP),
+            Some(0),
+            "the second has nothing to delete"
+        );
         // Between window opening and model commit of a new-window move — a tombstone stands even for a window the model does not yet know.
         let fresh = "slot-popup-99";
         assert_eq!(rig.destroyed(fresh), Some(0));
@@ -1144,7 +1171,10 @@ mod close_request_tests {
         {
             let mgr = rig.state.0.lock().unwrap();
             assert_owned(&mgr);
-            assert!(!mgr.windows.contains_key(POPUP), "the closed window remained in the model");
+            assert!(
+                !mgr.windows.contains_key(POPUP),
+                "the closed window remained in the model"
+            );
             assert_eq!(
                 mgr.slot_content(src, slot),
                 Ok(SlotContent::Agent {
@@ -1195,7 +1225,11 @@ mod close_request_tests {
             }),
             "the slot being moved stays at the source"
         );
-        assert_eq!(*host.closed.lock().unwrap(), [fresh], "reaps the window just opened");
+        assert_eq!(
+            *host.closed.lock().unwrap(),
+            [fresh],
+            "reaps the window just opened"
+        );
         assert!(
             host.placed.lock().unwrap().is_empty(),
             "the place of a window not in the model is not recorded"
@@ -1281,7 +1315,11 @@ mod close_request_tests {
             dock_to_new_window(&rig, &host, src),
             Err(DockError::WindowClosed(fresh.into()))
         );
-        assert_eq!(*host.closed.lock().unwrap(), [fresh], "reaps the window just opened");
+        assert_eq!(
+            *host.closed.lock().unwrap(),
+            [fresh],
+            "reaps the window just opened"
+        );
         assert!(
             host.placed.lock().unwrap().is_empty(),
             "the place of a window not in the model is not recorded"
@@ -1314,6 +1352,9 @@ mod close_request_tests {
         assert!(host.closed.lock().unwrap().is_empty());
         let mgr = rig.state.0.lock().unwrap();
         assert_owned(&mgr);
-        assert!(!mgr.windows.contains_key(POPUP), "the close request deleted it");
+        assert!(
+            !mgr.windows.contains_key(POPUP),
+            "the close request deleted it"
+        );
     }
 }

@@ -27,8 +27,8 @@ fn emit_resource_link_arg_for_tests() {
     let out_dir = std::env::var("OUT_DIR")
         .expect("OUT_DIR missing — cargo always provides it, so reaching here means the build environment itself is broken");
 
-    let entries =
-        std::fs::read_dir(&out_dir).unwrap_or_else(|e| panic!("failed to open OUT_DIR({out_dir}): {e}"));
+    let entries = std::fs::read_dir(&out_dir)
+        .unwrap_or_else(|e| panic!("failed to open OUT_DIR({out_dir}): {e}"));
 
     // Stage 1 = scan by name. Only regular files count as candidates (a directory named `*.lib`/`*.a` passed to the linker makes the diagnostics wrong). Accept both `.lib` and `.a`: embed-resource 3.0.9 names its output `resource.lib` for msvc and `libresource.a` for `*-pc-windows-gnu`, a supported configuration (tauri-build 2.6.3 branches on `CARGO_CFG_TARGET_ENV == "gnu"`) — `.lib` alone gives 0 candidates there and the panic below stops the build with the wrong assertion "no resource was created at all".
     let mut scanned: Vec<std::path::PathBuf> = entries

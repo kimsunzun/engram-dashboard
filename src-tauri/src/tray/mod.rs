@@ -253,7 +253,11 @@ fn start_daemon(
     launch: impl FnOnce() -> Result<DaemonInfo, String>,
 ) {
     match launch() {
-        Ok(info) => tracing::info!(pid = info.pid, port = info.port, "[tray] daemon ensure done"),
+        Ok(info) => tracing::info!(
+            pid = info.pid,
+            port = info.port,
+            "[tray] daemon ensure done"
+        ),
         Err(e) => tracing::warn!("[tray] {e}"),
     }
     match client {
@@ -264,8 +268,8 @@ fn start_daemon(
 
 /// Finds the daemon exe and starts it if none runs — blocks up to [`ENSURE_TIMEOUT`]. `Err` = the log text. Never spawn the daemon directly with `std::process::Command` (ADR-0024 C1): `ensure_daemon` spawns only via WMI (`Win32_Process.Create`), as a child of WmiPrvSE that does not inherit the app Job (KILL_ON_JOB_CLOSE) — the detached/breakaway requirement is met automatically; a direct spawn would kill the daemon with the app on exit.
 fn launch_daemon() -> Result<DaemonInfo, String> {
-    let exe =
-        crate::discovery::locate_daemon_exe().map_err(|e| format!("daemon exe lookup failed: {e}"))?;
+    let exe = crate::discovery::locate_daemon_exe()
+        .map_err(|e| format!("daemon exe lookup failed: {e}"))?;
     // console=false: windowless. Never log the token (discovery guarantees it).
     crate::discovery::ensure_daemon(
         &crate::discovery::default_data_dir(),

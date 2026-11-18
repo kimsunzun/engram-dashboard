@@ -1003,7 +1003,10 @@ mod tests {
         };
         assert_eq!(parked.drop.drag, id(3));
         assert_eq!(admit(&book, id(3), Arrival::Drop, plan_dock()), "duplicate");
-        assert!(book.close(id(3)).is_none(), "a rejection that was stood in for has nothing to close");
+        assert!(
+            book.close(id(3)).is_none(),
+            "a rejection that was stood in for has nothing to close"
+        );
     }
 
     #[test]
@@ -1158,7 +1161,9 @@ mod tests {
             (DockError::WindowExists("w".into()), "WindowExists"),
             (DockError::SlotIdOverlap, "SlotIdOverlap"),
             (
-                DockError::WindowOpen("moving the window Position failed — access denied (os error 5)".into()),
+                DockError::WindowOpen(
+                    "moving the window Position failed — access denied (os error 5)".into(),
+                ),
                 "WindowOpen",
             ),
         ];
@@ -1189,7 +1194,11 @@ mod tests {
         );
         assert_eq!(rig.mgr().version, before);
         assert_eq!(rig.mgr().list_tabs(MAIN).unwrap().tabs.len(), 2);
-        assert_eq!(rig.take_log(), ["done:Rejected"], "no notification · no focus");
+        assert_eq!(
+            rig.take_log(),
+            ["done:Rejected"],
+            "no notification · no focus"
+        );
     }
 
     #[test]
@@ -1262,14 +1271,20 @@ mod tests {
             .rposition(|s| s == "layout" || s.starts_with("tabs:"))
             .expect("model notification");
         let focus = log.iter().position(|s| s == "focus:main").expect("focus");
-        assert!(notified < focus, "model notification → focus → done: {log:?}");
+        assert!(
+            notified < focus,
+            "model notification → focus → done: {log:?}"
+        );
         assert_eq!(log.iter().filter(|s| s.starts_with("done:")).count(), 1);
 
         assert_eq!(
             rig.handle(&book, reorder, MAIN, &released(TopAt::Unknown)),
             TabDropReply::Duplicate
         );
-        assert!(rig.take_log().is_empty(), "a duplicate has no notification either");
+        assert!(
+            rig.take_log().is_empty(),
+            "a duplicate has no notification either"
+        );
     }
 
     #[test]
@@ -1554,7 +1569,10 @@ mod tests {
                 &released(TopAt::Foreign),
             )
         });
-        let [via] = logs.handled("via").try_into().expect("one drop-handled line");
+        let [via] = logs
+            .handled("via")
+            .try_into()
+            .expect("one drop-handled line");
         (via, reply)
     }
 
@@ -1614,7 +1632,11 @@ mod tests {
                 &released(TopAt::Unknown),
             )
         });
-        assert_eq!(logs.handled("via"), [None], "absent for a drop that is not a new window");
+        assert_eq!(
+            logs.handled("via"),
+            [None],
+            "absent for a drop that is not a new window"
+        );
     }
 
     // The answer of a new-window drop carries the persistent id · number of the window that holds the moved tab — in all cases: a newly built window · a prewarmed window handed over · a reused source window
@@ -1829,11 +1851,18 @@ mod tests {
         let mut sent = Vec::new();
         for label in [MAIN, "slot-popup-1"] {
             push_frame(&book, label, seen(false, Some(GEOM)), |_| {
-                assert!(book.last.try_lock().is_ok(), "emitted after the table lock is released");
+                assert!(
+                    book.last.try_lock().is_ok(),
+                    "emitted after the table lock is released"
+                );
                 sent.push(label);
             });
         }
-        assert_eq!(sent, [MAIN, "slot-popup-1"], "counted separately per window");
+        assert_eq!(
+            sent,
+            [MAIN, "slot-popup-1"],
+            "counted separately per window"
+        );
     }
 
     #[test]

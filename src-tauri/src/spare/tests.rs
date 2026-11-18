@@ -42,7 +42,11 @@ struct FakeGate {
 
 impl FakeGate {
     fn pool_locked(&self) -> bool {
-        let spare = self.spare.get().and_then(Weak::upgrade).expect("the pool is alive");
+        let spare = self
+            .spare
+            .get()
+            .and_then(Weak::upgrade)
+            .expect("the pool is alive");
         let locked = spare.pool.try_lock().is_err();
         locked
     }
@@ -68,7 +72,10 @@ impl FakeGate {
 
 impl PaintGate for FakeGate {
     fn hold_unarmed(&self, label: &str) {
-        assert!(self.pool_locked(), "the raise is set inside the same pool lock as the entrust");
+        assert!(
+            self.pool_locked(),
+            "the raise is set inside the same pool lock as the entrust"
+        );
         self.held
             .lock()
             .unwrap()
@@ -166,8 +173,14 @@ impl FakePort {
     }
 
     fn outside_locks(&self, what: &str) {
-        assert!(self.spare.pool.try_lock().is_ok(), "{what} — outside the pool lock");
-        assert!(self.layout.0.try_lock().is_ok(), "{what} — outside the layout lock");
+        assert!(
+            self.spare.pool.try_lock().is_ok(),
+            "{what} — outside the pool lock"
+        );
+        assert!(
+            self.layout.0.try_lock().is_ok(),
+            "{what} — outside the layout lock"
+        );
     }
 }
 
@@ -327,7 +340,10 @@ fn a_built_spare_is_handed_out_once_with_a_receive_only_hold() {
     assert!(!reply.build);
     assert_eq!(reply.waited, None);
     assert_eq!(gate.calls(), [GateCall::Hold(label.clone())]);
-    assert!(spare.is_spare(&label), "before confirmation it is a pool window");
+    assert!(
+        spare.is_spare(&label),
+        "before confirmation it is a pool window"
+    );
     let second = spare.claim();
     assert_eq!((second.claim, second.build), (None, false));
 }
@@ -387,7 +403,10 @@ fn a_claim_gives_up_on_a_building_spare_at_the_wait_limit() {
     assert!(reply.waited.unwrap() >= Duration::from_millis(20));
     assert_eq!(spare.pool().waiting(), 0);
     assert!(matches!(building.finish(), SpareBuild::Built { .. }));
-    assert!(spare.claim().claim.is_some(), "after being built it is handed over");
+    assert!(
+        spare.claim().claim.is_some(),
+        "after being built it is handed over"
+    );
 }
 
 #[test]
@@ -534,7 +553,11 @@ fn one_build_at_a_time_and_a_refused_build_takes_no_number() {
         spare.build(&*labels, |_| panic!("a refused build does not build")),
         SpareBuild::Refused(NoBuild::Occupied)
     );
-    assert_eq!(labels.issued(), 1, "a refused build does not receive a number");
+    assert_eq!(
+        labels.issued(),
+        1,
+        "a refused build does not receive a number"
+    );
     building.finish();
     assert_eq!(
         spare.build(&*labels, |_| panic!("a built window exists")),
@@ -598,7 +621,10 @@ fn the_rebuild_after_a_reveal_happens_once_per_label() {
         let labels = Labels::default();
         let claim = claimed(&spare, &labels);
         adopt(&spare, &claim);
-        assert!(run_first(&spare, &claim.label), "{first} comes first and builds");
+        assert!(
+            run_first(&spare, &claim.label),
+            "{first} comes first and builds"
+        );
         for (later, run_later) in done {
             assert!(
                 !run_later(&spare, &claim.label),
@@ -620,7 +646,10 @@ fn a_reveal_build_and_an_empty_claim_build_overlapping_make_one_spare() {
     let claim = claimed(&spare, &labels);
     adopt(&spare, &claim);
     assert!(spare.on_shown(&claim.label));
-    assert!(spare.claim().build, "it is empty and there is no wait to be shown either");
+    assert!(
+        spare.claim().build,
+        "it is empty and there is no wait to be shown either"
+    );
     let first = HeldBuild::start(&spare, &labels, Ok(()));
     assert_eq!(
         spare.build(&*labels, |_| panic!("only one stands")),
@@ -882,10 +911,7 @@ fn commit_for_a_label_gone_from_the_model_closes_it_outside_both_locks() {
         (None, false),
         "nobody can take it meanwhile"
     );
-    assert!(
-        spare.on_destroyed(&claim.label),
-        "that Destroyed rebuilds"
-    );
+    assert!(spare.on_destroyed(&claim.label), "that Destroyed rebuilds");
     assert!(matches!(
         spare.build(&labels, |_| Ok(())),
         SpareBuild::Built { .. }
@@ -984,7 +1010,10 @@ fn a_window_that_failed_to_listen_leaves_the_pool_without_an_immediate_rebuild()
         !spare.on_destroyed(&label),
         "removed first, so that Destroyed does not build"
     );
-    assert!(spare.claim().build, "the empty branch of the next entrust builds");
+    assert!(
+        spare.claim().build,
+        "the empty branch of the next entrust builds"
+    );
 }
 
 #[test]
@@ -1125,7 +1154,9 @@ fn reply(role: WindowRole, generation: Option<u32>, close: bool) -> RoleAnswer {
 fn a_pool_window_that_could_not_listen_is_unknown_and_closed_without_asking_the_model() {
     let (spare, _) = fresh();
     let label = built(&spare, &Labels::default());
-    let answer = spare.answer_role(&label, false, || panic!("a removed window does not consult the model"));
+    let answer = spare.answer_role(&label, false, || {
+        panic!("a removed window does not consult the model")
+    });
     assert_eq!(answer, reply(WindowRole::Unknown, None, true));
     assert!(!spare.is_spare(&label));
     assert!(
@@ -1151,7 +1182,9 @@ fn a_pool_window_that_listens_stays_spare() {
     let (spare, _) = fresh();
     let label = built(&spare, &Labels::default());
     assert_eq!(
-        spare.answer_role(&label, true, || panic!("a pool window does not consult the model")),
+        spare.answer_role(&label, true, || panic!(
+            "a pool window does not consult the model"
+        )),
         reply(WindowRole::Spare, None, false)
     );
     assert!(spare.is_spare(&label));
@@ -1205,7 +1238,10 @@ fn an_adopted_window_awaiting_its_reveal_gets_its_adoption_number() {
 fn the_role_answer_asks_the_model_with_the_pool_unlocked() {
     let (spare, _) = fresh();
     let answer = spare.answer_role("main", true, || {
-        assert!(spare.pool.try_lock().is_ok(), "does not ask while holding the pool lock");
+        assert!(
+            spare.pool.try_lock().is_ok(),
+            "does not ask while holding the pool lock"
+        );
         true
     });
     assert_eq!(answer, reply(WindowRole::Model, None, false));
@@ -1248,7 +1284,10 @@ fn a_spare_lost_in_any_state_is_rebuilt_unless_exiting() {
         building.finish();
     }
     let (spare, _) = fresh();
-    assert!(!spare.on_destroyed("main"), "a window unrelated to the pool");
+    assert!(
+        !spare.on_destroyed("main"),
+        "a window unrelated to the pool"
+    );
 }
 
 // ── window role · receiving measurements ──
@@ -1286,7 +1325,10 @@ fn a_window_outside_the_pool_is_model_or_unknown() {
 fn the_model_question_runs_with_the_pool_unlocked() {
     let (spare, _) = fresh();
     let role = spare.window_role("main", || {
-        assert!(spare.pool.try_lock().is_ok(), "does not ask while holding the pool lock");
+        assert!(
+            spare.pool.try_lock().is_ok(),
+            "does not ask while holding the pool lock"
+        );
         true
     });
     assert_eq!(role, WindowRole::Model);

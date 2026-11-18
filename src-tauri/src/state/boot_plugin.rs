@@ -389,7 +389,10 @@ impl StateSession {
                 ?outcome,
                 "could not record the normal exit — the next boot reads it as an abnormal exit"
             ),
-            None => tracing::info!(module = "state", "no writer, so it ends without the normal exit write"),
+            None => tracing::info!(
+                module = "state",
+                "no writer, so it ends without the normal exit write"
+            ),
         }
         drop(lock);
     }
@@ -634,7 +637,10 @@ mod tests {
         );
         {
             let mgr = layout.0.lock().unwrap();
-            assert_eq!(mgr.views[&saved_tab].name, TabName::Named("Last tab".into()));
+            assert_eq!(
+                mgr.views[&saved_tab].name,
+                TabName::Named("Last tab".into())
+            );
             assert_eq!(mgr.windows.len(), 2, "main + the restored popout");
             assert!(
                 mgr.windows.contains_key(&popup_label(1)),
@@ -745,13 +751,13 @@ mod tests {
             "does not write the run marker"
         );
         session.start_saver();
-        assert!(
-            session.cell().saver.is_none(),
-            "⑦ starts nothing"
-        );
+        assert!(session.cell().saver.is_none(), "⑦ starts nothing");
 
         session.shutdown();
-        assert!(lock_is_free(&run_dir), "even with a guard the exit releases the lock");
+        assert!(
+            lock_is_free(&run_dir),
+            "even with a guard the exit releases the lock"
+        );
         assert!(state_dir.join(STATE_FILE).is_dir());
     }
 
@@ -973,7 +979,10 @@ mod tests {
             "guard ⅱ is not put into state_file"
         );
         {
-            let ticket = boot.restore.begin_answer().expect("asks even under guard ⅱ");
+            let ticket = boot
+                .restore
+                .begin_answer()
+                .expect("asks even under guard ⅱ");
             assert_eq!(
                 ticket.copy().text,
                 raw,
@@ -1160,7 +1169,10 @@ mod tests {
         );
         session.publish_saver(handle);
 
-        assert!(session.cell().saver.is_none(), "not loaded into a closed session");
+        assert!(
+            session.cell().saver.is_none(),
+            "not loaded into a closed session"
+        );
         assert!(session.cell().starting.is_none());
         assert_eq!(
             session.resolve_crash_copy(codec::crash_copy_hash(&raw)),
@@ -1171,7 +1183,10 @@ mod tests {
             marker,
             "state.json unchanged after the exit"
         );
-        assert!(state_dir.join(CRASH_COPY_FILE).exists(), "the copy unchanged too");
+        assert!(
+            state_dir.join(CRASH_COPY_FILE).exists(),
+            "the copy unchanged too"
+        );
     }
 
     fn spawn_pending(session: &StateSession) -> SaverHandle {
@@ -1285,7 +1300,10 @@ mod tests {
 
         let (result, waited) = answer.join().unwrap();
         assert_eq!(result, ResolveResult::NotDurable);
-        assert!(waited < saver::REPLY_DEADLINE, "does not stand until the deadline");
+        assert!(
+            waited < saver::REPLY_DEADLINE,
+            "does not stand until the deadline"
+        );
         session.publish_saver(handle);
     }
 
@@ -1381,13 +1399,19 @@ mod tests {
 
         let reply = coordinator.answer(true).expect("accept");
 
-        assert!(reply.durable, "the write carrying the answer was issued within the deadline");
+        assert!(
+            reply.durable,
+            "the write carrying the answer was issued within the deadline"
+        );
         assert_eq!(reply.restored_windows, 1);
         assert!(
             layout.0.lock().unwrap().views.contains_key(&saved_tab),
             "the copy's screen"
         );
-        assert!(!state_dir.join(CRASH_COPY_FILE).exists(), "the copy is removed");
+        assert!(
+            !state_dir.join(CRASH_COPY_FILE).exists(),
+            "the copy is removed"
+        );
         let written = read_state(&state_dir);
         assert_eq!(
             written.resolved_crash_copy,

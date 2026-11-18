@@ -3195,7 +3195,11 @@ async fn get_usage_snapshot_hands_off_the_cache_with_the_socket_epoch() {
     let early = usage_snapshot_reply(&h.client, now);
     let later = usage_snapshot_reply(&h.client, now + Duration::from_secs(100));
     assert!(age(&early) >= 10);
-    assert_eq!(age(&later), age(&early) + 100, "ages by the seconds elapsed since receipt");
+    assert_eq!(
+        age(&later),
+        age(&early) + 100,
+        "ages by the seconds elapsed since receipt"
+    );
 
     let wire = serde_json::to_value(&later).unwrap();
     let mut keys: Vec<&str> = wire
@@ -3547,7 +3551,11 @@ async fn showing_again_within_the_delay_cancels_the_shrink() {
 
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
     settle().await;
-    assert_eq!(nudges(&mut rx), 0, "the timer of a reverted shrink emitted a nudge");
+    assert_eq!(
+        nudges(&mut rx),
+        0,
+        "the timer of a reverted shrink emitted a nudge"
+    );
     assert_eq!(sync_as_the_actor(&client, socket), None);
 }
 
@@ -3640,7 +3648,10 @@ async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_
         agent.to_string(),
     )
     .expect("assigned to the popout slot");
-    assert!(rx.try_recv().is_err(), "an assignment does not emit a release");
+    assert!(
+        rx.try_recv().is_err(),
+        "an assignment does not emit a release"
+    );
 
     close_requested_popup_window(POPUP, &state, &client.router, &client);
     let mut sent = Vec::new();
@@ -3657,7 +3668,10 @@ async fn a_popout_close_request_unsubscribes_once_and_the_later_destroyed_sends_
         drop_window_in_model(POPUP, DropCause::Destroyed, &state, &client.router, &client),
         Some(0)
     );
-    assert!(rx.try_recv().is_err(), "the destroy cleanup emitted a command");
+    assert!(
+        rx.try_recv().is_err(),
+        "the destroy cleanup emitted a command"
+    );
 }
 
 // ── A destroy without a close request (a popout left in the model): the one model part `lib.rs`'s `Destroyed` cleanup calls does it all — subscription release · tombstone · usage interest shrink · window number release (TRD S26-window-chrome §4-1) ──
@@ -3687,7 +3701,8 @@ async fn a_destroyed_popout_still_in_the_model_is_cleaned_up_in_one_pass_and_fre
         agent.to_string(),
     )
     .expect("assigned to the popout slot");
-    apply::create_tab(&state, &subs, &NoLayoutEvents, POPUP, None).expect("the popout's second tab");
+    apply::create_tab(&state, &subs, &NoLayoutEvents, POPUP, None)
+        .expect("the popout's second tab");
     set_usage_slot(&state, &client, POPUP, true, false);
     assert_eq!(nudges(&mut rx), 1);
     assert_eq!(
@@ -3756,7 +3771,11 @@ async fn a_failed_tray_hide_keeps_the_window_in_the_interest() {
     );
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
     settle().await;
-    assert_eq!(nudges(&mut rx), 0, "a window that could not be hidden was taken out of the interest");
+    assert_eq!(
+        nudges(&mut rx),
+        0,
+        "a window that could not be hidden was taken out of the interest"
+    );
     assert_eq!(sync_as_the_actor(&client, socket), None);
 }
 
@@ -3793,7 +3812,11 @@ async fn moving_a_usage_slot_to_a_new_window_sends_nothing() {
     assert_eq!(nudges(&mut rx), 0, "a nudge went out during the move");
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
     settle().await;
-    assert_eq!(nudges(&mut rx), 0, "the shrink timer emitted a nudge after the move");
+    assert_eq!(
+        nudges(&mut rx),
+        0,
+        "the shrink timer emitted a nudge after the move"
+    );
     assert_eq!(sync_as_the_actor(&client, socket), None);
 
     let outcome = client.usage_interest().lock().on_snapshot(
@@ -3812,7 +3835,11 @@ async fn moving_a_usage_slot_to_a_new_window_sends_nothing() {
         &[AgentBackendKind::Claude],
         Instant::now(),
     );
-    assert_eq!(outcome.labels, [moved.window], "the broadcast goes to the new window");
+    assert_eq!(
+        outcome.labels,
+        [moved.window],
+        "the broadcast goes to the new window"
+    );
     assert_eq!(outcome.resend, None);
 }
 

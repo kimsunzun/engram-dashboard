@@ -175,7 +175,11 @@ mod tests {
             MenuAction::QuitApp => assert_in_all(MenuAction::QuitApp),
             MenuAction::ToggleAutostart => assert_in_all(MenuAction::ToggleAutostart),
         }
-        assert_eq!(MenuAction::ALL.len(), 4, "variant count and ALL length do not match");
+        assert_eq!(
+            MenuAction::ALL.len(),
+            4,
+            "variant count and ALL length do not match"
+        );
     }
 
     #[test]
@@ -195,7 +199,10 @@ mod tests {
                 .iter()
                 .map(|&a| crate::ui_text::tray_label(lang, a))
                 .collect();
-            assert!(labels.iter().all(|l| !l.is_empty()), "empty label: {labels:?}");
+            assert!(
+                labels.iter().all(|l| !l.is_empty()),
+                "empty label: {labels:?}"
+            );
             let mut dedup = labels.clone();
             dedup.sort_unstable();
             dedup.dedup();

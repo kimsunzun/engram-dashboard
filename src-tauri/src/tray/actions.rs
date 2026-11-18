@@ -578,7 +578,11 @@ mod tests {
             },
             |_| true,
         );
-        assert_eq!(calls.get(), 1, "the hook is called once even when nothing was skipped");
+        assert_eq!(
+            calls.get(),
+            1,
+            "the hook is called once even when nothing was skipped"
+        );
     }
 
     // Show — among skipped prewarmed windows only one that left the pool meanwhile (`Adopted`) is shown with the same show, and since it precedes the ordered windows main stays last. A handed-over window (`Rehold`) · a not-handed-over one (`Untouched`) are not shown.

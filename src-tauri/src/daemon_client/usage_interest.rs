@@ -99,7 +99,10 @@ pub enum InterestAction {
     /// Nothing to do — interest = `sent` (a waiting reduction became invalid), or a reduction to the same interest is already waiting (its generation · deadline · timer still valid).
     Unchanged,
     Nudge,
-    Defer { gen: ShrinkGen, deadline: Instant },
+    Defer {
+        gen: ShrinkGen,
+        deadline: Instant,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -571,9 +574,15 @@ mod tests {
 
         mgr.close_window(POPUP).unwrap();
         let _ = ui.recompute(&mgr, t0);
-        assert!(ui.hidden.contains(POPUP), "recount does not erase hidden marks");
+        assert!(
+            ui.hidden.contains(POPUP),
+            "recount does not erase hidden marks"
+        );
         let _ = ui.forget_window(POPUP, &mgr, t0);
-        assert!(ui.hidden.is_empty(), "the hidden mark of a destroyed window remained");
+        assert!(
+            ui.hidden.is_empty(),
+            "the hidden mark of a destroyed window remained"
+        );
         assert_eq!(ui.interest, set(&[]));
         assert!(ui.usage_windows.is_empty());
     }
@@ -598,7 +607,11 @@ mod tests {
         let popup_view = mgr.create_window(POPUP).unwrap();
         put(&mut mgr, popup_view, usage(true, true));
         assert_eq!(ui.recompute(&mgr, t0), InterestAction::Unchanged);
-        assert_eq!(ui.interest, set(&[]), "a hidden pop-out was counted as visible");
+        assert_eq!(
+            ui.interest,
+            set(&[]),
+            "a hidden pop-out was counted as visible"
+        );
         assert_eq!(ui.usage_windows, labels(&[POPUP]));
 
         mgr.close_window(POPUP).unwrap();
@@ -620,7 +633,11 @@ mod tests {
         assert_eq!(ui.recompute(&mgr, t0), InterestAction::Nudge);
         assert_eq!(ui.sync(1, false), Some(set(&[Claude])));
         assert_eq!(ui.sent, set(&[Claude]));
-        assert_eq!(ui.sync(1, false), None, "based on sent, so nothing from the second call on (idempotent)");
+        assert_eq!(
+            ui.sync(1, false),
+            None,
+            "based on sent, so nothing from the second call on (idempotent)"
+        );
     }
 
     #[test]
@@ -638,7 +655,11 @@ mod tests {
         };
         assert_eq!(deadline, t0 + USAGE_INTEREST_SHRINK_DELAY);
         assert_eq!(USAGE_INTEREST_SHRINK_DELAY, Duration::from_millis(1500));
-        assert_eq!(ui.sync(1, false), None, "before the deadline = nothing sent");
+        assert_eq!(
+            ui.sync(1, false),
+            None,
+            "before the deadline = nothing sent"
+        );
         assert_eq!(ui.sent, set(&[Claude, Codex]));
 
         assert!(ui.deferral_elapsed(gen));
@@ -661,7 +682,10 @@ mod tests {
             InterestAction::Unchanged
         );
         assert_eq!(ui.shrink_pending, None);
-        assert!(!ui.deferral_elapsed(gen), "late deadline of a pending reduction that became invalid");
+        assert!(
+            !ui.deferral_elapsed(gen),
+            "late deadline of a pending reduction that became invalid"
+        );
         assert_eq!(ui.sync(1, false), None);
 
         // The layout side is the same — if a slot is emptied (reduction) and put back in another window within 1.5 seconds (restored), nothing goes.
@@ -723,7 +747,10 @@ mod tests {
             );
         }
         assert_eq!(ui.shrink_pending, Some(gen));
-        assert!(ui.deferral_elapsed(gen), "the first generation ends at the deadline as is");
+        assert!(
+            ui.deferral_elapsed(gen),
+            "the first generation ends at the deadline as is"
+        );
         assert_eq!(ui.sync(1, false), Some(set(&[Claude])));
     }
 
@@ -934,7 +961,11 @@ mod tests {
         assert_eq!(ui.sync(1, true), Some(set(&[Codex])));
         assert_eq!(ui.sent, set(&[Codex]));
         assert!(!ui.deferral_elapsed(gen));
-        assert_eq!(ui.sync(2, true), None, "no force either when it is not the current socket");
+        assert_eq!(
+            ui.sync(2, true),
+            None,
+            "no force either when it is not the current socket"
+        );
     }
 
     // ── cache · handoff correction ─────────────────────────────────────────────────────
@@ -1065,7 +1096,11 @@ mod tests {
         let empty = ViewManager::new();
         let mut idle = UsageInterest::new();
         let _ = idle.recompute(&empty, t0);
-        assert_eq!(idle.on_socket_open(1), None, "empty interest has nothing to send");
+        assert_eq!(
+            idle.on_socket_open(1),
+            None,
+            "empty interest has nothing to send"
+        );
         assert_eq!(idle.socket_epoch, 1);
     }
 

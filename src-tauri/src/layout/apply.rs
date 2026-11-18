@@ -303,8 +303,13 @@ impl NewWindow {
 // Builds the answer from the tab list captured inside the lock that inserted the window (or gave it the tab). It was inserted inside that lock so the list always exists; if not, only the answer is emitted as a failure (insertion and notice already happened).
 fn window_answer(label: &str, tabs: Option<&WindowTabsPayload>) -> Result<NewWindow, String> {
     tabs.map(NewWindow::of).ok_or_else(|| {
-        tracing::warn!(label, "new window answer — the inserted window has no tab list");
-        format!("window not found: {label} — could not read that window's tab list after inserting it")
+        tracing::warn!(
+            label,
+            "new window answer — the inserted window has no tab list"
+        );
+        format!(
+            "window not found: {label} — could not read that window's tab list after inserting it"
+        )
     })
 }
 
@@ -1077,7 +1082,9 @@ fn move_slot<T>(
         }
     } else if !host.is_open(&target_label) {
         rollback_detached(state, subs, tmp_view);
-        return Err(TargetError::Apply(format!("target window not found: {target_label}")));
+        return Err(TargetError::Apply(format!(
+            "target window not found: {target_label}"
+        )));
     }
 
     // ── phase C (lock): insert the temporary View as a tab of the target window (★re-verify an existing window★) + close the source slot ───────────
@@ -1112,7 +1119,9 @@ fn move_slot<T>(
             if is_new_window {
                 withdraw_new_window(host, &target_label, claim.as_ref());
             }
-            return Err(TargetError::Apply(format!("tab insertion failed (rollback): {e}")));
+            return Err(TargetError::Apply(format!(
+                "tab insertion failed (rollback): {e}"
+            )));
         }
 
         // ★MOVE→COPY degradation is an intended best-effort★: if the source slot is reassigned during phase B (unlocked), still_ours=false and the close is skipped. "Not deleting reassigned wrong content" has top priority, at the price of the original content remaining in both the target tab and the source slot; harmless because the model allows two Views with the same content (progress independent — ADR-0046), so no strict rollback. The same comparison applies when what moved is an empty area: if it was filled in between it mismatches and the filled content survives (ADR-0228).
@@ -1703,7 +1712,9 @@ pub enum TargetDockError {
     )]
     NotASlot,
     /// While opening a new window (or moving the window for reuse) between two locks, the target to move became a different tab or vanished. The opened window was reaped and the model is unchanged; a reuse window already moved is not reverted (the place was emptied, so nothing was moved). (TRD S28 §4-3)
-    #[error("the tab to move changed while the new window was opening — nothing was moved (Moved)")]
+    #[error(
+        "the tab to move changed while the new window was opening — nothing was moved (Moved)"
+    )]
     Moved,
     #[error("{0}")]
     Dock(#[from] DockError),

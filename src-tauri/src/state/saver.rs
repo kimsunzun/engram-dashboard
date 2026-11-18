@@ -319,9 +319,7 @@ enum Cause {
 enum Failure {
     Snapshot(String),
     Rejected(EncodeError),
-    Newer {
-        found: u64,
-    },
+    Newer { found: u64 },
     Unreadable(io::Error),
     Disk(io::Error),
 }
@@ -525,7 +523,11 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 self.aside_failures.end();
                 match cause {
                     Cause::Periodic => {
-                        tracing::debug!(module = "state", bytes = text.len(), "wrote the state file")
+                        tracing::debug!(
+                            module = "state",
+                            bytes = text.len(),
+                            "wrote the state file"
+                        )
                     }
                     Cause::Resolve | Cause::Final => tracing::info!(
                         module = "state",
@@ -1012,7 +1014,9 @@ mod tests {
         }
 
         fn last(&self) -> StateFile {
-            self.published().pop().expect("there is a published snapshot")
+            self.published()
+                .pop()
+                .expect("there is a published snapshot")
         }
 
         fn change_and_settle(&mut self) {
@@ -1063,7 +1067,11 @@ mod tests {
             rig.source.change();
             rig.tick();
         }
-        assert_eq!(rig.files.disk().write_calls, 0, "4.5 s after the first change (0.5 s)");
+        assert_eq!(
+            rig.files.disk().write_calls,
+            0,
+            "4.5 s after the first change (0.5 s)"
+        );
         rig.source.change();
         rig.tick();
         assert_eq!(rig.published().len(), 1, "5 s after the first change");
@@ -1235,7 +1243,11 @@ mod tests {
             "0.5 s after the failure — not quiet yet"
         );
         rig.tick();
-        assert_eq!(rig.files.counts(), (2, 0, 0), "decides again after the debounce");
+        assert_eq!(
+            rig.files.counts(),
+            (2, 0, 0),
+            "decides again after the debounce"
+        );
 
         rig.files.disk().fail_state_read = None;
         rig.ticks(2);
@@ -1279,7 +1291,11 @@ mod tests {
         let mut adopted = rig(FakeFiles::default(), None);
         adopted.files.disk().state = Some(placed.clone());
         adopted.change_and_settle();
-        assert_eq!(adopted.files.counts(), (1, 1, 0), "a held file is just written");
+        assert_eq!(
+            adopted.files.counts(),
+            (1, 1, 0),
+            "a held file is just written"
+        );
 
         let mut rig = rig_claiming(FakeFiles::default(), None, Claim::NotYet);
         rig.files.disk().state = Some(placed.clone());
@@ -1311,7 +1327,11 @@ mod tests {
         let disk = rig.files.disk();
         assert_eq!((disk.aside_calls, disk.write_calls), (1, 1));
         assert_eq!(disk.state_aside, None);
-        assert_eq!(disk.published.len(), 1, "writes even if the copy-aside fails");
+        assert_eq!(
+            disk.published.len(),
+            1,
+            "writes even if the copy-aside fails"
+        );
     }
 
     /// R15: once a write succeeds the copy-aside failure continuation ends too — the next copy-aside failure is the first of a new continuation and logs at error again.
@@ -1325,7 +1345,10 @@ mod tests {
         }
         rig.change_and_settle();
         assert_eq!(rig.published().len(), 1);
-        assert_eq!(rig.saver.aside_failures.current, None, "the write succeeded");
+        assert_eq!(
+            rig.saver.aside_failures.current, None,
+            "the write succeeded"
+        );
 
         {
             let mut disk = rig.files.disk();
@@ -1357,7 +1380,11 @@ mod tests {
         let state = rig.last();
         assert_eq!(state.resolved_crash_copy.as_deref(), Some("abc"));
         assert!(!state.clean_exit);
-        assert_eq!(rig.published().len(), 2, "writes right away even if the number is unchanged");
+        assert_eq!(
+            rig.published().len(),
+            2,
+            "writes right away even if the number is unchanged"
+        );
     }
 
     #[test]
@@ -1377,7 +1404,10 @@ mod tests {
 
     #[test]
     fn a_different_copy_is_kept_and_the_slot_cleared() {
-        let mut rig = rig(FakeFiles::with_copy("copy captured by a new instance"), None);
+        let mut rig = rig(
+            FakeFiles::with_copy("copy captured by a new instance"),
+            None,
+        );
         assert_eq!(rig.saver.resolve(hash(COPY)), SaveOutcome::Written);
         assert_eq!(rig.files.disk().remove_calls, 0);
         assert_eq!(
@@ -1721,7 +1751,11 @@ mod tests {
         let to = fs.copy_aside_state().unwrap();
         assert_eq!(to, dir.join("state.json.corrupt"));
         assert_eq!(std::fs::read_to_string(&to).unwrap(), "text");
-        assert_eq!(fs.read_state().unwrap(), "text", "the original stays in place");
+        assert_eq!(
+            fs.read_state().unwrap(),
+            "text",
+            "the original stays in place"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }

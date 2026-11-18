@@ -91,16 +91,9 @@ pub struct RoleAnswer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpareBuild {
     Refused(NoBuild),
-    Failed {
-        label: WindowLabel,
-        error: String,
-    },
-    Built {
-        label: WindowLabel,
-    },
-    Vanished {
-        label: WindowLabel,
-    },
+    Failed { label: WindowLabel, error: String },
+    Built { label: WindowLabel },
+    Vanished { label: WindowLabel },
 }
 
 /// The result of [`SpareState::commit`].
@@ -272,7 +265,11 @@ impl SpareState {
             if self.pool().build_failed(&label) {
                 self.changed.notify_all();
             }
-            tracing::warn!(module = "spare", label, "could not build the prewarmed window: {error}");
+            tracing::warn!(
+                module = "spare",
+                label,
+                "could not build the prewarmed window: {error}"
+            );
             return SpareBuild::Failed { label, error };
         }
         let built = self.pool().mark_built(&label);

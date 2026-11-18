@@ -705,7 +705,10 @@ mod tests {
         let ticket = gate.hold("main");
         let signal = released(gate.painted("main", None));
         assert!(gate.release("main", signal).is_some());
-        assert!(!gate.is_waiting("main", ticket), "the deadline does not hand it over");
+        assert!(
+            !gate.is_waiting("main", ticket),
+            "the deadline does not hand it over"
+        );
         assert!(gate.release("main", ticket).is_none());
     }
 
@@ -743,7 +746,10 @@ mod tests {
     fn a_window_hidden_after_the_deadline_queued_its_reveal_stays_hidden() {
         let gate = FirstPaintGate::default();
         let ticket = gate.hold("slot-popup-1");
-        assert!(gate.is_waiting("slot-popup-1", ticket), "the deadline hands it over");
+        assert!(
+            gate.is_waiting("slot-popup-1", ticket),
+            "the deadline hands it over"
+        );
         assert!(gate.cancel("slot-popup-1"));
         assert!(gate.release("slot-popup-1", ticket).is_none());
     }
@@ -1140,7 +1146,11 @@ mod tests {
         });
 
         tokio::time::sleep(FALLBACK_REVEAL - Duration::from_millis(1)).await;
-        assert_eq!(*queued.lock().unwrap(), 0, "does not hand over before the deadline");
+        assert_eq!(
+            *queued.lock().unwrap(),
+            0,
+            "does not hand over before the deadline"
+        );
 
         task.await.unwrap();
         assert_eq!(*queued.lock().unwrap(), 1);

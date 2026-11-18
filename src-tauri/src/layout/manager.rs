@@ -1939,7 +1939,11 @@ impl ViewManager {
                     w.number
                 );
             }
-            assert!(seen.insert(w.number), "two windows held number {}", w.number);
+            assert!(
+                seen.insert(w.number),
+                "two windows held number {}",
+                w.number
+            );
         }
         for (label, c) in &self.closing {
             assert!(
@@ -2028,7 +2032,10 @@ mod tests {
                 .views
                 .get(vid)
                 .unwrap_or_else(|| panic!("points to View {vid} without a side table"));
-            assert!(!slots.is_empty(), "side table: an empty entry of View {vid} remains");
+            assert!(
+                !slots.is_empty(),
+                "side table: an empty entry of View {vid} remains"
+            );
             for sid in slots.keys() {
                 assert_eq!(
                     tree::find_slot(&v.layout, *sid),
@@ -2241,7 +2248,11 @@ mod tests {
         let mut mgr = ViewManager::new();
         let v0 = main_active(&mgr);
         let out = mgr.close_tab(MAIN_WINDOW_LABEL, v0).unwrap();
-        assert_eq!(out, CloseTabOutcome::Stayed, "main does not close the window");
+        assert_eq!(
+            out,
+            CloseTabOutcome::Stayed,
+            "main does not close the window"
+        );
         let wt = mgr.windows.get(MAIN_WINDOW_LABEL).unwrap();
         assert_eq!(wt.tabs.len(), 1, "one empty tab forced");
         assert_ne!(wt.tabs[0], v0, "a new empty View id");
@@ -2322,7 +2333,10 @@ mod tests {
             assert!(!mgr.views.contains_key(&v), "0 View leftovers");
             assert!(!mgr.view_owner.contains_key(&v), "0 view_owner leftovers");
         }
-        assert!(!mgr.windows.contains_key("slot-popup-1"), "window entry removed");
+        assert!(
+            !mgr.windows.contains_key("slot-popup-1"),
+            "window entry removed"
+        );
         assert_invariants(&mgr);
     }
 
@@ -2615,7 +2629,11 @@ mod tests {
         );
         assert!(mgr.update_agent_names(&[]).is_empty());
         assert_eq!(mgr.version, ver);
-        assert_eq!(mgr.agent_name("a9"), Some("nowhere"), "it is recorded in the ledger");
+        assert_eq!(
+            mgr.agent_name("a9"),
+            Some("nowhere"),
+            "it is recorded in the ledger"
+        );
     }
 
     // ADR-0373 — the same contract as a name-ledger update: only windows with a changed automatic name, one bump.
@@ -2939,7 +2957,11 @@ mod tests {
         mgr.set_slot_content(src, slot, SlotContent::AgentList)
             .unwrap();
         let (tmp, content) = mgr.prepare_detached_view(src, slot).unwrap();
-        assert_eq!(content, SlotContent::AgentList, "returned content = AgentList");
+        assert_eq!(
+            content,
+            SlotContent::AgentList,
+            "returned content = AgentList"
+        );
         let tslot = first_slot_of(&mgr, tmp);
         assert_eq!(
             tree::find_slot(&mgr.views.get(&tmp).unwrap().layout, tslot).unwrap(),
@@ -3238,7 +3260,10 @@ mod tests {
         let mut mgr = ViewManager::new();
         let before = mgr.version;
         let (v, s) = foreign_root(&mut mgr);
-        assert!(mgr.version > before, "setting it up in the side table is a change too");
+        assert!(
+            mgr.version > before,
+            "setting it up in the side table is a change too"
+        );
         assert_eq!(mgr.slot_content(v, s).unwrap(), SlotContent::Empty);
         assert_eq!(mgr.slot_is_free(v, s), Ok(false));
         assert_eq!(mgr.unknown_content(v, s), Some(&raw("from_the_future")));
@@ -3823,7 +3848,11 @@ mod tests {
         let main = window(&mgr, MAIN_WINDOW_LABEL);
         assert_eq!(main.tabs.len(), 1);
         assert_eq!(mgr.views[&main.active].name, TabName::Auto);
-        assert_eq!(main.attrs, restored(vec![], None).attrs, "the attributes are kept");
+        assert_eq!(
+            main.attrs,
+            restored(vec![], None).attrs,
+            "the attributes are kept"
+        );
 
         let mut lost = view_named("lost");
         lost.focused_slot_id = Some(Uuid::new_v4());
@@ -3857,13 +3886,21 @@ mod tests {
         let cases = [
             ("popout without tabs", main(), popout(vec![], None)),
             ("no active tab", restored(vec![a.clone()], None), vec![]),
-            ("active tab outside the tabs", restored(vec![a.clone()], Some(p.id)), vec![]),
+            (
+                "active tab outside the tabs",
+                restored(vec![a.clone()], Some(p.id)),
+                vec![],
+            ),
             (
                 "popout active tab outside the tabs",
                 main(),
                 popout(vec![p.clone()], Some(a.id)),
             ),
-            ("duplicate View", main(), popout(vec![a.clone()], Some(a.id))),
+            (
+                "duplicate View",
+                main(),
+                popout(vec![a.clone()], Some(a.id)),
+            ),
             (
                 "duplicate View within one window",
                 restored(vec![a.clone(), a.clone()], Some(a.id)),
@@ -4080,15 +4117,27 @@ mod tests {
         assert_invariants(&mgr);
 
         mgr.close_window("p-2").unwrap();
-        assert_eq!(mgr.closing_numbers(), [3], "the OS window remains and holds the number");
+        assert_eq!(
+            mgr.closing_numbers(),
+            [3],
+            "the OS window remains and holds the number"
+        );
         mgr.create_window("p-4").unwrap();
-        assert_eq!(number_of(&mgr, "p-4"), 5, "skips the number of the closing window");
+        assert_eq!(
+            number_of(&mgr, "p-4"),
+            5,
+            "skips the number of the closing window"
+        );
         assert_invariants(&mgr);
 
         assert!(mgr.release_closing("p-2"));
         assert!(mgr.closing_numbers().is_empty());
         mgr.create_window("p-5").unwrap();
-        assert_eq!(number_of(&mgr, "p-5"), 3, "the freed number goes to the next new window");
+        assert_eq!(
+            number_of(&mgr, "p-5"),
+            3,
+            "the freed number goes to the next new window"
+        );
         assert_invariants(&mgr);
     }
 
@@ -4121,14 +4170,20 @@ mod tests {
         mgr.close_window("p-2").unwrap();
         let version = mgr.version;
 
-        assert!(!mgr.release_closing("p-9"), "a prewarm window — never in the model");
+        assert!(
+            !mgr.release_closing("p-9"),
+            "a prewarm window — never in the model"
+        );
         assert!(!mgr.release_closing("p-1"), "a live window");
         assert!(!mgr.release_closing(MAIN_WINDOW_LABEL));
         assert!(mgr.release_closing("p-2"));
         assert!(!mgr.release_closing("p-2"), "the second time is a no-op");
 
         assert_eq!(number_of(&mgr, "p-1"), 2);
-        assert_eq!(mgr.version, version, "freeing a number does not bump version");
+        assert_eq!(
+            mgr.version, version,
+            "freeing a number does not bump version"
+        );
         assert_invariants(&mgr);
     }
 
@@ -4280,7 +4335,10 @@ mod tests {
 
         let removed = mgr.adopt_restored(copy).unwrap();
         assert_eq!(removed, ["slot-popup-1", "slot-popup-2"]);
-        assert!(mgr.closing_numbers().is_empty(), "closing window numbers are freed too");
+        assert!(
+            mgr.closing_numbers().is_empty(),
+            "closing window numbers are freed too"
+        );
         assert_eq!(number_of(&mgr, "slot-popup-10"), 4);
         assert_eq!(number_of(&mgr, "slot-popup-11"), 2);
         assert_invariants(&mgr);
@@ -4374,7 +4432,11 @@ mod tests {
         let mut mgr = ViewManager::new();
         let hidden = main_active(&mgr);
         let shown = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
-        assert_ne!(main_active(&mgr), hidden, "premise: the first tab is hidden");
+        assert_ne!(
+            main_active(&mgr),
+            hidden,
+            "premise: the first tab is hidden"
+        );
         mgr.set_window_canvas(MAIN_WINDOW_LABEL, 1200, 800).unwrap();
         mgr.set_ui_metrics(MAIN_WINDOW_LABEL, one_px_border())
             .unwrap();
@@ -5042,7 +5104,10 @@ mod tests {
                         assert!(splits < 200, "{dir:?}: the guard does not kick in");
                     }
                     Err(e) => {
-                        assert_eq!(mgr.views[&v], before, "{dir:?}: a refusal leaves the tree unchanged");
+                        assert_eq!(
+                            mgr.views[&v], before,
+                            "{dir:?}: a refusal leaves the tree unchanged"
+                        );
                         assert_eq!(mgr.version, ver);
                         break e;
                     }
@@ -5061,7 +5126,8 @@ mod tests {
             let at = geometry::boundary(lo, hi, tree::SPLIT_RATIO);
             assert!(at == lo || at == hi, "{dir:?}: at={at} lo={lo} hi={hi}");
             assert_every_leaf_has_area(&mgr, v);
-            mgr.snapshot(v).expect("a snapshot at this depth also stands without panic");
+            mgr.snapshot(v)
+                .expect("a snapshot at this depth also stands without panic");
         }
     }
 
@@ -5435,12 +5501,19 @@ mod tests {
             .chain(tree::list_splits(&source_before))
             .map(|s| s.id)
             .collect();
-        assert!(!old_splits.contains(fresh), "only the wrapping split has a new id");
+        assert!(
+            !old_splits.contains(fresh),
+            "only the wrapping split has a new id"
+        );
 
         assert!(!mgr.views.contains_key(&p[1]), "the source tab vanishes");
         assert!(!mgr.view_owner.contains_key(&p[1]));
         assert_eq!(mgr.windows[P1].tabs, vec![p[0]]);
-        assert_eq!(main_active(&mgr), m[0], "Keep — the target window's visible tab unchanged");
+        assert_eq!(
+            main_active(&mgr),
+            m[0],
+            "Keep — the target window's visible tab unchanged"
+        );
         assert_eq!(
             mgr.views[&m[1]].focused_slot_id, focus_before,
             "Keep — the target focus unchanged"
@@ -5472,7 +5545,11 @@ mod tests {
         // A popout with only one tab empties and vanishes with its window entry (ADR-0057 D-3).
         assert!(out.emptied.is_some());
         assert!(!mgr.windows.contains_key(P2));
-        assert_eq!(main_active(&mgr), m[2], "Reveal — the target tab is visible");
+        assert_eq!(
+            main_active(&mgr),
+            m[2],
+            "Reveal — the target tab is visible"
+        );
         assert_eq!(
             mgr.views[&m[2]].focused_slot_id,
             Some(tree::first_slot_id(&source_before)),
@@ -6012,7 +6089,10 @@ mod tests {
         let Fx { mut mgr, m, p, .. } = fixture();
         let before = model(&mgr);
         mgr.mark_closed(FRESH);
-        assert_eq!(mgr.version, before.version, "a tombstone is not a layout change");
+        assert_eq!(
+            mgr.version, before.version,
+            "a tombstone is not a layout change"
+        );
         refused(
             &mut mgr,
             p[1],
@@ -6057,7 +6137,11 @@ mod tests {
                     Some(heir) => {
                         assert_eq!(mgr.windows[P1].active, heir, "n={n} removed={removed}")
                     }
-                    None => assert_eq!(out, CloseTabOutcome::WindowClosed, "alone, there is no tab to take over"),
+                    None => assert_eq!(
+                        out,
+                        CloseTabOutcome::WindowClosed,
+                        "alone, there is no tab to take over"
+                    ),
                 }
                 assert_invariants(&mgr);
             }
@@ -6130,7 +6214,10 @@ mod tests {
             FocusPolicy::Reveal,
         );
         let result = slots_of(&mgr, m[2]);
-        assert_ne!(result[0], source[0], "premise: the first area of the result is on the target side");
+        assert_ne!(
+            result[0], source[0],
+            "premise: the first area of the result is on the target side"
+        );
         assert_eq!(mgr.views[&m[2]].focused_slot_id, Some(source[0]));
     }
 
@@ -6192,7 +6279,10 @@ mod tests {
                     "{mode} {focus:?}"
                 );
                 assert_ne!(blank, only, "a new empty View: {mode} {focus:?}");
-                assert_eq!(main.active, blank, "the empty tab is active: {mode} {focus:?}");
+                assert_eq!(
+                    main.active, blank,
+                    "the empty tab is active: {mode} {focus:?}"
+                );
                 assert_eq!(mgr.views[&blank].name, TabName::Auto);
                 assert!(matches!(
                     mgr.views[&blank].layout,
@@ -6204,7 +6294,10 @@ mod tests {
                 assert!(!mgr.unknown_content.contains_key(&blank));
                 if mode == "seam" {
                     assert!(!mgr.views.contains_key(&only));
-                    assert!(mgr.unknown_content.contains_key(&p0), "the side table goes to the target");
+                    assert!(
+                        mgr.unknown_content.contains_key(&p0),
+                        "the side table goes to the target"
+                    );
                 } else {
                     assert_eq!(mgr.views[&only], moved, "{mode} {focus:?}");
                     assert_eq!(
@@ -6212,7 +6305,10 @@ mod tests {
                         Some(window),
                         "{mode} {focus:?}"
                     );
-                    assert!(mgr.unknown_content.contains_key(&only), "the side table goes with the View");
+                    assert!(
+                        mgr.unknown_content.contains_key(&only),
+                        "the side table goes with the View"
+                    );
                 }
                 assert_invariants(&mgr);
             }
@@ -6235,8 +6331,16 @@ mod tests {
         let cases: [(Pick, usize, &str); 4] = [
             (|p, _| Some(p[0]), 0, "a remaining tab is used"),
             (|_, _| None, 2, "none means succession"),
-            (|p, _| Some(p[1]), 2, "the moved tab itself means succession"),
-            (|_, m0| Some(m0), 2, "a tab of another window means succession"),
+            (
+                |p, _| Some(p[1]),
+                2,
+                "the moved tab itself means succession",
+            ),
+            (
+                |_, m0| Some(m0),
+                2,
+                "a tab of another window means succession",
+            ),
         ];
         for (pick, want, why) in cases {
             for mode in ["tab_bar", "new_window", "seam"] {

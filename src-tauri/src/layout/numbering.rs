@@ -63,10 +63,7 @@ mod tests {
         let mut seen: BTreeSet<u32> = held.iter().copied().collect();
         seen.insert(MAIN_WINDOW_NUMBER);
         for &n in out {
-            assert!(
-                seen.insert(n),
-                "{n} overlaps — out {out:?} · held {held:?}"
-            );
+            assert!(seen.insert(n), "{n} overlaps — out {out:?} · held {held:?}");
         }
     }
 

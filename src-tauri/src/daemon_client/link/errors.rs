@@ -9,7 +9,8 @@ use engram_dashboard_transport::{PeerState, RequestError, SendError};
 use crate::daemon_client::{CHANNEL_GONE, NOT_CONNECTED, NO_REQUEST_ID};
 
 /// The text of a command that never reached the wire because the link dropped. "Safe to resend" holds on this path only — one that went out has an unknown outcome ([`SENT_OUTCOME_UNKNOWN`]).
-pub(crate) const UNSENT_ON_DISCONNECT: &str = "daemon disconnected — command not sent (safe to resend)";
+pub(crate) const UNSENT_ON_DISCONNECT: &str =
+    "daemon disconnected — command not sent (safe to resend)";
 
 /// The message of a command that got no answer because of a disconnect — the only axis telling it from [`UNSENT_ON_DISCONNECT`] is "did it go out on the wire", which is exactly retry safety (for one that went out there is no way to know whether the daemon executed it).
 pub(crate) const SENT_OUTCOME_UNKNOWN: &str =

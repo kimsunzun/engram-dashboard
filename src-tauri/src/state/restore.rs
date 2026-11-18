@@ -837,7 +837,9 @@ fn open_hidden_popouts(
         });
         if let Err(e) = windows.open_hidden(label, at, attrs.maximized) {
             destroy_all(windows, &created, Leftover::HiddenRestored);
-            return Err(format!("could not create popout window {label} to restore: {e}"));
+            return Err(format!(
+                "could not create popout window {label} to restore: {e}"
+            ));
         }
         created.push(label.clone());
     }
@@ -1220,7 +1222,9 @@ mod tests {
             [CrashCopyStatus::Awaiting, CrashCopyStatus::Awaiting],
             "an answer of the old marker is not notified"
         );
-        let fresh = service.begin_answer().expect("the new generation is not in progress");
+        let fresh = service
+            .begin_answer()
+            .expect("the new generation is not in progress");
         assert_eq!(fresh.copy().hash, "new");
     }
 
@@ -1894,7 +1898,10 @@ mod tests {
             ],
             "read focus → create hidden (maximize deferred before creating · outside the model · positions off every monitor discarded) → commit → position → record current position → read focus again → focus main → show popouts (deferred maximize — after the main focus, so the popouts are on top) → reap old windows"
         );
-        assert!(rig.windows.deferred().is_empty(), "the deferral of shown windows was withdrawn");
+        assert!(
+            rig.windows.deferred().is_empty(),
+            "the deferral of shown windows was withdrawn"
+        );
         assert!(
             rig.ports_called_with_the_lock_free(),
             "the window port · subscription source are called outside the lock"
@@ -1986,7 +1993,10 @@ mod tests {
         let opened = rig.windows.opened_with.lock().unwrap().clone();
         assert_eq!(opened.len(), 2, "{opened:?}");
         for window in &opened {
-            assert!(sent.contains(window), "at creation {window:?} · pushed values {sent:?}");
+            assert!(
+                sent.contains(window),
+                "at creation {window:?} · pushed values {sent:?}"
+            );
         }
     }
 
@@ -2115,9 +2125,15 @@ mod tests {
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         rig.windows.gone.lock().unwrap().push("slot-popup-2".into());
 
-        let reply = rig.coordinator.answer(true).expect("the accept was committed");
+        let reply = rig
+            .coordinator
+            .answer(true)
+            .expect("the accept was committed");
 
-        assert_eq!(reply.restored_windows, 1, "a vanished popout is not counted");
+        assert_eq!(
+            reply.restored_windows, 1,
+            "a vanished popout is not counted"
+        );
         assert_eq!(rig.windows_in_model(), [MAIN_WINDOW_LABEL]);
         let calls = rig.windows.calls();
         assert!(
@@ -2298,7 +2314,10 @@ mod tests {
             "tries once more and gives up"
         );
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Awaiting);
-        assert!(rig.service.begin_answer().is_ok(), "the marker was released");
+        assert!(
+            rig.service.begin_answer().is_ok(),
+            "the marker was released"
+        );
     }
 
     #[test]
@@ -2342,14 +2361,20 @@ mod tests {
                 "main did not change to the copy"
             );
         }
-        assert!(rig.subs.seen.lock().unwrap().is_empty(), "stopped before the commit");
+        assert!(
+            rig.subs.seen.lock().unwrap().is_empty(),
+            "stopped before the commit"
+        );
         assert!(rig.events.tabs.lock().unwrap().is_empty());
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Awaiting);
         assert_eq!(
             rig.notices.seen(),
             [CrashCopyStatus::Awaiting, CrashCopyStatus::Awaiting]
         );
-        assert!(rig.service.begin_answer().is_ok(), "the marker was released");
+        assert!(
+            rig.service.begin_answer().is_ok(),
+            "the marker was released"
+        );
     }
 
     #[test]
@@ -2369,7 +2394,10 @@ mod tests {
         assert!(rig.windows.calls().is_empty(), "stops at preparation");
         assert_eq!(rig.fingerprint(), before);
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Awaiting);
-        assert!(rig.service.begin_answer().is_ok(), "the marker was released");
+        assert!(
+            rig.service.begin_answer().is_ok(),
+            "the marker was released"
+        );
     }
 
     #[test]

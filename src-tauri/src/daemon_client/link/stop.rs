@@ -208,7 +208,9 @@ pub struct StopDial {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopSend {
-    Sent { disconnected: bool },
+    Sent {
+        disconnected: bool,
+    },
     /// Nothing reached the daemon: the dial or the handshake ended without `Hello` (refused · reset · closed · an `Error` frame · timed out), or the command could not be queued.
     NothingSent,
 }
