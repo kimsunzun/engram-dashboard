@@ -87,13 +87,13 @@ Measured on two PCs (A, B) unless stated.
 
 ### Decided
 
+- D1 — Pairing (decided 2026-11-18): paste the other PC's ID on both PCs (Syncthing device-ID exchange). The user saw the other forms — one paste + accept prompt (Syncthing pending device, KDE Connect), one-time short code (Reason Network, Magic Wormhole), invite link (Reason Network team link) — and noted they all end in registering the ID: 「결국 2,3,4는 1이 되야 가능한거 아냐?」 → 「1먼저 해.」 The others are later conveniences on the same `peer.add`; the accept prompt is the suggested next one.
 - D2 — Remote address seen by agents (decided 2026-11-18, quotes in §1): bare names resolve across the user's trusted PCs through a shared directory; `name@pc` stays as the explicit form (R5 · R16 · R17 · R18). Drafted default was `name@pc` only — dropped because rules would have to name the PC 「어디 서버에 어디 에이전트에게」. Conventions: Reason Network keeps a replicated session directory where a bare session name works when it is unique and otherwise must be qualified `…@machine` (source read: `src/daemon/directory.rs` `resolve` / `pick`, research §8); Erlang `global` registered names (one name → one process anywhere in the cluster); service discovery (Consul catalog, Kubernetes Service) — a name maps to its current location through a directory, not a per-message broadcast. Not copied: Reason Network's full presence broadcast (checked every 2 s, re-sent every 60 s, carries repo / branch / activity — `src/net.rs` `presence_loop`); its pick of the live candidate when one name exists on several machines (here that is ambiguous, so the same rule never switches PC silently).
 
 ### Open
 
 Conventions are named in each line; ★ = main default.
 
-- D1 — Pairing: paste the other PC's ID on both PCs ★ (Syncthing device-ID exchange; hcom token paste) / one-time short code (Reason Network four-word code, Magic Wormhole) — needs a separate join protocol and a lookup service for the code.
 - D3 — Other PC off: fail at once and tell the sender ★ / keep and send later. Convention is to keep: Reason Network keeps an outbox for 7 days, SMTP queues for days. ★ departs from it for v1 size — keeping needs persistent storage, a resend loop and dedup; it is listed as the next unit.
 - D4 — Helper servers: n0 public relay + address lookup by default, plus settings for own servers and the optional typed address ★ (Syncthing: public relays/discovery with `default` + custom; Reason Network: own relays + custom) / n0 only / none (LAN or typed address only).
 - D5 — Inbound limits: per PC 60 mails/min, per agent pair 12 per 10 min (loop guard), body 64 KB ★ (Reason Network `daemon/mail.rs` values) / other values / none — "none" lets two agents on different PCs answer each other forever and spend tokens.
