@@ -430,3 +430,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0381](0381-library-json-is-written-only-after-the-root-change-succeeded.md) | library.json is written only after the root change succeeded; a save that fails after the publish leaves the root live and unsaved, and the root generation starts each run at a random base the daemon passes | 확정 (부분 폐기 by ADR-0382: the first start order in decisions 1 and 5) |
 | [0382](0382-the-daemon-scans-the-library-in-the-background-after-it-starts.md) | The daemon never walks the library before it is reachable — the first start publishes the root without a walk and a background boot scan walks it on every start; launches do not wait for it | 확정 |
 | [0383](0383-internal-text-is-english-only-screen-text-stays-switchable.md) | Internal text is English-only; screen text stays switchable | 확정 |
+| [0384](0384-library-edit-relink-and-create-rules-set-while-coding-step-9a.md) | Library edit, relink and create rules set while coding step 9a | 확정 |
