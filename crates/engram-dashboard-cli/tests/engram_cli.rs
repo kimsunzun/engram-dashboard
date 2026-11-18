@@ -1,12 +1,12 @@
 //! ADR-0086 step 2 · F7(b) · ADR-0132 — **process-level** tests of the `engram` CLI.
 //!
-//! Unit tests looked only at pure functions — here the whole path **wire → parse → stdout JSON → exit code** is measured
-//! (including env reads·TCP·process exit codes).
+//! Unit tests look only at pure functions — here the whole path **wire → parse → stdout JSON → exit code** is measured (env
+//!   reads·TCP·process exit codes).
 //!
-//! ★No claude needed·deterministic★: the stubs use only std and give fixed responses, so the result is always the same without claude/daemon.
-//! ★help is measured in front of a stub too★: the screen is produced by the daemon (`/control/help`), so what is measured here is the CLI's part — the request line ·
-//!   body characters · printing the received screen as is · failure paths — and the screen content is measured by the daemon tests (`control::help` ·
-//!   `tests/mail_gate.rs`).
+//! ★No claude needed·deterministic★: the stubs use only std and give fixed responses, with no claude/daemon.
+//! ★help is measured in front of a stub too★: the screen is the daemon's (`/control/help`), so what is measured here is the CLI's part —
+//!   request line · body characters · printing the received screen as is · failure paths;
+//!   screen content is measured by the daemon tests (`control::help` · `tests/mail_gate.rs`).
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -29,7 +29,8 @@ fn spawn_capturing_stub(response: &'static str) -> (String, u16, thread::JoinHan
     let handle = thread::spawn(move || {
         let mut seen = String::new();
         if let Ok((mut stream, _)) = listener.accept() {
-            // Reads a little of the request to consume the socket (a response can be sent without reading it all). Kept short to avoid non-blocking.
+            // Reads a little of the request to consume the socket (a response can be sent without reading it all). Kept short to avoid
+            //   non-blocking.
             let mut buf = [0u8; 4096];
             if let Ok(n) = stream.read(&mut buf) {
                 seen = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -52,10 +53,10 @@ fn ok_response(body: &str) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
 
-/// A stub that answers **several** requests in order — needed because the call path of the discovery surface is two round trips (list → call).
+/// A stub that answers **several** requests in order — the discovery call path is two round trips (list → call).
 ///
-/// ★A one-connection stub cannot measure that path★: the CLI opens a new socket every time with `Connection: close`. Using the sibling
-///   stub (`spawn_capturing_stub`) as is would end the second round trip in a connection failure, and the test would always see exit 1.
+/// ★A one-connection stub cannot measure that path★: the CLI opens a new socket per request (`Connection: close`), so the sibling
+///   `spawn_capturing_stub` would fail the second round trip and the test would always see exit 1.
 fn spawn_scripted_stub(
     responses: Vec<&'static str>,
 ) -> (String, u16, thread::JoinHandle<Vec<String>>) {
@@ -63,8 +64,8 @@ fn spawn_scripted_stub(
     listener.set_nonblocking(true).expect("nonblocking stub");
     let addr = listener.local_addr().expect("addr");
     let handle = thread::spawn(move || {
-        // ★Why there is a deadline★: there are cases where it is normal for the CLI to call **fewer** times than the script (a local bounce does not do the second
-        //   round trip). With a blocking accept, that test would hang forever at join.
+        // ★Why there is a deadline★: the CLI may legitimately call **fewer** times than the script (a local bounce skips the second round
+        //   trip); a blocking accept would hang that test at join.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut seen = Vec::new();
         for response in responses {
@@ -93,9 +94,8 @@ fn spawn_scripted_stub(
 
 /// Reads one request **to the end** — up to the header boundary, then `Content-Length` worth.
 ///
-/// ★Must not finish with a single `read`★: TCP can deliver the header and the body in different segments, and then an assertion that looks at the body
-///   ends **in a panic, not a failure** (what should be there never comes in). The stub must remove that split for the
-///   test to be reproducible.
+/// ★Must not finish with a single `read`★: TCP can split header and body into different segments, and a body assertion would **panic, not
+///   fail**; the stub must remove that split for reproducibility.
 fn read_request(stream: &mut std::net::TcpStream) -> String {
     let mut raw: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -244,9 +244,8 @@ fn engram_mail_send_non_2xx_exits_one() {
 
 #[test]
 fn engram_mail_send_transport_error_exits_one_with_error_json() {
-    // ★Deterministic connection failure (no TOCTOU)★: port 0 is a port reserved by the OS, so no process can listen on it.
-    //   The bind→drop approach has a TOCTOU where another process reuses that port between drop and connect, but
-    //   targeting http://127.0.0.1:0 directly makes connect fail immediately and there is no listener race at all.
+    // ★Deterministic connection failure (no TOCTOU)★: port 0 is OS-reserved, so nothing can listen on it; bind→drop would let another
+    //   process reuse the port before connect.
     let url = "http://127.0.0.1:0";
     let (stdout, code) = run_send(url, "bob", "hi");
 
@@ -456,9 +455,8 @@ fn engram_agent_rejections_from_the_daemon_exit_one_with_the_body_intact() {
     assert_eq!(v["code"], "AGENT_NOT_FOUND", "{stdout}");
 }
 
-/// ★A 2xx without evidence of the change is not success★: when the mail query decider was used as is, even `{}` was exit 0,
-///   so the caller believed something was created after receiving a response that created nothing. It pins at the process level
-///   that it is a report target (2), not a retry target (1).
+/// ★A 2xx without evidence of the change is not success★: with the mail query decider even `{}` was exit 0 and the caller believed
+///   something was created. Pins at the process level that it is a report target (2), not a retry target (1).
 #[test]
 fn engram_agent_hollow_success_bodies_exit_two_not_zero() {
     for (args, body) in [
@@ -470,8 +468,8 @@ fn engram_agent_hollow_success_bodies_exit_two_not_zero() {
             vec!["agent", "rename", "a", "b"],
             r#"{"agent_id":"i","name":"b"}"#,
         ),
-        // Nesting (`{agent:{…}}`) is a shape no daemon emits — this line blocks the revival of that branch **at the process level**.
-        //   If it were only in the unit table, this suite that runs the real exe would stay all green even if it revived.
+        // Nesting (`{agent:{…}}`) is a shape no daemon emits — blocks the revival of that branch **at the process level** (a unit table
+        //   alone would let this suite, which runs the real exe, stay green).
         (
             vec!["agent", "spawn", "w"],
             r#"{"agent":{"id":"i","name":"w","state":"live"},"created":false}"#,
@@ -584,13 +582,12 @@ fn engram_agent_help_is_discoverable_the_same_way_as_the_mail_group() {
 
 // ── ADR-0132: family surface — help and argument errors ──────────────────────────────────────────────────
 
-/// ★Destination = port 0, where nobody can listen★: pins with the URL the claim that argument error cases end before the network.
-///   If even one POST is attempted, the connection failure JSON (CONNECT_FAILED) comes out and the assertion breaks. The same destination is used
-///   when deliberately producing a failure to reach the daemon.
+/// ★Destination = port 0, where nobody can listen★: argument-error cases must end before the network — one POST would produce
+///   CONNECT_FAILED and break the assertion. Also used to deliberately produce a failure to reach the daemon.
 const UNREACHABLE_URL: &str = "http://127.0.0.1:0";
 
-/// The request line of the help route — ★written as characters★: if written with the shared constant (`CLI_HELP_ROUTE`), then when that constant changed this
-///   assertion would move along and catch nothing.
+/// The request line of the help route — ★written as characters★: with the shared constant (`CLI_HELP_ROUTE`) the assertion would move
+///   along with a changed constant and catch nothing.
 const HELP_REQUEST_LINE: &str = "POST /control/help HTTP/1.1\r\n";
 
 /// The help route success envelope — carries one screen the daemon rendered.
@@ -643,17 +640,13 @@ fn assert_suggested_help_runs(suggested: &str, context: &str) {
     );
 }
 
-/// ★Shipped file name ↔ constant (`CLI_EXE_NAME`) match★ — no other test sees this direction: the priming
-///   pin compares the priming **with the constant** (it passes if both move together), and the process tests below find the binary
-///   **through the manifest** (finding it by the name the manifest defined, so they always pass). So a combination that renamed only the constant·priming
-///   and missed `[[bin]]` turns red only here. The runtime symptom of that combination is that the deployed executable differs from the name the agent
-///   learned and mail stops silently (ADR-0094 alignment invariant).
-/// ★Path source (measured 2026-08-11)★: the `<name>` of `CARGO_BIN_EXE_<name>` is **the manifest's `[[bin]] name`**.
-///   Changing only `name` to `engram2` in a repo copy (with `path` still `src/bin/engram.rs`) and building,
-///   **compilation stopped** with `error: environment variable CARGO_BIN_EXE_engram not defined at compile time`,
-///   and the bin target of `cargo metadata` was only `engram2` — the explicit target already occupies that path, so
-///   auto-discovery of `src/bin/*.rs` does not revive an `engram` target from the same file. So a manifest-only rename is
-///   caught by compilation, and a constant-only rename by the assertion below.
+/// ★Shipped file name ↔ constant (`CLI_EXE_NAME`) match★ — no other test sees this direction: the priming pin compares priming **with the
+///   constant** (passes if both move together), and the process tests find the binary **through the manifest**
+///   (always pass). So only here does a rename of the constant·priming that misses `[[bin]]` turn red; at runtime the deployed executable
+///   would differ from the name the agent learned and mail would stop silently (ADR-0094 alignment invariant).
+/// ★Path source★: the `<name>` of `CARGO_BIN_EXE_<name>` is **the manifest's `[[bin]] name`** — renaming only `name` stops **compilation**
+///   (`CARGO_BIN_EXE_engram not defined`; the explicit target occupies the path, so auto-discovery does not revive an `engram` target).
+///   So a manifest-only rename is caught by compilation, a constant-only rename by the assertion below.
 #[test]
 fn the_built_binary_file_name_matches_the_shared_constant() {
     let exe = std::path::Path::new(env!("CARGO_BIN_EXE_engram"));
@@ -667,9 +660,8 @@ fn the_built_binary_file_name_matches_the_shared_constant() {
     );
 }
 
-/// ★help carries one word to the daemon and prints the received screen as is★ — the screen content (family list · family screen) is rendered by the daemon
-///   and measured by the daemon tests. What is measured here is the CLI's part: the request line · body characters · printing the screen untouched with just one newline
-///   appended · cutting shape errors without a round trip.
+/// ★help carries one word to the daemon and prints the received screen as is★ — screen content is the daemon's and measured by its tests;
+///   here: request line · body characters · screen printed untouched with one newline appended · shape errors cut without a round trip.
 #[test]
 fn engram_help_carries_one_word_and_prints_the_screen_it_gets() {
     // 0 arguments = help = table of contents (an agent sees the surface just by typing the name).
@@ -695,7 +687,8 @@ fn engram_help_carries_one_word_and_prints_the_screen_it_gets() {
         assert_help_request(&requests, &format!(r#"{{"topic":"{group}"}}"#));
     }
 
-    // There is no spot one level further below a family — it is cut as an argument error without a round trip and guided to the way to see the list.
+    // There is no spot one level further below a family — it is cut as an argument error without a round trip and guided to the way to see
+    //   the list.
     let (deeper, code) = run_cli(UNREACHABLE_URL, &["help", "mail", "send"], None);
     assert_eq!(
         code, 1,
@@ -727,11 +720,11 @@ fn run_cli_without_credentials(args: &[&str]) -> (String, i32) {
     )
 }
 
-/// ★help fails the same way as other commands (ADR-0285)★ — without credentials it matches `mail pending`, and when the daemon
-///   cannot be reached it matches `agent list`, with an envelope · exit 1 that is the same **down to the bytes**. If help alone went another way (fallback · copy · different code · different
-///   channel), the same state would look different per command.
-/// ★The control group is taken from the same run★: hard-coding the expected output as characters would require fixing this test every time the wording changes, and then
-///   it would not catch the help side alone ending up with a different wording.
+/// ★help fails the same way as other commands (ADR-0285)★ — without credentials it matches `mail pending`, and with the daemon unreachable
+///   it matches `agent list`, with the same envelope · exit 1 **down to the bytes**; a help-only path
+///   (fallback · copy · different code · channel) would make the same state look different per command.
+/// ★The control group is taken from the same run★: hard-coded expected output would need fixing on every wording change and would not
+///   catch help alone ending up with different wording.
 // ADR-0285
 #[test]
 fn help_fails_the_same_way_as_every_other_command_without_credentials_or_a_daemon() {
@@ -780,9 +773,9 @@ fn help_fails_the_same_way_as_every_other_command_without_credentials_or_a_daemo
 /// when the LLM typed what it learned.
 #[test]
 fn conventional_help_spellings_render_the_same_screens() {
-    // ★Only the two the parser accepts as families have the `<family> --help` spelling★: `window`·`settings` have no daemon-side
-    //   `<family> <verb>` entrance and are reached only through `engram help <word>`. The old word `theme` is also carried as the word as is
-    //   (resolving it to the settings screen is the daemon's job).
+    // ★Only the two the parser accepts as families have the `<family> --help` spelling★: `window`·`settings` have no daemon-side `<family>
+    //   <verb>` entrance and are reached only through `engram help <word>`; the old word `theme` is carried as is (alias resolution is the
+    //   daemon's).
     for (spellings, body) in [
         (
             vec![vec!["help"], vec!["--help"], vec!["-h"], vec![]],
@@ -874,9 +867,8 @@ fn engram_unknown_group_and_bare_flags_are_argument_errors_without_touching_the_
             v["hint"].as_str().unwrap_or_default().contains("help"),
             "the hint must guide to help ({args:?}): {stdout}"
         );
-        // ★It checks that the suggested command actually runs★: `engram help --to bob` used to suggest "run `engram help --to`"
-        //   — that itself is another argument error, so a caller that did as told hits the same wall again.
-        //   Looking only at "the hint has the word help" lets such a suggestion pass too.
+        // ★Checks that the suggested command actually runs★: `engram help --to bob` used to suggest "run `engram help --to`", itself
+        //   another argument error, so a caller that did as told hit the same wall; looking only for the word help in the hint lets that pass.
         let suggestions = backticked_help_commands(v["hint"].as_str().unwrap_or_default());
         // ★If the set is empty, this test passes without asserting anything★ — to avoid making an empty test that reads as coverage,
         //   "at least one was picked" must be pinned first.
@@ -1090,11 +1082,10 @@ fn engram_commands_lists_every_name_with_its_summary_and_marks_what_it_cannot_ru
         !free_text.contains("second line"),
         "one command = must be one line: {free_text}"
     );
-    // ★This row scripts **a value no daemon emits today**★ — both sources that merge into the list have
-    //   become reachable (ADR-0160), so the real daemon now emits every row as `callable:true`. Still,
-    //   this branch is measured because that field is not a constant — the day it receives false, the CLI must show it on the
-    //   screen. ★But the wording must not promise `UNSUPPORTED`★: the producer that emitted that code
-    //   is gone (`catalog::not_mine` deleted), and the refusal that comes in that spot now is a different code the daemon decides.
+    // ★This row scripts **a value no daemon emits today**★ (both merged sources are reachable, ADR-0160, so every real row is
+    //   `callable:true`) — measured because the field is not a constant: the day it receives false, the CLI must show it.
+    //   ★The wording must not promise `UNSUPPORTED`★: its producer is gone (`catalog::not_mine` deleted) and the refusal now is a
+    //   different code the daemon decides.
     assert!(
         stdout.contains("cannot run"),
         "the fact that the name cannot be called must be visible on the screen: {stdout}"
@@ -1129,11 +1120,13 @@ fn engram_commands_with_a_name_shows_its_arguments_return_shape_and_errors() {
         "--index <integer>",
         "--name <string>",
         "--sticky <true|false>",
-        // It is an optional field, so the null notation is not attached — attaching it, the screen would advertise a usage that does not work (M).
+        // It is an optional field, so the null notation is not attached — attaching it, the screen would advertise a usage that does not
+        //   work (M).
         "--mode <wide|tall>",
         "required",
         "optional",
-        // ★The return field is measured with a word that is not a substring of the command name★: it used to be measured with `slot`, so even if the return section
+        // ★The return field is measured with a word that is not a substring of the command name★: it used to be measured with `slot`, so
+        //   even if the return section
         //   vanished entirely, `slot.assign` contained that word and it stayed green.
         "placed_at",
         "NOT_FOUND",
@@ -1186,7 +1179,8 @@ fn asking_a_full_name_for_help_renders_its_detail_and_never_calls_it() {
             "must be the detail screen ({token}): {stdout}"
         );
     }
-    // ★L. A help shifted one position over is not an argument either★: it used to look only at the first position, so `--index 1 --help` was bound to that boolean
+    // ★L. A help shifted one position over is not an argument either★: it used to look only at the first position, so `--index 1 --help`
+    //   was bound to that boolean
     //   field and `{"index":1,"help":true}` was actually POSTed. In any position the command does not run —
     //   and these cases have port 0 as the destination, so they **do not touch the network either**.
     for args in [
@@ -1263,7 +1257,8 @@ fn detaching_over_the_full_name_surface_sends_a_real_json_null() {
 }
 
 /// ★M. If that word consumed **even optional fields**, it would be a silent accident★: if `agent.spawn --cwd none` went out as `{"cwd":null}`,
-///   it would be created in the daemon's default folder, and that response does not carry `cwd`, so the fact that a different folder was used would be
+///   it would be created in the daemon's default folder, and that response does not carry `cwd`, so the fact that a different folder was
+///   used would be
 ///   visible nowhere. In an optional field "no value" means leaving out the flag, and the old families also send the same input as a string.
 #[test]
 fn the_detach_word_reaches_the_daemon_as_a_string_in_an_optional_slot() {
@@ -1407,7 +1402,8 @@ fn engram_commands_for_a_name_the_catalog_does_not_list_is_a_failure_not_a_crash
 }
 
 /// ★The **declared type** decides, not what the value looks like★: `--name 123` is a string field, so it must be carried as a string,
-///   and `--index 3` is an integer field, so it must be carried as a number. Looking at only one side lets "all strings" or "all JSON parsing" pass too.
+///   and `--index 3` is an integer field, so it must be carried as a number. Looking at only one side lets "all strings" or "all JSON
+///   parsing" pass too.
 #[test]
 fn engram_invoking_a_full_name_coerces_each_value_to_its_declared_type() {
     let ok = ok_response(r#"{"placed_at":3}"#);
@@ -1471,7 +1467,8 @@ fn engram_invoking_a_full_name_coerces_each_value_to_its_declared_type() {
 }
 
 /// ★F. The call response is also measured by **the declared return**★: with a lenient decider this gives exit 0, while for the same response
-///   the old family gives exit 2. If one command got opposite decisions depending on the entrance, the caller would record something that did not happen
+///   the old family gives exit 2. If one command got opposite decisions depending on the entrance, the caller would record something that
+///   did not happen
 ///   as fact. The material (`ok.required`) already came in the first round trip.
 #[test]
 fn a_call_answered_without_the_declared_return_fields_exits_two_not_zero() {
@@ -1519,7 +1516,8 @@ fn engram_invoking_with_an_unparsable_value_never_reaches_the_call_route() {
     );
 }
 
-/// ★An unknown flag ends **locally**★: the daemon makes the same decision too, but that round trip knocks on a side-effecting entrance one more time
+/// ★An unknown flag ends **locally**★: the daemon makes the same decision too, but that round trip knocks on a side-effecting entrance one
+///   more time
 ///   while giving the caller nothing more. The wording must carry the material to fix it (all declared fields).
 #[test]
 fn engram_invoking_with_an_unknown_flag_fails_locally_with_the_declared_list() {
@@ -1595,13 +1593,12 @@ fn run_cli_streams(control_url: &str, args: &[&str]) -> (String, String, i32) {
     )
 }
 
-/// ★The daemon is the source of truth for deciding it cannot be called★: even if the list says `callable:false`, the CLI does not cut it beforehand —
-///   cutting it would leave that refusal unobserved.
+/// ★The daemon is the source of truth for deciding it cannot be called★: even with `callable:false` the CLI does not cut it beforehand —
+///   that would leave the refusal unobserved.
 ///
-/// ★The refusal code must be **what the daemon actually emits now**★: this test used to script `UNSUPPORTED`,
-///   but the producer that emitted that code disappeared with the introduction of relaying (ADR-0160). A scripted stub
-///   returns anything, so that test was **green on any implementation**. Calling that name now gets it relayed,
-///   and if the owner does not answer by the deadline, `TIMEOUT` comes back.
+/// ★The refusal code must be **what the daemon actually emits now**★: this test used to script `UNSUPPORTED`, whose producer disappeared
+///   with relaying (ADR-0160); a scripted stub returns anything, so it was **green on any implementation**.
+/// Calling that name is now relayed, and if the owner does not answer by the deadline `TIMEOUT` comes back.
 #[test]
 fn engram_invoking_a_name_this_entrance_cannot_run_surfaces_the_daemons_refusal() {
     let refusal = ok_response(
@@ -1695,11 +1692,11 @@ fn engram_commands_maps_rejections_and_transport_failures_to_one() {
     assert_eq!(v["status"], "error", "{stdout}");
 }
 
-/// Argument errors on the discovery·call surface follow the same discipline as the old families — **they do not touch the network** (destination = port 0).
+/// Argument errors on the discovery·call surface follow the same discipline as the old families — **they do not touch the network**
+///   (destination = port 0).
 ///
-/// ★It asserts down to the reason★: the old edition looked only at exit 1 + BAD_ARGS, but these cases were **all** bounced as "unknown family"
-///   even **before this surface existed** — i.e. they were green even on the old binary and kept none of the new rules.
-///   Only by pinning in the wording which rule each line hits does it turn red when that rule disappears.
+/// ★It asserts down to the reason★: asserting only exit 1 + BAD_ARGS was green on the old binary too (all these cases were bounced as
+///   "unknown family" before this surface existed); pinning which rule each line hits turns it red when that rule disappears.
 #[test]
 fn engram_catalog_and_call_argument_errors_never_touch_the_network() {
     for (args, expect) in [
@@ -1722,7 +1719,8 @@ fn engram_catalog_and_call_argument_errors_never_touch_the_network() {
         let v: serde_json::Value =
             serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("stdout json: {e}"));
         let hint = v["hint"].as_str().unwrap_or_default();
-        // `README.md` has a fine shape, so it can only be known by asking the list — only that line ends in a connection failure (one round trip).
+        // `README.md` has a fine shape, so it can only be known by asking the list — only that line ends in a connection failure (one
+        //   round trip).
         if expect == "unknown command" {
             assert_eq!(v["code"], "CONNECT_FAILED", "{args:?}: {stdout}");
             continue;
@@ -1735,9 +1733,9 @@ fn engram_catalog_and_call_argument_errors_never_touch_the_network() {
     }
 }
 
-/// ★help does not receive the discovery list — the table-of-contents screen only points to `engram commands`★: if help also received the list,
-///   one screen would take two round trips, and a failure of the list would look like a failure of help. The script has only one screen, so
-///   a second round trip would fail that connection and break exit 0.
+/// ★help does not receive the discovery list — the table-of-contents screen only points to `engram commands`★: otherwise one screen would
+///   take two round trips and a list failure would look like a help failure;
+///   the script has one screen, so a second round trip would fail the connection and break exit 0.
 #[test]
 fn the_static_help_points_at_the_catalog_without_fetching_it() {
     let (root, code, requests) = run_help_against_stub(&["help"], "stub root");
@@ -1749,13 +1747,13 @@ fn the_static_help_points_at_the_catalog_without_fetching_it() {
     );
 }
 
-/// The discovery list emits only **rows the daemon sent** — the only spot where family names appear on the screen must be those rows.
+/// The discovery list emits only **rows the daemon sent** — the only place family names appear on the screen must be those rows.
 ///
-/// ★The point of this test is that the fixture carries a mail name★: the old edition had no such word in the fixture at all, so it
-///   passed **on any implementation** (the assertion was always true). Now `mail.send` comes in the list, so if our chrome
-///   (headers·section titles·guidance) added that word, the line count would grow and it would turn red.
-/// ★It does not erase names the table carried★: what gets carried is daemon policy (that question is parked separately),
-///   and removing it from the list would make discovery not say "it exists" — this CLI is not the layer to fix that.
+/// ★The fixture carrying a mail name is the point★: without that word in the fixture the assertion was always true and passed on any
+///   implementation; now `mail.send` is in the list, so any of our chrome (headers·section titles·guidance) adding it grows the line count
+///   and turns red.
+/// ★It does not erase names the table carried★: what is carried is daemon policy (parked separately); removing it would make discovery not
+///   say "it exists" — this CLI is not the layer to fix that.
 #[test]
 fn the_catalog_surface_renders_only_the_rows_the_daemon_sent() {
     let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog()]);
@@ -1790,12 +1788,11 @@ fn the_catalog_surface_renders_only_the_rows_the_daemon_sent() {
 // ── ADR-0133: the daemon refuses mail — the CLI blocks neither the screen nor execution ─────────────────────
 
 /// ★A mail screen request is the same whatever the environment carries★ — the marker (`ENGRAM_MAIL`) that picked the screen by spawn env
-///   was removed (user decision 2026-09-23), and reviving it would let **a value the agent itself can erase** decide the screen
-///   again. What the CLI carries must be just one word — that the screen is the same regardless of the caller is measured by the daemon integration test
-///   (`tests/mail_gate.rs`).
+///   was removed; reviving it would let **a value the agent itself can erase** decide the screen again.
+///   That the screen is the same regardless of the caller is measured by the daemon integration test (`tests/mail_gate.rs`).
 ///
-/// ★Measuring the two conditions side by side is the point★: an env without the marker and an env carrying the old marker must send **the same**
-///   request. Measuring only one side stays green even if an environment-bound branch revives.
+/// ★Measuring both conditions side by side is the point★: an env without the marker and one with the old marker must send **the same**
+///   request; one side alone stays green if an environment-bound branch revives.
 // ADR-0133
 #[test]
 fn the_mail_screen_opens_whatever_the_environment_carries() {
@@ -1861,9 +1858,9 @@ fn a_mail_verb_the_daemon_refuses_still_posts_and_surfaces_the_refusal() {
 
 // ── ADR-0285: the common failure path of commands that call the daemon ──────────────────────────────────────────────
 
-/// ★`--body-stdin` without credentials fails without waiting for stdin★ — if stdin were read before the credentials,
-///   it would hang on an stdin that stays open (agent shell · pipe) and could neither fail nor reach the common failure path.
-///   Launches with stdin open but neither written nor closed, and checks that it ends with `NO_TOKEN` within the deadline.
+/// ★`--body-stdin` without credentials fails without waiting for stdin★ — reading stdin first would hang on an open stdin (agent shell ·
+///   pipe), neither failing nor reaching the common failure path.
+///   Launches with stdin open but neither written nor closed and checks `NO_TOKEN` within the deadline.
 // ADR-0285
 #[test]
 fn a_body_stdin_send_without_credentials_fails_without_waiting_for_stdin() {
@@ -1905,8 +1902,8 @@ fn a_body_stdin_send_without_credentials_fails_without_waiting_for_stdin() {
     assert_eq!(v["code"], "NO_TOKEN", "{stdout}");
 }
 
-/// ★If the daemon does not know that route (404 — a daemon of a different build than this CLI), help and other commands are the same `PROTOCOL_MISMATCH`
-///   envelope · exit 1★ — the daemon's 404 has an empty body, so passing it through as an empty line would teach the caller nothing.
+/// ★If the daemon does not know that route (404 — a daemon of a different build), help and other commands give the same
+///   `PROTOCOL_MISMATCH` envelope · exit 1★ — the 404 body is empty, so passing it through as an empty line would teach nothing.
 // ADR-0285
 #[test]
 fn a_daemon_that_does_not_serve_the_route_is_reported_as_a_version_mismatch() {

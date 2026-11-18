@@ -2,26 +2,25 @@
 //!
 //! ADR-0138 — release logs are written to a file **synchronously** (no async writer · the caller passes the folder).
 //!
-//! There are two entry points: [`init_logging`] (stdout only) · [`init_logging_with_file`] (stdout + file). Both are
-//! idempotent, and per process the one called first wins.
+//! Two entry points: [`init_logging`] (stdout only) · [`init_logging_with_file`] (stdout + file); both idempotent, per process the first
+//!   call wins.
 //!
-//! ★The reason the file sink exists = in release, stdout goes nowhere★ (measured):
-//! the release binary has `windows_subsystem = "windows"`, so there is no console, and the daemon is launched by WMI
-//! `Win32_Process.Create`, an API that cannot pass std handles, so the child's stdout/stderr attach
-//! to nothing (the non-WMI path sets them to null outright). The daemon does not inherit the parent environment either,
-//! so `RUST_LOG` does not reach it. So without a file, **there is no place at all where the cause of a startup failure remains.**
+//! ★The file sink exists because in release stdout goes nowhere★ (measured): the release binary has `windows_subsystem = "windows"` (no
+//!   console) and the daemon is launched by WMI `Win32_Process.Create`, which cannot pass std handles, so its stdout/stderr attach to nothing;
+//! it does not inherit the parent environment either, so `RUST_LOG` does not reach it. Without a file, **no place keeps the cause of a
+//!   startup failure.**
 //!
-//! ★The caller passes the log folder — this module does not find it itself★: the data folder layout belongs to the daemon `data_dir` and the
-//! shell `discovery` (copy)'s `DataLayout`, and both depend on this crate, so calling it from here would make a cycle (the leaf
-//! crate invariant — lib.rs header, tenancy condition ②). What this module owns is only the file
-//! name convention inside the received folder (`<kind>-<UTC>-<pid>.log`) and the `%TEMP%` fallback location.
+//! ★The caller passes the log folder — this module does not find it itself★: the data folder layout belongs to the daemon `data_dir` and
+//!   the shell `discovery` (copy)'s `DataLayout`, both depend on this crate, so calling it from here would make a cycle
+//! (leaf crate invariant — lib.rs header, tenancy condition ②). This module owns only the file name convention inside the received folder
+//!   (`<kind>-<UTC>-<pid>.log`) and the `%TEMP%` fallback location.
 //!
-//! ★If that folder cannot be used, it does not give up silently but falls back under `%TEMP%`★: otherwise this feature **fails at
-//! its own purpose** — being unable to use the data folder is exactly a common reason for the daemon failing to start,
-//! and precisely then the reason goes only to stdout (= a place that does not exist in release). This fallback does not touch ADR-0134 decision 4 (no data folder
-//! fallback) — the damage that decision prevents is **state** (registry · lock) ending up in two places,
-//! and what is moved here is one state-free sheet of reasons. If both fail there is truly nowhere left, and in that case the
-//! owner is the preflight check the client runs before spawn (ADR-0135 — the reason is shown in the window, not by the daemon).
+//! ★If that folder cannot be used, it falls back under `%TEMP%` instead of giving up silently★: an unusable data folder is a common reason
+//!   the daemon fails to start, and exactly then the reason would go only to stdout (nonexistent in release).
+//! This fallback does not touch ADR-0134 decision 4 (no data folder fallback) — what that decision prevents is **state** (registry · lock)
+//!   in two places, while what moves here is one state-free sheet of reasons.
+//! If both fail there is truly nowhere left; the owner then is the preflight check the client runs before spawn (ADR-0135 — the reason is
+//!   shown in the window, not by the daemon).
 
 use std::cell::Cell;
 use std::fs::File;
@@ -62,11 +61,10 @@ pub fn mask_secrets(s: &str) -> String {
 
 // ── File sink ────────────────────────────────────────────────────────────────────
 
-/// The kind of process that writes a log file. It is **the file-name prefix and also the unit of retention cleanup**.
+/// The kind of process that writes a log file — **the file-name prefix and the unit of retention cleanup**.
 ///
-/// ★Why it is a closed set, not a free string★: if two processes pick the same prefix they end up sharing
-/// one file, and on Windows that means interleaved, corrupted lines. When a new process appears, add a variant here
-/// so that it **consciously** picks a different name.
+/// ★A closed set, not a free string★: two processes picking the same prefix would share one file (interleaved, corrupted lines on
+///   Windows). A new process adds a variant here so it **consciously** picks a different name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogKind {
     /// The agent-host daemon (`engram-dashboard-daemon.exe`).
@@ -93,39 +91,40 @@ const LOG_EXT: &str = ".log";
 /// `KEEP_PER_KIND - 1` are kept before creating a new file).
 const KEEP_PER_KIND: usize = 10;
 
-/// Where it falls back when the primary folder is unusable = `%TEMP%/<this name>/logs/`. The product name is used as is so that it **does not collide in name**
-/// with the data folder (if several distributions fall back into one person's temp folder they share a folder,
-/// but the pid in file names keeps them from mixing, and only the retention cap is shared).
+/// Where it falls back when the primary folder is unusable = `%TEMP%/<this name>/logs/`. The product name is used as is so it **does not
+///   collide in name** with the data folder (distributions falling back into one person's temp folder share
+/// a folder, but the pid in file names keeps them apart; only the retention cap is shared).
 const FALLBACK_DIR_NAME: &str = "engram-dashboard";
 
 /// The log file actually opened. **Filled only after winning the subscriber install** — anything written before that is swallowed.
 static LOG_FILE: OnceLock<Mutex<File>> = OnceLock::new();
 
-/// A file writer used instead of the default [`MakeWriter`] implementation of [`Mutex`]. If the slot it points to is still empty,
-/// it drops that line — because the layer is built at install time and the file is opened **after** that.
+/// A file writer used instead of the default [`MakeWriter`] implementation of [`Mutex`]. If the slot it points to is still empty it drops
+///   that line — the layer is built at install time and the file is opened **after** that.
 ///
-/// ★It ignores poison and keeps writing★: the standard implementation panics on poison, and this sink's consumers include a
-/// panic hook. Once poisoned, that hook's log would panic again (panic-in-panic → abort) and
-/// **the reason for the death we most need to keep disappears.** The lock protects only against interleaved lines, so it is safe to override.
+/// ★It ignores poison and keeps writing★: the standard implementation panics on poison, and this sink's consumers include a panic hook — a
+///   poisoned lock would make that hook's log panic again (panic-in-panic → abort) and
+/// **lose the reason for the death we most need to keep.** The lock only prevents interleaved lines, so overriding is safe.
 ///
-/// ★If the same thread comes back while holding the writer, that line is not kept in the file★: the panic hook runs **before**
-/// unwinding, **on the thread that panicked**, and the log inside it calls this sink again. If a thread panics while holding the writer
-/// (inside `write_all`), that re-entry locks the same `Mutex` again and self-deadlocks (the process hangs —
-/// worse than abort). So a [`WRITING`] flag is raised while the writer is held, and a thread with the flag set
-/// is given a writer that drops instead of locking (the stdout layer receives it as is).
+/// ★If the same thread comes back while holding the writer, that line is not kept in the file★: the panic hook runs **before** unwinding
+///   **on the panicking thread** and logs through this sink again; a thread that panicked inside `write_all`
+/// would re-lock the same `Mutex` and self-deadlock (a hang — worse than abort). So a [`WRITING`] flag is raised while the writer is held,
+///   and a thread with the flag set gets a writer that drops instead of locking (the stdout layer receives it as is).
 ///
-/// ★A panicking thread waits for a lock held by another thread only up to [`PANICKING_LOCK_WAIT`], then drops the line★:
-/// if the holding thread is stuck, the hook would hang with it before reaching the end (abort). A write that is not during a panic
-/// waits as is (same as every log call). A line emitted by a destructor during unwinding is also during a panic, so it takes the same path.
+/// ★A panicking thread waits for a lock held by another thread only up to [`PANICKING_LOCK_WAIT`], then drops the line★: a stuck holder
+///   would hang the hook before it reaches the end (abort). A write not during a panic waits as is;
+/// a line from a destructor during unwinding is also during a panic.
 // ADR-0292
 struct FileSink(&'static OnceLock<Mutex<File>>);
 
-/// The cap on how long a panicking thread waits for the file lock. Normally the lock is held only while one line is written, so in common contention it is
-/// enough to keep the line, and the amount it delays the end (abort) when the holder is stuck is kept below what a person can notice.
+/// The cap on how long a panicking thread waits for the file lock. The lock is normally held only while one line is written, so in common
+///   contention it is enough to keep the line, and the delay it adds to the end (abort) when the holder is stuck stays below what a person
+///   can notice.
 const PANICKING_LOCK_WAIT: Duration = Duration::from_millis(100);
 
 thread_local! {
-    /// Does this thread currently hold the file lock of [`FileSink`]? As a const value without `Drop` it is thought to be readable even during thread teardown,
+    /// Does this thread currently hold the file lock of [`FileSink`]? As a const value without `Drop` it is thought to be readable even
+    ///   during thread teardown,
     /// but that is std implementation behavior, not a documented guarantee — if it cannot be read, it is read as 「not holding」.
     static WRITING: Cell<bool> = const { Cell::new(false) };
 }
@@ -241,13 +240,13 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
 /// Is this name a run log **of this kind** — only a name that matches exactly the `<kind>-YYYYMMDD-HHMMSS-<pid>.log` grammar
 /// is true.
 ///
-/// ★Do not select by prefix match (`starts_with("<kind>-")`) (do not revive it)★: then two things break.
-/// ① If a label is merely the prefix of another label (`app` vs `app-updater`), one side's cleanup **deletes files of the other
-/// kind** — labels will keep growing. ② The name is the sort key, so one hand-placed `daemon-note.log`
-/// settles at the end of lexicographic order and **pushes real logs out of the cap and deletes them.**
+/// ★Do not select by prefix match (`starts_with("<kind>-")`) (do not revive it)★: ① a label that is merely the prefix of another (`app` vs
+///   `app-updater`) makes one side's cleanup **delete the other kind's files** (labels will keep growing)
+/// ② the name is the sort key, so one hand-placed `daemon-note.log` settles at the end of lexicographic order and **pushes real logs out
+///   of the cap and deletes them.**
 ///
-/// It does not check calendar validity either (`daemon-20261301-…` passes). The grammar alone blocks the two above, and the names we
-/// wrote are made by [`utc_stamp`] and are valid to begin with.
+/// It does not check calendar validity either (`daemon-20261301-…` passes); the grammar alone blocks the two above, and names we wrote
+///   come from [`utc_stamp`].
 fn is_run_log_name(name: &str, kind: LogKind) -> bool {
     let Some(rest) = name
         .strip_prefix(kind.label())
@@ -272,10 +271,9 @@ fn is_run_log_name(name: &str, kind: LogKind) -> bool {
 
 /// Deletes old files of the same kind and leaves only `keep`. Returns = **the reasons of the failures it swallowed**.
 ///
-/// A deletion failure does not stop startup — a file held by another process legitimately exists (e.g. a daemon of the same
-/// kind running on two data folders), and a start must not fail because of that one. But it is not swallowed **silently**:
-/// this is the kind of thing that could fail forever with nobody knowing, so the caller emits it all at once right after the subscriber is installed
-/// (it cannot emit here — the subscriber does not exist yet when this function runs).
+/// A deletion failure does not stop startup — a file held by another process legitimately exists (e.g. a daemon of the same kind on two
+///   data folders). But it is not swallowed **silently** (it could fail forever unnoticed):
+/// the caller emits it all at once right after the subscriber is installed (it cannot emit here — no subscriber yet).
 fn prune_old_logs(dir: &Path, kind: LogKind, keep: usize) -> Vec<String> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -314,13 +312,12 @@ struct OpenedLog {
     deferred: Vec<String>,
 }
 
-/// Newly opens `<dir>/<kind>-<UTC>-<pid>.log` and returns the handle (`dir` is created if missing).
+/// Newly opens `<dir>/<kind>-<UTC>-<pid>.log` and returns the handle (`dir` is created if missing). The pid keeps two runs started in the
+///   same second from sharing one file.
 ///
-/// The pid is added to keep two runs started in the same second from sharing one file.
-///
-/// Known residual (not fixed): if a pid is reused within the same UTC second or the clock goes backwards, the names collide,
-/// and because of append **two runs are joined in one file**. The header is printed again each time so the boundary is readable,
-/// and preventing this would need exclusive create + a retry loop on open, so the cost exceeds the benefit.
+/// Known residual (not fixed): a pid reused within the same UTC second or a backwards clock makes names collide, and append **joins two
+///   runs in one file** (the header is printed each time so the boundary is readable);
+/// preventing it needs exclusive create + an open retry loop, costing more than it gains.
 fn open_run_log(dir: &Path, kind: LogKind) -> io::Result<OpenedLog> {
     std::fs::create_dir_all(dir)?;
     let mut deferred = prune_old_logs(dir, kind, KEEP_PER_KIND.saturating_sub(1));
@@ -342,12 +339,11 @@ fn open_run_log(dir: &Path, kind: LogKind) -> io::Result<OpenedLog> {
     })
 }
 
-/// Tries [`open_run_log`] in the order primary (caller's folder) → secondary (`%TEMP%`). `Err` = both failed, the value is
-/// the two reasons.
+/// Tries [`open_run_log`] in the order primary (caller's folder) → secondary (`%TEMP%`). `Err` = both failed, the value is the two reasons.
 ///
-/// ★Why the secondary exists = the situation where the primary fails is exactly where diagnosis is needed most★: if the data folder
-/// cannot be used the daemon gives up startup right after, and without the fallback that reason goes only to stdout (which does not exist in release).
-/// For the rationale and why this fallback does not infringe ADR-0134 decision 4, see this file's header.
+/// ★The secondary exists because the primary failing is exactly where diagnosis is needed most★ (an unusable data folder makes the daemon
+///   give up right after, and the reason would go only to stdout, nonexistent in release);
+/// rationale and why it does not infringe ADR-0134 decision 4: this file's header.
 fn open_run_log_with_fallback(logs_dir: &Path, kind: LogKind) -> Result<OpenedLog, Vec<String>> {
     let primary = match open_run_log(logs_dir, kind) {
         Ok(opened) => return Ok(opened),
@@ -375,9 +371,9 @@ fn open_run_log_with_fallback(logs_dir: &Path, kind: LogKind) -> Result<OpenedLo
 
 /// Stamps the identity of this run on the first line of the file.
 ///
-/// ★Why a file header and not a log event★: the default level is `warn`, so **a normal startup leaves not a single line**
-/// — what remains is an empty file, and you cannot even tell which binary from when it belongs to. Raising the startup notice from `info` → `warn`
-/// to fill that would break the meaning of levels, so one line is placed outside the event plane.
+/// ★A file header, not a log event★: the default level is `warn`, so **a normal startup leaves not a single line** — an empty file that
+///   cannot even say which binary from when.
+/// Raising the startup notice from `info` → `warn` would break the meaning of levels, so one line is placed outside the event plane.
 fn write_header(file: &mut File, kind: LogKind, stamp: &str) -> io::Result<()> {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
@@ -398,28 +394,27 @@ pub fn init_logging() {
     init_subscriber(false);
 }
 
-/// [`init_logging`] + a file sink dedicated to this run inside `logs_dir`. `logs_dir` = the log folder itself (not the data folder —
-/// the layout is decided by the caller's `DataLayout::logs_dir`).
+/// [`init_logging`] + a file sink dedicated to this run inside `logs_dir`. `logs_dir` = the log folder itself (not the data folder — the
+///   layout is the caller's `DataLayout::logs_dir`).
 ///
-/// Return value = the log file path this call actually attached. **If the primary folder cannot be used, it may be a path under `%TEMP%`**
-/// (that fact is also left as a `warn` just before returning — this file's header). `None` = no file sink,
-/// and there are three reasons: already initialized (quiet) · someone else installed the subscriber first so the layer was discarded (quiet) ·
-/// both primary and fallback failed to open (a `warn` right after — but in release even that `warn` has nowhere to go).
+/// Return value = the log file path this call actually attached. **If the primary folder is unusable it may be a path under `%TEMP%`**
+///   (also left as a `warn` just before returning — this file's header). `None` = no file sink: already initialized (quiet) ·
+/// someone else installed the subscriber first so the layer was discarded (quiet) · both primary and fallback failed to open (a `warn`
+///   right after — in release even that has nowhere to go).
 ///
-/// The level filter and stdout output are the same as [`init_logging`] — the file is **only added**, it does not replace.
+/// The level filter and stdout output are the same as [`init_logging`] — the file is **only added**.
 ///
-/// Known residual (not fixed): if two threads call the same kind at the same time, both may pass the first check.
-/// The loser is filtered out at `try_init`, returns `None`, and creates no file, so there is no corruption — exact
-/// exclusion would need an init-only lock, and for a once-at-boot call it is not worth it.
+/// Known residual (not fixed): two threads calling the same kind at once may both pass the first check; the loser is filtered at
+///   `try_init`, returns `None` and creates no file, so nothing is corrupted —
+/// exact exclusion would need an init-only lock, not worth it for a once-at-boot call.
 pub fn init_logging_with_file(logs_dir: &Path, kind: LogKind) -> Option<PathBuf> {
     if RELOAD_HANDLE.get().is_some() {
         return None;
     }
 
-    // ★The file is opened **only after winning** the subscriber install★: if the order is reversed, a losing call also creates the file and
-    //   runs retention cleanup, and an empty file nobody will write **deletes one real log** and permanently
-    //   takes its place. The layer is installed pointing at a slot that is not yet open (lines in between are dropped by [`FileSink`]),
-    //   and the slot is filled right below.
+    // ★The file is opened **only after winning** the subscriber install★: in the reverse order a losing call also creates the file and
+    //   runs retention cleanup, and an empty file nobody writes **deletes one real log** and permanently takes its place.
+    //   The layer is installed pointing at a not-yet-open slot (lines in between are dropped by [`FileSink`]); the slot is filled right below.
     if !init_subscriber(true) {
         return None;
     }
@@ -439,9 +434,9 @@ pub fn init_logging_with_file(logs_dir: &Path, kind: LogKind) -> Option<PathBuf>
             Some(path)
         }
         Err(reasons) => {
-            // ★This is the last hole of this feature★: the only place to go is stdout, and release has no stdout.
-            //   The owner for this case (neither the primary folder nor the temp folder can be used) is the data folder preflight the client runs before it starts the daemon
-            //   (ADR-0135), and the user sees the reason in that window.
+            // ★The last hole of this feature★: the only place to go is stdout, which release lacks. The owner for this case (neither the
+            //   primary nor the temp folder usable) is the data folder preflight the client runs before starting the daemon (ADR-0135);
+            //   the user sees the reason in that window.
             for r in reasons {
                 tracing::warn!("could not open the file log, logging to stdout only: {r}");
             }
@@ -461,10 +456,10 @@ fn init_subscriber(with_file: bool) -> bool {
 
     let (filter_layer, handle) = reload::Layer::new(filter);
 
-    // ★Do not use an async writer (`tracing_appender::non_blocking`) (do not revive it)★: the daemon
-    //   ends with `std::process::exit(code)` and skips destructors. Lines the worker thread has not yet flushed
-    //   vanish, and those vanishing lines are exactly **the last line just before a startup failure** that this feature is meant to catch.
-    //   `File` has no buffer, so one event line is one write — it is already on disk before the process dies.
+    // ★Do not use an async writer (`tracing_appender::non_blocking`) (do not revive it)★: the daemon ends with `std::process::exit(code)`
+    //   and skips destructors, so lines the worker thread has not flushed vanish — exactly
+    //   **the last line just before a startup failure** this feature exists to catch. `File` has no buffer, so one event line is one write
+    //   and is on disk before the process dies.
     // ANSI OFF: a person or LLM reads the file as is (color escapes are noise).
     let file_layer = with_file.then(|| {
         tracing_subscriber::fmt::layer()
@@ -619,7 +614,8 @@ mod tests {
         );
     }
 
-    /// The case where a label is the prefix of another label, and the case where a name not matching the grammar settles at the end of the sort — if reverting to prefix
+    /// The case where a label is the prefix of another label, and the case where a name not matching the grammar settles at the end of the
+    ///   sort — if reverting to prefix
     /// match, both **delete someone else's file**.
     #[test]
     fn prune_selects_by_filename_grammar_not_prefix() {
@@ -772,7 +768,8 @@ mod tests {
             .expect("must swallow");
     }
 
-    /// If the thread that holds the writer comes back (a hook log of a thread that panicked while holding it), that line is dropped and it does not wait for itself.
+    /// If the thread that holds the writer comes back (a hook log of a thread that panicked while holding it), that line is dropped and it
+    ///   does not wait for itself.
     /// Running it on another thread with a deadline is because the regression would show up as a permanent hang.
     #[test]
     fn file_sink_drops_the_line_of_a_thread_already_writing() {
@@ -807,7 +804,8 @@ mod tests {
             .ends_with("outer-1\nouter-2\nafter\n"));
     }
 
-    /// A panicking thread (hook · destructor during unwinding) facing a lock held and stuck by another thread waits only up to the cap and drops the line.
+    /// A panicking thread (hook · destructor during unwinding) facing a lock held and stuck by another thread waits only up to the cap and
+    ///   drops the line.
     /// The regression is a permanent hang, so a deadline is applied.
     #[test]
     fn a_panicking_thread_gives_up_on_a_lock_held_by_another_thread() {

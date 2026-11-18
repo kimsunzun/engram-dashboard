@@ -1,23 +1,24 @@
 //! Panic containment mark and the hook body for panics that were not contained (ADR-0292).
 //!
-//! A containing site is wrapped in [`contain`], and inside it a call that fixes state shared by several agents is
-//! wrapped in [`uncontained`]. What tells the two apart is one thread-local depth — the hook body ([`hook`]) always
-//! logs the reason and calls the previous hook, then if the depth is 0 calls the end (production = `std::process::abort` — [`install_hook`]),
-//! otherwise returns, and unwinding goes up to that [`contain`] and is folded into `Err`. The only place where the location (file · line) of a contained panic remains is that
-//! reason line.
+//! A containing site is wrapped in [`contain`], and inside it a call that fixes state shared by several agents is wrapped in
+//!   [`uncontained`]. One thread-local depth tells the two apart — the hook body ([`hook`]) always logs the reason and calls the previous hook,
+//! then if the depth is 0 calls the end (production = `std::process::abort` — [`install_hook`]), otherwise returns and unwinding goes up
+//!   to that [`contain`] and is folded into `Err`. That reason line is the only place the location (file · line) of a contained panic remains.
 //!
-//! ★Why the mark is needed★ — std's hook runs on the panicking thread **before unwinding**. If an 「uncaught panic = end」 hook is installed without a mark, it ends even the panics that `catch_unwind` meant to catch.
+//! ★Why the mark is needed★ — std's hook runs on the panicking thread **before unwinding**; an "uncaught panic = end" hook without a mark
+//!   would end even panics `catch_unwind` meant to catch.
 //!
-//! ★Invariant — mark range ⊆ the catch closure that catches it★: the only path that raises the depth is [`contain`], and there raising and
-//! catching are one body. No public means to raise only the depth is provided — if a mark stands with no one to catch, a panic inside it passes the hook
-//! and kills only the thread (for a pump, an agent left as `Running` with no terminal transition, and a live CLI — ADR-0005 · ADR-0290).
+//! ★Invariant — mark range ⊆ the catch closure that catches it★: the only path that raises the depth is [`contain`], where raising and
+//!   catching are one body. No public means to raise only the depth exists — a mark standing with no one to catch would let a panic inside it
+//! pass the hook and kill only the thread (for a pump, an agent left `Running` with no terminal transition, and a live CLI — ADR-0005 ·
+//!   ADR-0290).
 //!
-//! The mark does not follow threads — a thread or task launched by the wrapped code is outside the mark (= ends). There is no async mark either:
-//! all containing sites are synchronous, and containing an async site would need a separate task-local mark.
+//! The mark does not follow threads — a thread or task launched by the wrapped code is outside it (= ends). There is no async mark either:
+//!   all containing sites are synchronous, and an async site would need a separate task-local mark.
 //!
-//! Logging calls the `tracing` facade directly — it does not call this crate's `logging` tenant (lib.rs gate ③).
-//! The self-deadlock of a thread that panicked while holding it re-entering the log file, and endless waiting at a file lock held and stuck by another, are
-//! blocked by that tenant's file sink (it drops the line). Waiting at the `tracing` internal lock is not blocked.
+//! Logging calls the `tracing` facade directly — not this crate's `logging` tenant (lib.rs gate ③). A self-deadlock of a thread that
+//!   panicked while holding the log file and endless waiting at a file lock held by another thread are blocked by that tenant's
+//! file sink (it drops the line); waiting at the `tracing` internal lock is not blocked.
 // ADR-0292
 
 use std::any::Any;
@@ -27,7 +28,8 @@ use std::panic::{catch_unwind, PanicHookInfo, UnwindSafe};
 use std::sync::Once;
 
 thread_local! {
-    // Const-initialized and a value without `Drop`, so it is thought to be readable even during thread teardown (inside a TLS destructor), but that is std implementation
+    // Const-initialized and a value without `Drop`, so it is thought to be readable even during thread teardown (inside a TLS destructor),
+    //   but that is std implementation
     //   behavior, not a documented guarantee. If it cannot be read, it is read as 「no mark」 = the ending side.
     static DEPTH: Cell<u32> = const { Cell::new(0) };
 }
@@ -87,10 +89,10 @@ impl fmt::Display for Caught {
 
 /// Runs `f` inside the mark and catches its panic — a caught panic = `Err`.
 ///
-/// The mark returns to its pre-entry value when `f` ends or unwinds out. The hook leaves the reason line regardless of the mark, so
-/// the caller does not log again and only emits the failure surface (`Failed` · input rejection) — but it does keep an
-/// attribution not in the hook line (agent id etc.).
-/// The caught payload is dropped after this mark is lowered — a panic in that drop is decided by the outer mark.
+/// The mark returns to its pre-entry value when `f` ends or unwinds out. The hook leaves the reason line regardless of the mark, so the
+///   caller does not log again and only emits the failure surface (`Failed` · input rejection)
+/// plus any attribution not in the hook line (agent id etc.). The caught payload is dropped after this mark is lowered — a panic in that
+///   drop is decided by the outer mark.
 // ADR-0292
 pub fn contain<T>(f: impl FnOnce() -> T + UnwindSafe) -> Result<T, Caught> {
     catch_unwind(move || {
@@ -102,7 +104,8 @@ pub fn contain<T>(f: impl FnOnce() -> T + UnwindSafe) -> Result<T, Caught> {
     })
 }
 
-/// Runs `f` outside the mark — a panic inside it ends via the hook even if there is a [`contain`] outside. When it finishes (even by unwinding out),
+/// Runs `f` outside the mark — a panic inside it ends via the hook even if there is a [`contain`] outside. When it finishes (even by
+///   unwinding out),
 /// the mark returns to its pre-entry value. If [`contain`] is called again inside it, that range is contained again.
 ///
 /// Contained code wraps with this a call that fixes state shared by several agents — so as not to carry on leaving half-fixed shared state
@@ -131,9 +134,11 @@ pub fn payload_text(payload: &(dyn Any + Send)) -> String {
 /// Hook body — logs the reason line and calls the previous hook, then calls `end` if outside the mark.
 ///
 /// The decision uses the mark at the time of entry. If inside the mark it returns and unwinding goes up to that [`contain`].
-/// Logging is independent of the mark — the panic location (file · line) is visible only in the hook, so a record of a site that catches and does not log also
+/// Logging is independent of the mark — the panic location (file · line) is visible only in the hook, so a record of a site that catches
+///   and does not log also
 /// remains here. If `end` returns (tests), this function returns too and unwinding continues.
-/// ★A panic that occurs here (including inside the previous hook) is aborted by std at once regardless of the mark★ — a panic inside a hook does not unwind.
+/// ★A panic that occurs here (including inside the previous hook) is aborted by std at once regardless of the mark★ — a panic inside a
+///   hook does not unwind.
 // ADR-0292
 pub fn hook(info: &PanicHookInfo<'_>, previous: &dyn Fn(&PanicHookInfo<'_>), end: &dyn Fn()) {
     let contained = is_contained();
@@ -151,7 +156,8 @@ pub fn hook(info: &PanicHookInfo<'_>, previous: &dyn Fn(&PanicHookInfo<'_>), end
     }
 }
 
-/// Installs [`hook`] as the process hook — end = `std::process::abort`, previous hook = the hook present at install time (if it is the std default,
+/// Installs [`hook`] as the process hook — end = `std::process::abort`, previous hook = the hook present at install time (if it is the std
+///   default,
 /// stderr output). Idempotent (from the second call it does nothing).
 // ADR-0292
 pub fn install_hook() {
