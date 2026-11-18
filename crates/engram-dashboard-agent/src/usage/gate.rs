@@ -37,6 +37,7 @@ impl OutputDecoder for UsageGate {
     }
 
     fn take_usage(&mut self) -> Vec<UsageObservation> {
+        // Empty the inner buffer even when blocking — otherwise it grows for the agent's whole life.
         drop(self.inner.take_usage());
         Vec::new()
     }

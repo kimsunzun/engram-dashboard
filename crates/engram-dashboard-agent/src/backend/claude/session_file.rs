@@ -33,6 +33,7 @@ use crate::types::AgentId;
 
 /// Number of polls before giving up when the session file is not visible (≈ the observation window of runner period × N).
 const MAX_RESOLVE_ATTEMPTS: u32 = 15;
+/// Short retries on a file read sharing violation (while claude is writing).
 const READ_RETRIES: u32 = 3;
 
 // ── Session file representation (lenient parsing) ────────────────────────────────────────────────
@@ -124,9 +125,11 @@ pub(super) struct ClaudeSessionIdSource {
     /// Only a correlation key for diagnostic logs — not used to choose what to read.
     agent_id: AgentId,
     child_pid: u32,
+    /// The sid we first assigned — the key of PID learning (scan).
     expected_sid: Uuid,
     /// The actual file PID learned through the PID shim bypass. None means not yet resolved.
     resolved_pid: Option<u32>,
+    /// The sid last observed (initially = `expected_sid`) — a difference from it counts as a change.
     last_seen_sid: Uuid,
     attempts: u32,
 }

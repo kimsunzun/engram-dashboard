@@ -24,6 +24,7 @@ pub struct InputsPendingTable {
 struct Entry {
     epoch: u32,
     pending: bool,
+    /// The output seq that last updated this entry (comparable only within the same epoch).
     last_seq: u64,
 }
 

@@ -40,6 +40,7 @@ pub struct Preset {
 pub trait PresetStore: Send + Sync + 'static {
     /// Saves the whole snapshot atomically. The implementation logs the failure — the caller only branches the flow on `Err`.
     fn save(&self, presets: &[Preset]) -> Result<(), StoreError>;
+    /// Loaded once at boot. Empty list if missing, damaged or refused.
     fn load(&self) -> Vec<Preset>;
     /// Default = always usable (a store that never refuses).
     fn status(&self) -> StoreStatus {

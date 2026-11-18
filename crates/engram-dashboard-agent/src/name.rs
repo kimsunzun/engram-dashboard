@@ -35,6 +35,7 @@ pub fn cwd_basename(cwd: &str) -> String {
     //   lastIndexOf('\\'))`.
     let idx = trimmed.rfind(['/', '\\']).map(|i| i as isize).unwrap_or(-1);
     let base = if idx >= 0 {
+        // idx is a valid byte boundary (separator = 1 ASCII byte), so slicing is safe.
         &trimmed[(idx as usize) + 1..]
     } else {
         trimmed
@@ -79,6 +80,7 @@ pub fn canonical_name_or_id_fallback(
     base
 }
 
+/// Equivalent to the frontend regex `/^[A-Za-z]:$/`.
 fn is_drive_root(s: &str) -> bool {
     let bytes = s.as_bytes();
     bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'

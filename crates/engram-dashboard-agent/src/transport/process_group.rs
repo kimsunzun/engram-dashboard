@@ -56,6 +56,7 @@ pub(crate) enum PortEvent {
 pub(crate) struct RetiringSignal(Arc<AtomicBool>);
 
 impl RetiringSignal {
+    /// Share the cell — only the cell's owner calls it. The owner sets it with `Release`.
     pub(crate) fn of(flag: &Arc<AtomicBool>) -> Self {
         Self(Arc::clone(flag))
     }
@@ -71,7 +72,9 @@ impl RetiringSignal {
 /// Ending is split in two so the caller makes **only one** OS call inside a lock: `terminate_raw` = one ending call · `classify` = sorting
 ///   its raw result.
 pub(crate) trait Pinned: Send + Sync {
+    /// Has it ended now — does not wait. `Err` = failure of the wait query itself.
     fn exited(&self) -> io::Result<bool>;
+    /// Wait until `d` for it to end — `true` if it ended. `Err` = failure of the wait query itself.
     fn wait_exit(&self, d: Duration) -> io::Result<bool>;
     fn facts(&self) -> &ProcessFacts;
     /// One ending call that gives `exit_code` — it does not wait for the target to end. One held without ending permission is always `Err`.

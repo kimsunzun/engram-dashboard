@@ -94,6 +94,7 @@ pub struct SessionTracker {
 }
 
 impl SessionTracker {
+    /// The thread is not started here — it starts when `start()` is called.
     pub fn new(config: TrackerConfig, on_change: Arc<dyn Fn(AgentId, Uuid) + Send + Sync>) -> Self {
         Self {
             enabled: config.enabled,
@@ -120,6 +121,7 @@ impl SessionTracker {
         );
     }
 
+    /// Call on kill/respawn — prevents zombie entries.
     pub fn unwatch(&self, agent_id: AgentId) {
         self.watched
             .lock()
