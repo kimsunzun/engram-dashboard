@@ -1,72 +1,67 @@
-# Handoff: S38 (internal text → English) — docs + leaf crates + agent crate done; wave B paused; user chose cheap setup + comment pruning
+# Handoff: S38 (internal text → English) merged to master — done; only small leftovers
 
 ## Read first
 
-- **Cost is the user's main concern now.** The user was upset at token use (「뭔 에이전트를 50개를 스폰을해」, 「내부 번역을 비싸게 쓸 필요있음?」). For the rest: Sonnet translates and runs builds/tests (`worker-scout-sonnet`), ONE Opus reviewer per unit reviews-and-fixes (S33 style), Codex at most once per unit only to confirm "no code change beyond strings", at most 3 workers at once. Do not spawn per-area reviewer trios again. The user confirmed: 「어 싼구성으로 돌리고」.
-- **New scope (user): prune comments while translating U3–U5** to the code-conventions §주석 기준 (only what code/docs cannot say; keep ADR anchors). Already-translated comments in the U3–U5 worktrees get pruned too. If the result is good, prune U1–U2 (already committed, ~20k comment lines) as a follow-up (「A로 해보고 괜찮으면 B도 정리하자」). TRD §2 updated (`f482732e`); `.s38-review/coder-common.md` has the PRUNE rule. The Opus reviewer must check every deleted comment (invariants, "do not bring back" notes).
-- The user wants a remaining-work estimate to plan; give it first when they return (numbers below).
-- S33 had NOT finished code comments and left code strings out by design — that is why S38 grew (~45k code lines + ~11k doc lines). The user thought S33 had done it all.
-- Do not message other sessions; the user syncs other branches after the single master push (「그냥 푸쉬하면 내가 알아서 동기화 하라고 전달함」).
-- Working state lives in the git-excluded folder `.s38-review/` of this worktree (briefs, tools, diffs). `STATE.md` there is a short status; this handoff supersedes it.
-- Never let a worker use `isolation: "worktree"` (it bases on master and deletes unchanged worktrees). Main creates worktrees with `git worktree add` and the brief pins `cd <path> &&`.
+- S38 is finished and on master: merge `204bec50` (S38) + follow-up merge `2558d4da` (qa known-failure text, T-114). Other sessions can sync from master now (the user tells them; do not message other sessions).
+- Cost was the user's main complaint this session. Rules the user set for multi-agent work: at most 2 workers at once (「다음에는 2개로 운영해봐」), work in chunks with feedback (「끊고 피드백하고」), no Codex check for translation, reviews reduced to targeted ones (「리뷰를 좀 줄여」). Workers must not spawn sub-agents/forks.
+- Do not ask the user to stop using the keyboard during QA (「내가 작업하는데 키를 누르는걸 막으면 안되지」).
 
 ## One-line state · next first action
 
-- State: branch `v0.5.0/chore/english-internal-text` at `961551a7` (pushed). Done and committed: PRD/TRD 2.1, ADR-0383, all docs (W1/W2a/W2b/W3), U1 leaf crates, U2 agent crate. Wave B: U6 (scripts/CI/launch/_wip + `scripts/check-hangul.mjs`) finished but unreviewed; U3 daemon / U4 src-tauri / U5 frontend stopped mid-way by main at a usage limit, partial edits uncommitted in their worktrees.
-- Remaining (measured 10:25): daemon 5,261 Korean lines left (of 8,761), src-tauri 3,327 (of 6,329), frontend 4,171 (of 7,037; ~1,000 of these are kept Korean UI assertion values) → ~11k lines to translate; then review of U3–U6, U9 integration, QA, master merge.
-- Next first action (after the user confirms the cheap plan): resume U3/U4/U5 with fresh `worker-scout-sonnet` coders that continue from `git status` in each worktree (briefs `.s38-review/coder-common.md` + `.s38-review/wave-b-units.md`), max 3 at once; then one Opus reviewer-fixer per unit.
+- State: nothing in progress. Master = `2558d4da` (pushed; its CI was started by the push and not watched). Topic branch `v0.5.0/chore/english-internal-text` = `042b480d`, pushed, fully merged.
+- Next first action (suggestion only — wait for the user): pick from the leftovers below; none blocks anything.
 
-## Repo state (measured 2026-11-18 10:27)
+## Leftovers (none started)
 
-- wt2: branch `v0.5.0/chore/english-internal-text`, HEAD `f482732e` (TRD pruning decision, after handoff commit `ae2a9c46`), ahead of its remote by the TRD commit until this handoff is pushed (this handoff's commit comes after this text). Tracked working tree clean. master unchanged (`36a055da`).
-- Unit worktrees (all branched from `961551a7`, local branches `s38-u3..u6`, NOT pushed):
-  - `I:/Engram/apps/s38-wt/u3` daemon — uncommitted partial translation.
-  - `I:/Engram/apps/s38-wt/u4` src-tauri — uncommitted partial translation.
-  - `I:/Engram/apps/s38-wt/u5` frontend — uncommitted partial translation.
-  - `I:/Engram/apps/s38-wt/u6` — local commit `71d6fb6a` (complete, unreviewed).
-  - Old: `s38-wt/u1`, `u2a`, `u2b` (already merged into the topic branch; can be removed later with `git worktree remove`), and a harness worktree `I:/Engram/apps/engram-dashboard/.claude/worktrees/agent-a5f44decd17fe2489` plus stray branches `worktree-agent-a036dc1388a9a34fa`, `worktree-agent-aab949ee597c6cff9` (all at `d62374f2`, unused — ask before deleting).
-- Engram repo: feedback commit `6d82f4e` (global-feedback rows: bulk-translation cost, worktree isolation) — not pushed (rule).
+1. Two stale worktrees `I:/Engram/apps/s38-wt/u1`, `u2b` (+ scratch notes in `s38-wt/`): recycle failed (0x20 sharing violation, later 0x7C; two `node.exe` with `s38-wt` in their command line, PIDs 31928/38496 at the time, owner unknown — not killed). User command: `! bash ~/.claude/references/recycle.sh /i/Engram/apps/s38-wt && git -C /i/Engram/apps/engram-dashboard-wt2 worktree prune`. Unit branches `s38-u1`..`s38-u6`, `s38-u2a/b` kept (merged content).
+2. T-114 (docs/tracking.md): platform test `escape_reads_up_when_nobody_holds_it` reads the live Esc key state — fix as its own topic.
+3. `core.hooksPath` is an absolute path into the main checkout's `scripts/git-hooks`; the qa binding's mutation check compares the literal `scripts/git-hooks`, so mutation falls back to the isolated copy. Decide: set the relative path, or loosen the binding check (binding = instruction file → user approval).
+4. U1–U2 comment pruning (user: 「A로 해보고 괜찮으면 B도 정리하자」) — not decided; it is expensive (~20k comment lines).
+5. TRD references in comments: keep for now; decide removal when TRDs move to references (user).
+6. Engram feedback rows committed, not pushed (rule): 52e360c (per-mode agent cap), e0db641 (code-conventions: prune existing comments), daaf878 (rm -f), 236e860 (reviewer forks past cap), df8bf06 (no rustfmt rule). 6d82f4e is from the previous session.
+
+## Repo state (measured 2026-11-18 15:51)
+
+- wt2: branch `v0.5.0/chore/english-internal-text`, HEAD `042b480d`, 0/0 vs origin, tracked tree clean (untracked = `.claude/handoff/**` attachments and an old root `bindings/` folder from 2026-10-20, not S38). This handoff's commit comes after this text and is not pushed.
+- master `2558d4da` = origin/master.
 
 ## Verification
 
-- Done: per-unit package tests in the unit worktrees — U1 (base 93, command 110, protocol 126, messaging 273, platform 85, transport 386/434, cli 157, shell lib_unit 1489, vitest wsFrame+StructuredTextView 86), U2 (agent 1553, daemon ws_e2e 45); test counts per target unchanged; comment-stripped token compare = rustfmt only. Docs: `py .s38-review/doclines.py scan @.s38-review/<unit>.txt` = 0 remaining for w1/w2a/w2b/w3; `adr.mjs lint` clean. U6: `npx vitest run src/util/checkHangul.test.ts …` 27 passed, `npx tsc --noEmit` 0.
-- Reviews done: PRD+TRD full PASS; U1 full PASS (1 fix round); U2 full PASS (1 fix round + main batched). Docs: Sonnet translate + Opus review-fix per batch.
-- **Not verified (labels):** 「QA 미실행」 — no full regression (CI three jobs locally) and no GUI run yet on the topic branch; committed U1/U2 carry "QA pending" in their commit bodies. 「리뷰 미통과」 — U6 (`71d6fb6a`) and the partial U3/U4/U5 edits are untrusted diffs. 「미커밋」 — U3/U4/U5 worktree edits.
-- Re-run check of the topic branch Hangul status: `node I:/Engram/apps/s38-wt/u6/scripts/check-hangul.mjs I:/Engram/apps/engram-dashboard-wt2` (folder mode) once U6 lands.
+- QA (engram-qa, third run, tree `4b9bdad9`): full regression PASS (backend 5512 passed, gates 32/32 incl. `cargo fmt --check` and `Hangul check`, frontend 2928 + tsc); claude, codex, shell real-daemon lanes PASS (`lanes.tsv` updated to `4b9bdad9`); real-process Job lane = known failure `ignored_daemon_kill_cleans_pty_child` only; mutation PASS (isolated copy); GUI smoke, AC3 (logs English, 0 Hangul lines) and AC4 (band en / ko head + English cause / live switch) PASS. `escape_reads_up_when_nobody_holds_it` skipped by user decision.
+- CI green on `4b9bdad9` and `042b480d`. Master CI for `204bec50` / `2558d4da` started, result not read.
+- Not verified: master CI results; the qa binding change in `042b480d` was checked only by `launcherWiring.test.ts` (6 passed) + CI, not a local full regression.
+- Known quality gap (accepted for cost): reviews were targeted; translation meaning/term slips in comments likely remain outside reviewed hunks (part-A full review found 25 in two files).
 
 ## Failed approaches (do not repeat)
 
-- Agent `isolation: "worktree"`: base was master, not the topic branch; workers stopped on the base check, the unchanged worktrees were auto-deleted, and resumed workers ran `git checkout -B` in wt2 (main checkout). Fixed by main-made worktrees.
-- Heavy review layers (3 Claude + Codex per unit, Opus re-read of every doc batch) — correct results but far too expensive for internal text (user correction).
-- One Opus coder for a 14k-line crate ran out of context ("Prompt is too long"); a continue-coder from `git status` worked. Keep units ≤ ~5k lines per coder or let coders hand over.
-- Python heredocs with `\u` in replacement strings broke (`unicodeescape`); write scripts with raw strings or via Write.
-- `git add $(cat list)` broke on Korean paths; use `git add --pathspec-from-file=<LF list>`.
+- Sonnet coders told to "prune while translating" translated only; prune needed separate chunked passes with calibration (example block + "rewrite blocks line by line"). "When unsure, keep" made them far too timid.
+- Running one worker through a whole unit grew contexts to 500–800k (U4 prune worker 56M cache reads). Hand over at ~400–500k via the progress file.
+- Full Opus review of a 20k-line unit diff: split into parts or it overflows; targeted review (risky deleted comments + changed strings) cost ~1/3.
+- `cargo fmt` after translation can split a line and move a trailing `// hangul-ok` marker off the Korean literal → run `check-hangul.mjs` after every fmt.
+- My prune calibration told workers to cut `(TRD …)` tails, conflicting with the project binding (keep existing TRD refs, `FIX <n>` anchors) → 166 refs had to be restored. Check project bindings before writing a calibration.
+- `git cherry-pick -n` leaves sequencer state; run `git cherry-pick --quit` afterwards.
 
 ## Resume command
 
-`git -C I:/Engram/apps/engram-dashboard-wt2 log --oneline -3 && for u in u3 u4 u5 u6; do git -C I:/Engram/apps/s38-wt/$u status --porcelain | wc -l; done`
+`git -C I:/Engram/apps/engram-dashboard-wt2 log --oneline -3 master && git -C I:/Engram/apps/engram-dashboard-wt2 worktree list`
 
 ## Decisions
 
 User decisions (this session):
-- (묻지 않음) scope criterion · 상황: S35 left logs/errors/LLM text Korean · 선택지 없음 · 고른 것 「일단 내가 닿는거라면 모를까 닿지 않는건 영어임」 · —.
-- include S33's leftover docs · 상황: docs had ~11k leftover Korean lines · 선택지 같이 넣음 ★ / 따로 · 고른 것 「같이 넣어」 · 같음 · 조건: 「번역이라서 내가 딱히 얘기할건 없지? 너 플랜 한번 듣고 쭉 진행하면 될듯」.
-- (묻지 않음) hold list · 고른 것 「engram help 그냥 놔두고, 너 스킬같은것도 놔두고,(나중에 내가 볼수도 있어서 일단은 보류라는거)」 · — (priming also held by Claude's reading; `.claude/**`, `CLAUDE.md` held).
-- merge cadence · 상황: hundreds of files conflict with open branches · 선택지 docs/comments first merge ★ / one push at the end · 고른 것 「그냥 다 작업하고 마스터 푸쉬하면 그것들 한번에 동기화 하는게 좋을것같은데」 · 갈림 · 조건: 「다른세션에 얘기하지는마」, 「그냥 푸쉬하면 내가 알아서 동기화 하라고 전달함」.
-- mode · 고른 것 「딱히 이슈 없으면 자율모드로 진행해」, later 「자율로 쭉 진행해」 · —.
-- (묻지 않음) comment pruning · 상황: remaining work is mostly comments (daemon 3/4) · 선택지 U3–U5 only now, U1–U2 later ★ / all now · 고른 것 「주석은 이왕이면 뺄수 있는건 뺏으면 좋겠어 … AI 기준으로 꼭 필요한것만 넣어야되는데」 then 「A로 해보고 괜찮으면 B도 정리하자」 · 같음.
-- (묻지 않음) cost · 상황: 50+ workers, mostly Opus · 고른 것 요지: internal translation should not use expensive setups (「내부 번역을 비싸게 쓸 필요있음?」); agreed the direction (「그게 맞기는하는데」) · 선택지 lighter review A ★ / Sonnet coders too B / keep C, then Claude proposed S33 style (Sonnet translate + 1 Opus review) — then confirmed 「어 싼구성으로 돌리고」 · 조건: 「일단 핸드오프해서 진행하는게맞고」.
-- Pending (asked, no answer yet): keep Korean HTML reports under `docs/` (★ keep — applied); build script output English (★ yes — applied in U6). Confirm before the master push.
+- (묻지 않음) drop Codex check for translation · 상황: translation is internal text, no behaviour change · 선택지 없음 · 고른 것 「번역에서 구지 codex 확인은 필요없어보여」 · — · 근거: 「실제 동작에 영향이 가는건 아니니」.
+- (묻지 않음) worker cap · 상황: 3 workers burned usage fast · 선택지 없음 · 고른 것 「다음에는 2개로 운영해봐」 · —.
+- (묻지 않음) chunked prune with feedback · 상황: prune workers stopped early and were timid · 선택지 없음 · 고른 것 「한꺼번에 하지 말고 끊고 피드백하고 끊고 피드백하고 하면됨」 · —.
+- TRD refs in comments · 상황: my calibration contradicted the binding, 168 refs removed in U4 · 선택지 keep ★ / remove · 고른 것 「나중에 trd에서 레퍼런스로 옮길때 결정하는게 좋으려나?」 → keep now · 같음.
+- review reduction · 상황: full Opus reviews ~35M per part, ~10 left · 선택지 targeted sample review ★ / keep full · 고른 것 「ㅇㅇ 리뷰를 좀 줄여」 · 같음.
+- U5 prune long tail · 상황: 76 small files left · 선택지 stop ★ / continue · 고른 것 「그냥 진행해 작은 파일들이라는거잖아」 · 갈림.
+- Korean HTML reports · 상황: pending since last session · 고른 것 「html 보고서는 내가 보는거잖아. claude.md에서 룰 적어놨잖아」 → keep Korean · 같음.
+- (묻지 않음) Esc test · 상황: QA asked user not to press keys · 고른 것 「esc는 안건들게 아니면 그냥 빼고 하던가」 → skip in QA · —.
+- (묻지 않음) merge · 고른 것 「다 되면 알아서 머지해」 · —; worktree cleanup 「그거 안쓰면 지워」 · —.
+- (묻지 않음) feedback rows · 고른 것 「멀티,서브 에이전트 상한을 둬야될것같음. 모드에 따라 다르게」, 「기존 주석 정리해야됨」 · —.
 
-Claude decisions: ADR-0383 decisions 1–7 (screen errors = English cause in translated head; CATALOG_VERSION not bumped; units commit regenerated bindings; English placeholder marker + frontend accepts the old Korean one until the next PROTOCOL_VERSION bump; Hangul check over code/config, docs not checked; Korean file names / ADR lint tokens / ADR index / HTML reports kept; frontend tests stay in `ko`). During coding: references to held Korean doc headings keep the Korean heading in 「」 with `hangul-ok`; ADR section names English in comments; 명부 = "roster" (agent roster, ADR-0119) vs "registry" (queued-input `Registry`); old-marker accept moved from U5 to U1 after Codex review; U1/U2 commits not added to `.git-blame-ignore-revs` (they mix in the marker code); one U1 fix round included batched wording via the coder (deviation from implement §3, to avoid a separate main pass).
-
-Open: none blocking besides the two pending user answers.
-
-## U9 checklist (after wave B)
-
-Glossary rows (`.s38-review/manual-fixes.txt`), `docs/reference/logging-conventions.md` §Format rewrite (English log line; replace the Korean example), `docs/reference/structure/i18n.md` line (causes English), `.git-blame-ignore-revs` (docs commits in `.s38-review/blame-ignore-candidates.txt`), move `hangul-ok` off `//!` lines (transport `lib.rs:283`, platform `lib.rs:104/149/168`, `group/mod.rs`, `group/windows.rs`), `check-hangul.mjs` to zero then the CI `gates` step (`shell: bash`), AC7 md scan, `ui_text.rs` continuation lines 84/87/99 markers (U4), S38 README + TRD `Implemented`, then `/engram-qa` (full regression + GUI: AC3 logs English, AC4 band en/ko + live switch), then ask the user before the master push.
+Claude decisions: do not restore ★ markers dropped by the U3 prune (rule text kept; cost); U3 daemon accepted at ~20–35% comment shrink (dense contracts); skip files with <15 comment lines in prune; blame-ignore gets docs commits + U3/U4/U5 + glossary commit, not U1/U2/U6/logging rule; S38 follow-ups (qa known-failure text, T-114) committed on the S38 branch and merged again because `v0.5.0/chore/misc` is checked out in another worktree.
 
 ## References
 
-- `docs/process/S38-english-internal-text/` (`prd.md`, `trd.md` ed. 2.1), `docs/decisions/0383-internal-text-is-english-only-screen-text-stays-switchable.md`.
-- `.s38-review/`: `coder-common.md`, `wave-b-units.md`, `code-review-brief.md`, `translator-brief.md`, `docs-reviewer-brief.md`, `doclines.py`, `manual-fixes.txt`, `blame-ignore-candidates.txt`, `STATE.md`.
+- `docs/process/S38-english-internal-text/` (README, prd, trd — Implemented), `docs/decisions/0383-*.md`.
+- `.s38-review/` (git-excluded): `prune-brief.md`, `light-review-brief.md`, `review-fix-brief.md`, `u9-notes.md`, `new-terms.md`.
