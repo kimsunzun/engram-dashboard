@@ -14,25 +14,24 @@ pub enum AgentStatus {
 }
 
 impl AgentStatus {
-    /// ★Different from "present in the session map" (load-bearing)★: a session stays in the map until the reaper collects it, so
-    ///   deciding by mere presence mixes in corpses. The roster (`AgentManager::roster`) and the daemon adapter
-    ///   (`messaging_host::is_live` — it only calls this predicate) must look at **the same condition** so the sending side and
-    ///   the flush side do not see different worlds. This predicate is canonical — do not make a duplicate.
+    /// ★Not "present in the session map" (load-bearing)★: a session stays in the map until the reaper collects it, so presence mixes in
+    ///   corpses. The roster (`AgentManager::roster`) and the daemon adapter (`messaging_host::is_live` — only calls this) must see **the
+    ///   same condition**. Canonical — no duplicates.
     // ADR-0116
     pub fn is_live(&self) -> bool {
         matches!(self, AgentStatus::Running | AgentStatus::Exiting)
     }
 }
 
-/// Internal pump→core output event. An extensible enum. core is variant-agnostic (_ => ignore).
+/// Internal pump→core output event. An extensible enum; core is variant-agnostic (_ => ignore).
 ///
-/// ★ADR-0045 (output refining moved to the backend)★: the console stays `TerminalBytes` (VT byte stream) as is,
-/// and for structured backends (claude stream-json etc.) the backend decoder parses and emits the structured variants below.
-/// This type is **an agent domain type**, not a protocol wire type — agent↔wire conversion is done by the daemon
-/// adapter (ADR-0003 isolation: core does not know the wire). No tauri import in core (serde is allowed).
+/// ★ADR-0045 (output refining moved to the backend)★: the console stays `TerminalBytes` (VT byte stream); structured backends (claude
+///   stream-json etc.) have their decoder emit the structured variants below.
+/// **An agent domain type**, not a protocol wire type — agent↔wire conversion is the daemon adapter's (ADR-0003: core does not know the
+///   wire). No tauri import in core (serde allowed).
 ///
-/// `turn_id`/`message_id` are optional fields for conversation tracking — claude need not fill them, and they are left open to absorb
-/// the turn/message model leaks of codex/gemini (swappability). None if the backend cannot fill them.
+/// `turn_id`/`message_id` are optional conversation-tracking fields — claude need not fill them; open to absorb codex/gemini turn/message
+///   model leaks. None if the backend cannot fill them.
 #[derive(Debug, Clone)]
 pub enum OutputEvent {
     /// Console raw bytes (VT stream). The only payload of PtyTransport and terminal mode.
@@ -55,11 +54,11 @@ pub enum OutputEvent {
     },
     /// The end result of one tool call — points at the earlier [`ToolCall`](Self::ToolCall) by `id` (not a new row).
     ///
-    /// ★`id` is not an `Option`★ — if there is no call to point at, the translator does not emit this event.
-    /// ★The absence of this event ≠ success★ — absence is 「unknown」 (the end did not come · pushed out of the ring · an old daemon · a backend that does not
+    /// ★`id` is not an `Option`★ — with no call to point at the translator does not emit this event.
+    /// ★Absence ≠ success★ — absence is 「unknown」 (end did not come · pushed out of the ring · an old daemon · a backend that does not
     ///   emit ends).
-    /// ★It also comes **after** the turn end (codex measured — an interrupted command keeps running and closes late)★ — so neither turn classifier counts it as progress
-    ///   or as an error.
+    /// ★It also comes **after** the turn end (codex: an interrupted command keeps running and closes late)★ — so neither turn classifier
+    ///   counts it as progress or error.
     // ADR-0241
     ToolResult { id: String, outcome: ToolOutcome },
     Usage {
@@ -72,55 +71,53 @@ pub enum OutputEvent {
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// The turn boundary + **how it ended**. Being a different type from [`MessageDone`](Self::MessageDone) is intended —
-    /// that one is "one message closed" and this one is "one turn closed with this outcome".
+    /// The turn boundary + **how it ended**. Intentionally not [`MessageDone`](Self::MessageDone): that is "one message closed", this "one
+    ///   turn closed with this outcome".
     ///
-    /// ★Some backends have several completed items in one turn (measured)★ — there **turn end ≠ message end**, so
-    ///   folding the outcome into `MessageDone` would split one turn into several boundaries. And folding the outcome into
-    ///   [`Error`](Self::Error) would **stamp a turn the user normally aborted as a failure.**
-    /// ★`MessageDone` is not migrated to this★ — claude emits ends as `MessageDone` as is, and emits only the interrupted-turn
-    ///   branch as this (`Interrupted`) (ADR-0238). The two vocabularies coexist, and which one is emitted is decided by each backend's
-    ///   decoder.
-    /// ★The outcome is **a neutral enum** — the backend's raw state string is not carried as is★ (ADR-0004).
+    /// ★Some backends have several completed items per turn (measured)★ — **turn end ≠ message end**, so folding the outcome into
+    ///   `MessageDone` would split one turn into several boundaries; folding it into [`Error`](Self::Error) would **stamp a user-aborted
+    ///   turn a failure.**
+    /// ★`MessageDone` is not migrated to this★ — claude emits ends as `MessageDone` and only the interrupted-turn branch as this
+    ///   (`Interrupted`, ADR-0238); the two coexist, each backend's decoder decides.
+    /// ★The outcome is **a neutral enum** — the backend's raw state string is not carried★ (ADR-0004).
     TurnEnd {
         turn_id: Option<String>,
         outcome: TurnOutcome,
     },
     /// An error the backend reported — ★**not a turn boundary**★ (separate from `TerminalReason` too).
     ///
-    /// ★What each of the two vocabularies means — consumers split here★:
-    ///   - `Error` = **an incident within the turn**. The same turn continues after it (a stream error that gets retried is
-    ///     of this kind). Reading it as an end would split one turn into as many pieces as there were incidents.
-    ///   - [`TurnEnd`](Self::TurnEnd) = **the turn ended**. A turn that ended in failure also comes in this vocabulary.
-    /// ★So 「is it retried」 is not sent out as a separate field★ — the event type already carries that distinction.
-    /// ★A failed claude turn comes as `Error` followed by [`MessageDone`](Self::MessageDone)★ — that backend, which does not put failures in `TurnEnd`
-    ///   (only interrupted turns are `TurnEnd`), emits the two in this order from one failed `result` line, and the turn
-    ///   classifier recognizes that `Error` by its prefix and folds the following end into an error end (`RESULT_FAILURE_DETAIL` of
-    ///   `backend/claude`). ★An `Error` without that
-    ///   prefix is not a turn error★ — a line-buffer overflow (`partial-line buffer overflow`) is an example.
+    /// ★Two vocabularies★:
+    ///   - `Error` = **an incident within the turn**; the same turn continues (a retried stream error is this). Read as an end it would
+    ///   split a turn into as many pieces as incidents.
+    ///   - [`TurnEnd`](Self::TurnEnd) = **the turn ended**; a failed turn comes in this vocabulary too.
+    /// ★「Is it retried」 is not a separate field★ — the event type carries it.
+    /// ★A failed claude turn comes as `Error` followed by [`MessageDone`](Self::MessageDone)★ — claude puts failures not in `TurnEnd`
+    ///   (only interrupted turns) but emits the two in this order from one failed `result` line; the turn classifier recognizes that
+    ///   `Error` by prefix and folds the following
+    ///   end into an error end (`RESULT_FAILURE_DETAIL` of `backend/claude`). ★An `Error` without that prefix is not a turn error★ — e.g.
+    ///   a line-buffer overflow (`partial-line buffer overflow`).
     Error(String),
     /// Escape hatch (forward-compat) for per-backend structured events not caught by the formal variants above.
     /// kind = event kind tag, json = original serialized payload. core does not interpret the content.
     Structured { kind: String, json: String },
-    /// Queued input registry event — backend-neutral. The canonical interpretation (reduction rules) is [`crate::queued_input`].
+    /// Queued input registry event — backend-neutral. Canonical interpretation (reduction rules): [`crate::queued_input`].
     ///
-    /// ★Not carried in the [`Structured`](Self::Structured) escape hatch★ — the claude turn classifier counts every `Structured`
-    ///   except the interrupted marker (`kind:"interrupted"` — ADR-0243) as a progress signal, so carried there, a registry event coming after the turn end
-    ///   would turn 「in a turn」 back on.
+    /// ★Not carried in the [`Structured`](Self::Structured) escape hatch★ — the claude turn classifier counts every `Structured` except
+    ///   the interrupted marker (`kind:"interrupted"` — ADR-0243) as progress, so a registry event coming after the turn end would turn
+    ///   「in a turn」 back on.
     // ADR-0231
     QueuedInput(QueuedInputEvent),
 }
 
-/// The event [`OutputEvent::QueuedInput`] carries — the registry (`crate::queued_input`) and the frontend accumulator read it with the same reduction
-/// rules. `id` = that input's identifier (claude = input uuid · codex = `clientId`).
+/// The event [`OutputEvent::QueuedInput`] carries — the registry (`crate::queued_input`) and the frontend accumulator read it with the
+///   same reduction rules. `id` = that input's identifier (claude = input uuid · codex = `clientId`).
 ///
 /// ★Producer obligations — what the reduction rules rely on★:
-///   - `Queued` is emitted **once** per id (no re-emission — the reducer drops a second one).
-///   - `CancelRequested` is also once per id (the idempotency decision is on the producer side · the reducer is a second defense).
-///   - `AckUnavailable.delivered` **is emitted empty by the decoder** — the body copies of the entries that event closes as accepted are
-///     filled by the core at the moment it writes to the ring (so the bubbles can be redrawn even if the ring cap pushes out `Queued`).
-/// ★`Delivered` carries no body★ — the bubble body is our local copy (the `text` of `Queued`) (the vendor may
-///   normalize it — ADR-0198).
+///   - `Queued` is emitted **once** per id (the reducer drops a second).
+///   - `CancelRequested` is once per id too (idempotency on the producer side · the reducer is a second defense).
+///   - `AckUnavailable.delivered` **is emitted empty by the decoder** — the core fills the body copies of the entries that event closes as
+///   accepted when it writes to the ring (so bubbles redraw even if the ring cap pushes out `Queued`).
+/// ★`Delivered` carries no body★ — the bubble body is our local copy (`Queued`'s `text`); the vendor may normalize it (ADR-0198).
 // ADR-0231
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueuedInputEvent {
@@ -129,15 +126,17 @@ pub enum QueuedInputEvent {
     /// The cancel request was accepted — the outcome is decided by the event that follows.
     CancelRequested { id: String },
     /// Success response of the cancel request. `removed` = whether the vendor removed that text from its own queue.
-    ///   ★Only `true` is an outcome (cancelled right away)★ — `false` is material for telling whether the vendor close that follows was our cancel.
+    ///   ★Only `true` is an outcome (cancelled right away)★ — `false` is material for telling whether the vendor close that follows was
+    ///   our cancel.
     CancelAnswered { id: String, removed: bool },
     /// The cancel request itself failed (error response · cancel line write failure). ★It is not returned to the list★ — it stays pending cancel
     ///   as 「could not remove」, and the outcome is decided by the vendor lifecycle.
     CancelFailed { id: String },
     /// The link handed that text to the vendor (`sent: true` — wrote codex `turn/steer`·`turn/start`) · put it back where it held it
-    ///   (`false` — the turn ended without an echo · steer refused · write failure). ★Not an outcome★ — the row stays on the list (a handed-over row hides its ✕)
-    ///   and what removes it is still `Delivered`·`Dropped`·the cancel response. A no-op for an id not on the list.
-    ///   ★The value is the link's current stage★ — it can come several times for the same id and the last one wins. claude does not emit it.
+    ///   (`false` — turn ended without an echo · steer refused · write failure). ★Not an outcome★ — the row stays on the list (a
+    ///   handed-over row hides its ✕) and
+    ///   `Delivered`·`Dropped`·the cancel response still remove it. A no-op for an id not on the list. ★The value is the link's current
+    ///   stage★ — it can come several times for one id, last wins. claude does not emit it.
     HandedOver { id: String, sent: bool },
     /// The vendor put it into a turn → it leaves the list and becomes a bubble at the end of the conversation.
     Delivered { id: String },
@@ -147,8 +146,8 @@ pub enum QueuedInputEvent {
     AckUnavailable { delivered: Vec<DeliveredCopy> },
 }
 
-/// The cause of [`QueuedInputEvent::Dropped`]. ★Only `Unknown` leaves a revivable tombstone★ — a late vendor
-/// ack beats 「unknown」 (the tombstone rule of `crate::queued_input`).
+/// The cause of [`QueuedInputEvent::Dropped`]. ★Only `Unknown` leaves a revivable tombstone★ — a late vendor ack beats 「unknown」
+///   (tombstone rule of `crate::queued_input`).
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropCause {
@@ -174,13 +173,14 @@ pub struct DeliveredCopy {
 
 /// **How** the turn ended — the neutral vocabulary [`OutputEvent::TurnEnd`] carries.
 ///
-/// ★What is neutral is **the discriminant** — not `detail`★ (ADR-0004): each backend decoder moves the other protocol's state strings
-///   into these four branches, and that is the only **axis** the outside (core · wire · frontend) **branches on**.
-/// ★`detail` carries the human-readable sentence the other side made as is★ — the failure reason the other side gave is the only
-///   information, so moving it into a neutral vocabulary would require inventing meaning. The grade of that field is **the same** as the string of
-///   [`OutputEvent::Error`] (opaque · for drawing only). Length and credential masking are carried by the backend decoder that made it.
-/// ★Do not fold [`Unknown`](Self::Unknown) into one of the three known ones★ — folding would require guessing the meaning of an unknown value,
-///   and if that guess is wrong the screen draws **a false outcome**. The fact of not knowing itself is carried.
+/// ★What is neutral is **the discriminant**, not `detail`★ (ADR-0004): each backend decoder maps the other protocol's state strings into
+///   these four branches, the only **axis** the outside (core · wire · frontend) **branches on**.
+/// ★`detail` carries the other side's human-readable sentence as is★ — the failure reason it gave is the only information, and a neutral
+///   vocabulary would need invented meaning. Same grade as the string of [`OutputEvent::Error`] (opaque · for drawing only); length and
+///   credential masking belong to the
+/// decoder that made it.
+/// ★Do not fold [`Unknown`](Self::Unknown) into one of the three known ones★ — that would guess an unknown value's meaning and a wrong
+///   guess draws **a false outcome**; the fact of not knowing is carried.
 // ADR-0004
 // ADR-0045
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,14 +194,15 @@ pub enum TurnOutcome {
     ///   (the same reason `TerminalReason::Interrupted` exists separately).
     Interrupted,
     /// The outcome cannot be known — the other side gave a value we do not know, or gave none at all.
-    /// ★The turn is still counted as ended★: dropping the event because the outcome is unknown would keep that conversation's waiting indicator spinning forever.
+    /// ★The turn is still counted as ended★: dropping the event because the outcome is unknown would keep that conversation's waiting
+    ///   indicator spinning forever.
     Unknown,
 }
 
-/// Neutral category of a tool call — carried by [`OutputEvent::ToolCall`]. Decided by each backend translator.
+/// Neutral category of a tool call — carried by [`OutputEvent::ToolCall`], decided by each backend translator.
 ///
-/// ★Vendor tool names and item types do not come here★ (ADR-0004) — the name tables and decisions are inside `backend/claude` · `backend/codex`,
-///   and the outside (core · daemon · wire · frontend) knows only these nine branches.
+/// ★Vendor tool names and item types do not come here★ (ADR-0004) — name tables and decisions stay in `backend/claude` · `backend/codex`;
+///   the outside (core · daemon · wire · frontend) knows only these nine branches.
 // ADR-0239
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCategory {
@@ -213,13 +214,13 @@ pub enum ToolCategory {
     Web,
     Agent,
     Mcp,
-    /// A tool that belongs to none of the categories above or that the translator does not know — if the vendor renames or adds tools, they fall here.
+    /// A tool that belongs to none of the categories above or that the translator does not know — if the vendor renames or adds tools,
+    ///   they fall here.
     Other,
 }
 
-/// Neutral outcome of a tool call's end result — carried by [`OutputEvent::ToolResult`].
-///
-/// ★Vendor end-state strings do not come here★ (ADR-0004) — the decision ends inside each backend.
+/// Neutral outcome of a tool call's end result — carried by [`OutputEvent::ToolResult`]. ★Vendor end-state strings do not come here★
+///   (ADR-0004) — the decision ends inside each backend.
 // ADR-0241
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolOutcome {
@@ -242,8 +243,8 @@ pub enum InputEvent {
 
 /// **From whom** the input came — received by the session write verbs.
 ///
-/// ★`Mail` never goes onto the queued list in any backend★ — non-human callers (mail delivery · pilot) always take today's
-///   path. Caller table: WS `WriteStdin` = `User` · all `*_observed` verbs = `Mail`.
+/// ★`Mail` never goes onto the queued list in any backend★ — non-human callers (mail delivery · pilot) take the plain path. Callers: WS
+///   `WriteStdin` = `User` · all `*_observed` verbs = `Mail`.
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputOrigin {
@@ -253,8 +254,8 @@ pub enum InputOrigin {
 
 /// **Who classifies and who releases** input typed mid-turn — the backend reports it at spawn (ADR-0004 shape).
 ///
-/// ★The session decides only by this value — it does not branch on the encoder tag or backend name★. Branching that way would leak backend knowledge
-///   into the session.
+/// ★The session decides only by this value, not by encoder tag or backend name★ — branching that way would leak backend knowledge into the
+///   session.
 // ADR-0231
 #[derive(Debug, Clone, Copy)]
 pub enum MidTurnPolicy {
@@ -263,19 +264,19 @@ pub enum MidTurnPolicy {
     /// The session classifies inside the input lock and the vendor releases (claude JSON). `cancel_line` = one stdin line
     /// requesting the cancellation of that id (newline included — the session `send_input`s it as is).
     SessionClassified { cancel_line: fn(&str) -> Vec<u8> },
-    /// The link carries classification, release and cancellation (codex JSON) — the session hands over [`TurnInput`] and only hands cancellation
-    /// to `AgentTransport::withdraw`. It does not take the input lock (order is carried by the link state lock).
-    /// ★The session does not count the submissions of the session id first-submission latch either★ — a backend reporting this policy must plug the first-turn port
-    ///   into its link (the pairing discipline of `backend::FirstTurnSink` · ADR-0226 amendment).
+    /// The link carries classification, release and cancellation (codex JSON) — the session hands over [`TurnInput`] and only passes
+    ///   cancellation to `AgentTransport::withdraw`; it does not take the input lock (order is carried by the link state lock).
+    /// ★The session does not count the session id first-submission latch's submissions either★ — a backend reporting this policy must plug
+    ///   the first-turn port into its link (pairing: `backend::FirstTurnSink` · ADR-0226 amendment).
     TransportOwned,
 }
 
-/// Whether this incarnation **can give per-entry acks** — three incarnation-shared values. The backend fills it and the session and link read it.
+/// Whether this incarnation **can give per-entry acks** — three incarnation-shared values; the backend fills it, the session and link read it.
 ///
-/// ★The transition happens only from `Unknown` — once decided it is not reverted★. If `Available` were reverted, the decisions of the entries
-///   listed before then would diverge (the ack-unavailable verdict applies once to 「all entries listed until then」).
-/// ★The ring order of the ack-unavailable verdict is set not by this atomic value but by the `AckUnavailable` in the ring★ — the core does not read
-///   this value (the list event door of `OutputCore`).
+/// ★The transition happens only from `Unknown` — once decided it is not reverted★: reverting `Available` would diverge the decisions of
+///   entries listed before (the ack-unavailable verdict applies once to 「all entries listed until then」).
+/// ★The ack-unavailable verdict's ring order is set by the `AckUnavailable` in the ring, not by this atomic★ — the core does not read it
+///   (the list event door of `OutputCore`).
 // ADR-0231
 #[derive(Debug, Default)]
 pub struct DeliveryAck(std::sync::atomic::AtomicU8);
@@ -328,10 +329,8 @@ impl DeliveryAck {
     }
 }
 
-/// One turn a `TransportOwned` session hands to the link (`AgentTransport::send_turn`).
-///
-/// `id` = this input's identifier — the `WriteOutcome::msg_uuid` string of this write (the same value as the id of the list event) · `body` =
-/// the bytes after the encoder.
+/// One turn a `TransportOwned` session hands to the link (`AgentTransport::send_turn`). `id` = this input's identifier — the
+///   `WriteOutcome::msg_uuid` string of this write (same as the list event id) · `body` = the bytes after the encoder.
 // ADR-0231
 #[derive(Debug, Clone)]
 pub struct TurnInput {
@@ -346,7 +345,8 @@ pub struct TurnInput {
 pub enum Withdraw {
     /// The link erased the entry it held — the vendor never saw that text.
     Withdrawn,
-    /// Already handed over — the link cannot withdraw it and the row stays on the list (the outcome is the vendor's — accepted, or withdrawn when it turns out not accepted).
+    /// Already handed over — the link cannot withdraw it and the row stays on the list (the outcome is the vendor's — accepted, or
+    ///   withdrawn when it turns out not accepted).
     TooLate,
     /// An id the link does not know (already has an outcome or is off the list).
     NotHeld,
@@ -396,11 +396,10 @@ pub enum TerminalReason {
     Error(String),
 }
 
-/// User intent — filled by the kill handler (ADR-0019). It is **separated** from the PTY-observed fact (TerminalReason):
-/// inferring the intent by observing the exit would misclassify a daemon-shutdown Job-kill as a user kill, so the intent is
-/// tagged explicitly at "the action point that caused the exit" (the kill command handler).
-/// `#[repr(u8)]` — kept and snapshotted per session as `Arc<AtomicU8>`. DaemonShutdown is separated into the global
-/// `shutting_down` flag (not kept here).
+/// User intent — filled by the kill handler (ADR-0019), **separated** from the PTY-observed fact (TerminalReason): inferring intent from
+///   the exit would misclassify a daemon-shutdown Job-kill as a user kill, so the intent is tagged at "the action point that caused the
+///   exit" (the kill command handler).
+/// `#[repr(u8)]` — kept per session as `Arc<AtomicU8>`. DaemonShutdown is the global `shutting_down` flag (not kept here).
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminationIntent {
@@ -420,9 +419,8 @@ impl TerminationIntent {
 
 /// The exit event the pump emits once when it is the finish winner (consumed solely by the ADR-0019 reaper).
 ///
-/// ★Key to race prevention★: `intent_at_finish`/`shutting_down_at_finish` are frozen values snapshotted at **the very moment of finish**.
-/// If the reaper read them live at reap time, a race would arise: "after dying by crash and before the reaper handles it, the user
-/// kills → the crash is misclassified as a user kill → profile deleted (data loss)" (found in a GPT consult).
+/// ★Race prevention★: `intent_at_finish`/`shutting_down_at_finish` are frozen at **the very moment of finish**; read live at reap time,
+///   "crash → user kills before the reaper handles it → crash misclassified as a user kill → profile deleted (data loss)" would arise.
 #[derive(Debug, Clone)]
 pub struct ReapMsg {
     pub id: AgentId,
@@ -433,10 +431,9 @@ pub struct ReapMsg {
     pub shutting_down_at_finish: bool,
 }
 
-/// Exit classification result (ADR-0019 §decide). reap_one applies it to the ProfileRegistry outside the lock.
-/// ★Having no delete disposition is intended (ADR-0083)★ — the reaper does not auto-delete a profile on any exit.
-/// Profile deletion is done only by an explicit user command (AgentCommand::DeleteProfile / Tauri delete_profile)
-/// calling ProfileRegistry::try_remove directly, without going through this enum.
+/// Exit classification result (ADR-0019 §decide); reap_one applies it to the ProfileRegistry outside the lock.
+/// ★No delete disposition is intended (ADR-0083)★ — the reaper never auto-deletes a profile on any exit; deletion is only an explicit user
+///   command (AgentCommand::DeleteProfile / Tauri delete_profile) calling ProfileRegistry::try_remove directly, not through this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
     /// Every runtime exit (user kill · normal exit · crash · EOF · signal) → keep the profile + auto_restore=false
@@ -457,105 +454,103 @@ pub struct CommandSpec {
 
 // ── ADR-0086: control channel entry (MCP) — agent seam ──────────────────────────────────────
 //
-// ★Why agent has an abstract descriptor + seam★: for a spawned agent to attach to the daemon's control channel (MCP entry),
-//   (a) the daemon issues a token per (AgentId, epoch) and (b) that token + endpoint must be injected into the backend command line.
-//   But **token issuing, the MCP server and the mcp-config file** are all daemon concerns (rmcp/axum/HTTP), so
-//   bringing them into agent would break the same spirit as the tauri-import-0 isolation (no dependency on transport or infrastructure). So with
-//   **the same idiom (ADR-0003)** as OutputSink/StatusSink, agent knows only a pure trait (`ControlChannel`) + an abstract
-//   descriptor (`ControlEndpoint`), and the real implementation is provided by the daemon (`DaemonControlChannel`).
+// ★Why an abstract descriptor + seam★: for a spawned agent to attach to the control channel (MCP entry), (a) the daemon issues a token per
+//   (AgentId, epoch) and (b) token + endpoint are injected into the backend command line; but **token issuing, the MCP server and the
+//   mcp-config file** are daemon
+//   concerns (rmcp/axum/HTTP), and bringing them into agent would break the tauri-import-0 isolation. So, in the same idiom as
+//   OutputSink/StatusSink (ADR-0003), agent knows only a pure trait (`ControlChannel`) + an abstract descriptor (`ControlEndpoint`); the
+//   daemon provides the real
+//   implementation (`DaemonControlChannel`).
 
-/// The **bare executable name** the spawned agent **actually types** in the shell (no path or extension). The stem of the deployed executable,
-/// the exe of `ToolGrant::Cli`, the name the backend makes resolvable by adding to PATH, and the command the priming teaches —
-/// the four must be **literally the same** (ADR-0094 alignment invariant).
+/// The **bare executable name** the spawned agent **actually types** in the shell (no path or extension). The stem of the deployed
+///   executable, the exe of `ToolGrant::Cli`, the name the backend makes resolvable via PATH, and the command the priming teaches must be
+///   **literally the same** (ADR-0094 alignment invariant).
 ///
-/// ★Do not retype it anywhere★: if the name diverges by even one place, the agent calls a command not on PATH or not covered by the grant,
-///   and mail **silently stops** without an error (ADR-0099 measured: 6 of 7 not sent).
-/// ★What CI catches now / does not catch★: the grant string and the PATH resolution name are derived from this constant and cannot diverge separately,
-///   and **shipped file name ↔ constant** (`engram-dashboard-cli/tests/engram_cli.rs`) and **priming ↔ constant** (daemon
-///   `control/priming.rs` pin) are tests that run without claude, so CI sees them. The axis left outside CI is **whether the agent actually
-///   resolves and runs that name** — because the real claude spawn tests are excluded since the runner has no claude, and
-///   that is confirmed only by local measurement.
+/// ★Do not retype it anywhere★: one diverging place makes the agent call a command not on PATH or not covered by the grant, and mail
+///   **silently stops** (ADR-0099 measured: 6 of 7 not sent).
+/// ★What CI catches / does not★: the grant string and PATH resolution name derive from this constant; **shipped file name ↔ constant**
+///   (`engram-dashboard-cli/tests/engram_cli.rs`) and **priming ↔ constant** (daemon `control/priming.rs` pin) run without claude. Outside
+///   CI: **whether the agent actually
+/// resolves and runs that name** — real claude spawn tests are excluded (no claude on the runner); local measurement only.
 // ADR-0094
 pub const CLI_EXE_NAME: &str = "engram";
 
 /// The **logical name** of the daemon MCP server (the `mcpServers` key · the server slot of `mcp__{server}__{tool}`).
 ///
-/// ★The definition is here because there are consumers outside the daemon too★: the daemon authors the mcp-config JSON with this name
-///   and fills `ToolGrant::Mcp`, and the backend folder also assembles **its program's MCP
-///   attachment syntax** with the same name (codex's `-c mcp_servers.<name>=…`). The backend crate cannot depend on the daemon
-///   (dependency direction), so if the name stayed there, a **second copy** would appear on the backend side.
-/// ★If they diverge the symptom is quiet★: if the server name mismatches, the grant points at a nonexistent server, and on the codex side
-///   the tools come up under a wrong name matching neither the priming nor the grant — neither branch raises an error.
+/// ★Defined here because consumers exist outside the daemon too★: the daemon authors the mcp-config JSON and `ToolGrant::Mcp` with it, and
+///   the backend folder assembles **its program's MCP attachment syntax** with the same name (codex's `-c mcp_servers.<name>=…`). The
+///   backend crate cannot depend on the
+/// daemon, so a name kept there would need a **second copy**.
+/// ★A divergence is quiet★: a mismatching server name points the grant at a nonexistent server, and on codex the tools appear under a
+///   wrong name matching neither priming nor grant — no error either way.
 // ADR-0094
 // ADR-0209
 pub const MCP_SERVER_NAME: &str = "engram";
 
 /// CLI mail group name — the middle token of `engram mail <verb>` (ADR-0132 group structure).
 ///
-/// ★Why agent knows this★: the deciders guarding the **education↔wiring equality** of the mail channel (ADR-0128/0099) must
-///   **find the mail CLI education in the priming body**, and if that decision token diverges from the notation the CLI actually accepts, the decision
-///   silently flips. So the CLI's dispatch and those deciders look at the same value.
-/// ★That decision cannot be made from the bare executable name alone★: the MCP priming legitimately uses the same word as the MCP **server name**
-///   (`on the engram server`) — so the decision is made by the **adjacency** of `CLI_EXE_NAME` + this token.
+/// ★Why agent knows this★: the deciders guarding the mail channel's **education↔wiring equality** (ADR-0128/0099) must **find the mail CLI
+///   education in the priming body**, and a decision token diverging from the CLI's accepted notation silently flips the decision; so the
+///   CLI dispatch and the deciders look at one value.
+/// ★Not decidable from the bare executable name alone★: the MCP priming legitimately uses the same word as the MCP **server name** (`on
+///   the engram server`), so the decision uses the **adjacency** of `CLI_EXE_NAME` + this token.
 // ADR-0132
 pub const CLI_GROUP_MAIL: &str = "mail";
 
 /// The **silence limit** (seconds) the CLI endures on the control route — the upper bound of the daemon deadline.
 ///
-/// ★Not 「a total budget」★: consumers put this into `set_read_timeout` (+`set_write_timeout`), so the firing
-/// condition is 「after the request is sent, **one read** receives not a single byte within this time」 — it measures not the duration of the whole
-/// round trip but **a continuous no-response interval**. Today the control route streams no bytes before the answer, so the two
-/// values are effectively the same, but do not write sentences relying on that coincidence (if intermediate bytes appear, the total duration can exceed this value
-/// without the client cutting off).
-/// ★Why both sides must look at the same value★: the daemon **answers with `TIMEOUT`** on a round trip past its deadline, but if
-/// the CLI cuts the socket before that answer goes out, nobody sees it — to the user it looks like 「could not reach the daemon」
-/// (when in fact it did reach and the command may have been applied), and the daemon side loses the place to send the reply. It actually
-/// was inverted that way: both sides held 10 seconds each, but the CLI's clock started **first** (connect · parse · pool scheduling come
-/// before the daemon deadline) and the daemon's answer went out only after the collection period (1 second), so the client deterministically cut off first.
-/// ★So the relation is an inequality★: `daemon deadline + collection period + margin ≤ this value`. The one place enforcing that inequality is the daemon
-/// side (`fits_caller_silence_window` of daemon `command_delivery` — the default by a `const` assertion,
-/// injected values decided in the constructor). Shrinking this value breaks that assertion and stops the build. **Do not write that arithmetic
-/// again here** — the day the two copies diverge, neither can be trusted.
-/// ★Why an integer in seconds★: `Duration` has a different grain from the other CLI vocabulary in this agent list, and letting the two consumers
-/// each wrap it in their own type keeps this constant a pure **number**.
+/// ★Not 「a total budget」★: consumers put it into `set_read_timeout` (+`set_write_timeout`), so it fires when, after the request is sent,
+///   **one read** receives not a byte within this time — a **continuous no-response interval**, not the whole round trip. Today the
+///   control route streams no bytes
+/// before the answer, so the two coincide; do not rely on it (with intermediate bytes the total can exceed this without the client cutting off).
+/// ★Both sides must look at the same value★: the daemon **answers `TIMEOUT`** on a round trip past its deadline, but a CLI cutting the
+///   socket first hides it — to the user 「could not reach the daemon」 though the command may have applied. It happened: both held 10 s,
+///   but the CLI's clock started **first** (connect · parse ·
+/// pool scheduling precede the daemon deadline) and the daemon's answer left only after the 1 s collection period, so the client cut off
+///   first deterministically.
+/// ★So the relation is an inequality★: `daemon deadline + collection period + margin ≤ this value`, enforced in one place on the daemon
+///   side (`fits_caller_silence_window` of daemon `command_delivery` — `const` assertion for the default, constructor for injected
+///   values); shrinking this breaks the build. **Do not write that
+/// arithmetic here again** — diverged copies cannot be trusted.
+/// ★Integer seconds★: `Duration` has a different grain from the other CLI vocabulary here, and wrapping per consumer keeps this a pure
+///   **number**.
 pub const CLI_CONTROL_READ_TIMEOUT_SECS: u64 = 10;
 
 /// The variable name used when carrying the **absolute path** of the CLI executable in the spawn env.
 ///
-/// The backend puts the value under this name (claude), and the priming deciders look for this name in the body to see "whether the CLI surface
-/// is written" — the two places must look at the same value so the decision does not diverge from the actual wiring.
-/// ★The name merely appearing is not education★: what counts as send education is only **the call form** (the form where the group token follows
-///   this variable). The canonical decision rule is daemon `control/priming.rs`.
+/// The backend puts the value under this name (claude), and the priming deciders look for this name in the body to see "whether the CLI
+///   surface is written" — the two must look at one value.
+/// ★The name merely appearing is not education★: only **the call form** (group token following this variable) counts as send education.
+///   Canonical rule: daemon `control/priming.rs`.
 // ADR-0132
 pub const CLI_EXE_ENV: &str = "ENGRAM_CLI_EXE";
 
 /// The variable name used when carrying the control channel bearer token in the spawn env.
 ///
-/// ★There is a place where the name itself became a contract — hence a constant★: codex receives, in its MCP server settings, **this variable name**
-///   instead of the token **value** (`bearer_token_env_var`) and reads it from env itself. That is, the side planting it
-///   ([`crate::backend::inject_cli_entrance`]) and the side writing that name into the settings (backend/codex) must look at one
-///   value.
-/// ★If they diverge it is quiet★: if the name mismatches, codex attaches without an Authorization header and the daemon returns 401, and
-///   that 401 shows up not on the agent screen but only as an MCP server startup failure.
+/// ★The name itself became a contract — hence a constant★: codex receives **this variable name** in its MCP server settings instead of the
+///   token **value** (`bearer_token_env_var`) and reads it from env itself; the planting side ([`crate::backend::inject_cli_entrance`])
+///   and the settings side (backend/codex) must look at one value.
+/// ★A divergence is quiet★: a mismatching name makes codex attach without an Authorization header and the daemon returns 401, visible not
+///   on the agent screen but only as an MCP server startup failure.
 // ADR-0086
 // ADR-0209
 pub const TOKEN_ENV: &str = "ENGRAM_TOKEN";
 
 /// All verbs of the mail group — `engram mail <verb>`.
 ///
-/// Two consumers must look at the same value: the CLI parser (what it accepts) · the priming decider (whether the body taught an **executable**
-/// call). ★The third, 「the user guidance text」, went away with ADR-0220 decision 5 — the help screen no longer teaches the CLI mail
-/// verbs.★ If the decider looked only up to the group token, it would count **a verb-less fragment** like `engram mail` as
-/// education too, but that is a command that does not run, so "taught" would be false.
+/// Two consumers must look at one value: the CLI parser (what it accepts) · the priming decider (whether the body taught an **executable**
+///   call). A decider looking only up to the group token would count **a verb-less fragment** like `engram mail` as education, but that
+///   command does not run. (The third,
+/// the user guidance text, went with ADR-0220 decision 5 — help no longer teaches the CLI mail verbs.)
 // ADR-0132
 pub const CLI_MAIL_VERBS: [&str; 3] = ["send", "status", "pending"];
 
 /// All mail-CLI-only flag notations (kebab).
 ///
-/// The set the parser recognizes, and the vocabulary the priming decider uses to see "whether the CLI surface is written". The MCP entry receives the same
-/// concept as a snake_case JSON field (`reply_to`), so **the notation axis tells the two entries apart**.
-/// ★If the parser's match arms and this list diverge★, the value-slot defense (the accident of swallowing a flag as a value) and the priming decision
-///   miss the new flag — the drift test of `engram-dashboard-cli/src/bin/engram.rs` catches that mismatch.
+/// The set the parser recognizes and the vocabulary the priming decider uses for "whether the CLI surface is written". The MCP entry
+///   receives the same concept as a snake_case JSON field (`reply_to`), so **the notation axis tells the two entries apart**.
+/// ★If the parser's match arms and this list diverge★, the value-slot defense (a flag swallowed as a value) and the priming decision miss
+///   the new flag — the drift test of `engram-dashboard-cli/src/bin/engram.rs` catches it.
 // ADR-0132
 pub const CLI_MAIL_FLAGS: [&str; 6] = [
     "--to",
@@ -568,37 +563,37 @@ pub const CLI_MAIL_FLAGS: [&str; 6] = [
 
 /// CLI control group name — the middle token of `engram agent <verb>`.
 ///
-/// ★Unlike the mail group (`CLI_GROUP_MAIL`), it is not used for the priming decision★: for mail, the decider must keep the "taught channel = laid wiring"
-///   equality (ADR-0128), so agent had to know that token, but control has no such equality
-///   (ADR-0132 decision 5 — permission is open to everyone). The only reason it is here is to make **the CLI parser, help and drift test look at one
-///   string**.
+/// ★Unlike the mail group (`CLI_GROUP_MAIL`), not used for the priming decision★: mail's decider must keep the "taught channel = laid
+///   wiring" equality (ADR-0128), but control has none (ADR-0132 decision 5 — permission open to everyone). It is here only so **the CLI
+///   parser, help and drift test look at one string**.
 // ADR-0132
 pub const CLI_GROUP_AGENT: &str = "agent";
 
 /// All verbs of the control group — `engram agent <verb>`.
 ///
-/// ★The absence of `kill`·`rm` is not a missing implementation but **a deferred decision**★: whether removing from the tree ends the agent's life
-///   (ADR-0122) is still out of line with the code (the current `try_delete_agent` deletes only the profile and leaves the process),
-///   so putting those two here would expose that inconsistency through a new entry. Do not add them to this list before that decision stands.
+/// ★The absence of `kill`·`rm` is **a deferred decision**, not a missing implementation★: whether removing from the tree ends the agent's
+///   life (ADR-0122) is still out of line with the code (`try_delete_agent` deletes only the profile and leaves the process), and these
+///   two would expose that inconsistency through a new entry.
+/// Do not add them before that decision stands.
 // ADR-0132
 // ADR-0122
 pub const CLI_AGENT_VERBS: [&str; 5] = ["list", "spawn", "new", "rename", "move"];
 
-/// All control-group-only flag notations (kebab) — the set the parser recognizes and the vocabulary of the value-slot defense
-/// (the same discipline as `CLI_MAIL_FLAGS`, kept separately per group — because one group's flag must not steal another group's
-/// value slot).
+/// All control-group-only flag notations (kebab) — the set the parser recognizes and the value-slot defense's vocabulary (same discipline
+///   as `CLI_MAIL_FLAGS`, kept per group so one group's flag cannot steal another's value slot).
 // ADR-0132
 pub const CLI_AGENT_FLAGS: [&str; 3] = ["--cwd", "--name", "--parent"];
 
 /// The help screen route — the CLI POSTs without a session and the daemon produces the screen.
 ///
-/// ★Body = `{"topic": null | "<word>"}` · success response = `{"screen": "<screen>"}` (key names = the two constants below)★.
-///   `topic` is required (null = table of contents screen), and if there are other keys the daemon rejects with `INVALID_ARGUMENT` — so that a CLI
-///   whose key spelling diverged does not silently get the table of contents. The rejection is the same `{"status":"error",…}` envelope as the sibling
-///   control routes.
-/// ★Both sides look at path and keys through this one copy★ — retyping the literals would let an edit fixing only one side show up only as a 404 or a key
-///   rejection. The five sibling control routes (`/control/send` etc.) are still matched by hand between the CLI and the daemon
-///   (the `CONTROL_HELP_PATH` doc of `mcp_server.rs` · moving them to shared constants is a follow-up — TRD S21 2-3 §8 O15).
+/// ★Body = `{"topic": null | "<word>"}` · success = `{"screen": "<screen>"}` (key names = the two constants below)★. `topic` is required
+///   (null = table of contents), and other keys are rejected by the daemon with `INVALID_ARGUMENT` — so a CLI with diverged key spelling
+///   does not silently get the table of contents.
+///   The rejection is the same `{"status":"error",…}` envelope as the sibling control routes.
+/// ★Both sides look at path and keys through this one copy★ — retyped literals would let a one-sided fix show up only as a 404 or key
+///   rejection. The five sibling control routes (`/control/send` etc.) are still hand-matched between CLI and daemon (`CONTROL_HELP_PATH`
+///   doc of `mcp_server.rs` · shared
+/// constants are a follow-up — TRD S21 2-3 §8 O15).
 // ADR-0285
 pub const CLI_HELP_ROUTE: &str = "/control/help";
 /// The screen word key of the [`CLI_HELP_ROUTE`] request body.
@@ -608,33 +603,33 @@ pub const CLI_HELP_SCREEN_KEY: &str = "screen";
 
 /// The wire notation of the **agent state axis** (alive · asleep · absent) carried in control responses.
 ///
-/// ★Why it is in agent★: the producer of this string (the table of `agent::commands`) and the consumer (the CLI's response decider) are **different
-///   crates**, so if each wrote the literal, nobody would notice when only one side changed — the symptom is a false alarm where a normal response bounces as
-///   "an unreadable shape" (exit 2). Both sides look at one value.
-/// ★Having no value corresponding to "absent" is intended★ — absence is expressed not by a state value but by a rejection code
-///   (`NOT_FOUND`). It is not mixed with the message outcome vocabulary (`delivered`/`pending`/`failed`) (ADR-0116).
+/// ★In agent because producer (the `agent::commands` table) and consumer (the CLI's response decider) are **different crates**★ — separate
+///   literals would let a one-sided change go unnoticed, showing as a false alarm where a normal response bounces as "an unreadable shape"
+///   (exit 2).
+/// ★No value for "absent" is intended★ — absence is a rejection code (`NOT_FOUND`), not mixed with the message outcome vocabulary
+///   (`delivered`/`pending`/`failed`) (ADR-0116).
 // ADR-0132
 pub const AGENT_STATE_LIVE: &str = "live";
 pub const AGENT_STATE_SLEEPING: &str = "sleeping";
 
-/// The `outcome` vocabulary of the rename response — owned by agent for the same reason as above. The two failure branches (absent · name space exhausted)
-/// go out as rejection codes, so they are not here.
+/// The `outcome` vocabulary of the rename response — owned by agent for the same reason. The two failure branches (absent · name space
+///   exhausted) go out as rejection codes, so they are not here.
 // ADR-0132
 pub const RENAME_OUTCOME_RENAMED: &str = "renamed";
 pub const RENAME_OUTCOME_UNCHANGED: &str = "unchanged";
 
-/// ADR-0094: the abstract spec (backend-agnostic) of one tool to **pre-approve** for a spawned agent. The daemon control channel
-/// fills it next to its own entry definition, and the backend translates it into its program's syntax (claude = `--allowedTools`).
+/// ADR-0094: the abstract spec (backend-agnostic) of one tool to **pre-approve** for a spawned agent. The daemon control channel fills it
+///   next to its own entry definition and the backend translates it into its program's syntax (claude = `--allowedTools`).
 ///
-/// ★Why an abstract enum (single source · isolation)★: only the control channel knows the **identity** of the send entry (which tool of which MCP server, which CLI exe)
-///   — the tool name (`eg_send`), server name (`engram`) and CLI path are canonical in its definitions.
-///   agent carries that identity only as data (server/tool/exe strings) and does not know the concepts of "permission" or "allowlist".
-///   backend/claude/ only translates this data into claude syntax (`mcp__{server}__{tool}` / `Bash({exe}:*)` +
-///   `PowerShell({exe}:*)`) — it does not retype names (ADR-0004 isolation + ADR-0094 single-source invariant).
-/// ★Least privilege (ADR-0094)★: this list holds only send-entry tools — widening this *list* requires an explicit decision (ADR-0094 amendment).
-///   Note: by the user decision of 2026-07-22, the spawn itself runs under `--permission-mode bypassPermissions` (auto) —
-///   this grant now remains not as a runtime gate but as **a policy surface + documentation for a future shared constraint layer**
-///   (see backend/claude/, step-log backlog "constraint layer shared by all LLMs").
+/// ★Why an abstract enum (single source · isolation)★: only the control channel knows the send entry's **identity** (which tool of which
+///   MCP server, which CLI exe) — tool name (`eg_send`), server name (`engram`) and CLI path are canonical in its definitions. agent
+///   carries it only as data (server/tool/exe strings) and
+///   does not know "permission" or "allowlist"; backend/claude/ translates it into claude syntax (`mcp__{server}__{tool}` /
+///   `Bash({exe}:*)` + `PowerShell({exe}:*)`) without retyping names (ADR-0004 + ADR-0094 single-source).
+/// ★Least privilege (ADR-0094)★: this list holds only send-entry tools — widening the *list* needs an explicit decision (ADR-0094
+///   amendment). The spawn itself runs under `--permission-mode bypassPermissions` (auto), so this grant remains **a policy surface +
+///   documentation for a future shared constraint layer**, not a
+///   runtime gate (see backend/claude/).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolGrant {
     /// One tool of an MCP server. The backend translates it into `mcp__{server}__{tool}` (claude).
@@ -644,23 +639,23 @@ pub enum ToolGrant {
     Cli { exe: String },
 }
 
-/// The control channel endpoint the daemon issues (an abstract descriptor). The backend receives it and injects it into the command line/env
-/// its program's way (claude = `--mcp-config <path>` — that knowledge is backend/claude/ alone,
-/// ADR-0004). agent/transport carry only url/token/path strings and know neither "MCP" nor claude flags.
+/// The control channel endpoint the daemon issues (an abstract descriptor). The backend receives it and injects it into the command
+///   line/env its program's way (claude = `--mcp-config <path>` — that knowledge is backend/claude/ alone, ADR-0004). agent/transport
+///   carry only url/token/path strings and know neither "MCP" nor claude flags.
 ///
-/// ★Each field has a different consumer — do not read 「the backend translates」 as 「one backend writes all fields」★:
-/// `token`·`send_exe`·`mail_allowed` below are written by **the backend-shared injection** (`backend::inject_cli_entrance`),
-/// and `config_path`·`priming_file`·`settings_file`·`grants` are translated only into their own flags by the folder of the program
-/// that accepts them. The grounds for that division is the sentence the `config_path` doc right below already wrote.
+/// ★Each field has a different consumer — 「the backend translates」 does not mean 「one backend writes all fields」★:
+///   `token`·`send_exe`·`mail_allowed` are written by **the backend-shared injection** (`backend::inject_cli_entrance`);
+///   `config_path`·`priming_file`·`settings_file`·`grants` are translated into their own flags only by the
+/// folder of the program that accepts them (grounds: the `config_path` doc below).
 #[derive(Debug, Clone)]
 pub struct ControlEndpoint {
-    /// The agent that was issued this endpoint and its incarnation — the field holding as a value the lifetime unit (`(AgentId,epoch)`)
-    /// of the `token` below. Incarnation markers are compared only for match/mismatch (ADR-0163).
+    /// The agent that was issued this endpoint and its incarnation — the lifetime unit (`(AgentId,epoch)`) of the `token` below as a
+    ///   value. Incarnation markers are compared only for match/mismatch (ADR-0163).
     ///
-    /// ★Carrying it in the descriptor is the decision — do not revert to receiving it separately as a backend assembly argument★:
-    ///   that way this pair would reach spawns **without** a control channel too, and 「carried only together with a control channel」
-    ///   would have to be rewritten as a conditional in every backend (the condition ADR-0217 decision 5 guards). Here,
-    ///   one `Option<ControlEndpoint>` answers that condition with a type.
+    /// ★Carrying it in the descriptor is the decision — do not revert to a separate backend assembly argument★: that pair would reach
+    ///   spawns **without** a control channel too, and 「only together with a control channel」 would become a conditional in every backend
+    ///   (the condition ADR-0217 decision 5 guards); one
+    ///   `Option<ControlEndpoint>` answers it with a type.
     // ADR-0217
     pub agent_id: AgentId,
     /// Paired with `agent_id` above — that doc is canonical.
@@ -670,72 +665,70 @@ pub struct ControlEndpoint {
     /// The bearer token dedicated to this (AgentId,epoch) (carried in the HTTP Authorization header).
     /// ★Security★: this value is not logged (recorded only in the mcp-config file — the file is deleted on revoke).
     pub token: String,
-    /// Per-agent mcp-config file path (the daemon creates it and deletes it on revoke). backend/claude/ writes
-    /// url+token into this file and injects it with `--mcp-config`.
-    /// ★Option = absence encoded in the type (ADR-0099)★: for an MCP-capable backend (claude) `Some(path)` (the mcp-config
-    ///   physically exists), for a non-MCP backend (codex/gemini stub) `None` — the mcp-config is **not written at all** (the MCP
-    ///   entry physically deleted). The backend injects `--mcp-config` only when `Some` (no empty-path defense code needed —
-    ///   the type enforces it).
-    /// ★This Option means only **whether there is an MCP entry** (ADR-0133)★ — not whether there is CLI wiring. The CLI is laid down
-    ///   for everyone in both branches, and mail availability is decided by the daemon's credential refusal. The daemon writes the config only when
-    ///   MCP-capable and cuts provision with Err on a failure of that write, so a half MCP endpoint does not exist.
+    /// Per-agent mcp-config file path (the daemon creates it, deletes it on revoke). backend/claude/ writes url+token into it and injects
+    ///   it with `--mcp-config`.
+    /// ★Option = absence encoded in the type (ADR-0099)★: `Some(path)` for an MCP-capable backend (claude), `None` for non-MCP
+    ///   (codex/gemini stub) — the mcp-config is **not written at all**. The backend injects `--mcp-config` only when `Some` (no
+    ///   empty-path defense — the type enforces it).
+    /// ★Means only **whether there is an MCP entry** (ADR-0133)★, not whether there is CLI wiring: the CLI is laid down for everyone in
+    ///   both branches and mail availability is the daemon's credential refusal. The daemon writes the config only when MCP-capable and
+    ///   cuts provision with Err on a write failure,
+    ///   so a half MCP endpoint does not exist.
     pub config_path: Option<std::path::PathBuf>,
-    /// ADR-0086 step 2 (CLI entry): the absolute path of the `engram` CLI binary the daemon located (if any).
-    /// It is a sibling of the daemon exe and lives with it when deployed, but may be missing in a partial build etc. → if `None`, the CLI entry injection
-    /// skips that env (`CLI_EXE_ENV`) and the PATH prepend (`backend::inject_cli_entrance` — shared by backends).
-    /// ★Consumption condition = every spawn with a control endpoint (ADR-0133 · ADR-0132 decision 5)★: the control verbs are open to everyone,
-    /// so both branches use this value. The knowledge of finding the sibling exe is owned by the daemon (lib.rs).
+    /// ADR-0086 step 2 (CLI entry): the absolute path of the `engram` CLI binary the daemon located (if any). A sibling of the daemon exe
+    ///   deployed together, but may be missing in a partial build → `None` makes the CLI entry injection skip that env (`CLI_EXE_ENV`) and
+    ///   the PATH prepend
+    /// (`backend::inject_cli_entrance` — shared by backends).
+    /// ★Consumed by every spawn with a control endpoint (ADR-0133 · ADR-0132 decision 5)★: control verbs are open to everyone, so both
+    ///   branches use it. Finding the sibling exe is the daemon's knowledge (lib.rs).
     pub send_exe: Option<std::path::PathBuf>,
-    /// Whether this spawn **can use the CLI/HTTP mail entry (`engram mail …`)** (ADR-0133 decision 2) — a **fact** the daemon
-    /// decides and carries, which this crate neither derives nor re-derives.
+    /// Whether this spawn **can use the CLI/HTTP mail entry (`engram mail …`)** (ADR-0133 decision 2) — a **fact** the daemon decides and
+    ///   carries; this crate neither derives nor re-derives it.
     ///
-    /// ★Narrower than its name — it is not "can it use mail"★: a spawn with `false` (= an MCP-capable backend) **uses mail normally**
-    ///   through MCP tools. The channel is decided only by backend capability with no runtime fallback (ADR-0128
-    ///   decision 1) — this value points only at the entry (CLI/HTTP) that must be closed in that design.
+    /// ★Narrower than its name★: a spawn with `false` (= an MCP-capable backend) **uses mail normally** through MCP tools. The channel is
+    ///   decided only by backend capability with no runtime fallback (ADR-0128 decision 1); this points only at the entry (CLI/HTTP) that
+    ///   must be closed.
     ///
-    /// ★No production code reads this field today — but it was not deleted★: the same decision is baked into the credentials
-    ///   and the daemon refuses (`control/mcp_server.rs`), and this field remains as **the record** of that credential axis.
-    ///   At one point the backend translated this value into a spawn env marker to hide mail from the CLI usage, but that marker,
-    ///   being the agent's own env, enforced nothing while leaving open an entry for the outside to choose the screen
-    ///   (removal = user decision 2026-09-23). ★Do not bring that translation back★ — Rust does not warn when there is no longer a reader,
-    ///   so this sentence is the only record of "why it remained".
+    /// ★No production code reads this field today — not deleted★: the same decision is baked into the credentials and the daemon refuses
+    ///   (`control/mcp_server.rs`); this field remains **the record** of that credential axis. A backend once translated it into a spawn
+    ///   env marker hiding mail from the CLI usage,
+    ///   but that marker, being the agent's own env, enforced nothing and left an entry for the outside to choose the screen. ★Do not
+    ///   bring that translation back★ — Rust does not warn when a reader is gone, so this sentence is the only record of why it remained.
     // ADR-0133
     pub mail_allowed: bool,
-    /// ADR-0092 (receive-contract priming): **the absolute path of the priming MD file** to inject into the system prompt at spawn
-    /// (if any). The daemon's `PrimingProvider` seam resolves it and carries it — `None` if the file is missing/unconfigured.
-    /// backend/claude/ injects this path as `--append-system-prompt-file <abs-path>` (claude
-    /// **reads the file directly** — the daemon/agent do not read the content). It is broker-injected data orthogonal to MCP, but
-    /// it reuses this descriptor the daemon already fills for every claude spawn instead of making a separate threading
-    /// path.
+    /// ADR-0092 (receive-contract priming): **the absolute path of the priming MD file** to inject into the system prompt at spawn (if
+    ///   any). The daemon's `PrimingProvider` seam resolves and carries it — `None` if missing/unconfigured. backend/claude/ injects it as
+    ///   `--append-system-prompt-file <abs-path>`
+    /// (claude **reads the file directly** — daemon/agent do not read the content). Broker-injected data orthogonal to MCP, riding this
+    ///   descriptor the daemon already fills for every claude spawn instead of a separate threading path.
     pub priming_file: Option<std::path::PathBuf>,
     /// The list of tools to pre-approve (ADR-0094 — the contract is `ToolGrant`). The daemon control channel fills the send entries (MCP
-    /// `eg_send` / `engram` CLI). If the Vec is empty, the backend injects nothing
-    /// (no permission flags = existing gate kept).
+    ///   `eg_send` / `engram` CLI). An empty Vec makes the backend inject nothing (no permission flags = existing gate kept).
     pub grants: Vec<ToolGrant>,
-    /// S18 D (spec §6 allowedMcpServers measure): **the absolute path of a settings fragment file** to put only on the spawned session (if any).
-    /// The daemon writes it to `<data_dir>/mcp-config/<id>-<epoch>.settings.json` at provision and deletes it at revoke.
-    /// backend/claude/ translates it to `--settings <abs-path>` (that flag knowledge is there alone — ADR-0004).
+    /// S18 D (spec §6 allowedMcpServers measure): **the absolute path of a settings fragment file** for the spawned session only (if any).
+    ///   The daemon writes `<data_dir>/mcp-config/<id>-<epoch>.settings.json` at provision and deletes it at revoke; backend/claude/
+    ///   translates it to `--settings <abs-path>` (that flag
+    /// knowledge is there alone — ADR-0004).
     ///
-    /// ★Why it is needed (measured 2026-07-24)★: the user-global setting `allowedMcpServers: []` (= block everything) **applied
-    ///   to spawned agents as is**, so the engram MCP server did not appear in the tool list. This fragment allows the engram server only for that
-    ///   session — **the global settings file is never touched** (allowed scope = only agents engram
-    ///   spawned). It has the same lifetime as config_path (created and discarded per epoch), so it rides the same descriptor.
+    /// ★Needed (measured 2026-07-24)★: the user-global `allowedMcpServers: []` (= block everything) **applied to spawned agents as is**,
+    ///   hiding the engram MCP server from the tool list. This fragment allows the engram server only for that session — **the global
+    ///   settings file is never touched**. Same lifetime as
+    ///   config_path (created and discarded per epoch), so it rides the same descriptor.
     pub settings_file: Option<std::path::PathBuf>,
 }
 
 impl ControlEndpoint {
     /// Whether the daemon **authorized the send entry of our MCP server** for this spawn.
     ///
-    /// ★This is **the only real thing** of 「MCP mail availability」 the backend can see★: the only place making that decision is
-    ///   the daemon's `DaemonControlChannel::build_grants` (the operator knob `ENGRAM_DISALLOW_MCP_SEND`, and
-    ///   the harness knob `ENGRAM_FORCE_CLI_ONLY_SEND` flipping `accepts_mcp_config`, all pass through that one
-    ///   place and appear in this list), and its result comes in as `grants`. ★Do not read those environment variables
-    ///   again in the backend★ — the owner of the decision is the daemon, and if the backend re-derived it there would be two authorities (ADR-0004).
-    /// ★Do not read it through `mail_allowed` instead★ — that field means **CLI mail** authorization (ADR-0133), and in a spawn
-    ///   using MCP mail it is always `false`, so it cannot tell MCP turned off from turned on.
-    /// ★Tool names are not looked at — only the server name★: the canonical source of that name is the daemon side (`SEND_MESSAGE_TOOL`), and
-    ///   this crate carries it only as data (the isolation discipline of the [`ToolGrant`] doc above). The server name is canonical here,
-    ///   [`MCP_SERVER_NAME`], so it is not a retyping.
+    /// ★The only real thing of 「MCP mail availability」 the backend can see★: the decision is made only in the daemon's
+    ///   `DaemonControlChannel::build_grants` (operator knob `ENGRAM_DISALLOW_MCP_SEND` and harness knob `ENGRAM_FORCE_CLI_ONLY_SEND`
+    ///   flipping `accepts_mcp_config` both pass there and appear in this list) and arrives as
+    ///   `grants`. ★Do not read those environment variables again in the backend★ — the owner is the daemon; a backend re-derivation would
+    ///   make two authorities (ADR-0004).
+    /// ★Do not read it through `mail_allowed` instead★ — that is **CLI mail** authorization (ADR-0133) and always `false` in an MCP-mail
+    ///   spawn, so it cannot tell MCP off from on.
+    /// ★Only the server name is looked at, not tool names★: tool names are canonical on the daemon side (`SEND_MESSAGE_TOOL`) and carried
+    ///   here only as data ([`ToolGrant`] doc); the server name is canonical here, [`MCP_SERVER_NAME`] — not a retyping.
     // ADR-0094
     // ADR-0133
     // ADR-0209
@@ -746,10 +739,11 @@ impl ControlEndpoint {
     }
 }
 
-/// The reason a control channel provision failed (ADR-0086 fail-closed). The case where there "**was an intent to attach** the control channel
-/// **but it failed**", such as a file write or CSPRNG failure — when spawn meets this Err it aborts the spawn fail-closed (no
-/// agent running without a control channel is made). ★Distinct from absence★: Ok(None) = legitimate absence of not using a control channel
-/// (Noop · shell), Err = failed while trying to use it (fatal). agent carries only strings (prevents rmcp/io type leaks, ADR-0003).
+/// The reason a control channel provision failed (ADR-0086 fail-closed): there **was an intent to attach** the control channel **but it
+///   failed** (file write · CSPRNG failure) — spawn aborts fail-closed (no agent running without a control channel is made). ★Distinct
+///   from absence★: Ok(None) = legitimate
+/// absence of not using a control channel (Noop · shell), Err = failed while trying (fatal). agent carries only strings (no rmcp/io type
+///   leaks, ADR-0003).
 #[derive(Debug)]
 pub struct ProvisionError(pub String);
 
@@ -763,19 +757,19 @@ impl std::error::Error for ProvisionError {}
 
 /// **What this spawn receives** from the control channel — all the axes provision splits on.
 ///
-/// ★Three fields, not one — do not merge them★: once, a single `accepts_mcp_config` drove the MCP entry, the priming
-///   variant, the grants and **mail availability** all together. Because of that folding, a backend 「using the control channel but outside the mail plane」
-///   **opened send authorization along with it** the moment it turned control on (with receiving closed). That asymmetry was written
-///   in no declaration — because there were two axes but one field.
-/// ★The third field split off in the same shape★: while `accepts_mcp_config` doubled as 「does it use mail through MCP」 and
-///   「does it read the file we wrote」, a backend turning MCP on by another mechanism (codex's
-///   `-c mcp_servers.engram=…`) got **a plaintext token file nobody reads** on every spawn just by turning that field on to match the mail axis
-///   (default ACL · a failure of that write, being fail-closed, cut even the spawn).
-/// ★Still, **the derivation point of `mail_allowed` is still one** (ADR-0133 decision 2)★: the daemon makes one value from these two fields,
-///   and that one value produces **together** the enforcement baked into the credentials and the marker carried on the endpoint. What changed is
-///   only the number of ingredients of that formula. Deciding separately in two places would split education and enforcement.
-/// ★The `engram` CLI wiring (env · PATH) is laid down in every combination★ — because the control verbs are open to everyone
-///   (ADR-0132 decision 5). What this type splits is only **mail and MCP**.
+/// ★Three fields, not one — do not merge them★: a single `accepts_mcp_config` once drove the MCP entry, priming variant, grants and **mail
+///   availability** together, so a backend 「using the control channel but outside the mail plane」 **opened send authorization the moment
+///   it turned control on** (receiving closed) —
+///   an asymmetry declared nowhere, because two axes had one field.
+/// ★The third field split off the same way★: while `accepts_mcp_config` doubled as 「mail through MCP」 and 「reads the file we wrote」, a
+///   backend turning MCP on by another mechanism (codex's `-c mcp_servers.engram=…`) got **a plaintext token file nobody reads** on every
+///   spawn by turning that field on for the mail axis (default
+///   ACL · the fail-closed write could even cut the spawn).
+/// ★The derivation point of `mail_allowed` is still one (ADR-0133 decision 2)★: the daemon makes one value from these two fields and that
+///   value produces **together** the enforcement baked into the credentials and the marker on the endpoint; two separate decisions would
+///   split education and enforcement.
+/// ★The `engram` CLI wiring (env · PATH) is laid down in every combination★ — control verbs are open to everyone (ADR-0132 decision 5);
+///   this type splits only **mail and MCP**.
 // ADR-0099
 // ADR-0126
 // ADR-0133
@@ -783,39 +777,36 @@ impl std::error::Error for ProvisionError {}
 pub struct ControlChannelNeeds {
     /// Whether this backend **can consume the mcp-config file we make** (ADR-0099).
     ///
-    /// true → mcp-config + session settings fragment recorded + MCP endpoint bits. false → none of the three is made.
-    /// ★Not "can it use MCP"★ — a program turning MCP on by another mechanism also has this field false
-    ///   (the canonical decision is in each backend folder).
+    /// true → mcp-config + session settings fragment recorded + MCP endpoint bits. false → none of the three is made. ★Not "can it use
+    ///   MCP"★ — a program turning MCP on by another mechanism also has this false (canonical decision: each backend folder).
     pub accepts_mcp_config: bool,
     /// Whether the daemon **will write the mcp-config file** for this spawn (`AgentBackend::writes_mcp_config_file`).
     ///
-    /// true → records `<data_dir>/mcp-config/<id>-<epoch>.json` (plaintext Bearer token) and the session settings fragment,
-    /// and a failure of that write is **fail-closed** (spawn aborted). false → makes neither, and `config_path`·
-    /// `settings_file` go out as `None`.
-    /// ★Do not **fold it into one field** with the field above★: the one above is the axis deriving the mail channel decision (`mail_allowed`), and
-    ///   this field asks only **whether to write a plaintext token to disk**. 「uses MCP but does not read our file」
-    ///   (codex) is the normal value of that combination — the third-field item of the type doc is the canonical reasoning.
+    /// true → records `<data_dir>/mcp-config/<id>-<epoch>.json` (plaintext Bearer token) and the session settings fragment, and a failure
+    ///   of that write is **fail-closed** (spawn aborted). false → neither, and `config_path`·`settings_file` go out `None`.
+    /// ★Do not **fold it into one field** with the field above★: that is the axis deriving the mail channel decision (`mail_allowed`);
+    ///   this asks only **whether to write a plaintext token to disk**. 「MCP but does not read our file」 (codex) is the normal value of
+    ///   that combination (canonical: the third-field item of the type doc).
     // ADR-0209
     pub writes_mcp_config_file: bool,
-    /// Whether this spawn **is assigned a mail channel** (`AgentBackend::uses_mail`).
-    ///
-    /// false → neither the mail education (priming) nor the send grant is carried, and the daemon refuses mail requests with these credentials.
-    /// ★It still receives the control verbs and the CLI entry★ — the last item of the type doc above.
+    /// Whether this spawn **is assigned a mail channel** (`AgentBackend::uses_mail`). false → neither mail education (priming) nor the
+    ///   send grant is carried and the daemon refuses mail requests with these credentials. ★It still receives the control verbs and the
+    ///   CLI entry★ (last item of the type doc).
     // ADR-0209
     pub uses_mail: bool,
 }
 
 /// Control channel provisioning seam (ADR-0086). AgentManager default = `NoopControlChannel`.
 pub trait ControlChannel: Send + Sync + 'static {
-    /// Issues a token for (AgentId,epoch), creates the mcp-config file (if MCP-capable) and returns the endpoint.
-    /// Called on the spawn path right before spec assembly. Three return values (fail-closed contract, ADR-0086):
+    /// Issues a token for (AgentId,epoch), creates the mcp-config file (if MCP-capable) and returns the endpoint. Called on the spawn path
+    ///   right before spec assembly. Three returns (fail-closed contract, ADR-0086):
     ///   - `Ok(Some(ep))` — control channel issued (the backend injects it).
     ///   - `Ok(None)`     — **legitimate absence** of not using a control channel (Noop · shell-only · unconfigured). Spawn continues.
-    ///   - `Err(_)`       — **failed** while trying to use the control channel (CSPRNG/file write error). ★Fatal★ — when spawn
-    ///     meets this Err it aborts fail-closed (no agent secretly running without a control channel, no health disguise).
+    ///   - `Err(_)`       — **failed** while trying to use it (CSPRNG/file write error). ★Fatal★ — spawn aborts fail-closed (no agent
+    ///   secretly running without a control channel).
     ///
-    /// `needs` = what this spawn receives from the control channel ([`ControlChannelNeeds`] — that type doc is the canonical source of the meaning
-    ///   of the fields and how they split). The manager fills it through backend dispatch and passes it.
+    /// `needs` = what this spawn receives from the control channel ([`ControlChannelNeeds`] — canonical for the fields' meaning and
+    ///   split); the manager fills it through backend dispatch.
     // ADR-0126
     // ADR-0133
     fn provision(
@@ -825,17 +816,16 @@ pub trait ControlChannel: Send + Sync + 'static {
         needs: ControlChannelNeeds,
     ) -> Result<Option<ControlEndpoint>, ProvisionError>;
 
-    /// Discards the token of (AgentId,epoch) and deletes the mcp-config file. The reaper calls it on any terminal (kill · crash · EOF · normal
-    /// exit), so nothing is missed. kill_agent and the spawn failure guard also call it pre-emptively, so duplicate calls come for the same
-    /// (id,epoch) (absorbed by remove-if-present). It also receives the epoch so a stale terminal cannot erase a live token newly attached
-    /// by reactivation (a new incarnation = a different marker) (the spirit of the ADR-0007/0084 epoch-guard
-    /// — the decision is **match/mismatch**. Markers have no order).
+    /// Discards the token of (AgentId,epoch) and deletes the mcp-config file. The reaper calls it on any terminal (kill · crash · EOF ·
+    ///   normal exit); kill_agent and the spawn failure guard call it pre-emptively too, so duplicate calls for one (id,epoch) come
+    ///   (absorbed by remove-if-present). It receives the epoch so a stale
+    /// terminal cannot erase a live token newly attached by reactivation (a new incarnation = a different marker; ADR-0007/0084
+    ///   epoch-guard — the decision is **match/mismatch**, markers have no order).
     fn revoke(&self, id: AgentId, epoch: u32);
 }
 
-/// No-op implementation for paths that do not use a control channel (headless tests · shell-only). provision always returns Ok(None)
-/// (legitimate absence — not a failure), revoke is a no-op. The AgentManager default — only the daemon injects the real
-/// `DaemonControlChannel`.
+/// No-op implementation for paths not using a control channel (headless tests · shell-only): provision always returns Ok(None) (legitimate
+///   absence), revoke is a no-op. The AgentManager default — only the daemon injects the real `DaemonControlChannel`.
 pub struct NoopControlChannel;
 
 impl ControlChannel for NoopControlChannel {
@@ -852,11 +842,10 @@ impl ControlChannel for NoopControlChannel {
 
 /// Per-area capabilities (no bool explosion). Serialized (shared with the frontend, snake_case).
 ///
-/// ★Source separation (load-bearing)★: the 5 areas of this composite come from **two sources** — input/output/control are decided
-/// by the physical channel (transport), and session/model by the program (backend). Previously the transport
-/// hardcoded even session.resume (resume=true regardless of claude/shell), so the shell backend was inaccurate.
-/// Now it is built only through `Capabilities::compose(TransportCaps, BackendCaps)`, enforcing the source by type
-/// (ADR-0030 capability matrix).
+/// ★Source separation (load-bearing)★: the 5 areas come from **two sources** — input/output/control from the physical channel (transport),
+///   session/model from the program (backend). The transport once hardcoded even session.resume (true regardless of claude/shell), making
+///   the shell backend inaccurate; now it is built only through
+/// `Capabilities::compose(TransportCaps, BackendCaps)`, enforcing the source by type (ADR-0030 capability matrix).
 // ADR-0030
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Capabilities {
@@ -906,9 +895,9 @@ pub struct InputCaps {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OutputCaps {
     pub terminal_bytes: bool,
-    /// Reports that the output is a structured stream (NDJSON etc.) and needs parsed rendering (RichSlot) instead of terminal rendering (ADR-0044).
-    /// The frontend's `defaultRenderMode` picks the renderer by this one value (true=RichSlot / false=xterm, ADR-0002).
-    /// Not content interpretation (the link-unrefined invariant) — just a render hint saying "this byte stream is not a terminal".
+    /// Reports that the output is a structured stream (NDJSON etc.) needing parsed rendering (RichSlot) instead of terminal rendering
+    ///   (ADR-0044). The frontend's `defaultRenderMode` picks the renderer by this one value (true=RichSlot / false=xterm, ADR-0002). Not
+    ///   content interpretation (link-unrefined invariant) — just a hint that "this byte stream is not a terminal".
     pub structured: bool,
     pub markdown: bool,
     pub tool_events: bool,
@@ -944,15 +933,14 @@ pub struct OutputChunk {
     pub data: Vec<u8>,
 }
 
-/// The PTY output wire format going to the frontend — base64-encoded for JSON compatibility.
-/// ※S12: this is a representation **only for Embedded (Tauri JSON Channel)**. base64 is a JSON Channel constraint and
-/// not a core concern — ChannelOutputSink receives OutputFrame (raw) and encodes it into this.
+/// The PTY output wire format going to the frontend — base64-encoded for JSON compatibility. ※S12: a representation **only for Embedded
+///   (Tauri JSON Channel)**; base64 is a JSON Channel constraint, not a core concern — ChannelOutputSink receives OutputFrame (raw) and
+///   encodes it into this.
 ///
-/// ★epoch★: like the WS binary frame header ([tag][agentId][epoch][seq]), it carries the session epoch on every output frame
-/// (OutputFrame.epoch as is). If frame.epoch were **dropped** when encoding,
-/// embedded would flow with epoch fixed at 0, mismatching SubscribeAck.current_epoch≥1 (resume-fallback), and
-/// the ProtocolClient epoch guard (f.epoch !== st.epoch) would wipe out the output (Stage 3
-/// BLOCKER 1). So frame.epoch must always be included, matching the WS path.
+/// ★epoch★: like the WS binary frame header ([tag][agentId][epoch][seq]), every output frame carries the session epoch (OutputFrame.epoch
+///   as is). **Dropping** frame.epoch in encoding would flow embedded with epoch fixed at 0, mismatching SubscribeAck.current_epoch≥1
+///   (resume-fallback), and the ProtocolClient epoch
+/// guard (f.epoch !== st.epoch) would wipe out the output (Stage 3 BLOCKER 1). So frame.epoch must always be included, matching the WS path.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PtyEvent {
     pub agent_id: AgentId,
@@ -962,9 +950,9 @@ pub struct PtyEvent {
 }
 
 /// core→sink output payload (S15 B5 payload-generic). Passed **borrowed** — core does not know the wire (ADR-0003).
-/// ★ADR-0002 (no assumption about output kind)★: output is not forced into terminal bytes — split into two branches Bytes/Event
-/// so the sink handles each kind (Bytes→tag0 terminal frame, Event→tag1 structured frame, B7).
-/// Holds only references to stay Copy (preserving the OutputFrame Copy contract) — no Serialize attached (an agent domain type, ADR-0003).
+/// ★ADR-0002 (no assumption about output kind)★: output is not forced into terminal bytes — two branches Bytes/Event let the sink handle
+///   each kind (Bytes→tag0 terminal frame, Event→tag1 structured frame, B7).
+/// Holds only references to stay Copy (the OutputFrame Copy contract) — no Serialize (an agent domain type, ADR-0003).
 #[derive(Debug, Clone, Copy)]
 pub enum OutputPayload<'a> {
     /// Console raw bytes (terminal · tag0 path). The payload of PtyTransport and terminal mode.
@@ -997,16 +985,17 @@ pub struct AgentInfo {
     /// (ADR-0164 decision 8; the old statement S9 §18-a is stale).
     pub epoch: u32,
     pub capabilities: Capabilities,
-    /// Whether this agent is **a reader of mail** (= eligibility for the mail recipient list). The value the session received from the backend
-    /// at spawn is **carried as is in this snapshot**.
+    /// Whether this agent is **a reader of mail** (= eligibility for the mail recipient list). The value the session received from the
+    ///   backend at spawn is **carried as is in this snapshot**.
     ///
-    /// ★Why it is carried in the snapshot (load-bearing — do not revert to re-querying)★: if a consumer received the list and then asked the manager back
-    ///   per entry, ① between the eligibility check and the injection the same id could split into a different session (TOCTOU),
-    ///   ② if the reaper collected the session between the two queries, that entry would drop out of both the live list and the asleep one, and mail
-    ///   that would have been parked and delivered on reappearance would be **lost** as "no such recipient", and ③ N per-session lock acquisitions would come back
-    ///   (`AgentManager::roster` doc — the mail-sending critical path). Coming out of one snapshot, none of the three holds.
-    /// ★Not a capability★: `capabilities` is "what it can do", this is "what the input is interpreted as".
-    ///   So it is a separate field, not inside `Capabilities`, and it does not go out on the wire either (a daemon-internal decision axis).
+    /// ★Carried in the snapshot (load-bearing — do not revert to re-querying)★: a consumer receiving the list and asking the manager back
+    ///   per entry would face ① TOCTOU — the same id could split into a different session between the check and the injection, ② the
+    ///   reaper collecting the session between the two queries,
+    ///   dropping that entry from both live and asleep lists so mail that would have been parked and delivered on reappearance is **lost**
+    ///   as "no such recipient", ③ N per-session lock acquisitions again (`AgentManager::roster` doc — the mail-sending critical path).
+    ///   One snapshot avoids all three.
+    /// ★Not a capability★: `capabilities` is "what it can do", this "what the input is interpreted as" — a separate field, not on the wire
+    ///   (a daemon-internal decision axis).
     pub reads_messages: bool,
 }
 
@@ -1027,28 +1016,27 @@ pub enum PtyError {
     Unsupported(String),
     /// ★It hit the total roster cap and **refused to register a new agent** (runaway backstop — `AgentManager::MAX_ROSTER_SIZE`)★.
     ///
-    /// ★Why a dedicated variant★: callers must tell this apart from name space exhaustion (`Unsupported`) — what the user should do
-    ///   is opposite (retry with a different name vs delete agents to free a slot). Telling them apart by string matching
-    ///   silently breaks the moment the text changes.
-    /// ★It does not apply to existing agents★: the cap looks only at **new registrations**. Restore and respawn of a roster already over the cap
-    ///   (replacing the incarnation of the same id) pass through as is — if the backstop took the existing team hostage, recovery would be impossible.
+    /// ★Dedicated variant★: callers must tell it from name space exhaustion (`Unsupported`) — the user's remedy is opposite (retry with
+    ///   another name vs delete agents); string matching breaks when the text changes.
+    /// ★Does not apply to existing agents★: the cap looks only at **new registrations**; restore and respawn of a roster already over the
+    ///   cap (replacing the same id's incarnation) pass — a backstop taking the existing team hostage would make recovery impossible.
     #[error("roster is full: {current} agents (ceiling {limit}) — refusing to register another")]
     RosterFull { current: usize, limit: usize },
     /// ★The profile store refused to save this change (`ReadOnly`) or could not write it (`Io`) — the in-memory registry is unchanged★.
     ///
-    /// Only the registry's entries with a caller (`try_` verbs) emit this — internal changes without a caller apply to memory on any
-    ///   save `Err` and set dirty, so they do not become errors.
-    /// ★The launch path has partial success★: if the save of clearing the session id fails after the roster registration was saved, the registration stays
-    ///   (it is not reverted) and only the launch stops — canonical = the `spawn_agent_watching_link` doc of `manager`.
-    /// ★Why a dedicated variant★: the bus must carry a save refusal with a code different from other failures (the caller has different things to do) —
-    ///   for the same reason as `RosterFull`, it is split by variant, not by string.
+    /// Only the registry's entries with a caller (`try_` verbs) emit this — internal changes without a caller apply to memory on any save
+    ///   `Err` and set dirty, so they do not become errors.
+    /// ★The launch path has partial success★: if clearing the session id fails to save after the roster registration was saved, the
+    ///   registration stays (not reverted) and only the launch stops — canonical: the `spawn_agent_watching_link` doc of `manager`.
+    /// ★Dedicated variant★: the bus must carry a save refusal with its own code (the caller's remedy differs); split by variant, not
+    ///   string, as `RosterFull`.
     // ADR-0291 R17
     #[error("agent store: {0}")]
     Store(crate::profile::StoreError),
-    // ★Do not turn duplicate spawn requests back into an error here★: "already up / already launching" is not a failure but
-    //   **a request with nothing to do**, so it is answered with `Ok(manager::SpawnOutcome::Moot)`. When it was an error, every consumer
-    //   had to carry a list of "this error is not a real failure", and over the three times that list was fixed, one item was missed each time
-    //   and a failure marker was stamped on a live agent (ADR-0172).
+    // ★Do not turn duplicate spawn requests back into an error★: "already up / already launching" is **a request with nothing to do**,
+    //   answered `Ok(manager::SpawnOutcome::Moot)`. As an error, every consumer carried a list of "this error is not a real failure" and
+    //   each fix of that list missed one item and stamped a failure marker on a
+    //   live agent (ADR-0172).
 }
 
 /// Subscription replay branch result (core-neutral — the daemon maps it to protocol::SubscribeAction).
@@ -1069,18 +1057,18 @@ pub struct SubscribeOutcome {
     pub sink_id: SinkId,
     pub oldest_seq: u64,
     pub latest_seq: u64,
-    /// The seq of the chunk actually sent first. If nothing was sent — for an empty ring, the next seq to issue (the value read under the replay lock
+    /// The seq of the chunk actually sent first. If nothing was sent — for an empty ring, the next seq to issue (the value read under the
+    ///   replay lock
     /// · ADR-0231); if there is no tail to continue, `after_seq+1`.
     pub replay_from: u64,
     /// Number of chunks actually sent (can be 0).
     pub replayed: usize,
 }
 
-/// The **incarnation facts** a subscription response carries — a value type. Not a session field.
+/// The **incarnation facts** a subscription response carries — a value type, not a session field.
 ///
-/// ★Do not put a field of this type in the session★: the home of the incarnation marker is `AgentSession::epoch` alone. Bringing this value in as a session
-///   field would make two markers, and if the two diverged nobody would know which is the incarnation. It is assembled on the spot when the response
-///   is built.
+/// ★Do not put a field of this type in the session★: the incarnation marker's home is `AgentSession::epoch` alone; a second marker
+///   diverging would leave unknown which is the incarnation. It is assembled on the spot when the response is built.
 // ADR-0226
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Incarnation {
@@ -1092,8 +1080,8 @@ pub struct Incarnation {
 
 /// The result of `subscribe_from` — the replay result and the facts of **the incarnation that did that replay**.
 ///
-/// ★The two fields come from one session lookup★: looked up separately, the incarnation could change in between, and then the marker would
-///   speak of a different incarnation from the one that replayed.
+/// ★The two fields come from one session lookup★: separate lookups could change the incarnation in between and the marker would speak of a
+///   different incarnation than the one that replayed.
 // ADR-0226
 #[derive(Debug, Clone, Copy)]
 pub struct SubscribeReply {
@@ -1103,55 +1091,46 @@ pub struct SubscribeReply {
 
 /// Delivery-boundary measurement output of an input write (ADR-0088 Stage 0).
 ///
-/// ★Why it exists★: if `write_input`/`write_stdin` returned only `Ok(())`, there would be no evidence to tell "not inserted due to a send failure" from
-///   "fully inserted but ignored by the model". For the delivery accuracy harness (ADR-0088) to tell these two
-///   apart, the **completeness signal** (full acceptance vs failure) and this user turn's replay-dedup key
-///   (`msg_uuid`) must be made observable at the write boundary. This value is that output (returned only on the success path).
+/// ★Why it exists★: `write_input`/`write_stdin` returning only `Ok(())` gives no evidence to tell "not inserted due to a send failure"
+///   from "fully inserted but ignored by the model"; for the delivery accuracy harness (ADR-0088) the **completeness signal** (full
+///   acceptance vs failure) and this turn's replay-dedup key (`msg_uuid`)
+/// must be observable at the write boundary. Returned only on the success path.
 ///
-/// ★★What `Ok` means **depends on which verb it was obtained from** — this paragraph is that split, and the old statement is false★★:
-///   at one point this said 「the transport's `send_input` writes with `write_all` (+`flush`)」, but now that all three links
-///   (PTY · stdio · codex) put input into **a bounded input queue** that a dedicated writer pops and writes, that is not true.
-///   The split is this:
-///   - The `Ok` of `AgentSession::submit_input_observed` (= the verb mail delivery uses, `AgentManager::submit_stdin_observed`)
-///     = ★**it actually went out to the OS**★. That verb issues the receipt only after confirming the landing with `AgentTransport::flush_input`
-///     — the "send failure" vs "ignored by the model" ADR-0088 wants to tell apart stands on that confirmation.
-///   - The `Ok` of `AgentSession::write_input_observed` (the keystroke streaming version) = **the whole thing was accepted with its order settled**.
-///     That path does not wait (if it waited, the per-connection dispatch consumer would stand still entirely on one stuck agent).
-///   ★A link without a means of confirmation stays at the old level★ — for the codex app-server and the test-rig seam, `flush_input` is
-///     `Unsupported`, so even the delivery verb knows only up to 「accepted」. **For those links this record does not assert landing**
-///     (pre-existing — those links' queues existed before this discipline).
+/// ★★What `Ok` means **depends on which verb it came from**★★ (all three links — PTY · stdio · codex — put input into **a bounded input
+///   queue** that a dedicated writer pops and writes):
+///   - The `Ok` of `AgentSession::submit_input_observed` (= the mail delivery verb, `AgentManager::submit_stdin_observed`) = ★**it
+///   actually went out to the OS**★: that verb issues the receipt only after `AgentTransport::flush_input` confirms the landing — the
+///   "send failure" vs "ignored by the model" split of ADR-0088 stands on it.
+///   - The `Ok` of `AgentSession::write_input_observed` (keystroke streaming) = **the whole thing was accepted with its order settled**;
+///   that path does not wait (waiting would stall the per-connection dispatch consumer on one stuck agent).
+///   ★A link without a confirmation means stays at the old level★: for the codex app-server and the test-rig seam `flush_input` is
+///   `Unsupported`, so even the delivery verb knows only 「accepted」 — **for those links this record does not assert landing**.
 ///
-/// ★The completeness signal = Ok-vs-Err, not a byte comparison (important)★: on either side of the split above, partial acceptance is not hidden as `Ok`
-///   — either the whole thing is accepted (or the whole thing goes out) or it is `Err`. So the only evidence of that decision is
-///   `Ok(WriteOutcome)` **itself** (vs `Err`) — not a comparison of the two byte fields below. The real written
-///   byte count is not threaded out of the transport (unnecessary under the write_all contract), so `bytes_written` is
-///   not an independent measurement but a value **copied as is from `bytes_requested` by construction** (short writes cannot be detected —
-///   comparing them always gives equal, a tautology). This field exists only for the self-description of the observation record (in logs and forensics,
-///   the by-construction identity "this much was requested to write and write_all was Ok"), not as a completeness decision
-///   lever. Completeness must look at `Ok`.
+/// ★The completeness signal = Ok-vs-Err, not a byte comparison★: partial acceptance is never hidden as `Ok` — the whole thing is accepted
+///   (or goes out) or `Err`. So the only evidence is `Ok(WriteOutcome)` **itself**. The real written byte count is not threaded out of the
+///   transport, so `bytes_written` is
+/// **copied from `bytes_requested` by construction** (short writes undetectable — always equal, a tautology); it exists for the
+///   observation record's self-description (logs and forensics), not as a completeness lever. Completeness must look at `Ok`.
 ///
-/// ★Byte units · layer★: the two values here are **the byte length of the logical message the caller handed to the session boundary**
-///   (`bytes.len()` — **before** encoder wrapping, not a char count). When the encoder wraps text (json mode),
-///   the actual wire bytes are larger, but that encoded wire count is not measured here (not this layer's logical
-///   unit). The daemon layer's `DeliveryObservation` uses the same "logical message bytes" meaning
-///   (there that logical message = the bytes of the envelope string built by `wrap_message`).
+/// ★Byte units · layer★: both values are **the byte length of the logical message the caller handed to the session boundary**
+///   (`bytes.len()` — **before** encoder wrapping, not a char count). With json mode wrapping the wire bytes are larger, but that is not
+///   measured here. The daemon's `DeliveryObservation` uses the same
+/// "logical message bytes" meaning (there = the envelope string built by `wrap_message`).
 #[derive(Debug, Clone, Copy)]
 pub struct WriteOutcome {
     pub bytes_requested: usize,
     pub bytes_written: usize,
-    /// The message uuid of this user turn (replay-dedup key, generated by session.write_input — LOAD-BEARING).
-    /// The delivery harness correlates the ingress's logical msg_id with this value to decide "did claude replay this turn" (=
-    /// did it actually parse it) (ADR-0088). The value and meaning are not changed here — only exposed.
+    /// The message uuid of this user turn (replay-dedup key, generated by session.write_input — LOAD-BEARING). The delivery harness
+    ///   correlates the ingress's logical msg_id with it to decide "did claude replay this turn" (= did it actually parse it) (ADR-0088).
+    ///   Only exposed here.
     pub msg_uuid: uuid::Uuid,
-    /// ★The epoch of the incarnation where the write actually landed (ADR-0088 Stage 1)★. A value carrying by construction the
-    /// `self.epoch` of the session that performed this write (the same nature as bytes_written — not an independent measurement, but
-    /// the session that executed the write fills in its own epoch as is). ★Why it is needed★: for the control channel delivery observation record
-    /// to be **record-self-sufficient**, "which incarnation was this message inserted into" must be answerable directly within the record
-    /// — only by holding the epoch of the session **where the write actually landed**, not the epoch snapshotted at resolve time,
-    /// can the mid-flight epoch race (a restart between resolve↔write) be settled from the record alone (that race is marked design-accepted by
-    /// ADR-0086 §F5 — mail is aimed at the logical agent, so landing on a new
-    /// incarnation is the correct behavior). The value is filled only by the session that executed the write (success path only),
-    /// so it can diverge from resolve-time, and it exists precisely to observe that divergence.
+    /// ★The epoch of the incarnation where the write actually landed (ADR-0088 Stage 1)★ — the executing session's own `self.epoch`,
+    ///   filled by construction (as bytes_written: not an independent measurement). ★Needed★: for the delivery observation record to be
+    ///   **self-sufficient** ("which incarnation was this message inserted
+    /// into"); only the epoch of the session **where the write actually landed**, not the one snapshotted at resolve time, settles the
+    ///   mid-flight epoch race (a restart between resolve↔write) from the record alone (the race is design-accepted — ADR-0086 §F5: mail
+    ///   targets the logical agent, so landing on a new incarnation is
+    /// correct). Success path only; it can diverge from resolve-time, and exists to observe that divergence.
     pub epoch: u32,
 }
 
@@ -1159,14 +1138,13 @@ pub struct WriteOutcome {
 #[derive(Debug)]
 pub struct SinkError;
 
-/// PTY output delivery abstraction — isolated so headless tests are possible without a Tauri dependency.
-/// ※S12: wire encoding is owned by the implementation (ChannelOutputSink = base64 PtyEvent / the daemon frame sink = binary
-/// frame) → core is transport-agnostic.
+/// PTY output delivery abstraction — isolated so headless tests work without a Tauri dependency. ※S12: wire encoding is the
+///   implementation's (ChannelOutputSink = base64 PtyEvent / the daemon frame sink = binary frame), so core is transport-agnostic.
 pub trait OutputSink: Send + Sync + 'static {
-    /// ★Contract = never blocks — if it cannot send, do not wait; `SinkError`★. There are two places where this call is made while holding
-    /// an order lock (both exceptions to ADR-0006 「send without holding a lock」) — the session's input lock (`input_order` —
-    /// the `SessionClassified` path) and the codex link's emit lane (`Announcer.order` — `announce`). An implementation waiting here stops that incarnation's input and cancellation (for codex,
-    /// the input and the writer's emits) together.
+    /// ★Contract = never blocks — if it cannot send, do not wait; `SinkError`★. Two callers hold an order lock (both exceptions to
+    ///   ADR-0006 「send without holding a lock」): the session's input lock (`input_order` — `SessionClassified` path) and the codex link's
+    ///   emit lane (`Announcer.order` — `announce`);
+    /// an implementation waiting here stops that incarnation's input and cancellation (codex: input and the writer's emits) together.
     // ADR-0231
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError>;
     fn sink_id(&self) -> SinkId;
@@ -1180,34 +1158,33 @@ pub trait StatusSink: Send + Sync + 'static {
     fn agent_list_updated(&self, agents: Vec<AgentInfo>);
     /// Restore attempt result notification (S9 §18-d). Default no-op — sinks that do not use restore need not implement it.
     fn restore_result(&self, _report: crate::profile::RestoreReport) {}
-    /// The backend observed a usage limit (meaning of missing fields = [`crate::usage::UsageObservation`]). Default no-op.
+    /// The backend observed a usage limit (missing-field meaning = [`crate::usage::UsageObservation`]). Default no-op.
     ///
-    /// ★The contract is the same as [`Self::turn_ended`] (non-blocking · non-reentrant)★ — the caller is the output pump, so stopping here stops
-    ///   that incarnation's output along with it.
+    /// ★Same contract as [`Self::turn_ended`] (non-blocking · non-reentrant)★ — the caller is the output pump, so stopping here stops that
+    ///   incarnation's output.
     fn usage_observed(&self, _obs: crate::usage::UsageObservation) {}
     /// This incarnation just ended a turn (ADR-0113 — the push exit of turn observation). Default no-op.
     ///
-    /// ★Contract = non-blocking · non-reentrant (ADR-0006 callback discipline — never violate)★: what an implementation can do is at most a non-blocking
-    ///   notification (channel send). Doing IO, injection or reentrant calls makes the thread that called this callback stop
-    ///   until that work finishes.
-    /// ★That thread is the output pump **today** — but the structure does not guarantee it (load-bearing)★: `emit` has
-    ///   two callers (the output pump · the injection thread that emitted the input echo — turn.rs header), and this hook is called from whichever of them
-    ///   emitted the end signal. The only reason it is fixed to the pump now is **that the input echo is classified as a progress signal**
-    ///   (the backend classifier). If a new non-pump emit path emitting end signals appears, the weight of this contract moves to that thread
-    ///   — then this must still be non-blocking so delivery work is not loaded onto the sending thread.
-    /// ★It goes out on every end signal regardless of whether there was a transition★: a consumer that wants to narrow it to "only when it was in a turn just before" must
-    ///   make that decision on its own side. Narrowing it here would drop the notification for a turn that ends right away without assistant events, and
-    ///   while surplus notifications are usually harmless, a missing one makes the consumer wait forever.
+    /// ★Contract = non-blocking · non-reentrant (ADR-0006 callback discipline — never violate)★: at most a non-blocking notification
+    ///   (channel send); IO, injection or reentrant calls stop the thread that called this callback until done.
+    /// ★That thread is the output pump **today**, not by structural guarantee (load-bearing)★: `emit` has two callers (the output pump ·
+    ///   the injection thread emitting the input echo — turn.rs header) and this hook runs on whichever emitted the end signal. It is
+    ///   pump-only now **because the input echo is classified as a
+    ///   progress signal** (backend classifier); a new non-pump emit path emitting end signals moves this contract's weight there — it
+    ///   must stay non-blocking so delivery work is not loaded onto the sending thread.
+    /// ★It goes out on every end signal regardless of transition★: a consumer wanting "only when in a turn just before" decides on its own
+    ///   side; narrowing here would drop the notification for a turn ending right away without assistant events, and a missing
+    ///   notification makes the consumer wait forever.
     // ADR-0113
     fn turn_ended(&self, _id: AgentId, _epoch: u32) {}
-    /// This incarnation's user waiting list just became empty — the doorbell that keeps parked mail from being tied up until the next turn end
-    /// even when only the list empties without the turn ending. Default no-op.
+    /// This incarnation's user waiting list just became empty — the doorbell keeping parked mail from being tied up until the next turn
+    ///   end when only the list empties. Default no-op.
     ///
-    /// ★The contract is the same as [`Self::turn_ended`] (non-blocking · non-reentrant)★. ★It rings **after** 「empty」 is written
-    ///   to the waiting-list table★ — the receiver asks about busy again right away. It goes out every time it empties (except when emptied by the exit synthesis —
-    ///   `OutputCore::finish`), and surplus is absorbed by the consumer.
-    /// ★Why a separate verb instead of widening `turn_ended`★: if the name 「the turn ended」 came to mean even the case of emptying without a turn,
-    ///   consumers relying on that name would misjudge.
+    /// ★Same contract as [`Self::turn_ended`] (non-blocking · non-reentrant)★. ★It rings **after** 「empty」 is written to the waiting-list
+    ///   table★ — the receiver asks about busy again at once. It goes out every time it empties (except emptying by the exit synthesis —
+    ///   `OutputCore::finish`); surplus is absorbed by the consumer.
+    /// ★A separate verb, not a widened `turn_ended`★: 「the turn ended」 meaning even emptying without a turn would mislead consumers
+    ///   relying on the name.
     // ADR-0231
     fn inputs_drained(&self, _id: AgentId, _epoch: u32) {}
 }
