@@ -1,8 +1,5 @@
-// ADR-0055/0057: 사람 클릭(TabBar·Ctrl+Tab)과 LLM(__engramCmd)이 모두 이 동일 store 액션을 지난다
-//   (§5 단일 제어 표면 — 새 상태 경로 0).
-//
-// ★window 해소★: command args 로 window 를 받되, 생략하면 이 웹뷰 창(readWindowLabelFromHash — main·팝업
-//   label)으로 떨어진다. 그래서 Ctrl+Tab 같은 "포커스된 창" 소비자가 별도 label 계산 없이 부를 수 있다.
+// ADR-0055/0057: human clicks (TabBar·Ctrl+Tab) and the LLM (__engramCmd) pass through this same store action (§5 single control surface).
+// ★Window resolution★: taken from the command args; when omitted, falls back to this webview window (readWindowLabelFromHash), so "focused window" consumers like Ctrl+Tab need no label.
 
 import { invoke } from '@tauri-apps/api/core'
 
@@ -19,21 +16,19 @@ import { register } from './registry'
 import { readWindowLabelFromHash, useViewStore } from '../store/viewStore'
 import type { WindowTabsPayload } from '../store/viewStore'
 
-// 빈 · 공백뿐 · 문자열 아닌 값을 fallback 으로 접지 않는다 — 빈 인자는 대개 안 채운 셸 변수라, 접으면 다른 창을
-//   건드린다(버스 `layout/commands.rs` `text` 와 같은 조항). 없는 인자(undefined · null — optionalUuidArg 와
-//   같은 가름)만 이 웹뷰 창으로 떨어진다.
+// Empty, blank-only or non-string values do not fold into the fallback — an empty argument is usually an unfilled shell variable and folding would touch another window (same clause as `text` in the bus `layout/commands.rs`). Only undefined · null (as in optionalUuidArg) falls back to this webview window.
 function resolveWindow(cmd: string, args?: Record<string, unknown>): string {
   const w = args?.window
   if (w === undefined || w === null) return readWindowLabelFromHash()
   if (typeof w !== 'string' || w.trim().length === 0) {
     throw new Error(
-      `[${cmd}] window 는 비어 있지 않은 문자열이어야 함 — 빈 인자는 대개 안 채운 셸 변수(받음: ${describeArg(w)})`,
+      `[${cmd}] window must be a non-empty string — an empty argument is usually an unfilled shell variable (got: ${describeArg(w)})`,
     )
   }
   return w
 }
 
-// JSON.stringify 는 BigInt · 순환 객체에서 던진다 — 그러면 `[<cmd>]` 를 붙인 오류 대신 그 TypeError 가 나간다.
+// JSON.stringify throws on BigInt and cyclic objects — then that TypeError would go out instead of the error prefixed with `[<cmd>]`.
 function describeArg(v: unknown): string {
   try {
     return JSON.stringify(v) ?? String(v)
@@ -42,8 +37,7 @@ function describeArg(v: unknown): string {
   }
 }
 
-// 셸 거절(invoke 는 문자열로 거절한다)을 명령 이름을 붙인 Error 로 바꾼다 — 버스 답의 오류 문구가 어느 명령의 것인지
-//   보이게.
+// Turns a shell refusal (invoke refuses with a string) into an Error carrying the command name, so a bus answer's error text shows which command it belongs to.
 async function tagShellRejection<T>(cmd: string, call: Promise<T>): Promise<T> {
   try {
     return await call
@@ -53,10 +47,7 @@ async function tagShellRejection<T>(cmd: string, call: Promise<T>): Promise<T> {
 }
 
 /**
- * 창 인자 `window` 의 탭 목록을 셸에서 받는다 — 셸이 버스와 같은 해석기로 그 인자를 푼다(window_id · 같은 실행 안 label
- * 을 받고 번호는 거절 — TRD S26-window-chrome §4-5). 답의 `label` 이 푼 창이다. ★웹 스토어(`windows`)로 고르지 말
- * 것★ — 그 키는 label 뿐이라 window_id 를 받으면 아무 창도 못 찾아 조용히 아무 일도 안 한다. 셸 거절은 명령 이름을
- * 붙인 Error 로 던진다.
+ * Tab list of the `window` argument from the shell, which resolves it with the bus's resolver (takes window_id and a label in the same run, refuses numbers — TRD S26-window-chrome §4-5); the answer's `label` is the resolved window. ★Do not look it up in the web store (`windows`)★ — its key is the label only, so a window_id silently finds nothing. A shell refusal is thrown as an Error carrying the command name.
  */
 function listTabsOf(cmd: string, window: string): Promise<WindowTabsPayload> {
   return tagShellRejection(cmd, invoke<WindowTabsPayload>('list_tabs', { window }))
@@ -66,12 +57,12 @@ register({
   id: 'tab.create',
   title: () => t('tab.create'),
   category: 'tab',
-  // name 은 tab.rename 과 같게 다듬고 공백뿐이면 invoke 전에 throw 한다 — 빠지면 자동 이름.
+  // name is trimmed like tab.rename, and blank-only throws before invoke — when omitted, an automatic name.
   run: args => {
     let name: string | undefined
     if (typeof args?.name === 'string') {
       name = args.name.trim()
-      if (name.length === 0) throw new Error('[tab.create] name 은 공백일 수 없음')
+      if (name.length === 0) throw new Error('[tab.create] name cannot be blank')
     }
     return useViewStore.getState().createTab(resolveWindow('tab.create', args), name)
   },
@@ -83,7 +74,7 @@ register({
   category: 'tab',
   run: args => {
     const view = args?.view
-    if (typeof view !== 'string') throw new Error('[tab.switch] view(탭 id) 필요')
+    if (typeof view !== 'string') throw new Error('[tab.switch] view (tab id) required')
     return useViewStore.getState().switchTab(resolveWindow('tab.switch', args), view)
   },
 })
@@ -92,7 +83,7 @@ register({
   id: 'tab.close',
   title: () => t('tab.closeCmd'),
   category: 'tab',
-  // view 생략 = 지정된 창(window)의 활성 탭 — 이 웹뷰의 활성이 아니다(S4-F1).
+  // view omitted = the active tab of the given window (window) — not this webview's active one (S4-F1).
   run: async args => {
     const window = resolveWindow('tab.close', args)
     const view = args?.view
@@ -107,22 +98,19 @@ register({
   title: () => t('tab.next'),
   category: 'tab',
   keybinding: 'Ctrl+Tab',
-  // ★생략 시 무엇이 바뀌나를 정확히 적는다★: 버스 호출자에겐 「자기 창」이 없고, 실제 대상은 셸이 고른
-  //   목적지 창(보통 main)이다. 아래 resolveWindow 의 fallback 은 그 목적지 창의 URL 해시를 읽는다 — 즉
-  //   생략하면 사실상 main 이다. LLM 이 window 를 넘길지 말지를 정하는 근거가 이 문장뿐이라 「이 창」 같은
-  //   말을 쓰지 않는다.
+  // ★State exactly what changes when omitted★: a bus caller has no "own window"; the target is the destination window the shell picks (usually main), and resolveWindow's fallback reads that window's URL hash — so omitting means effectively main. This text is the LLM's only basis for passing window, so do not say "this window".
   help: {
-    summary: '그 창의 활성 탭을 다음 탭으로 옮긴다(탭이 하나뿐이면 아무 일도 안 한다).',
+    summary: "Moves that window's active tab to the next tab (does nothing when there is only one tab).",
     effect: 'write',
     args: {
       window: {
         type: 'string',
         description:
-          '대상 창 — window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시 쓰인다 — 주면 거절). 생략하면 사실상 main 이다 — 버스 호출에는 "부른 창"이 없어 셸이 고른 목적지 창의 해시를 읽고, 그 값이 main 으로 떨어진다.',
+          'Target window — a window_id from window.list (the same window across restarts) or a label within the same run. Numbers are not accepted (they get reused — refused if given). When omitted it is effectively main — a bus call has no "calling window", so the hash of the destination window the shell picked is read, and that value falls to main.',
       },
     },
   },
-  // ★Ctrl+Tab(D-8)★: 사람 키·클릭과 동일 command 경로(§5). 활성 · 탭 차례는 셸 답(list_tabs) 기준이다.
+  // ★Ctrl+Tab (D-8)★: the same command path as human keys and clicks (§5). Active tab and tab order are based on the shell answer (list_tabs).
   run: async args => {
     const tabs = await listTabsOf('tab.next', resolveWindow('tab.next', args))
     if (tabs.tabs.length <= 1) return
@@ -136,15 +124,14 @@ register({
   id: 'tab.rename',
   title: () => t('tab.rename'),
   category: 'tab',
-  // ★rename(ADR-0057)★: 사람 더블클릭 인라인 편집 = LLM 한 표면(§5). 빈/공백 name 은 invoke 전에 throw
-  //   (백엔드로 흘려보내지 않음 — TabBar 경계와 동일 정규화). view 는 백엔드 view_owner 파생이라 window 불필요.
+  // ★rename (ADR-0057)★: one surface with human double-click inline edit (§5). An empty/blank name throws before invoke (same normalization as the TabBar boundary); view comes from the backend view_owner, so no window is needed.
   run: args => {
     const view = args?.view
-    if (typeof view !== 'string' || view.length === 0) throw new Error('[tab.rename] view(탭 id) 필요')
+    if (typeof view !== 'string' || view.length === 0) throw new Error('[tab.rename] view (tab id) required')
     const name = args?.name
-    if (typeof name !== 'string') throw new Error('[tab.rename] name(문자열) 필요')
+    if (typeof name !== 'string') throw new Error('[tab.rename] name (string) required')
     const trimmed = name.trim()
-    if (trimmed.length === 0) throw new Error('[tab.rename] name 은 공백일 수 없음')
+    if (trimmed.length === 0) throw new Error('[tab.rename] name cannot be blank')
     return useViewStore.getState().renameTab(view, trimmed)
   },
 })
@@ -153,17 +140,14 @@ register({
   id: 'window.create',
   title: () => t('window.create'),
   category: 'window',
-  // 빈 새 창(빈 탭 1개) 생성(D-6) → {window, window_id, number} 반환(셸 버스 `window.create` 의 답과 같은 셋 — TRD
-  //   S26-window-chrome §5-3).
+  // New empty window (1 empty tab) (D-6) → {window, window_id, number}, same set as the shell bus `window.create` answer (TRD S26-window-chrome §5-3).
   run: () => useViewStore.getState().createWindow(),
 })
 
-// ── 창 상태 명령(TRD S26-window-chrome §6-4) ──
-// 셸 버스 표와 같은 id 다 — ★`help` 를 달지 않는다★(같은 이름을 데몬 명부에 다시 올리면 등록 패킷이 통째로 반려된다 —
-//   `viewCommandBridge.ts` 의 `offeredCommands`). 모두 invoke `window_control` 하나로 가고, 답은 같은 id 의 버스 답
-//   모양으로 깎는다 — 두 표면에서 같은 명령이 다른 칸을 돌려주지 않게.
+// ── Window state commands (TRD S26-window-chrome §6-4) ──
+// Same ids as the shell bus table — ★no `help`★ (the same name on the daemon roster again bounces the whole registration packet — `offeredCommands` in `viewCommandBridge.ts`). All go to the single invoke `window_control`; the answer is trimmed to the bus answer's shape so both surfaces return the same fields.
 
-// 버스 `window.close` 의 `outcome` 철자 — invoke 답의 `close` 는 snake_case 다.
+// The `outcome` spelling of the bus `window.close` — the invoke answer's `close` is snake_case.
 const CLOSE_OUTCOME: Record<WindowCloseResult, 'Closed' | 'HiddenAll' | 'Kept'> = {
   closed: 'Closed',
   hidden_all: 'HiddenAll',
@@ -176,9 +160,7 @@ function registerWindowControl(
   action: WindowControlAction,
   answer: (outcome: WindowControlOutcome) => Record<string, unknown>,
 ): void {
-  // 모든 창 동사(`hide_all` · `show_all`)는 버스처럼 `window` 인자로 창을 고르지 않는다 — invoke 가 요구하는 칸은 이 창
-  //   label 로 채운다(셸은 그 값으로 창을 고르지 않는다). 그래도 준 `window` 의 모양은 resolveWindow 로 본다 — 빈 인자는
-  //   대개 안 채운 셸 변수라 다른 창 동사와 같이 던진다.
+  // The all-windows verbs (`hide_all` · `show_all`) ignore the `window` argument like the bus — the field invoke requires gets this window's label (the shell does not pick by it). A given `window` is still shape-checked with resolveWindow (an empty argument is usually an unfilled shell variable).
   const allWindows = action === 'hide_all' || action === 'show_all'
   register({
     id,
@@ -209,16 +191,15 @@ register({
   id: 'window.close',
   title: () => t('window.close'),
   category: 'window',
-  // 팝아웃 = 닫기 · main = 모든 창 숨기기(셸이 가른다 — TRD §5-4). `if_empty` 는 버스와 같은 이름 · 같은 뜻(§5-5)이고, 그때
-  //   `window` 를 생략하면 이 창 label 로 떨어져 window_id 로만 찾는 셸이 아무것도 닫지 않으므로(답 `Kept`) 던진다.
+  // Popout = close · main = hide all windows (shell decides — TRD §5-4). `if_empty` matches the bus (§5-5); with it, omitting `window` falls back to this window's label, which the shell (finding only by window_id) cannot match — it closes nothing (`Kept`), so it throws.
   run: args => {
     const raw = args?.if_empty
     if (raw !== undefined && raw !== null && typeof raw !== 'boolean') {
-      throw new Error(`[window.close] if_empty 는 boolean 이어야 함(받음: ${describeArg(raw)})`)
+      throw new Error(`[window.close] if_empty must be a boolean (got: ${describeArg(raw)})`)
     }
     const ifEmpty = raw === true
     if (ifEmpty && (args?.window === undefined || args.window === null)) {
-      throw new Error('[window.close] if_empty 에는 window(그 창의 window_id)가 필요하다')
+      throw new Error('[window.close] if_empty requires window (the window_id of that window)')
     }
     return tagShellRejection(
       'window.close',
@@ -227,25 +208,21 @@ register({
   },
 })
 
-/** tab/slot 는 백엔드 ViewId/slot id(Uuid) 라 형식이 맞아야 한다. */
+/** tab/slot are backend ViewId/slot ids (Uuid), so the format must match. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
- * ★spawn_into 인자 정규화(FIX 5)★: tab/slot 는 "있으면 UUID 문자열, 없으면 미지정(null)"이다. 이전엔
- * 잘못된 타입(숫자 등)을 조용히 null 로 강등해 "스폰은 됐는데 엉뚱한 곳에 배치"로 이어졌다 → present-but-invalid
- * 는 invoke **전에** throw 해 side-effecting 스폰을 막는다. 부재(undefined/null)는 정상("미지정").
+ * ★spawn_into argument normalization (FIX 5)★: tab/slot = a UUID string or unspecified (null). A wrong type (a number etc.) used to degrade silently to null ("spawned but placed wrong"), so present-but-invalid throws **before** invoke to block the side-effecting spawn.
  */
 function optionalUuidArg(v: unknown, name: string): string | null {
   if (v === undefined || v === null) return null
   if (typeof v !== 'string' || !UUID_RE.test(v)) {
-    throw new Error(`[agent.spawnInto] ${name} 는 UUID 문자열이어야 함(받음: ${JSON.stringify(v)})`)
+    throw new Error(`[agent.spawnInto] ${name} must be a UUID string (got: ${JSON.stringify(v)})`)
   }
   return v
 }
 
-// SlotContent 유니온 태그 화이트리스트(set_slot_content 인자 검증 — ADR-0060/0063).
-// ★순서가 곧 선언 철자다★ — 호출자가 어떤 대소문자로 쓰든 백엔드로 나가는 태그는 이 배열의 원소로
-//   접힌다(사용자 결정 2026-09-23 — 같은 낱말이 CLI 로는 되고 이 표면으로는 안 되던 어긋남 제거).
+// SlotContent union tag whitelist (set_slot_content validation — ADR-0060/0063). ★Order = declared spelling★: whatever letter case the caller uses, the tag sent to the backend folds to an element of this array (CLI and this surface must agree).
 const SLOT_CONTENT_TYPES = ['empty', 'agent', 'agent_list', 'preset_palette', 'usage'] as const
 
 const USAGE_SHOW_FIELDS = ['show_claude', 'show_codex'] as const
@@ -256,15 +233,8 @@ function findSlotContent(node: LayoutNode, slotId: string): SlotContent | null {
 }
 
 /**
- * 사용량 슬롯의 빠진 show 칸 = 그 슬롯이 이미 사용량이면 지금 값(TRD §3 #20). 버스의 `layout.setSlotContent` 는 셸이 락
- * 안에서 같은 병합을 하므로, 이 길도 같게 두어야 두 LLM 길이 같은 결과를 낸다. 이미 사용량이 아니거나 그 뷰를 아직
- * 모르면 빠진 채로 넘긴다 — 셸 역직렬화가 빠진 칸을 true 로 읽는다(`SlotContent::Usage` serde 기본값).
- *
- * ★기준은 웹뷰가 받아 둔 레이아웃이다★ — 셸의 권위 값과 그사이 어긋날 수 있다(방송이 닿기 전의 연속 호출). 락 안의
- *   원자 병합은 이 길엔 없고 셸의 `set_usage_slot`(버스와 사용량 토글 `usageSlot.toggle*` 가 탄다)에 있다. ★그래서
- *   이 길(`__engramCmd`·cdp)로 사용량 content 를 보내는 LLM 은 show_claude · show_codex 를 둘 다 준다★ — 빠진 칸을
- *   지금 값으로 지키려면 버스의 `layout.setSlotContent` 를 쓴다. 이 안내를 `prompts/engram-help.md` 에 두지 않는 이유 =
- *   그 화면의 독자는 창 JS 를 못 부르는 CLI 에이전트다.
+ * A missing show field of a usage slot = the slot's current value if it is already usage (TRD §3 #20). The shell bus `layout.setSlotContent` merges inside the lock; this path does the same so both LLM paths agree. Not usage yet or view unknown → passed missing (shell serde default reads a missing field as true, `SlotContent::Usage`).
+ * ★Based on the layout the webview received★ — it can drift from the shell's authoritative value (consecutive calls before the broadcast). The atomic merge is the shell's `set_usage_slot` (bus and `usageSlot.toggle*`). ★So an LLM sending usage content through this path (`__engramCmd`·cdp) gets both show_claude and show_codex★ — to keep a missing field at its current value use the bus `layout.setSlotContent`. This note is not in `prompts/engram-help.md` because that reader is a CLI agent that cannot call window JS.
  */
 function mergeUsageShows(viewId: string, slotId: string, content: Record<string, unknown>): Record<string, unknown> {
   const layout = useViewStore.getState().layouts[viewId]?.layout
@@ -276,37 +246,33 @@ function mergeUsageShows(viewId: string, slotId: string, content: Record<string,
 }
 
 /**
- * ★SlotContent variant 형태 검증(FIX LOW)★: 태그(type)만 화이트리스트로 걸면 `{type:'agent'}` 처럼
- * agent_id 가 빠진 malformed 값이 레지스트리를 통과해 Rust 역직렬화에서야 늦게 터진다(오배치 진단 지연).
- * variant 별 필수 필드를 레지스트리 경계에서 미리 검증해 잘못된 값은 invoke **전에** throw 한다
- * (agent.spawnInto 의 optionalUuidArg 와 동형 — side-effecting invoke 전 loud fail). tag 는 이미
- * SLOT_CONTENT_TYPES 로 검증된 상태로 들어온다.
+ * ★SlotContent variant shape validation (FIX LOW)★: checking only the tag lets a malformed value like `{type:'agent'}` (no agent_id) pass and fail late in Rust deserialization. Required fields per variant are validated at the registry boundary so a bad value throws **before** invoke (like optionalUuidArg). The tag is already validated by SLOT_CONTENT_TYPES.
  */
 function validateSlotContent(content: { type: string } & Record<string, unknown>): void {
   switch (content.type) {
     case 'agent':
       if (typeof content.agent_id !== 'string' || content.agent_id.length === 0) {
         throw new Error(
-          `[layout.setSlotContent] agent variant 는 string agent_id 필요(받음: ${JSON.stringify(content)})`,
+          `[layout.setSlotContent] agent variant requires a string agent_id (got: ${JSON.stringify(content)})`,
         )
       }
       break
     case 'empty':
     case 'agent_list':
     case 'preset_palette':
-      // 추가 필드 없는 unit variant — tag 만 맞으면 통과(여분 필드는 백엔드가 무시).
+      // Unit variant with no extra fields — passes when the tag matches (extra fields are ignored by the backend).
       break
     case 'usage':
-      // 빠진 칸은 여기서 채우지 않는다 — 호출부가 그 슬롯의 지금 값으로 채운다(`mergeUsageShows`).
+      // Missing fields are not filled here — the caller fills them with that slot's current value (`mergeUsageShows`).
       for (const field of USAGE_SHOW_FIELDS) {
         if (content[field] !== undefined && typeof content[field] !== 'boolean') {
           throw new Error(
-            `[layout.setSlotContent] usage variant 의 ${field} 는 boolean 이어야 함(받음: ${JSON.stringify(content)})`,
+            `[layout.setSlotContent] ${field} of the usage variant must be a boolean (got: ${JSON.stringify(content)})`,
           )
         }
       }
       break
-    // default 는 도달 불가(호출부에서 SLOT_CONTENT_TYPES 로 이미 걸러짐) — 방어만.
+    // default is unreachable (already filtered by SLOT_CONTENT_TYPES at the caller) — defence only.
   }
 }
 
@@ -314,20 +280,20 @@ register({
   id: 'layout.setSlotContent',
   title: () => t('slot.setContent'),
   category: 'layout',
-  // ★set_slot_content(ADR-0063)★: 사람 우클릭 = LLM 한 표면(§5).
+  // ★set_slot_content (ADR-0063)★: human right-click = one surface with the LLM (§5).
   run: args => {
     const viewId = args?.viewId
     const slotId = args?.slotId
     const raw = args?.content
-    if (typeof viewId !== 'string') throw new Error('[layout.setSlotContent] viewId 필요')
-    if (typeof slotId !== 'string') throw new Error('[layout.setSlotContent] slotId 필요')
+    if (typeof viewId !== 'string') throw new Error('[layout.setSlotContent] viewId required')
+    if (typeof slotId !== 'string') throw new Error('[layout.setSlotContent] slotId required')
     const type = matchDeclaredSpelling((raw as { type?: unknown } | undefined)?.type, SLOT_CONTENT_TYPES)
     if (!type) {
       throw new Error(
-        `[layout.setSlotContent] content.type 이 SlotContent variant 여야 함(받음: ${JSON.stringify(raw)})`,
+        `[layout.setSlotContent] content.type must be a SlotContent variant (got: ${JSON.stringify(raw)})`,
       )
     }
-    // 접은 태그를 도로 얹는다 — 여분 필드(agent_id 등)는 호출자가 준 그대로 통과시키고 태그만 갈아낀다.
+    // The folded tag is put back — extra fields (agent_id etc.) pass through as the caller gave them, and only the tag is swapped.
     const content = { ...(raw as Record<string, unknown>), type }
     validateSlotContent(content)
     const sent = type === 'usage' ? mergeUsageShows(viewId, slotId, content) : content
@@ -339,13 +305,11 @@ register({
   id: 'agent.spawnInto',
   title: () => t('agent.spawnInto'),
   category: 'agent',
-  // ★spawn_into(D-7, TRD §6 G9)★: 스폰(데몬) + 탭 생성(필요 시) + 슬롯 배정을 한 방으로 조립하는 백엔드
-  //   합성 command 를 직접 invoke 한다(store 상태 없이 backend 권위 — ADR-0057). 성공 시 새 AgentId 반환.
-  //   슬롯 정책·실패 가시성은 backend 가 강제.
-  //   ★FIX 5★: tab/slot 은 invoke 전에 UUID 형식 검증(잘못된 값 → 스폰 전 throw, 오배치 방지).
+  // ★spawn_into (D-7, TRD §6 G9)★: invokes the backend composite command (spawn + tab creation if needed + slot assignment; backend authority without store state — ADR-0057). Returns the new AgentId. Slot policy and failure visibility are the backend's.
+  // ★FIX 5★: tab/slot get UUID validation before invoke (bad value → throw before the spawn).
   run: args => {
     const cwd = args?.cwd
-    if (typeof cwd !== 'string' || cwd.length === 0) throw new Error('[agent.spawnInto] cwd 필요')
+    if (typeof cwd !== 'string' || cwd.length === 0) throw new Error('[agent.spawnInto] cwd required')
     const tab = optionalUuidArg(args?.tab, 'tab')
     const slot = optionalUuidArg(args?.slot, 'slot')
     const backend = typeof args?.backend === 'string' ? args.backend : null

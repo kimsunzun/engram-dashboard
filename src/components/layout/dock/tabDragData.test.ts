@@ -30,8 +30,8 @@ const split = (dir: 'left_right' | 'top_bottom', ratio: number, a: LayoutNode, b
 /** Left-right (0.3) — left area · right top-bottom (1/3) split. */
 const NESTED = split('left_right', 0.3, leaf('a'), split('top_bottom', 1 / 3, leaf('b'), leaf('c')))
 
-describe('타입 문자열 — 짓기 → 읽기', () => {
-  it('왕복 — 모든 칸', () => {
+describe('type string — build → read', () => {
+  it('round trip — every field', () => {
     const mime = buildTabDragType({ app: APP, drag: DRAG, original: { w: 640.4, h: 479.6 }, shape: shapeOf(NESTED) })
     expect(mime).toBe(`${TAB_MIME};app=${APP};drag=${DRAG};w=640;h=480;shape=h0.3_lv0.3333333333333333_ll`)
     const head = readTabDragType(['Files', mime], APP)
@@ -42,7 +42,7 @@ describe('타입 문자열 — 짓기 → 읽기', () => {
     expect(shapeOf(head!.shape!)).toBe(shapeOf(NESTED))
   })
 
-  it('대문자 identifier 를 소문자로 짓고 소문자로 견준다(Chromium 이 형식을 소문자로 바꾼다)', () => {
+  it('builds an uppercase identifier in lowercase and compares in lowercase (Chromium lowercases the format)', () => {
     const mime = buildTabDragType({ app: 'Com.Engram.Dashboard', drag: DRAG, original: null, shape: null })
     expect(mime).toBe(mime.toLowerCase())
     expect(readTabDragType([mime], 'COM.ENGRAM.DASHBOARD')?.drag).toBe(DRAG)
@@ -50,13 +50,13 @@ describe('타입 문자열 — 짓기 → 읽기', () => {
     expect(readTabDragType([`APPLICATION/X-ENGRAM-TAB;APP=${APP.toUpperCase()};DRAG=${DRAG}`], APP)?.drag).toBe(DRAG)
   })
 
-  it('크기 · drag · 모양 칸이 없으면 그 칸만 null', () => {
+  it('if the size · drag · shape field is missing only that field is null', () => {
     const head = readTabDragType([`${TAB_MIME};app=${APP}`], APP)
     expect(head).toEqual({ mime: `${TAB_MIME};app=${APP}`, drag: null, original: null, shape: null })
     expect(buildTabDragType({ app: APP, drag: DRAG, original: null, shape: null })).toBe(`${TAB_MIME};app=${APP};drag=${DRAG}`)
   })
 
-  it('깨진 칸을 거른다 — 크기(0 · 음수 · 소수 · 한 변만) · 빈 drag · 모양 문법', () => {
+  it('filters broken fields — size (0 · negative · fractional · one side only) · empty drag · shape grammar', () => {
     const read = (params: string) => readTabDragType([`${TAB_MIME};app=${APP};${params}`], APP)!
     expect(read('w=0;h=10').original).toBeNull()
     expect(read('w=-5;h=10').original).toBeNull()
@@ -71,12 +71,12 @@ describe('타입 문자열 — 짓기 → 읽기', () => {
     expect(read(`w=0;h=10;drag=${DRAG}`).drag).toBe(DRAG)
   })
 
-  it('다른 app 은 우리 끌기가 아니다 · app 칸이 없어도 아니다', () => {
+  it('another app is not our drag · neither is one without an app field', () => {
     expect(readTabDragType([`${TAB_MIME};app=com.engram.spike;drag=${DRAG}`], APP)).toBeNull()
     expect(readTabDragType([`${TAB_MIME};drag=${DRAG}`], APP)).toBeNull()
   })
 
-  it('Files · text/uri-list 만이면 우리 끌기가 아니다 · 머리가 같은 이름으로 시작만 하는 것도 아니다', () => {
+  it('only Files · text/uri-list is not our drag · nor one whose head merely starts with the same name', () => {
     expect(readTabDragType(['Files'], APP)).toBeNull()
     expect(readTabDragType(['text/uri-list', 'text/plain'], APP)).toBeNull()
     expect(readTabDragType([`${TAB_MIME}-other;app=${APP}`], APP)).toBeNull()
@@ -84,13 +84,13 @@ describe('타입 문자열 — 짓기 → 읽기', () => {
   })
 })
 
-describe('모양 — shapeOf ↔ parseShape', () => {
-  it('칸 하나 = l', () => {
+describe('shape — shapeOf ↔ parseShape', () => {
+  it('one area = l', () => {
     expect(shapeOf(leaf('x'))).toBe('l')
     expect(parseShape('l')).toEqual({ type: 'slot', id: 'shape-slot-0', content: { type: 'empty' } })
   })
 
-  it('분할 · 비율 f64 그대로 왕복', () => {
+  it('split · ratio f64 round trip as is', () => {
     for (const ratio of [0.5, 1 / 3, 0.1 + 0.2, 1e-7, 0.999999999999, 5e-324]) {
       const tree = split('top_bottom', ratio, leaf('a'), split('left_right', 1 - ratio, leaf('b'), leaf('c')))
       const back = parseShape(shapeOf(tree))
@@ -100,7 +100,7 @@ describe('모양 — shapeOf ↔ parseShape', () => {
     }
   })
 
-  it('id 는 전위 순 · 칸 내용은 empty', () => {
+  it('ids in pre-order · area content is empty', () => {
     expect(parseShape(shapeOf(NESTED))).toEqual({
       type: 'split',
       id: 'shape-split-0',
@@ -118,14 +118,14 @@ describe('모양 — shapeOf ↔ parseShape', () => {
     })
   })
 
-  it('타입 문자열 칸을 깨는 글자(; =)가 없고 소문자다', () => {
+  it('no characters that break the type string field (; =) and lowercase', () => {
     const text = shapeOf(split('left_right', 1.5e-10, leaf('a'), leaf('b')))
     expect(text).toBe(text.toLowerCase())
     expect(text).not.toMatch(/[;=]/)
   })
 })
 
-describe('값 JSON', () => {
+describe('value JSON', () => {
   const value = {
     drag: DRAG,
     view: 'view-1',
@@ -135,7 +135,7 @@ describe('값 JSON', () => {
     grab: { x: 37.5, y: 14 },
   }
 
-  it('왕복 · 판 v = 1', () => {
+  it('round trip · version v = 1', () => {
     const raw = buildTabDragValue(value)
     expect(JSON.parse(raw).v).toBe(1)
     expect(readTabDragValue(raw)).toEqual({ v: 1, ...value })
@@ -147,7 +147,7 @@ describe('값 JSON', () => {
     })
   })
 
-  it('JSON 깨짐 · 칸 모양이 다르면 null', () => {
+  it('broken JSON · a different field shape gives null', () => {
     expect(readTabDragValue('')).toBeNull()
     expect(readTabDragValue('{')).toBeNull()
     expect(readTabDragValue('null')).toBeNull()

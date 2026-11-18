@@ -76,7 +76,7 @@ const PARK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 ///   fails and a batch of N comes back → queue = N + k. The next cycle's batch is N + k, so it grows by **+k** every cycle
 ///   (the old comment's "the excess is at most one batch" was circular since that one batch already contained the excess).
 ///   So the denominator adds **in-flight** (= that recipient's share that flush carried out of the lock and has not yet settled).
-/// ★The surface of application widened in amendment 7 — **every send now passes this gate** (ADR-0125 §impact · spec §5)★:
+/// ★The surface of application widened in amendment 7 — **every send now passes this gate** (ADR-0125 §Impact · spec §5)★:
 ///   through amendment 5 this check ran only in the parking branch, and "a direct send that went straight to stdin without entering the queue is not in the denominator,
 ///   so 101 landing on an idle recipient is not a cap violation" was an explicit contract. With the direct-send shortcut abolished,
 ///   **no path skips loading anymore, so that contract died with it** — now a live recipient can also get `MAILBOX_FULL`,
@@ -199,7 +199,7 @@ pub struct DrainOutcome {
 }
 
 /// ★Why the recipient is returned too (load-bearing — 1 msg_id : N delivery records, spec §4 · ADR-0104)★: the key of a ledger record
-///   is `(msg_id, 수신자 id)`. A group broadcast has **N** per-recipient records under one msg_id, so which record an expired
+///   is `(msg_id, recipient id)`. A group broadcast has **N** per-recipient records under one msg_id, so which record an expired
 ///   item is cannot be identified by msg_id alone — if the upper layer looked up "the first pending record" by msg_id,
 ///   it could transition **the wrong member's record** to expired (the danger of the C1-era helper, the defect that anchor pointed at).
 ///   The store is the only place that knows which queue the item was in, so it ships that fact along here.
@@ -393,7 +393,7 @@ impl Mailbox {
     ///   path (`park`) already blocks it, and re-parked items were originally admitted within that cap.
     /// ★The basis of the bound is **not** "at most one batch" but in-flight accounting (F1 — the old argument is discarded)★:
     ///   a batch that drain took out is **still held in the denominator** (`take_in_flight`),
-    ///   so the new inflow k that can arrive in the drain↔restore window is already limited by `cap − (큐 + in-flight)`,
+    ///   so the new inflow k that can arrive in the drain↔restore window is already limited by `cap − (queue + in-flight)`,
     ///   and restore **only moves slots** from in-flight to the queue (it settles that much in the same lock section — service.rs
     ///   `flush_for` failure branch), so the sum does not grow. So this bypass cannot breach the cap — `queue + in_flight ≤ cap`
     ///   still holds. **The property of not counting the cap itself is kept** (lossless restore is the purpose, and the inflow
@@ -441,9 +441,9 @@ impl Mailbox {
                 (None, None) => break,
             };
             if take_restored {
-                merged.push_back(restored.next().expect("peek 직후"));
+                merged.push_back(restored.next().expect("right after peek"));
             } else {
-                merged.push_back(remaining.next().expect("peek 직후"));
+                merged.push_back(remaining.next().expect("right after peek"));
             }
         }
         *queue = merged;
@@ -515,7 +515,7 @@ impl Mailbox {
     /// ★Used in production decisions (round-7 — no longer test-only)★: **blocking duplicate drain entry
     ///   for the same recipient** (service.rs `drain_queue` step 0 — keeps batch B from overtaking batch A's remainder). Since everything became queued, this is the device that makes
     ///   "delivery order = load order" hold, and **in synchronous drain two sending threads
-    ///   draining the same recipient at once is the routine case, so it matters even more** (ADR-0125 §impact — do not remove).
+    ///   draining the same recipient at once is the routine case, so it matters even more** (ADR-0125 §Impact — do not remove).
     ///   Tests also use it for settlement-leak assertions.
     pub fn in_flight_len(&self, recipient: PeerId) -> usize {
         self.in_flight
@@ -595,7 +595,7 @@ impl Mailbox {
         self.queues.is_empty()
     }
 
-    /// Sum of items in all recipient queues (in-flight excluded) — for the assertion 「어느 큐에도 안 들어갔다」 (it entered no queue).
+    /// Sum of items in all recipient queues (in-flight excluded) — for the assertion 「it entered no queue」.
     #[cfg(any(test, feature = "test-harness"))]
     pub fn total_len(&self) -> usize {
         self.queues.values().map(|q| q.len()).sum()
@@ -607,7 +607,7 @@ impl Mailbox {
         self.park(recipient, msg).map(|admitted| {
             assert!(
                 admitted.retired.is_empty(),
-                "park_ok 경로에서 예기치 않은 회수"
+                "unexpected reclaim on the park_ok path"
             );
         })
     }
@@ -647,20 +647,20 @@ mod tests {
         let t0 = Instant::now();
         for i in 0..MAILBOX_CAP {
             mb.park(tid("w"), parked(&format!("m{i}"), ParkKind::Message, t0))
-                .unwrap_or_else(|_| panic!("{i}번째"));
+                .unwrap_or_else(|_| panic!("#{i}"));
         }
         assert_eq!(
             mb.park(tid("w"), parked("m-new", ParkKind::Message, t0))
                 .err(),
             Some(ParkError::MailboxFull),
-            "회수할 stale 이 없으면 반려"
+            "bounced if there is no stale item to reclaim"
         );
         assert_eq!(
             mb.len(tid("w")),
             MAILBOX_CAP,
-            "반려 경로는 큐를 건드리지 않는다(부작용 0)"
+            "the bounce path does not touch the queue (0 side effects)"
         );
-        assert_eq!(mb.msg_ids(tid("w"))[0], "m0", "아무것도 걷어내지 않았다");
+        assert_eq!(mb.msg_ids(tid("w"))[0], "m0", "nothing was taken out");
     }
 
     // ── round-6: notice lane (independent limit + no bounce) ─────────────────────────────────────────
@@ -670,13 +670,13 @@ mod tests {
         let t0 = Instant::now();
         for i in 0..NOTICE_CAP {
             mb.park_ok(tid("w"), parked(&format!("n{i}"), ParkKind::Notice, t0))
-                .unwrap_or_else(|_| panic!("{i}번째 notice(레인 이내)"));
+                .unwrap_or_else(|_| panic!("notice #{i} (within the lane)"));
         }
         assert_eq!(mb.len(tid("w")), NOTICE_CAP);
 
         let admitted = mb
             .park(tid("w"), parked("n-new", ParkKind::Notice, t0))
-            .expect("notice 는 절대 반려되지 않는다");
+            .expect("a notice is never bounced");
         assert_eq!(
             admitted
                 .retired
@@ -684,10 +684,14 @@ mod tests {
                 .map(|m| m.msg_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["n0"],
-            "가장 오래된 통지 1건이 회수돼 장부에 남는다(조용한 유실 금지)"
+            "the oldest notice is reclaimed and remains in the ledger (no silent loss)"
         );
         let ids = mb.msg_ids(tid("w"));
-        assert_eq!(ids.len(), NOTICE_CAP, "notice 레인은 상한을 넘지 않는다");
+        assert_eq!(
+            ids.len(),
+            NOTICE_CAP,
+            "the notice lane does not exceed the cap"
+        );
         assert_eq!(ids.first().unwrap(), "n1");
         assert_eq!(ids.last().unwrap(), "n-new");
     }
@@ -708,10 +712,10 @@ mod tests {
         for i in 0..NOTICE_CAP {
             let admitted = mb
                 .park(tid("w"), parked(&format!("n{i}"), ParkKind::Notice, t0))
-                .unwrap_or_else(|_| panic!("가득 찬 message 큐가 notice 를 막으면 안 된다({i})"));
+                .unwrap_or_else(|_| panic!("a full message queue must not block notices ({i})"));
             assert!(
                 admitted.retired.is_empty(),
-                "notice 레인은 아직 여유가 있다"
+                "the notice lane still has room"
             );
         }
         assert_eq!(mb.len(tid("w")), MAILBOX_CAP + NOTICE_CAP);
@@ -719,16 +723,16 @@ mod tests {
             mb.park(tid("w"), parked("m-over2", ParkKind::Message, t0))
                 .err(),
             Some(ParkError::MailboxFull),
-            "notice 가 message 분모를 부풀리지 않는다(반려 사유는 message 백로그뿐)"
+            "notices do not inflate the message denominator (the only bounce reason is the message backlog)"
         );
         let admitted = mb
             .park(tid("w"), parked("n-new", ParkKind::Notice, t0))
-            .expect("notice 반려 없음");
+            .expect("no notice bounce");
         assert_eq!(admitted.retired.len(), 1);
         assert_eq!(
             mb.len(tid("w")),
             MAILBOX_CAP + NOTICE_CAP,
-            "두 레인 합이 큐 총량의 상한이다(물리 상한 상수 불요)"
+            "the sum of the two lanes is the cap of the total queue size (no physical cap constant needed)"
         );
     }
 
@@ -739,22 +743,26 @@ mod tests {
         let t0 = Instant::now();
         for i in 0..MAILBOX_CAP {
             mb.park_ok(tid("w"), parked(&format!("m{i}"), ParkKind::Message, t0))
-                .unwrap_or_else(|_| panic!("{i}번째"));
+                .unwrap_or_else(|_| panic!("#{i}"));
         }
         let batch = mb.drain(tid("w"), t0).deliverable;
-        assert_eq!(mb.len(tid("w")), 0, "전제: drain 이 큐를 통째로 비웠다");
+        assert_eq!(
+            mb.len(tid("w")),
+            0,
+            "premise: the drain emptied the whole queue"
+        );
         let ticket = mb.take_in_flight(tid("w"), batch.iter());
         assert_eq!(mb.in_flight_len(tid("w")), MAILBOX_CAP);
 
         assert_eq!(
             mb.park(tid("w"), parked("c0", ParkKind::Message, t0)).err(),
             Some(ParkError::MailboxFull),
-            "큐가 비어 보여도 분모는 in-flight 를 센다(옛 구현 = 100건 더 수용)"
+            "even if the queue looks empty, the denominator counts in-flight (old implementation = accepted 100 more)"
         );
         mb.settle_in_flight(tid("w"), ticket);
         assert_eq!(mb.in_flight_len(tid("w")), 0);
         mb.park(tid("w"), parked("c1", ParkKind::Message, t0))
-            .expect("정산 뒤에는 수용");
+            .expect("accepted after settlement");
         assert_eq!(mb.len(tid("w")), 1);
     }
 
@@ -767,19 +775,23 @@ mod tests {
             .expect("park");
 
         let batch = mb.drain(tid("w"), t0).deliverable;
-        assert_eq!(mb.len(tid("w")), 0, "큐 항은 0(= 큐만 보는 판정의 전부)");
+        assert_eq!(
+            mb.len(tid("w")),
+            0,
+            "queue term is 0 (= all a queue-only decision sees)"
+        );
         let ticket = mb.take_in_flight(tid("w"), batch.iter());
         assert_eq!(
             mb.in_flight_len(tid("w")),
             1,
-            "큐를 떠났어도 아직 수신자에게 닿지 않았다 — 진행 중인 배치가 보여야 한다"
+            "it left the queue but has not reached the recipient yet — the batch in progress must be visible"
         );
 
         mb.settle_in_flight(tid("w"), ticket);
         assert_eq!(
             mb.in_flight_len(tid("w")),
             0,
-            "정산되면(배달 완료) 비로소 그 이름 앞이 빈다"
+            "only once settled (delivery complete) does nothing remain in flight addressed to that name"
         );
     }
 
@@ -789,7 +801,7 @@ mod tests {
         let t0 = Instant::now();
         for i in 0..MAILBOX_CAP {
             mb.park_ok(tid("w"), parked(&format!("m{i}"), ParkKind::Message, t0))
-                .unwrap_or_else(|_| panic!("{i}번째"));
+                .unwrap_or_else(|_| panic!("#{i}"));
         }
         for cycle in 0..4 {
             let batch = mb.drain(tid("w"), t0).deliverable;
@@ -805,17 +817,17 @@ mod tests {
                 .count();
             assert_eq!(
                 admitted, 0,
-                "사이클 {cycle}: 이미 cap 만큼 나가 있으므로 창이 열려 있어도 한 건도 못 받는다"
+                "cycle {cycle}: cap's worth is already out, so even with the window open it cannot accept a single one"
             );
             mb.restore_ordered(tid("w"), batch);
             mb.settle_in_flight(tid("w"), ticket);
             assert_eq!(
                 mb.len(tid("w")),
                 MAILBOX_CAP,
-                "사이클 {cycle}: 큐 + in-flight 합이 cap 을 넘지 않는다"
+                "cycle {cycle}: queue + in-flight does not exceed the cap"
             );
         }
-        assert_eq!(mb.in_flight_len(tid("w")), 0, "정산 누수 없음");
+        assert_eq!(mb.in_flight_len(tid("w")), 0, "no settlement leak");
     }
 
     #[test]
@@ -835,13 +847,16 @@ mod tests {
         assert_eq!(
             mb.in_flight_len(tid("w")),
             2,
-            "배달된 1건만 분모에서 빠진다"
+            "only the 1 delivered item leaves the denominator"
         );
 
         let rest = ticket.split([ParkKind::Message; 5]);
         mb.settle_in_flight(tid("w"), rest);
         assert_eq!(mb.in_flight_len(tid("w")), 0);
-        assert!(ticket.is_zero(), "영수증은 잔량 이상을 발급하지 않는다");
+        assert!(
+            ticket.is_zero(),
+            "the receipt does not issue more than the remainder"
+        );
         mb.settle_in_flight(tid("w"), mb_ticket_of(2));
         assert_eq!(mb.in_flight_len(tid("w")), 0);
     }
@@ -860,7 +875,7 @@ mod tests {
         let t0 = Instant::now();
         for i in 0..NOTICE_CAP {
             mb.park_ok(tid("w"), parked(&format!("n{i}"), ParkKind::Notice, t0))
-                .unwrap_or_else(|_| panic!("{i}번째"));
+                .unwrap_or_else(|_| panic!("#{i}"));
         }
         let batch = mb.drain(tid("w"), t0).deliverable;
         let ticket = mb.take_in_flight(tid("w"), batch.iter());
@@ -868,17 +883,17 @@ mod tests {
         for i in 0..5 {
             let admitted = mb
                 .park(tid("w"), parked(&format!("x{i}"), ParkKind::Notice, t0))
-                .expect("통지는 절대 반려되지 않는다");
+                .expect("a notice is never bounced");
             retired_total += admitted.retired.len();
         }
         assert_eq!(
             mb.len(tid("w")) + mb.in_flight_len(tid("w")),
             NOTICE_CAP + 1,
-            "일시 초과는 +1 에서 멈춘다(다음 park 이 초과분 전체를 걷어낸다)"
+            "a temporary excess stops at +1 (the next park takes out the whole excess)"
         );
         assert_eq!(
             retired_total, 4,
-            "밀려난 통지는 전부 반환돼 장부에 남는다(조용한 유실 0)"
+            "pushed-out notices are all returned and remain in the ledger (0 silent loss)"
         );
         mb.settle_in_flight(tid("w"), ticket);
         assert_eq!(mb.in_flight_len(tid("w")), 0);
@@ -893,7 +908,7 @@ mod tests {
                 tid("alice"),
                 parked(&format!("m{i}"), ParkKind::Message, t0),
             )
-            .expect("park 성공");
+            .expect("park succeeds");
         }
         let drained = mb.drain(tid("alice"), t0);
         let ids: Vec<&str> = drained
@@ -904,9 +919,9 @@ mod tests {
         assert_eq!(
             ids,
             vec!["m0", "m1", "m2", "m3", "m4"],
-            "drain 은 park 순서(오래된 순)를 보존해야"
+            "drain must preserve park order (oldest first)"
         );
-        assert!(drained.expired.is_empty(), "만료 없음");
+        assert!(drained.expired.is_empty(), "no expiry");
     }
 
     #[test]
@@ -917,8 +932,12 @@ mod tests {
             .unwrap();
         assert_eq!(mb.len(tid("alice")), 1);
         let _ = mb.drain(tid("alice"), t0);
-        assert_eq!(mb.len(tid("alice")), 0, "drain 후 큐가 비어야");
-        assert!(mb.is_empty(), "빈 큐는 맵에서 제거돼야");
+        assert_eq!(
+            mb.len(tid("alice")),
+            0,
+            "the queue must be empty after drain"
+        );
+        assert!(mb.is_empty(), "an empty queue must be removed from the map");
     }
 
     #[test]
@@ -927,7 +946,7 @@ mod tests {
         let drained = mb.drain(tid("nobody"), Instant::now());
         assert!(
             drained.deliverable.is_empty(),
-            "없는 수신자 drain 은 빈 목록"
+            "draining a nonexistent recipient gives an empty list"
         );
         assert!(drained.expired.is_empty());
     }
@@ -938,19 +957,19 @@ mod tests {
         let t0 = Instant::now();
         for i in 0..MAILBOX_CAP {
             mb.park_ok(tid("bob"), parked(&format!("m{i}"), ParkKind::Message, t0))
-                .unwrap_or_else(|_| panic!("{i}번째(cap 이내)는 수용해야"));
+                .unwrap_or_else(|_| panic!("#{i} (within the cap) must be accepted"));
         }
         assert_eq!(mb.len(tid("bob")), MAILBOX_CAP);
         let over = mb.park_ok(tid("bob"), parked("overflow", ParkKind::Message, t0));
         assert_eq!(
             over,
             Err(ParkError::MailboxFull),
-            "cap 초과 message 는 MailboxFull 반려"
+            "a message over the cap is bounced with MailboxFull"
         );
         assert_eq!(
             mb.len(tid("bob")),
             MAILBOX_CAP,
-            "반려된 항목은 큐에 안 들어감"
+            "a bounced item does not enter the queue"
         );
     }
 
@@ -971,13 +990,13 @@ mod tests {
         );
         for i in 0..3 {
             mb.park_ok(tid("carol"), parked(&format!("n{i}"), ParkKind::Notice, t0))
-                .unwrap_or_else(|_| panic!("가득 찬 message 큐가 notice 를 막으면 안 됨({i})"));
+                .unwrap_or_else(|_| panic!("a full message queue must not block notices ({i})"));
         }
         assert_eq!(mb.len(tid("carol")), MAILBOX_CAP + 3);
         assert_eq!(
             mb.park_ok(tid("carol"), parked("msg-over2", ParkKind::Message, t0)),
             Err(ParkError::MailboxFull),
-            "notice 가 message 분모를 부풀리면 안 됨"
+            "notices must not inflate the message denominator"
         );
     }
 
@@ -991,12 +1010,12 @@ mod tests {
         let drained = mb.drain(tid("d"), at_ttl);
         assert!(
             drained.deliverable.is_empty(),
-            "정확히 TTL 인 순간은 만료(경계 포함) — deliverable 아님"
+            "the exact TTL moment is expired (boundary inclusive) — not deliverable"
         );
         assert_eq!(
             drained.expired.len(),
             1,
-            "정확히 TTL 인 순간은 expired 로 표면화"
+            "the exact TTL moment surfaces as expired"
         );
         assert_eq!(drained.expired[0].msg_id, "m0");
     }
@@ -1011,9 +1030,13 @@ mod tests {
         let drained = mb.drain(tid("d"), over);
         assert!(
             drained.deliverable.is_empty(),
-            "TTL 초과분은 주입 대상 아님"
+            "items past TTL are not inject targets"
         );
-        assert_eq!(drained.expired.len(), 1, "TTL 초과분은 expired 로 표면화");
+        assert_eq!(
+            drained.expired.len(),
+            1,
+            "items past TTL surface as expired"
+        );
     }
 
     #[test]
@@ -1036,13 +1059,17 @@ mod tests {
             .map(|m| m.msg_id.as_str())
             .collect();
         let expired: Vec<&str> = drained.expired.iter().map(|m| m.msg_id.as_str()).collect();
-        assert_eq!(deliverable, vec!["recent"], "미만료만 주입 대상");
+        assert_eq!(
+            deliverable,
+            vec!["recent"],
+            "only unexpired items are inject targets"
+        );
         assert_eq!(
             expired,
             vec!["old"],
-            "만료는 조용히 사라지지 않고 expired 로"
+            "expiry does not vanish silently but becomes expired"
         );
-        assert!(mb.is_empty(), "drain 은 큐를 비운다(재-park 방지)");
+        assert!(mb.is_empty(), "drain empties the queue (prevents re-park)");
     }
 
     #[test]
@@ -1059,14 +1086,14 @@ mod tests {
         .unwrap();
         let now = t0 + PARK_TTL + Duration::from_nanos(1);
         let expired = mb.sweep_expired(now);
-        assert_eq!(expired.len(), 1, "만료분 1건만 반환");
+        assert_eq!(expired.len(), 1, "only 1 expired item returned");
         assert_eq!(expired[0].msg.msg_id, "old");
         assert_eq!(
             expired[0].recipient,
             tid("e"),
-            "만료 항목이 있던 수신자 큐 키를 함께 돌려줘야(1:N 장부 전이 — C4)"
+            "must also return the recipient queue keys that had expired items (1:N ledger transition — C4)"
         );
-        assert_eq!(mb.len(tid("e")), 1, "최근 것은 큐에 잔존");
+        assert_eq!(mb.len(tid("e")), 1, "the recent one stays in the queue");
         let rest = mb.drain(tid("e"), now);
         assert_eq!(rest.deliverable[0].msg_id, "recent");
         assert!(rest.expired.is_empty());
@@ -1081,7 +1108,10 @@ mod tests {
         let now = t0 + PARK_TTL + Duration::from_nanos(1);
         let expired = mb.sweep_expired(now);
         assert_eq!(expired.len(), 1);
-        assert!(mb.is_empty(), "전부 만료돼 비면 큐가 맵에서 제거돼야");
+        assert!(
+            mb.is_empty(),
+            "when everything expires and it is empty, the queue must be removed from the map"
+        );
     }
 
     #[test]
@@ -1094,7 +1124,11 @@ mod tests {
             .unwrap();
         let now = t0 + PARK_TTL;
         let expired = mb.sweep_expired(now);
-        assert_eq!(expired.len(), 2, "두 멤버 큐의 같은 msg_id 가 각각 만료");
+        assert_eq!(
+            expired.len(),
+            2,
+            "the same msg_id in the two member queues each expire"
+        );
         // The order across queues is non-deterministic because of HashMap — view it as a set.
         let mut got: Vec<PeerId> = expired.iter().map(|e| e.recipient).collect();
         let mut want = vec![tid("alice"), tid("bob")];
@@ -1103,7 +1137,7 @@ mod tests {
         assert_eq!(got, want);
         assert!(
             expired.iter().all(|e| e.msg.msg_id == "g1"),
-            "둘 다 같은 논리 메시지(1 msg_id : N 배달기록)"
+            "both are the same logical message (1 msg_id : N delivery records)"
         );
     }
 
@@ -1129,7 +1163,7 @@ mod tests {
         assert_eq!(
             mb.len(tid("r")),
             MAILBOX_CAP + 2,
-            "재파킹은 cap 을 우회해 admitted 항목을 되돌린다(유실 0)"
+            "re-parking bypasses the cap and puts back admitted items (0 loss)"
         );
     }
 
@@ -1163,7 +1197,7 @@ mod tests {
         assert_eq!(
             ids,
             vec!["old1", "old2", "new0", "new1"],
-            "재파킹분이 동시 park 신규분보다 앞서야(오래된 순 보존)"
+            "re-parked items must come before new concurrent park items (oldest-first preserved)"
         );
     }
 
@@ -1190,14 +1224,14 @@ mod tests {
         assert_eq!(
             mb.msg_ids(tid("dup")),
             vec!["m0", "m1", "m2", "m3"],
-            "여러 번 복원해도 큐는 전역 수용 순서(오래된 순)를 유지해야"
+            "even after several restores the queue must keep the global acceptance order (oldest first)"
         );
         mb.park_ok(tid("dup"), parked("new", ParkKind::Message, t0))
             .unwrap();
         assert_eq!(
             mb.msg_ids(tid("dup")),
             vec!["m0", "m1", "m2", "m3", "new"],
-            "재파킹분이 신규분보다 앞"
+            "re-parked items come before new ones"
         );
     }
 
@@ -1216,7 +1250,7 @@ mod tests {
         assert_eq!(
             mb.msg_ids(tid("r")),
             vec!["old0", "old1", "old2", "new0"],
-            "동시 park 된 신규분은 재파킹분 뒤"
+            "new items parked concurrently come after the re-parked items"
         );
     }
 
@@ -1240,12 +1274,12 @@ mod tests {
                 .map(|e| e.msg.msg_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["older"],
-            "미만료 항목 뒤에 숨은 만료분도 sweep 이 걷어내야(전량 스캔)"
+            "the sweep must also take out expired items hidden behind unexpired ones (full scan)"
         );
         assert_eq!(
             mb.msg_ids(tid("z")),
             vec!["newer"],
-            "미만료분은 순서 그대로 잔존"
+            "unexpired items remain in order"
         );
     }
 
@@ -1253,7 +1287,7 @@ mod tests {
     fn restore_ordered_empty_is_noop() {
         let mut mb = Mailbox::new();
         mb.restore_ordered(tid("r"), Vec::new());
-        assert!(mb.is_empty(), "빈 재파킹은 큐를 만들지 않는다");
+        assert!(mb.is_empty(), "an empty re-park does not create a queue");
     }
 
     #[test]
@@ -1279,7 +1313,7 @@ mod tests {
         assert_eq!(
             ids,
             vec!["first", "second", "third"],
-            "sweep 도 오래된 순 보존"
+            "the sweep also preserves oldest-first"
         );
     }
 }

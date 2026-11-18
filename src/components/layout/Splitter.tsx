@@ -1,6 +1,5 @@
-// ADR-0227: 분할 경계 하나의 드래그 손잡이. 셸을 모른다 — 포인터를 비율로 바꿔 콜백으로 알릴 뿐이고, 미리보기
-//   상태·`set_split_ratio`·화해는 호출자(`splitPreview.ts` 를 쓰는 렌더러)가 진다.
-// 레이아웃 공간을 먹지 않는 오버레이다 — 셸의 칸 px 계산이 구분선 두께를 빼지 않는 것과 짝이다(TRD §2d).
+// ADR-0227: drag handle for one split boundary. It does not know the shell — it turns the pointer into a ratio and reports it by callback; the preview state, `set_split_ratio` and reconciliation belong to the caller (the renderer using `splitPreview.ts`).
+// An overlay that takes no layout space — paired with the shell's area px computation not subtracting the divider thickness (TRD §2d).
 
 import {
   useEffect,
@@ -19,31 +18,28 @@ const HIT_PX = 8
 const HOVER_DELAY_MS = 300
 
 /**
- * 콜백 계약: `onDragStart` 뒤에는 `onRelease`·`onCancel` 중 정확히 하나가 온다(언마운트 포함).
- * 움직임 없이 뗀 클릭은 아무 콜백도 부르지 않는다. 누르는 동안 다른 포인터의 누름은 무시한다.
+ * Callback contract: after `onDragStart` exactly one of `onRelease` and `onCancel` comes (including unmount). A click released without movement calls no callback; a press by another pointer during a press is ignored.
  */
 export interface SplitterProps {
-  /** 이 분할의 지금 사각형 — 미리보기 재사상이 입혀졌을 수 있다. */
+  /** The current rectangle of this split — a preview remap may have been applied. */
   split: SplitRect
-  /** 허용 비율 범위(`ratioRange`). null = 잠김 — 드래그·더블클릭 모두 무시한다. */
+  /** Allowed ratio range (`ratioRange`). null = locked — drag and double-click are both ignored. */
   range: { lo: number; hi: number } | null
-  /** 평평한 루트. 누를 때 한 번 `getBoundingClientRect()` 로 포인터 원점·크기를 잡는다. */
+  /** The flat root. On press, `getBoundingClientRect()` is taken once to fix the pointer origin and size. */
   rootRef: RefObject<HTMLElement | null>
   /**
-   * 분할 축으로 처음 실제로 움직였을 때 한 번 — 그 위치의 범위 안 비율을 싣는다(미리보기의 시작값). 누르기만 해서는
-   * 부르지 않는다. 이 값은 `onPreview` 로 다시 오지 않는다.
+   * Once, when it first actually moves along the split axis — carries the in-range ratio there (the preview's start value). A bare press does not call it; this value does not come again through `onPreview`.
    */
   onDragStart(ratio: number): void
-  /** 드래그 중 비율 — 프레임당 최대 한 번, 직전에 알린 값(`onDragStart` 포함)과 다를 때만. */
+  /** Ratio during the drag — at most once per frame, and only when different from the last reported value (including `onDragStart`). */
   onPreview(ratio: number): void
-  /** 움직인 뒤 뗐을 때 한 번. 밀린 프레임을 먼저 `onPreview` 로 내보내므로 직전에 알린 값과 같다. */
+  /** Once on release after moving. It flushes the pending frame through `onPreview` first, so it equals the last reported value. */
   onRelease(ratio: number): void
   /**
-   * 드래그 중 pointercancel·창 blur·언마운트, 주 버튼이 떨어진 채 온 pointermove, 같은 포인터의 새 pointerdown(어느
-   * 구분선이든), 또는 드래그 중 이 분할이 잠기거나 방향이 바뀌거나 다른 split id 로 바뀌었을 때.
+   * During a drag: pointercancel, window blur, unmount, a pointermove with the primary button up, a new pointerdown by the same pointer (on any divider), or this split being locked, changing direction or changing split id.
    */
   onCancel(): void
-  /** 더블클릭(잠김이 아닐 때). 호출자가 미리보기 없이 0.5 를 보낸다. */
+  /** Double-click (when not locked). The caller sends 0.5 without a preview. */
   onReset(): void
 }
 
@@ -52,7 +48,7 @@ interface Press {
   splitId: string
   dir: SplitDir
   el: HTMLElement
-  /** 누를 때 잡은 루트의 분할 축 시작 좌표·길이(CSS px). */
+  /** The root's split-axis start coordinate and length captured on press (CSS px). */
   origin: number
   size: number
   start: number
@@ -65,9 +61,7 @@ interface Press {
 const axisOf = (dir: SplitDir, e: { clientX: number; clientY: number }): number =>
   dir === 'left_right' ? e.clientX : e.clientY
 
-// 드래그는 겹칠 수 있다(두 구분선을 두 포인터로). body 스타일은 첫 드래그가 원래 값을 한 번 저장하고 마지막 드래그가
-//   끝날 때 되돌린다 — 드래그마다 저장·복원하면 먼저 끝난 쪽이 남은 드래그의 잠금을 풀거나, 나중에 끝난 쪽이 다른
-//   드래그가 건 잠금 값을 「원래 값」으로 되살려 남긴다.
+// Drags can overlap (two dividers, two pointers). The first drag saves the original body style once and the last restores it — per-drag save/restore would let the first to end release the lock of the remaining drag, or let the last revive another drag's lock value as the "original".
 const bodyLocks = new Map<object, string>()
 let bodyOriginal: { cursor: string; userSelect: string } | null = null
 
@@ -94,11 +88,10 @@ function unlockBody(owner: object): void {
   }
 }
 
-// pointerId → 그 포인터의 누름을 쥔 구분선의 취소 함수. 같은 포인터의 새 누름이 다른 구분선에 와도 앞 누름을 닫을 수
-//   있게 구분선끼리 공유한다.
+// pointerId → cancel function of the divider holding that pointer's press, shared among dividers so a new press by the same pointer on another divider can close the earlier press.
 const pointerOwners = new Map<number, () => void>()
 
-// 창 수준 리스너는 떼려면 같은 함수여야 해서 인스턴스당 한 번 만들고, 최신 props 는 ref 로 읽는다.
+// A window-level listener must be the same function to detach, so it is created once per instance and the latest props are read through a ref.
 function createDrag(latest: { current: SplitterProps }, setDragging: (v: boolean) => void) {
   let press: Press | null = null
 
@@ -127,7 +120,7 @@ function createDrag(latest: { current: SplitterProps }, setDragging: (v: boolean
     try {
       if (p.el.hasPointerCapture?.(p.pointerId)) p.el.releasePointerCapture(p.pointerId)
     } catch {
-      // 캡처는 이미 풀렸을 수 있다(웹뷰 경계를 넘나든 뒤 등) — 풀려 있으면 할 일이 없다.
+      // The capture may already be released (e.g. after crossing a webview boundary) — if released there is nothing to do.
     }
     unlockBody(p)
     if (pointerOwners.get(p.pointerId) === abort) pointerOwners.delete(p.pointerId)
@@ -148,14 +141,12 @@ function createDrag(latest: { current: SplitterProps }, setDragging: (v: boolean
   function onMove(e: PointerEvent): void {
     const p = press
     if (p === null || e.pointerId !== p.pointerId) return
-    // 주 버튼 없이 온 이동은 pointerup 을 놓쳤거나 다른 버튼을 쥔 채 주 버튼을 뗀 것이다 — 어느 쪽이든 확정 근거가
-    //   없고, 따라가면 버튼을 뗀 채 끌리다가 다음 pointerup 에서 아무 비율로나 확정되므로 취소로 닫는다.
-    //   Pointer Events 규격상 터치 접촉·펜 팁 접촉도 bit 0 을 켠다.
+    // A move without the primary button means pointerup was missed or the primary was released while another button was held — no basis to commit, and following it would drag with the button released and commit an arbitrary ratio, so close it as a cancel. Per the Pointer Events spec touch and pen-tip contact also set bit 0.
     if ((e.buttons & 1) === 0) {
       abort()
       return
     }
-    // pointerdown 을 막지 않으므로(아래 onPointerDown) 누른 채 끄는 동안의 기본 동작은 여기서 막는다.
+    // pointerdown is not prevented (onPointerDown below), so the default action during the press-and-drag is prevented here.
     e.preventDefault()
     p.last = axisOf(p.dir, e)
     if (!p.moved) {
@@ -187,7 +178,7 @@ function createDrag(latest: { current: SplitterProps }, setDragging: (v: boolean
   function onUp(e: PointerEvent): void {
     const p = press
     if (p === null || e.pointerId !== p.pointerId) return
-    // 뗀 값은 pointerup 좌표가 아니라 마지막 pointermove 위치로 정한다 — 그래야 확정값이 직전 미리보기와 같아 뗄 때 튀지 않는다.
+    // Released value = the last pointermove position, not the pointerup coordinates, so the commit equals the last preview (no jump on release).
     const r = p.moved ? ratioNow(p) : null
     end(p)
     if (!p.moved) return
@@ -204,9 +195,7 @@ function createDrag(latest: { current: SplitterProps }, setDragging: (v: boolean
 
   const onPointerDown = (e: ReactPointerEvent<HTMLElement>): void => {
     if (e.button !== 0) return
-    // 같은 포인터는 떼지 않고 다시 누를 수 없다(버튼을 더 눌러도 pointermove 다) — 그 포인터의 앞 누름은 pointerup 을
-    //   놓친 것이니 어느 구분선 것이든 취소로 닫는다. 안 닫으면 다른 구분선이면 한 포인터가 두 분할을 함께 끌고, 같은
-    //   구분선이면 새 누름이 무시돼 움직이지 않은 클릭도 앞 드래그의 마지막 값으로 확정된다.
+    // The same pointer cannot press again without releasing — its earlier press missed pointerup, so close it as a cancel whichever divider owns it; otherwise on another divider one pointer would drag two splits together, and on the same divider a click without movement would commit the earlier drag's last value.
     pointerOwners.get(e.pointerId)?.()
     if (press !== null) return
     const { split, range, rootRef } = latest.current
@@ -216,9 +205,7 @@ function createDrag(latest: { current: SplitterProps }, setDragging: (v: boolean
     const dir = split.dir
     const size = dir === 'left_right' ? rect.width : rect.height
     if (!(size > 0)) return
-    // preventDefault 하지 않는다 — 막으면 호환 mousedown 이 사라져, 문서 mousedown 으로 닫히는 열린 메뉴·팝업
-    //   (SlotContextMenu·AgentList·PresetPalette)이 구분선을 눌러도 안 닫힌다. 텍스트 선택은 구분선의
-    //   `user-select: none` 과 드래그 중 body 잠금·pointermove 의 preventDefault 로 막는다.
+    // Do not preventDefault — it removes the compat mousedown, so open menus and popups that close on document mousedown (SlotContextMenu·AgentList·PresetPalette) would not close on a divider press. Text selection is blocked by the divider's `user-select: none`, the body lock during the drag and pointermove's preventDefault.
     const start = axisOf(dir, e)
     const el = e.currentTarget
     press = {
@@ -235,22 +222,21 @@ function createDrag(latest: { current: SplitterProps }, setDragging: (v: boolean
       previewed: null,
     }
     pointerOwners.set(e.pointerId, abort)
-    // jsdom 등 포인터 캡처가 없는 환경이 있어 선택적으로 부른다 — 창 수준 리스너만으로도 드래그는 돈다.
+    // Some environments such as jsdom have no pointer capture, so it is called optionally — the window-level listeners alone keep the drag running.
     try {
       el.setPointerCapture?.(e.pointerId)
     } catch {
-      // 캡처 실패는 치명적이지 않다 — 아래 창 수준 리스너가 떼기·취소까지 받는다.
+      // A capture failure is not fatal — the window-level listeners below receive release and cancel.
     }
-    // Chromium 은 버튼을 쥔 채로도 캡처를 잠깐 잃는다(orca `pane-divider-drag.ts`). 그래서 캡처와 별도로 창 수준에서
-    //   pointerup·pointercancel·blur 까지 드래그를 쥐고, `lostpointercapture` 는 취소로 치지 않는다.
+    // Chromium briefly loses capture even with a button held (orca `pane-divider-drag.ts`), so the drag is also held at window level through pointerup, pointercancel and blur; `lostpointercapture` is not a cancel.
     window.addEventListener('pointermove', onMove, true)
     window.addEventListener('pointerup', onUp, true)
     window.addEventListener('pointercancel', onPointerCancel, true)
-    // blur 는 캡처 단계로 걸지 않는다 — 걸면 창 안 요소의 blur 까지 받아 드래그가 끊긴다. 창 자신의 blur 만 필요하다.
+    // blur is not registered in the capture phase — it would also receive blur of elements inside the window and cut the drag. Only the window's own blur is needed.
     window.addEventListener('blur', abort)
   }
 
-  /** 렌더 뒤 호출 — 누르는 동안 잠기거나 방향·split id 가 바뀌었으면 드래그를 거둔다. */
+  /** Called after render — if it got locked during the press or the direction or split id changed, the drag is reaped. */
   const revalidate = (): void => {
     if (press !== null && ratioNow(press) === null) abort()
   }

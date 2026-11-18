@@ -1,21 +1,10 @@
 //! State → wire fan-out (ADR-0129 — agent system layer).
 //!
-//! Only one **global `StatusSink`** injected into `AgentManager` lives. It encodes the state facts
-//! the core pushes up from a sync thread (status_changed / agent_list_updated / restore_result) as `AgentEvent` JSON
-//! and pushes them once into the fan-out port (`crate::conn_port::FrameFanout`).
+//! Only one global `StatusSink` injected into `AgentManager` lives here. It encodes the state facts the core pushes up from a sync thread (status_changed / agent_list_updated / restore_result) as `AgentEvent` JSON and pushes them once into the fan-out port (`crate::conn_port::FrameFanout`).
 //!
-//! ★Why the agent system side (the separation axis)★: this file knows **both** the core vocabulary (`AgentId`·`AgentStatus`·`AgentInfo`·
-//!   `RestoreReport`) and the wire vocabulary (`AgentEvent`) — things the network layer must not know even by type (ADR-0129 decision 1). Conversely this file does not
-//!   know how many connections there are or who is registered:
-//!   the only thing that can be passed across the port is one opaque text
-//!   (ADR-0129 2026-08-04 note — the holes have two shapes: per-connection and all-connections).
-//! ★Policy does not change here★: the terminal decision and event synthesis belong to the core (ADR-0005 status notification split),
-//!   and this sink only encodes what the core called and lets it flow — it neither decides nor produces events.
-//!   Here is the end of the one branch of the structure where the core pushes state up **through a single branch only** (ADR-0028 — no separate
-//!   observer is attached per feature).
-//! ★It is not "one send per event" (beware of misreading)★: the encoding and fan-out call in this file is once per event but
-//!   **the actual sending is as many as the number of registered connections** — the port implementation does try_send per connection. ADR-0028 is a decision that *there is one
-//!   push branch*, not a guarantee that *sending happens once*.
+//! ★Why the agent system side★: this file knows both the core vocabulary (`AgentId`·`AgentStatus`·`AgentInfo`·`RestoreReport`) and the wire vocabulary (`AgentEvent`) — which the network layer must not know even by type (ADR-0129 decision 1). It does not know how many connections exist; only one opaque text crosses the port (ADR-0129 — the holes have two shapes: per-connection and all-connections).
+//! ★Policy does not change here★: the terminal decision and event synthesis belong to the core (ADR-0005 status notification split); this sink only encodes what the core called and lets it flow. It is the end of the single branch where the core pushes state up (ADR-0028 — no per-feature observer).
+//! ★Not "one send per event"★: encoding and the fan-out call are once per event, but actual sending is as many as the registered connections (the port implementation does try_send per connection). ADR-0028 decides that there is one push branch, not that sending happens once.
 // ADR-0129
 // ADR-0005
 // ADR-0028
@@ -91,7 +80,7 @@ mod tests {
     }
 
     fn sole_event(fanout: &RecordingFanout) -> serde_json::Value {
-        serde_json::from_str(&fanout.sole_text()).expect("wire 는 JSON")
+        serde_json::from_str(&fanout.sole_text()).expect("wire is JSON")
     }
 
     fn info(id: AgentId, name: &str, epoch: u32, status: CoreStatus) -> CoreAgentInfo {
@@ -137,8 +126,7 @@ mod tests {
         }
     }
 
-    /// The **whole** shape of the `info` fixture above when it came out on the wire. Write it without dropping a single field —
-    /// a partial assertion lets pollution or an extra field in an unchecked field through (that is the reason this helper exists).
+    /// The whole shape of the `info` fixture above on the wire. Write it without dropping a field — a partial assertion lets pollution or an extra field through.
     fn expected_agent(
         id: AgentId,
         name: &str,
@@ -170,8 +158,7 @@ mod tests {
 
     #[test]
     fn a_status_change_goes_out_as_exactly_one_whole_envelope() {
-        // ★Why a state carrying a payload (`Exited{code}`) is used★: if only unit variants are run, a regression that drops the state payload
-        //   is not caught.
+        // ★Why a state carrying a payload (`Exited{code}`)★: running only unit variants would not catch a regression that drops the state payload.
         let (sink, fanout) = sink_with_fanout();
         let id = AgentId::new_v4();
 
@@ -191,10 +178,7 @@ mod tests {
 
     #[test]
     fn a_roster_update_carries_the_whole_list_including_agents_that_are_not_running() {
-        // ★This sink **does not filter** the roster (load-bearing)★: the predicate that picks only the live (`is_live`) is a concern of the delivery
-        //   decision side, and the frontend list must see even the dead to decide a terminal transition (ADR-0005 —
-        //   the frontend decides terminal by this list, not by status_changed). So the fixture
-        //   **mixes in non-Running** — if a filter appears here the frontend never sees an exit.
+        // ★This sink does not filter the roster (load-bearing)★: picking only the live (`is_live`) is the delivery decision side's concern, and the frontend list must see the dead too to decide a terminal transition (ADR-0005 — the frontend decides terminal by this list, not status_changed). So the fixture mixes in non-Running — a filter here would hide every exit from the frontend.
         let (sink, fanout) = sink_with_fanout();
         let (a, b, c) = (AgentId::new_v4(), AgentId::new_v4(), AgentId::new_v4());
 
@@ -222,15 +206,13 @@ mod tests {
                     ]
                 }
             }),
-            "목록은 받은 순서·내용 그대로 실린다(필터링·잘림·재정렬 없음)"
+            "the list is carried in the received order and content as is (no filtering, truncation or reordering)"
         );
     }
 
     #[test]
     fn every_restore_outcome_is_forwarded_with_its_payload() {
-        // ★Run **all variants** of the outcome★: if only one kind is run, an implementation that hardcodes `Resumed` passes,
-        //   and a break in the outcomes carrying a payload (FreshFallback/Failed/Blocked) goes uncaught. FreshFallback also passes
-        //   through the Uuid→String conversion so that boundary is nailed down here as well.
+        // ★Run all outcome variants★: one kind would pass an implementation hardcoding `Resumed` and miss a break in the payload-carrying outcomes (FreshFallback/Failed/Blocked). FreshFallback also passes the Uuid→String conversion, nailing that boundary.
         let old = uuid::Uuid::new_v4();
         let new = uuid::Uuid::new_v4();
         let cases = vec![
@@ -244,21 +226,21 @@ mod tests {
             ),
             (
                 CoreRestoreOutcome::Failed {
-                    reason: "fresh 실패".into(),
+                    reason: "fresh failed".into(),
                 },
-                json!({ "type": "Failed", "reason": "fresh 실패" }),
+                json!({ "type": "Failed", "reason": "fresh failed" }),
             ),
             (
                 CoreRestoreOutcome::FreshFallback {
                     old_sid: Some(old),
                     new_sid: new,
-                    reason: "resume 조기 종료".into(),
+                    reason: "resume exited early".into(),
                 },
                 json!({
                     "type": "FreshFallback",
                     "old_sid": old.to_string(),
                     "new_sid": new.to_string(),
-                    "reason": "resume 조기 종료"
+                    "reason": "resume exited early"
                 }),
             ),
         ];
@@ -289,8 +271,7 @@ mod tests {
         }
     }
 
-    /// ★Raw observations are not broadcast here★ — usage sends the one sheet the service merged only to connections subscribed to that vendor
-    /// (`usage_service`). If it flowed from here, even unsubscribed connections would receive the pre-merge value.
+    /// ★Raw observations are not broadcast here★ — usage sends the one sheet the service merged only to connections subscribed to that vendor (`usage_service`); from here even unsubscribed connections would receive the pre-merge value.
     #[test]
     fn a_usage_observation_is_not_broadcast() {
         use engram_dashboard_agent::usage::{UsageObservation, UsageSource, UsageVendorKey};

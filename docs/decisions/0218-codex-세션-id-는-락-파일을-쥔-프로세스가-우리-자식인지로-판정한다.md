@@ -5,7 +5,7 @@
 
 ## 맥락
 
-ADR-0217 chose the **MCP `tools/call` `_meta`** as the recovery channel. That this channel gives the id is measured and still true. ★**The problem is coverage**★ — the trigger is 「첫 도구 호출」 (the first tool call), so **a session that launches codex, exchanges a few words and then closes does not get an id.** The user pointed at that scenario ("안녕 한 다음에 종료하면 저장이 안 된다는 거 아냐" — so if I say hello and then quit, it doesn't get saved?), and it is **an interval worse than the status-line approach** — the status line caught that case too.
+ADR-0217 chose the **MCP `tools/call` `_meta`** as the recovery channel. That this channel gives the id is measured and still true. ★**The problem is coverage**★ — the trigger is 「첫 도구 호출」 (the first tool call), so **a session that launches codex, exchanges a few words and then closes does not get an id.** The user pointed at that scenario (「안녕 한 다음에 종료하면 저장이 안 된다는 거 아냐」 ("So if I say hello and then quit, it doesn't get saved?")), and it is **an interval worse than the status-line approach** — the status line caught that case too.
 
 While designing 「첫 턴 관측 후 기록 조회」 (a record lookup after observing the first turn) to fill that gap, a full sweep of the storage turned up ★**a key tied directly to our child process**★. With that, not only does the gap disappear, but **neither a turn nor a tool call is needed anymore.**
 

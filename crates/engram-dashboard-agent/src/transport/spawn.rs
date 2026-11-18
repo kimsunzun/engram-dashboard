@@ -90,7 +90,7 @@ const REAP_POLL: Duration = Duration::from_millis(10);
 /// ★Do not find and end descendants by pid★ — `taskkill /T` (platform `process::kill_tree`) builds the tree from parent pids alone and does not look at start
 ///   time, so on this PC, where processes carrying a dead parent's pid are common (measured 2026-10-10 · U7 review), it kills even a stranger's tree under the
 ///   `cmd.exe` that got that pid again. The route of snapshotting an identity list (platform `process::subtree`) and re-reading each start time before
-///   ending it also kills a stranger if the pid is handed over after the snapshot and before the read (ADR-0291 「거부한 대안」).
+///   ending it also kills a stranger if the pid is handed over after the snapshot and before the read (ADR-0291 「Rejected alternatives」).
 // ADR-0291
 pub(crate) struct ChildGuard<C: Reap> {
     child: Option<C>,
@@ -108,12 +108,12 @@ impl<C: Reap> ChildGuard<C> {
     pub(crate) fn child_mut(&mut self) -> &mut C {
         self.child
             .as_mut()
-            .expect("가드는 풀리기 전까지 자식을 쥔다")
+            .expect("the guard holds the child until it is released")
     }
 
     /// Releases the guard and hands the child over — after this the guard ends nothing.
     pub(crate) fn into_inner(mut self) -> C {
-        self.child.take().expect("가드는 한 번만 풀린다")
+        self.child.take().expect("the guard is released only once")
     }
 }
 
@@ -125,7 +125,7 @@ impl<C: Reap> Drop for ChildGuard<C> {
         if let Err(e) = child.kill_direct() {
             tracing::warn!(
                 pid = ?child.pid(),
-                "띄우기 실패 정리: 직속 자식을 못 껐다 — 거두지 않고 놓는다: {e}"
+                "spawn failure cleanup: could not kill the direct child — letting it go without reaping: {e}"
             );
             return;
         }
@@ -138,14 +138,14 @@ impl<C: Reap> Drop for ChildGuard<C> {
                     tracing::warn!(
                         pid = ?child.pid(),
                         budget_ms = REAP_BUDGET.as_millis() as u64,
-                        "띄우기 실패 정리: 끈 직속 자식이 시한 안에 안 끝났다 — 거두지 않고 놓는다"
+                        "spawn failure cleanup: the killed direct child did not exit within the time limit — letting it go without reaping"
                     );
                     return;
                 }
                 Err(e) => {
                     tracing::warn!(
                         pid = ?child.pid(),
-                        "띄우기 실패 정리: 직속 자식이 끝났는지 물을 수 없다 — 거두지 않고 놓는다: {e}"
+                        "spawn failure cleanup: cannot ask whether the direct child exited — letting it go without reaping: {e}"
                     );
                     return;
                 }
@@ -266,7 +266,7 @@ pub(crate) fn drain_stderr(
             }
         });
     if let Err(e) = spawn_result {
-        tracing::warn!(agent = %agent_id, "{what} stderr drain 스레드 기동 실패: {e}");
+        tracing::warn!(agent = %agent_id, "{what} stderr drain thread failed to start: {e}");
     }
 }
 
@@ -280,7 +280,7 @@ mod tests {
     fn production(src: &str) -> String {
         src.split("mod tests {")
             .next()
-            .expect("운영 구획")
+            .expect("production section")
             .lines()
             .map(|line| line.split("//").next().unwrap_or(""))
             .collect::<Vec<_>>()
@@ -291,8 +291,8 @@ mod tests {
     fn body<'a>(code: &'a str, signature: &str) -> &'a str {
         let start = code
             .find(signature)
-            .unwrap_or_else(|| panic!("`{signature}` 가 없다 — 이 항목의 전제가 낡았다"));
-        let open = start + code[start..].find('{').expect("본문 여는 괄호");
+            .unwrap_or_else(|| panic!("`{signature}` is missing — this entry's premise is stale"));
+        let open = start + code[start..].find('{').expect("opening brace of the body");
         let mut depth = 0usize;
         for (i, c) in code[open..].char_indices() {
             match c {
@@ -306,7 +306,7 @@ mod tests {
                 _ => {}
             }
         }
-        panic!("`{signature}` 본문이 닫히지 않는다");
+        panic!("the body of `{signature}` does not close");
     }
 
     fn line_at(body: &str, at: usize) -> &str {
@@ -343,7 +343,7 @@ mod tests {
     fn assert_no_early_exit(file: &str, code: &str, what: &str) {
         if let Some(&at) = early_exits(code).first() {
             panic!(
-                "{file}: {what}에 `?` 아닌 이른 반환이 있다 — 소스 시험이 실패 걸음으로 못 센다: `{}`",
+                "{file}: {what} has an early return that is not `?` — the source test cannot count it as a failure step: `{}`",
                 line_at(code, at)
             );
         }
@@ -356,45 +356,45 @@ mod tests {
         body: &str,
         spawned: &str,
     ) {
-        let spawn_at = body
-            .find(spawned)
-            .unwrap_or_else(|| panic!("{file}: `{spawned}` 가 없다 — 이 항목의 전제가 낡았다"));
-        let spawn_step = spawn_at + body[spawn_at..].find('?').expect("띄우기의 `?`");
+        let spawn_at = body.find(spawned).unwrap_or_else(|| {
+            panic!("{file}: `{spawned}` is missing — this entry's premise is stale")
+        });
+        let spawn_step = spawn_at + body[spawn_at..].find('?').expect("the `?` of the spawn");
         let armed = body
             .find("ChildGuard::new(")
-            .unwrap_or_else(|| panic!("{file}: 가드 무장 지점이 없다"));
+            .unwrap_or_else(|| panic!("{file}: no guard arming point"));
         let grouped = body
             .find("new_group_with(")
-            .unwrap_or_else(|| panic!("{file}: 무리 넣기가 없다 — 이 항목의 전제가 낡았다"));
+            .unwrap_or_else(|| panic!("{file}: no group adoption — this entry's premise is stale"));
         let released = body
             .find(".into_inner()")
-            .unwrap_or_else(|| panic!("{file}: 가드 풀기 지점이 없다"));
+            .unwrap_or_else(|| panic!("{file}: no guard release point"));
         assert!(
             spawn_step < armed,
-            "{file}: 가드가 띄우기보다 앞에 선다 — 이 항목의 전제가 낡았다"
+            "{file}: the guard stands before the spawn — this entry's premise is stale"
         );
         assert!(
             armed < grouped,
-            "{file}: 무리 넣기가 가드 무장보다 앞이다 — 넣기가 실패하면 띄운 자식을 아무도 안 끈다"
+            "{file}: group adoption comes before guard arming — if adoption fails, nobody kills the spawned child"
         );
-        assert_no_early_exit(file, &body[spawn_step + 1..], "띄운 뒤");
+        assert_no_early_exit(file, &body[spawn_step + 1..], "after spawn");
         let later: Vec<usize> = body[spawn_step + 1..]
             .match_indices('?')
             .map(|(i, _)| spawn_step + 1 + i)
             .collect();
         let first = *later.first().unwrap_or_else(|| {
-            panic!("{file}: 띄운 뒤에 실패 가능한 걸음이 없다 — 이 항목의 전제가 낡았다")
+            panic!("{file}: no fallible step after the spawn — this entry's premise is stale")
         });
         assert!(
             grouped < first && !body[grouped..first].contains(';'),
-            "{file}: 띄운 뒤 첫 실패 가능 걸음이 무리 넣기가 아니다 — 그 실패에서는 무리가 없어 그때까지 뜬 후손을 \
-             아무도 안 끈다: `{}`",
+            "{file}: the first fallible step after the spawn is not group adoption — in that failure there is no group, so descendants launched by then are \
+             killed by nobody: `{}`",
             line_at(body, first)
         );
         for &at in &later {
             assert!(
                 at < released,
-                "{file}: 가드를 푼 뒤에 실패 가능한 걸음이 있다 — 그 실패가 띄운 자식을 남긴다: `{}`",
+                "{file}: there is a fallible step after the guard is released — that failure leaves the spawned child behind: `{}`",
                 line_at(body, at)
             );
         }
@@ -432,18 +432,18 @@ mod tests {
             let open = body(&code, "fn open(");
             let spawned = open.find("spawn_piped(").unwrap_or_else(|| {
                 panic!(
-                    "{file}: `open` 이 `spawn_piped` 를 부르지 않는다 — 가드 밖에서 띄울 수 있다"
+                    "{file}: `open` does not call `spawn_piped` — it could spawn outside the guard"
                 )
             });
             assert!(
                 !open.contains(".spawn()") && !open.contains("Command::new("),
-                "{file}: `open` 이 스스로 띄운다 — 가드 밖이다"
+                "{file}: `open` spawns by itself — that is outside the guard"
             );
-            let spawn_step = spawned + open[spawned..].find('?').expect("띄우기의 `?`");
-            assert_no_early_exit(file, &open[spawn_step + 1..], "`spawn_piped` 뒤");
+            let spawn_step = spawned + open[spawned..].find('?').expect("the `?` of the spawn");
+            assert_no_early_exit(file, &open[spawn_step + 1..], "after `spawn_piped`");
             assert!(
                 !open[spawn_step + 1..].contains('?'),
-                "{file}: `spawn_piped` 뒤에 실패 가능한 걸음이 있다 — 거기엔 가드가 없다: `{}`",
+                "{file}: there is a fallible step after `spawn_piped` — there is no guard there: `{}`",
                 line_at(
                     open,
                     spawn_step + 1 + open[spawn_step + 1..].find('?').unwrap_or(0)
@@ -458,7 +458,7 @@ mod tests {
         ] {
             assert!(
                 !production(src).contains("GroupOwner::new"),
-                "{file}: 통로가 무리를 직접 만든다 — 무리 넣기는 가드 아래의 `new_group_with` 로만 한다"
+                "{file}: the link creates the group directly — group adoption goes only through `new_group_with` under the guard"
             );
         }
     }
@@ -475,7 +475,7 @@ mod tests {
         assert!(early_exits("let returned = elsewhere();").is_empty());
     }
 
-    /// A child that, although its kill is `Ok`, still answers 「아직 돈다」 (still running) in the end — the shape of a child whose kill really failed on Windows.
+    /// A child that, although its kill is `Ok`, still answers 「still running」 in the end — the shape of a child whose kill really failed on Windows.
     struct Unending {
         polls: Arc<AtomicUsize>,
     }
@@ -506,15 +506,15 @@ mod tests {
         let took = started.elapsed();
         assert!(
             took >= REAP_BUDGET,
-            "시한 전에 놓았다 — 기다리지 않았다: {took:?}"
+            "let go before the time limit — did not wait: {took:?}"
         );
         assert!(
             took < REAP_BUDGET + Duration::from_secs(2),
-            "시한을 넘겨 기다렸다: {took:?}"
+            "waited past the time limit: {took:?}"
         );
         assert!(
             polls.load(Ordering::Relaxed) > 1,
-            "한 번 묻고 말았다 — 시한 안에서 다시 묻지 않는다"
+            "asked once and stopped — does not ask again within the time limit"
         );
     }
 
@@ -529,7 +529,7 @@ mod tests {
         let child = ChildGuard::new(ping_child()).into_inner();
         assert!(
             pid_alive(child.id()),
-            "풀린 가드가 자식을 껐다 — 성공 경로가 통로 대신 끄기를 한다"
+            "the released guard killed the child — the success path kills instead of the link"
         );
         drop(ChildGuard::new(child));
     }
@@ -548,7 +548,7 @@ mod tests {
         let pair = open_pty();
         let mut cmd = portable_pty::CommandBuilder::new("ping.exe");
         cmd.args(["-n", "30", "127.0.0.1"]);
-        assert_dropping_the_guard_ends(pair.slave.spawn_command(cmd).expect("pty 기동"));
+        assert_dropping_the_guard_ends(pair.slave.spawn_command(cmd).expect("pty start"));
         drop(pair);
     }
 
@@ -603,14 +603,14 @@ mod tests {
             "30",
             "127.0.0.1",
         ]);
-        let child = pair.slave.spawn_command(cmd).expect("pty 기동");
+        let child = pair.slave.spawn_command(cmd).expect("pty start");
         // Hold it until the decision is finished — closing the input end makes conhost tear down the session, and the grandchild may end by a path other than the group (not
         // measured).
-        let mut gate = pair.master.take_writer().expect("pty 쓰기");
+        let mut gate = pair.master.take_writer().expect("pty write");
 
         let mut seen = None;
         let failed = fail_after_adoption(child, |guard, group| {
-            gate.write_all(b"go\r\n").expect("문 열기");
+            gate.write_all(b"go\r\n").expect("open the gate");
             seen = Some(grandchild_in(guard, group));
         });
         assert_tree_ended(failed, seen);
@@ -628,22 +628,22 @@ mod tests {
         let mut guard = ChildGuard::new(child);
         let group = new_group_with(guard.pid())?;
         probe(&mut guard, &group);
-        Err(PtyError::SpawnFailed("주입한 실패".into()))
+        Err(PtyError::SpawnFailed("injected failure".into()))
     }
 
     /// The pids of the direct child and the grandchild `ping` under it — if the grandchild is outside the group (it was spawned before adoption), the experiment does not hold and it panics.
     #[cfg(windows)]
     fn grandchild_in<C: Reap>(guard: &ChildGuard<C>, group: &GroupOwner) -> (u32, u32) {
-        let root = guard.pid().expect("직속 자식 번호");
+        let root = guard.pid().expect("direct child pid");
         let grandchild = ping_under(root);
         let members = group
             .downgrade()
-            .expect("Windows 는 무리가 있다")
+            .expect("Windows has a group")
             .member_pids()
-            .expect("무리 멤버 명단");
+            .expect("group member list");
         assert!(
             members.contains(&grandchild),
-            "손자 ping 이 무리 밖이다 — 넣기 전에 떴다 · 실험이 성립하지 않는다: {members:?}"
+            "grandchild ping is outside the group — it launched before adoption · the experiment does not hold: {members:?}"
         );
         (root, grandchild)
     }
@@ -654,16 +654,17 @@ mod tests {
         use engram_dashboard_platform::process::pid_alive;
         use std::time::Duration;
 
-        let (root, grandchild) =
-            seen.unwrap_or_else(|| panic!("무리 넣기가 실패해 실험이 성립하지 않는다: {failed:?}"));
-        assert!(failed.is_err(), "주입한 실패가 안 돌아왔다");
+        let (root, grandchild) = seen.unwrap_or_else(|| {
+            panic!("group adoption failed, so the experiment does not hold: {failed:?}")
+        });
+        assert!(failed.is_err(), "the injected failure did not come back");
         assert!(
             wait_until(Duration::from_secs(5), || !pid_alive(root)),
-            "넣은 뒤 실패했는데 직속 자식이 산다"
+            "failed after adoption but the direct child is alive"
         );
         assert!(
             wait_until(Duration::from_secs(5), || !pid_alive(grandchild)),
-            "넣은 뒤 실패했는데 손자 ping 이 산다 — 무리가 넣은 뒤에 뜬 후손을 못 끝냈다"
+            "failed after adoption but grandchild ping is alive — the group could not end a descendant launched after adoption"
         );
     }
 
@@ -673,17 +674,17 @@ mod tests {
         use engram_dashboard_platform::process::pid_alive;
         use std::time::Duration;
 
-        let root = child.pid().expect("직속 자식 번호");
+        let root = child.pid().expect("direct child pid");
         let started = Instant::now();
         drop(ChildGuard::new(child));
         // On a busy runner, scheduling delay may push it slightly past the deadline and the reaping can still succeed — leave margin.
         assert!(
             started.elapsed() < REAP_BUDGET + Duration::from_secs(3),
-            "가드가 끈 직속 자식을 시한 안에 못 거뒀다"
+            "could not reap the direct child the guard killed within the time limit"
         );
         assert!(
             wait_until(Duration::from_secs(5), || !pid_alive(root)),
-            "가드를 버렸는데 직속 자식이 산다"
+            "dropped the guard but the direct child is alive"
         );
     }
 
@@ -696,7 +697,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         hide_console_window(&mut cmd);
-        cmd.spawn().expect("ping 기동")
+        cmd.spawn().expect("ping start")
     }
 
     #[cfg(windows)]
@@ -725,8 +726,8 @@ mod tests {
                 grandchild = child_pids(root).into_iter().find(|&pid| is_ping(pid));
                 grandchild.is_some()
             }),
-            "10 초 안에 손자 ping 을 못 봤다 — 실험이 성립하지 않는다"
+            "did not see grandchild ping within 10 seconds — the experiment does not hold"
         );
-        grandchild.expect("방금 봤다")
+        grandchild.expect("just saw it")
     }
 }

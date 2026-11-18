@@ -1,4 +1,4 @@
-//! failure — the kind vocabulary of the 「마지막 실패」 (last failure).
+//! failure — the kind vocabulary of the 「last failure」.
 //!
 //! ★Home (the answer to ADR-0171's two questions)★: who must see it = every window + the control LLM (→ it cannot be carried in the frontend store) ·
 //!   until when must it live = while the daemon lives (→ not kept on disk). So this value lives as a
@@ -16,13 +16,13 @@
 /// The kind of activation failure.
 ///
 /// ★An **axis separate** from the current state (`AgentStatus`) — do not merge them★: if merged, the combination "running while holding a last failure"
-///   cannot be expressed, and without that combination the screen's 「도는 중이 이긴다」 (running wins) rule has no place to stand
+///   cannot be expressed, and without that combination the screen's 「running wins」 rule has no place to stand
 ///   (ADR-0172 decision 3 · ADR-0173).
 /// ★The serde derive was left off on purpose — do not bring it back★: this value must not go out to disk (ADR-0172 decision 2).
 ///   The profile field is `#[serde(skip)]` so it does not go out even now, but without the derive, a change that deletes that skip becomes a
 ///   **compile error**. The mirror that goes out as the wire spec is carried separately by `protocol::AgentFailureKind`.
-/// ★The 「다시 해볼 가치가 있나」 (is it worth retrying) decision is not put here★: today the only consumer reading that value is the screen
-///   (click blocking · 「새 대화로 시작」 (start as a new conversation) are follow-ups), and the wire spec carries only the kind. Putting a table on both sides makes two copies the compiler
+/// ★The 「is it worth retrying」 decision is not put here★: today the only consumer reading that value is the screen
+///   (click blocking · 「start as a new conversation」 are follow-ups), and the wire spec carries only the kind. Putting a table on both sides makes two copies the compiler
 ///   cannot keep in sync — when the consumer comes to the core, it is moved here then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentFailureKind {

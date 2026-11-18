@@ -1,28 +1,11 @@
-//! 셸 명령 표(`layout::commands`) + 인바운드 수신기(`daemon_client::inbound`) 통합 테스트 —
-//! 데몬·창·소켓 0 (ADR-0012 seam 격리).
-//!
-//! ★이 파일이 `tests/`(통합 타깃)에 있는 이유★: 재는 대상이 **실 소켓·실 `AppHandle` 없이는 못 세우는
-//! 배선**이라, 그 자리를 포트로 끊어 세우는 통합 하네스가 제자리다(그래서 하네스 자신은 데몬·창·소켓을
-//! 하나도 안 쓴다). 순수 단위 단언은 모듈 옆 `#[cfg(test)]` 로 가고 그쪽은 `--test lib_unit` 으로 돈다
-//! (그 타깃을 세운 결정 = ADR-0174 · 현황 = `.claude/skill-bindings/qa.md` 「모듈별 명령」).
-//! 실행: `cargo test -p engram-dashboard --test layout_commands`(자식 프로세스를 하나도 안 띄우므로
-//! `-- --test-threads=4` 를 붙이지 않는다 — 판정 규칙 정본 = `.claude/skill-bindings/qa.md` 「모듈별 명령」).
-//!
-//! ★`layout_apply.rs` 와 나누는 기준★: 저쪽은 **적용 서비스의 락 위치**(어느 포트가 락 안/밖에서 불리나)를
-//! 재고, 여기는 **봉투가 그 서비스까지 가는 길**(이름 배달 · 인자 검문 · 답장 상관 · 연결 태스크 밖 실행)을
-//! 잰다. 그래서 이 파일의 가짜 포트에는 락 프로브가 없다 — 같은 것을 두 번 재면 한쪽이 낡는다.
-//!
-//! ## ★연결 태스크를 안 막는다는 것을 어떻게 재나★
-//! 두 하네스가 서로 다른 실패 모드를 잡는다.
-//! - [`Queued`] — 태스크를 **쥐고만** 있는 spawner. `on_command` 가 반환한 시점에 적용이 **아직 안 일어났음**을
-//!   본다(인라인 실행이면 이 단언이 깨진다).
-//! - `RuntimeSpawner` + 실 런타임 — 합성 명령(`agent.spawnInto`)이 데몬 답장을 기다리는 동안 **호출자
-//!   태스크가 계속 돈다**는 것을 본다. 인라인이면 호출자가 스폰 요청을 서비스하지 못해 그 자리에서 교착이다
-//!   (ADR-0081 「relay 적용은 액터 밖」이 막는 self-deadlock 그대로).
-//!
-//! ## ★무엇이 실코드로 덮이고 무엇이 안 덮이나★
-//! 잔여 목록의 정본은 아래 「연결 구동이 걷는 바이트 경로」 절 머리다 — 이 헤더에 베끼지 않는다(두 곳에 적으면
-//! 한쪽이 낡는다).
+//! Integration test of the shell command table (`layout::commands`) + the inbound receiver (`daemon_client::inbound`) — zero daemon, window or socket (ADR-0012).
+//! Lives in `tests/` because it needs a harness that cuts the socket and `AppHandle` with ports; pure unit assertions go beside the module (`--test lib_unit`, ADR-0174).
+// hangul-ok-begin
+//! Run: `cargo test -p engram-dashboard --test layout_commands`; it starts no child process, so no `-- --test-threads=4` (`.claude/skill-bindings/qa.md` 「모듈별 명령」).
+// hangul-ok-end
+//! Split from `layout_apply.rs`: that one measures the apply service's lock position; this one measures the envelope's path to it (name delivery, argument screening, reply correlation, running off the connection task). The fake ports here have no lock probe.
+//! Two harnesses show the connection task is not blocked: [`Queued`] holds the task, proving `on_command` returned before the application happened; `RuntimeSpawner` + a real runtime proves the caller task keeps running while `agent.spawnInto` waits for the daemon (inline would self-deadlock — ADR-0081).
+//! What real code does not cover is listed at the section 「byte path walked by the connection drive」.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -92,7 +75,7 @@ use engram_dashboard_lib::view_commands::{
     ViewCommandRequest, ViewDispatch, ViewEffect, VIEW_HOP_MARGIN, VIEW_REPLY_DEADLINE,
 };
 
-// ── 가짜 포트 ────────────────────────────────────────────────────────────────
+// ── Fake ports ────────────────────────────────────────────────────────────────
 
 #[derive(Default)]
 struct Events;
@@ -102,8 +85,7 @@ impl LayoutEvents for Events {
     fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
 }
 
-/// 표가 쥔 알림 포트 — 다음 알림 한 번 전에 `hook` 을 돈다. 알림은 쓰기가 락을 놓은 뒤에 나가므로, 결말을 지은 락과 명령
-/// 답 사이에 끼어든 쓰기를 흉내 낸다.
+/// The notification port the table holds — runs `hook` once before the next notification, imitating a write that slips in between the outcome's lock and the command answer.
 #[derive(Default)]
 struct HookedEvents {
     hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -136,17 +118,15 @@ impl SubscriptionSync for Subs {
 }
 
 struct Windows {
-    /// 표가 쥔 것과 같은 모델 — `open` 이 그 창이 아직 모델에 없는지 본다.
     state: LayoutState,
     opened: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
-    /// 한 번 맡길 숨은 예열 창의 label(TRD S21-slot-docking §8-1 ⑬).
+    /// Hidden prewarmed window to hand over once (TRD S21-slot-docking §8-1 ⑬).
     spare: Mutex<Option<String>>,
-    /// 예열 창 셋이 불린 차례 — `"claim:<label>"` · `"committed:<label>"` · `"release:<label>"`.
+    /// Order of the three prewarmed-window calls: `"claim:<label>"` · `"committed:<label>"` · `"release:<label>"`.
     spare_calls: Mutex<Vec<String>>,
-    /// `open_at` 이 받은 (label, 자리, 활성) — 명령이 포커스를 가져가는지 본다.
     placed: Mutex<Vec<(String, WindowPlace, bool)>>,
-    /// 다음 `open_at` 이 창을 열기 전에 한 번 — 새 창 도킹의 두 락 사이에 끼어든 쓰기.
+    /// Runs once before the next `open_at` — a write slipping between the two locks of new-window docking.
     on_open: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
@@ -165,14 +145,12 @@ impl Windows {
 }
 
 impl WindowHost for Windows {
-    // ★모델에 들기 전이어야 한다★ — 버스 `window.create` · `slot.popout` 도 창을 먼저 열고 모델에 넣는다(TRD
-    // S21-slot-docking §3-9 「자리별 차례」 · ADR-0299). 락을 못 잡으면 보지 않는다 — 락 위치는 `layout_apply.rs` 가 재고,
-    // 여기서 기다리면 그 결함이 실패가 아니라 멈춤으로 나온다.
+    // Must come before entering the model: the bus `window.create` · `slot.popout` also open the window first (TRD S21-slot-docking §3-9 · ADR-0299). It takes no lock — the lock position is measured by `layout_apply.rs`, and waiting here would turn a defect into a hang.
     fn open(&self, label: &str) -> Result<(), String> {
         if let Ok(mgr) = self.state.0.try_lock() {
             assert!(
                 !mgr.windows.contains_key(label),
-                "open({label}) 은 창이 모델에 들기 전에 불려야 한다"
+                "open({label}) must be called before the window enters the model"
             );
         }
         self.opened.lock().unwrap().push(label.to_string());
@@ -195,7 +173,7 @@ impl WindowHost for Windows {
         self.closed.lock().unwrap().push(label.to_string());
     }
 
-    // ★main 을 특례로 참이라 답한다★ — 정적 config 창이라 이 가짜가 연 적이 없는데 실 앱에서는 항상 떠 있다.
+    // True for main: a static config window this fake never opened but that is always up in the real app.
     fn is_open(&self, label: &str) -> bool {
         label == MAIN_WINDOW_LABEL
             || (self.opened.lock().unwrap().iter().any(|l| l == label)
@@ -233,9 +211,7 @@ impl WindowHost for Windows {
     }
 }
 
-/// 창 상태 포트 대역 — 부른 차례(`"apply:<label>:<동작>"` · `"apply_unmodeled:<label>:<동작>"` · `"show_all:<갈래>"` ·
-/// `"hide_all"` · `"state:<label>"`)와 부른 스레드를 남기고, 꾸민 답을 낸다. `state` 는 `states` 에 없는 창이면 OS 창이
-/// 없다고 답한다. `unmodeled` = 모델 밖 창으로 답할 label(묻기는 차례에 남기지 않는다 — 모델에 없는 인자마다 불린다).
+/// Window state port stand-in — records calls (`"apply:<label>:<action>"` · `"apply_unmodeled:<label>:<action>"` · `"show_all:<branch>"` · `"hide_all"` · `"state:<label>"`) and the calling thread. A label not in `states` has no OS window; `unmodeled` labels answer as windows outside the model.
 #[derive(Default)]
 struct Control {
     calls: Mutex<Vec<String>>,
@@ -302,15 +278,13 @@ impl WindowControl for Control {
     }
 }
 
-/// 스폰 요청 한 건 — cwd · 고른 백엔드 · 그 답을 넣을 자리.
 type SpawnRequest = (
     String,
     Option<engram_dashboard_protocol::AgentBackendKind>,
     oneshot::Sender<Result<String, String>>,
 );
 
-/// ★답을 **다른 태스크가** 넣어 줘야 끝난다★ — 데몬 왕복의 성질을 그대로 흉내낸다. 이게 있어야
-/// 「적용이 호출자 태스크를 붙들고 있나」를 잴 수 있다(가짜가 즉답하면 그 질문 자체가 사라진다).
+/// Finishes only when another task supplies the answer, like a daemon round trip — otherwise "does the application hold the caller task" could not be measured.
 struct DaemonSpawner {
     requests: mpsc::UnboundedSender<SpawnRequest>,
 }
@@ -326,15 +300,14 @@ impl AgentSpawner for DaemonSpawner {
             let (answer, wait) = oneshot::channel();
             self.requests
                 .send((cwd, backend, answer))
-                .map_err(|_| "테스트 스폰 채널이 닫혔다".to_string())?;
+                .map_err(|_| "the test spawn channel is closed".to_string())?;
             wait.await
-                .map_err(|_| "테스트 스폰 응답이 없다".to_string())?
+                .map_err(|_| "there is no test spawn response".to_string())?
         })
     }
 }
 
-/// 시험 에이전트 id — 데몬이 이름을 바꿔 넣은 꼴 그대로다. 셸 명령의 `#[agent_ref]` 칸은 id 만 받는다(ADR-0308 · 이름 → id
-/// 는 데몬 시험이 잰다). 표시 이름(`alpha` · `beta`)은 셸 이름 캐시에만 적는다(`World::show` · `World::name`).
+/// Test agent id in the post-daemon shape: `#[agent_ref]` fields take ids only (ADR-0308); display names (`alpha`, `beta`) live only in the shell name cache (`World::show` · `World::name`).
 const ALPHA: &str = "aaaaaaaa-0000-4000-8000-000000000001";
 const BETA: &str = "bbbbbbbb-0000-4000-8000-000000000002";
 
@@ -342,8 +315,7 @@ fn agent_id(id: &str) -> uuid::Uuid {
     uuid::Uuid::parse_str(id).expect("UUID")
 }
 
-/// 테마 밀기의 창 쪽 대역 — 창 명단을 정해 두고 보낸 것을 순서대로 남긴다. `refuse` = 받지 못하는 창(시도는
-/// 남긴다).
+/// Window-side stand-in of the theme push — fixed window list, records what was sent; `refuse` = windows that cannot receive.
 struct RecordingWindows {
     labels: Vec<String>,
     refuse: Mutex<Option<String>>,
@@ -359,7 +331,6 @@ impl RecordingWindows {
         }
     }
 
-    /// 지금까지 보낸 것을 비우며 돌려준다 — `(창, 테마)`.
     fn take(&self) -> Vec<(String, String)> {
         std::mem::take(&mut *self.sent.lock().unwrap())
     }
@@ -386,11 +357,9 @@ impl ThemeWindows for RecordingWindows {
     }
 }
 
-/// [`RecordingWindows`] 가 받지 못하는 창에 주는 사유.
-const WINDOW_GONE: &str = "창이 이미 닫혔다";
+const WINDOW_GONE: &str = "the window is already closed";
 
-/// 웹뷰는 떠 있지만 레이아웃 모델에는 아직 없는 팝아웃 — 밀기는 이 창에 전역 값을 보낸다. 하네스의 발급기가 닿지
-/// 않는 번호라 `window.create` 가 만든 창과 겹치지 않는다.
+/// A pop-out whose webview is up but not yet in the model — the push sends it the global value. Outside the issuer's number range, so no collision with `window.create`.
 const UNMODELED_POPOUT_LABEL: &str = "slot-popup-99";
 
 fn sent(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -400,12 +369,11 @@ fn sent(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// 설정 알림 포트 대역 — 창도 Tauri 도 없이 「무엇을 언제 알렸나」만 남긴다.
+/// Settings notification port stand-in — with no window or Tauri, leaves only 「what was announced when」.
 #[derive(Default)]
 struct FakeSettingsEvents {
     changed: Mutex<Vec<SettingsSnapshot>>,
     theme_pushes: Mutex<usize>,
-    /// `changed` 가 불린 스레드 — 쓰기 본문이 어디서 돌았나.
     threads: Mutex<Vec<std::thread::ThreadId>>,
 }
 
@@ -439,7 +407,7 @@ impl FakeSettingsEvents {
     }
 }
 
-/// 시험 하나 몫의 셸 config 폴더 — 적재는 폴더를 만들지 않고 첫 쓰기가 만든다. 끝나면 치운다.
+/// Shell config folder for one test — created on first write, cleaned up at the end.
 struct ConfigDir(std::path::PathBuf);
 
 impl ConfigDir {
@@ -451,12 +419,11 @@ impl ConfigDir {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("시계")
+                .expect("clock")
                 .as_nanos()
         )))
     }
 
-    /// 셸 `setup` 이 하는 그대로 — 적재 뒤 쓰기를 연다.
     fn service(&self) -> Arc<SettingsService> {
         let service = SettingsService::load_from_dir(&self.0);
         service.enable_writes();
@@ -470,9 +437,8 @@ impl Drop for ConfigDir {
     }
 }
 
-// ── 태스크 spawner 하네스 ────────────────────────────────────────────────────
+// ── Task spawner harness ────────────────────────────────────────────────────
 
-/// 태스크를 받아 **쥐고만** 있는다 — 테스트가 [`Queued::drain`] 으로 직접 돌린다.
 #[derive(Default)]
 struct Queued {
     tasks: Mutex<Vec<BoxedTask>>,
@@ -494,13 +460,9 @@ impl Queued {
     }
 }
 
-// ── 패닉 훅 잠깐 끄기 ───────────────────────────────────────────────────────
+// ── Briefly turning the panic hook off ───────────────────────────────────────────────────
 
-/// 패닉 메시지를 삼킨 채 `body` 를 끝까지 돌리고 원래 훅을 되돌린다 — 같은 모양의 동기 판
-/// `engram_dashboard_command::testing::with_quiet_panic_hook` 의 async 판이다.
-///
-/// ★구간을 의도된 패닉 하나로 좁게 잡고, 되돌리기는 unwind 를 잡은 **뒤에** 한다 — RAII(`Drop`)로 옮기지
-/// 말 것★. 두 사유의 정본은 그 헬퍼의 doc 과 본문 주석이다.
+/// Runs `body` while swallowing the panic message and restores the hook afterwards — async twin of `engram_dashboard_command::testing::with_quiet_panic_hook`. The section covers one intended panic and restores after catching the unwind; do not move the restore to `Drop` (reasons: that helper's doc).
 async fn quiet_panics<T>(body: impl std::future::Future<Output = T>) -> T {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -511,13 +473,13 @@ async fn quiet_panics<T>(body: impl std::future::Future<Output = T>) -> T {
             .downcast_ref::<&str>()
             .copied()
             .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("<문자열이 아닌 패닉 페이로드>");
-        eprintln!("조용한 패닉 훅 구간 안에서 본문이 패닉했다(원래 출력은 삼켜졌다): {message}");
+            .unwrap_or("<non-string panic payload>");
+        eprintln!("the body panicked inside the quiet panic hook section (the original output was swallowed): {message}");
         std::panic::resume_unwind(payload)
     })
 }
 
-// ── 답장 수거 ────────────────────────────────────────────────────────────────
+// ── Collecting replies ────────────────────────────────────────────────────────────────
 
 #[derive(Default, Clone)]
 struct Mailbox(Arc<Mutex<Vec<CommandReply>>>);
@@ -530,7 +492,6 @@ impl Mailbox {
         })
     }
 
-    /// `InboundReceiver::accept` 이 받는 배달 콜백 — 연결 루프가 소켓에 되쓰는 자리에 해당한다.
     fn deliver(&self) -> impl FnOnce(CommandReply) + Send + 'static {
         let seen = Arc::clone(&self.0);
         move |reply| {
@@ -542,14 +503,14 @@ impl Mailbox {
         self.0.lock().unwrap().len()
     }
 
-    /// 같은 하네스로 명령을 두 번 부르는 테스트용 — [`Mailbox::only`] 가 「정확히 하나」를 요구한다.
+    /// Reset between two calls with one harness — [`Mailbox::only`] demands exactly one reply.
     fn clear(&self) {
         self.0.lock().unwrap().clear();
     }
 
     fn only(&self) -> CommandReply {
         let seen = self.0.lock().unwrap();
-        assert_eq!(seen.len(), 1, "한 request_id 에 답장은 정확히 하나다");
+        assert_eq!(seen.len(), 1, "exactly one reply per request_id");
         seen[0].clone()
     }
 
@@ -562,13 +523,13 @@ impl Mailbox {
             .collect()
     }
 
-    /// 답장 `n` 개가 다 올 때까지 이 태스크를 양보한다 — 안 오면 실패로 끝낸다(hang 금지).
+    /// Yields this task until all `n` replies arrive — if they do not come, it ends as a failure (no hang).
     async fn settle(&self, n: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while self.len() < n {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "답장 {n} 개를 기다렸는데 {} 개만 왔다",
+                "waited for {n} replies but only {} came",
                 self.len()
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -580,36 +541,31 @@ fn envelope(name: &str, args: serde_json::Value, request_id: RequestId) -> Comma
     CommandEnvelope {
         name: name.to_string(),
         request_id,
-        // 목적지 토큰 — 이 홉 앞으로 온 것이다(앞 홉이 자기 명부의 답으로 적어 넣는 칸).
+        // Destination token: addressed to this hop.
         owner: OwnerToken::new("shell"),
         proto_ver: CATALOG_VERSION,
         args,
     }
 }
 
-// ── 하네스 ───────────────────────────────────────────────────────────────────
+// ── Harness ─────────────────────────────────────────────────────────────────
 
 struct World {
     state: LayoutState,
     windows: Arc<Windows>,
     control: Arc<Control>,
-    /// 표가 쥔 것과 같은 테마 손잡이 — 창 쪽은 `theme_windows`(main · 모델 밖 팝아웃).
+    /// Same handle as the table's; the window side is `theme_windows`.
     themes: ThemeControl,
     theme_windows: Arc<RecordingWindows>,
-    /// 표가 쥔 것과 같은 서비스 — 시험이 명령 밖에서 값을 확인한다.
     settings: Arc<SettingsService>,
     settings_events: Arc<FakeSettingsEvents>,
-    /// 쥐고만 있다 — 시험이 끝나면 폴더를 치운다.
     _config: ConfigDir,
     mail: Mailbox,
     spawn_requests: mpsc::UnboundedReceiver<SpawnRequest>,
-    /// 표가 쥔 조율자의 복원 서비스 — 시험이 부팅 단계 ⑥ 을 흉내 낸다(`set_boot`).
+    /// The restore service of the coordinator the table holds — the test imitates boot step ⑥ (`set_boot`).
     restore_service: Arc<RestoreService>,
-    /// 표가 쥔 것과 같은 조율자 — 시험이 셸 setup 끝처럼 포트를 꽂는다.
     restore: Arc<RestoreCoordinator>,
-    /// 표가 쥔 것과 같은 label 발급기 — 시험이 명령 밖에서 팝아웃을 연다.
     labels: Arc<PopupCounter>,
-    /// 표가 쥔 알림 포트.
     events: Arc<HookedEvents>,
 }
 
@@ -630,14 +586,13 @@ impl World {
         );
         let settings_events = Arc::new(FakeSettingsEvents::default());
         let (tx, spawn_requests) = mpsc::unbounded_channel();
-        // 실물 발급기 — label 단조성은 닫힌 label 재-build 를 막는 계약이라 가짜로 대체하지 않는다. 복원 조율자도
-        //   같은 것을 쓴다(운영 조립과 같다 — 새 팝아웃 label 이 떠 있는 창과 겹치지 않는다).
+        // Real issuer: label monotonicity blocks re-building a closed label, so it is not faked; the restore coordinator shares it (as in production).
         let labels = Arc::new(PopupCounter::default());
         let restore_service = Arc::new(RestoreService::new());
         let restore = Arc::new(RestoreCoordinator::new(
             Arc::clone(&restore_service),
             state.clone(),
-            // 기록기가 없다 — 답은 곧바로 `durable:false` 다(가드 아래 셸과 같다).
+            // There is no recorder — the answer is `durable:false` at once (same as the shell under the guard).
             Arc::new(StateSession::default()),
             labels.clone(),
         ));
@@ -677,7 +632,7 @@ impl World {
     }
 
     fn main_tabs(&self) -> WindowTabsPayload {
-        apply::list_tabs(&self.state, MAIN_WINDOW_LABEL).expect("main 창은 항상 있다")
+        apply::list_tabs(&self.state, MAIN_WINDOW_LABEL).expect("the main window always exists")
     }
 
     fn slots(&self, view: uuid::Uuid) -> Vec<uuid::Uuid> {
@@ -691,13 +646,10 @@ impl World {
 
     fn empty_slot(&self, view: uuid::Uuid) -> uuid::Uuid {
         tree::first_empty_slot_id(&apply::get_view(&self.state, view).expect("view").layout)
-            .expect("빈 슬롯")
+            .expect("an empty slot")
     }
 
-    /// agent 가 든 한 칸 — 반환 = (탭, 그 슬롯).
-    ///
-    /// agent 콘텐츠를 쓰는 이유는 운영 형태를 그대로 태우려는 것뿐이다 — ★구독 마이그레이션은 여기서 안
-    /// 잰다★(이 파일의 `Subs` 는 no-op 이고, 실 `OutputRouter` 로 재는 자리는 `layout_apply.rs` 다).
+    /// One area holding an agent — returns (tab, that slot). Subscription migration is not measured here: `Subs` is a no-op, and the real `OutputRouter` measurement is `layout_apply.rs`.
     fn filled_slot(&self) -> (uuid::Uuid, uuid::Uuid) {
         let view = self.main_tabs().active;
         let slot = self.empty_slot(view);
@@ -711,12 +663,11 @@ impl World {
                 agent_id: uuid::Uuid::new_v4().to_string(),
             },
         )
-        .expect("콘텐츠 배치");
+        .expect("content placement");
         (view, slot)
     }
 }
 
-/// 표를 쥐고만 있는 수신기 — 적용 시점을 테스트가 고른다.
 fn queued() -> (World, Arc<Queued>, InboundReceiver) {
     let (world, ports) = World::build();
     let queue = Arc::new(Queued::default());
@@ -728,14 +679,12 @@ fn queued() -> (World, Arc<Queued>, InboundReceiver) {
     (world, queue, receiver)
 }
 
-/// 큐에 쌓인 태스크를 전부 끝까지 돌린다.
 async fn run(queue: &Queued) {
     for task in queue.drain() {
         task.await;
     }
 }
 
-/// 봉투 하나를 넣고 끝까지 돌린 답장.
 async fn call(
     receiver: &InboundReceiver,
     queue: &Queued,
@@ -749,19 +698,18 @@ async fn call(
     let reply = mail.only();
     assert_eq!(
         reply.request_id, request_id,
-        "답장은 요청과 같은 상관 키를 달고 온다"
+        "the reply comes with the same correlation key as the request"
     );
     reply
 }
 
 fn error_of(reply: CommandReply) -> CommandError {
-    reply.outcome.expect_err("오류 답장")
+    reply.outcome.expect_err("error reply")
 }
 
-// ── (A) 선언과 표 ────────────────────────────────────────────────────────────
+// ── (A) Declarations and the table ────────────────────────────────────────────────────────────
 
-/// 표에 실제로 꽂힌 이름 전량 — ★손 목록이 아니라 골든이다★: 선언을 늘리면서 조립을 빠뜨리면
-/// (또는 그 반대) 여기서 걸린다.
+/// All names actually plugged into the table — a golden, not a hand list: declarations growing without assembly (or the reverse) is caught here.
 #[test]
 fn the_table_holds_exactly_the_declared_commands() {
     let (_world, ports) = World::build();
@@ -808,39 +756,20 @@ fn the_table_holds_exactly_the_declared_commands() {
             "window.unmaximize",
         ]
     );
-    assert_eq!(names.len(), COMMAND_SPECS.len(), "선언은 있는데 안 꽂힌 것");
+    assert_eq!(
+        names.len(),
+        COMMAND_SPECS.len(),
+        "declared but not plugged in"
+    );
 }
 
-/// ★세대 번호를 손으로 못 박는다★ — 매크로 계약이 「선언이 바뀌면 손으로 올린다」이고, 안 올리면 어휘가
-/// 다른 두 셸이 같은 세대를 보고해 진단이 거짓말을 한다. 위 골든 목록은 **이름만** 보므로 이것을 못 잡는다.
-/// 세 줄이 함께 움직여야 한다: 세대 · 선언 수 · 새 명령이 주장하는 `since`(코어 `command_alphabet.rs` 와 같은 형태).
+/// The generation number is pinned by hand (macro contract: raise it when a declaration changes), otherwise two shells with different vocabularies report the same generation. The names-only golden above cannot catch this.
+/// Generation · declaration count · the new command's `since` must move together (same shape as core `command_alphabet.rs`).
 #[test]
 fn the_catalog_generation_is_pinned_to_the_declaration_set() {
-    // ★이름 수가 안 늘어도 올라간다★ — 세대 4 는 `ui.refresh` 의 **답 모양**이, 세대 5 는
-    //   `agent.spawnInto` 의 `backend` 가 받는 **어휘**가, 세대 6 은 그 칸의 **정책**(아는 낱말 하나를 이
-    //   표면이 안 만든다)이, 세대 7 은 그 정책이 **뒤집힌 것**(그 낱말을 이 표면이 실제로 만든다 —
-    //   2026-09-22 · ADR-0219)이 바뀐 세대다(넷 다 선언이라 올린다). 세대 8 은 이름이 는 세대다
-    //   (`split.setRatio`·`split.list` — ADR-0227). 세대 9 는 `layout.setSlotContent` 의 **어휘와 칸**이
-    //   는 세대다(`content=Usage` + `show_claude`·`show_codex` — TRD S21 usage-limit-slot §1-7). 세대 10 은
-    //   이름이 넷 늘고(`settings.*`) `ui.refresh` 답의 `theme` 출처가 설정으로 바뀐 세대다(TRD S21-storage §5-4).
-    //   세대 11 은 이름이 둘 는 세대다(`restore.*` — TRD S21-storage §6-7). 세대 12 는 `restore.status` 의
-    //   **답 모양**이 바뀐 세대다(`state_file` — TRD S21-storage §6-5). 세대 13 도 그 답 모양이다(`saves` — 같은
-    //   절 · 가드 ⅱ 안내(ADR-0276)를 나르는 칸 — 칸 자체는 구현 · 세션 판단). 세대 14 는 이름이 둘 늘고
-    //   (`window.setTheme`·`window.getTheme`) 하나가 빠진 세대다(`ui.refresh` — TRD S21-storage §5-6 · §5-7).
-    //   세대 15 는 그 둘의 `window` 칸이 받는 **어휘**가 준 세대다(`agent-tree` — ADR-0225 · summary 는
-    //   `window.getTheme` · `restore.status` 것만 바뀌었다). 세대 16 은 `restore.status` 의 `state_file` **어휘**가
-    //   늘고(`newer`) `settings.set` · `settings.reset` 의 **오류 선언**에 `CONFLICT` 가 든 세대다(ADR-0291). 세대 17 은
-    //   그 둘이 지금 못 읽은 설정 파일을 `INTERNAL` 대신 `CONFLICT` 로 답하는 **답 어휘**와 summary 가 바뀐 세대다
-    //   (ADR-0291 R17). 세대 18 은 `tab.list` 의 탭 칸에 `named` 가 붙고 `name` 이 보이는 이름이 된
-    //   **답 모양**의 세대다(TRD S26-window-chrome §3-2 · §6-6 · `tab.create` · `tab.rename` 의 summary 와 `name` 앞뒤
-    //   공백 깎기도 같은 세대). 세대 19 는 창 인자가 받는 **어휘**(영속 id)와 **오류 어휘**(숫자만 = `INVALID_ARGUMENT` ·
-    //   앞 실행의 label = `CONFLICT`)가 바뀌고 `window.create` · `slot.popout` 의 **답 모양**에 `window_id` · `number` 가 든
-    //   세대다(TRD S26-window-chrome §4-5 · §5-3 · §6-6). 세대 20 은 이름이 여섯 늘고(창 상태 명령) `window.close` 의
-    //   **인자 · 답 모양**(`if_empty` · `outcome` — main 은 거절 대신 모두 숨기기)과 `window.list` 의 **답 모양**(`details`)이
-    //   바뀐 세대다(TRD S26-window-chrome §6-1 · §6-6). 세대 21 은 이름이 넷 늘고(대상을 받는 `tab.move` · `tab.dock` ·
-    //   `tab.detach` · `layout.get` — TRD S28 §4) 칸 · 탭 동사의 **인자**(`slot_of` · `at` · `tab_of` · `assign` — id 인자는
-    //   선택) · **답 모양**(`layout`) · **오류 선언**(`NOT_FOUND`)이 바뀌고 에이전트 칸에 표시(`agent_args` — ADR-0308)가 든
-    //   세대다(TRD S28 §7 — 한 커밋이라 한 세대).
+    // Rises with any declaration change (answer shape, vocabulary, error declarations), not only when the name count grows.
+    // ADR-0219 · ADR-0227 · ADR-0276 · ADR-0225 · ADR-0291 · ADR-0308
+    // TRD S21 usage-limit-slot §1-7 · TRD S21-storage §5-4 · §5-6 · §5-7 · §6-5 · §6-7 · TRD S26-window-chrome §3-2 · §4-5 · §5-3 · §6-1 · §6-6 · TRD S28 §4 · §7
     assert_eq!(CATALOG_VERSION, 21);
     assert_eq!(COMMAND_SPECS.len(), 36);
     for since in [
@@ -864,12 +793,12 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     assert_eq!(
         WindowCloseArgs::SPEC.since,
         1,
-        "모양이 바뀐 명령은 처음 들어온 세대를 그대로 광고한다"
+        "a command whose shape changed advertises the generation it first entered, as is"
     );
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
         2,
-        "세대 2에 들어온 명령이 1부터 있었다고 광고하면 안 된다"
+        "a command that entered at generation 2 must not advertise that it existed from 1"
     );
     assert_eq!(SplitSetRatioArgs::SPEC.since, 8);
     assert_eq!(SplitListArgs::SPEC.since, 8);
@@ -887,30 +816,27 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     assert_eq!(WindowSetThemeArgs::SPEC.since, 14);
 }
 
-/// 창별 테마는 상태가 됐다 — 파일을 다시 읽는 명령은 표에서도 링커 수집에서도 사라졌다(TRD S21-storage §5-7).
+/// Per-window theme became state: the command that re-reads the file left both the table and the linker collection (TRD S21-storage §5-7).
 #[test]
 fn ui_refresh_is_gone_from_the_catalog() {
     assert!(spec_of("ui.refresh").is_none());
 }
 
-/// ★등록 패킷의 `help` 하나가 명부 상한을 넘으면 데몬이 패킷을 통째로 거절한다★(`Roster::register` — 한 이름도
-/// 넣지 않는다) — 그러면 셸의 명령 전부가 `UNKNOWN_COMMAND` 다. 요약(선언의 doc 주석)이 자라는 쪽은 셸이고 상한은
-/// 데몬에만 있어, 여기서 재지 않으면 실제로 붙어 봐야 드러난다. 재는 것은 등록이 싣는 문자열 그대로다(`decls`).
-/// 에이전트 참조 칸(`agent_args`)의 수와 칸 이름 길이도 같은 거절을 부르므로 함께 잰다.
+/// If one registration `help` exceeds the roster limit the daemon rejects the whole packet (`Roster::register`), making every shell command `UNKNOWN_COMMAND`. Summaries (declaration docs) grow here while the limit lives only in the daemon, so the carried string (`decls`) is measured; agent reference field count and name length trigger the same rejection and are measured with it.
 #[test]
 fn every_registered_declaration_fits_the_roster_help_cap() {
     let (_world, ports) = World::build();
     for decl in make_table(ports).decls() {
         assert!(
             decl.help.len() <= Roster::MAX_HELP_BYTES,
-            "{}: help {} 바이트 > 상한 {}",
+            "{}: help {} bytes > limit {}",
             decl.name,
             decl.help.len(),
             Roster::MAX_HELP_BYTES
         );
         assert!(
             decl.agent_args.len() <= Roster::MAX_AGENT_ARGS,
-            "{}: 에이전트 참조 칸 {} 개 > 상한 {}",
+            "{}: {} agent reference fields > limit {}",
             decl.name,
             decl.agent_args.len(),
             Roster::MAX_AGENT_ARGS
@@ -918,7 +844,7 @@ fn every_registered_declaration_fits_the_roster_help_cap() {
         for arg in &decl.agent_args {
             assert!(
                 arg.len() <= Roster::MAX_NAME_BYTES,
-                "{}: 에이전트 참조 칸 이름 {arg} 가 {} 바이트 > 상한 {}",
+                "{}: agent reference field name {arg} is {} bytes > limit {}",
                 decl.name,
                 arg.len(),
                 Roster::MAX_NAME_BYTES
@@ -933,38 +859,34 @@ fn every_declaration_carries_a_usable_json_shape() {
         lint_spec(spec).unwrap_or_else(|e| panic!("{e}"));
         assert!(
             !spec.summary.trim().is_empty(),
-            "{}: 요약이 비었다",
+            "{}: the summary is empty",
             spec.name
         );
         for (label, text) in [("args", spec.args_schema), ("ok", spec.ok_schema)] {
-            let shape: serde_json::Value = serde_json::from_str(text).expect("스키마는 JSON");
+            let shape: serde_json::Value = serde_json::from_str(text).expect("the schema is JSON");
             assert_eq!(
                 shape["type"], "object",
-                "{}: {label} 는 객체여야 한다",
+                "{}: {label} must be an object",
                 spec.name
             );
         }
         assert_eq!(
             spec_of(spec.name).map(|s| s.name),
             Some(spec.name),
-            "{}: 링커 수집에서 안 보인다",
+            "{}: not seen in the linker collection",
             spec.name
         );
     }
 }
 
-/// ★재는 범위 = 이 바이너리에 **링크된** crate 의 선언끼리다★ — 링커 수집(`duplicate_command_names`)은
-/// 링크된 선언 객체만 본다. 셸이 `agent.*` 계열에 이름을 더하므로(`agent.spawnInto`) agent 선언과 겹치면
-/// 어느 주인이 이기는지 알 수 없어지는데, 셸 lib 은 agent 를 의존하지 않는다. agent 선언이 여기 보이는
-/// 것은 데몬 dev 의존을 타고 온 결과다(이 파일이 데몬 상수를 읽는다 · 실측 2026-10-06 — `spec_of("agent.new")`
-/// 가 `Some`). 그 경로가 끊기면 이 시험은 그 겹침을 말없이 못 본다.
-/// 셸 · 데몬 이름 겹침의 벽은 데몬의 등록 반려다(ADR-0270 결정 2).
+/// Measured range = declarations of crates linked into this binary (`duplicate_command_names` sees only linked objects). The shell adds `agent.spawnInto` to the `agent.*` family; agent declarations are visible here only via the daemon dev dependency (`spec_of("agent.new")` is `Some`) — if that path is cut, this test silently stops seeing the overlap.
+/// The wall against shell · daemon overlap is the daemon's registration refusal (ADR-0270 decision 2).
 #[test]
 fn no_two_declarations_claim_the_same_name() {
     assert_eq!(duplicate_command_names(), Vec::<&str>::new());
 }
 
-// ── (B) 배달 ─────────────────────────────────────────────────────────────────
+// ── (B) Delivery ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn a_write_command_reaches_the_apply_service() {
@@ -976,17 +898,17 @@ async fn a_write_command_reaches_the_apply_service() {
         &queue,
         &world.mail,
         "tab.create",
-        json!({ "window": MAIN_WINDOW_LABEL, "name": "새 탭" }),
+        json!({ "window": MAIN_WINDOW_LABEL, "name": "new tab" }),
     )
     .await;
 
-    let ok = reply.outcome.expect("생성 성공");
+    let ok = reply.outcome.expect("creation succeeds");
     let after = world.main_tabs();
     assert_eq!(after.tabs.len(), before + 1);
     assert_eq!(
         ok["view_id"].as_str(),
         Some(after.active.to_string().as_str()),
-        "새로 만든 탭이 활성이고 그 id 가 답장에 실린다"
+        "the newly made tab is active and its id is carried in the reply"
     );
 }
 
@@ -996,7 +918,7 @@ async fn a_read_command_answers_from_the_same_authority() {
     let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
         .await
         .outcome
-        .expect("창 생성");
+        .expect("window creation");
     let label = created["window"].as_str().expect("label").to_string();
     assert_eq!(
         world.windows.opened.lock().unwrap().as_slice(),
@@ -1007,21 +929,20 @@ async fn a_read_command_answers_from_the_same_authority() {
     let listed = call(&receiver, &queue, &mail, "window.list", json!({}))
         .await
         .outcome
-        .expect("창 목록");
+        .expect("window list");
     let windows: Vec<&str> = listed["windows"]
         .as_array()
-        .expect("배열")
+        .expect("array")
         .iter()
         .map(|v| v.as_str().expect("label"))
         .collect();
     assert!(
         windows.contains(&label.as_str()),
-        "방금 만든 창이 조회에 보인다: {windows:?}"
+        "the window just made shows in the query: {windows:?}"
     );
 }
 
-/// `tab.list` 의 탭 칸은 이름을 정했나를 싣는다 — 이름 없이 만든 탭은 자동 이름(포커스 칸의 낱말)이고, 그 글자
-/// 그대로 `tab.rename` 해도 정한 이름이 된다(TRD S26-window-chrome §3-1 · §3-2).
+/// `tab.list` rows carry whether the name was set: an unnamed tab is auto-named, and `tab.rename` with that same text makes it a set name (TRD S26-window-chrome §3-1 · §3-2).
 #[tokio::test]
 async fn tab_list_says_whether_each_tab_name_was_set() {
     let (world, queue, receiver) = queued();
@@ -1034,17 +955,17 @@ async fn tab_list_says_whether_each_tab_name_was_set() {
     )
     .await
     .outcome
-    .expect("자동 이름 탭");
+    .expect("auto-named tab");
     let named = call(
         &receiver,
         &queue,
         &Mailbox::default(),
         "tab.create",
-        json!({ "window": MAIN_WINDOW_LABEL, "name": "작업" }),
+        json!({ "window": MAIN_WINDOW_LABEL, "name": "work" }),
     )
     .await
     .outcome
-    .expect("이름을 정한 탭");
+    .expect("tab with a set name");
     async fn list(receiver: &InboundReceiver, queue: &Queued) -> serde_json::Value {
         call(
             receiver,
@@ -1055,16 +976,16 @@ async fn tab_list_says_whether_each_tab_name_was_set() {
         )
         .await
         .outcome
-        .expect("탭 목록")
+        .expect("tab list")
     }
     let row = |listed: &serde_json::Value, id: &serde_json::Value| {
         listed["tabs"]
             .as_array()
-            .expect("배열")
+            .expect("array")
             .iter()
             .find(|t| t["id"] == *id)
             .cloned()
-            .expect("그 탭")
+            .expect("that tab")
     };
 
     let listed = list(&receiver, &queue).await;
@@ -1074,7 +995,7 @@ async fn tab_list_says_whether_each_tab_name_was_set() {
     );
     assert_eq!(
         row(&listed, &named["view_id"]),
-        json!({ "id": named["view_id"], "name": "작업", "named": true })
+        json!({ "id": named["view_id"], "name": "work", "named": true })
     );
 
     call(
@@ -1086,15 +1007,14 @@ async fn tab_list_says_whether_each_tab_name_was_set() {
     )
     .await
     .outcome
-    .expect("같은 글자로 이름 바꾸기");
+    .expect("rename with the same text");
     assert_eq!(
         row(&list(&receiver, &queue).await, &auto["view_id"]),
         json!({ "id": auto["view_id"], "name": "Empty slot", "named": true })
     );
 }
 
-/// `tab.create` · `tab.rename` 은 `name` 앞뒤 공백을 깎아 정한다 — 웹 레지스트리 `tab.rename` · 탭바 편집과 같은 글자가
-/// 된다.
+/// `tab.create` · `tab.rename` trim whitespace around `name`, same as the web registry and tab bar editing.
 #[tokio::test]
 async fn tab_create_and_rename_trim_the_name() {
     let (world, queue, receiver) = queued();
@@ -1103,11 +1023,11 @@ async fn tab_create_and_rename_trim_the_name() {
         &queue,
         &world.mail,
         "tab.create",
-        json!({ "window": MAIN_WINDOW_LABEL, "name": "  작업 \t" }),
+        json!({ "window": MAIN_WINDOW_LABEL, "name": "  work \t" }),
     )
     .await
     .outcome
-    .expect("이름을 정한 탭");
+    .expect("tab with a set name");
     async fn name_of(
         receiver: &InboundReceiver,
         queue: &Queued,
@@ -1122,18 +1042,18 @@ async fn tab_create_and_rename_trim_the_name() {
         )
         .await
         .outcome
-        .expect("탭 목록");
+        .expect("tab list");
         listed["tabs"]
             .as_array()
-            .expect("배열")
+            .expect("array")
             .iter()
             .find(|t| t["id"] == *id)
-            .expect("그 탭")["name"]
+            .expect("that tab")["name"]
             .clone()
     }
     assert_eq!(
         name_of(&receiver, &queue, &created["view_id"]).await,
-        json!("작업")
+        json!("work")
     );
 
     call(
@@ -1141,14 +1061,14 @@ async fn tab_create_and_rename_trim_the_name() {
         &queue,
         &Mailbox::default(),
         "tab.rename",
-        json!({ "view_id": created["view_id"], "name": " 새 이름  " }),
+        json!({ "view_id": created["view_id"], "name": " new name  " }),
     )
     .await
     .outcome
-    .expect("이름 바꾸기");
+    .expect("rename");
     assert_eq!(
         name_of(&receiver, &queue, &created["view_id"]).await,
-        json!("새 이름")
+        json!("new name")
     );
 }
 
@@ -1160,7 +1080,7 @@ async fn an_unknown_command_name_is_answered_not_dropped() {
     assert!(err.message().contains("tab.teleport"));
 }
 
-/// 형식이 깨진 id 는 적용 **전에** 반려된다 — 없는 id 와 같은 답을 받으면 호출자가 멀쩡한 목록을 뒤진다.
+/// A malformed id is rejected **before** application — receiving the same answer as for a nonexistent id would make the caller dig through a healthy list.
 #[tokio::test]
 async fn a_malformed_id_is_an_invalid_argument() {
     let (world, queue, receiver) = queued();
@@ -1178,7 +1098,7 @@ async fn a_malformed_id_is_an_invalid_argument() {
     assert!(err.message().contains("view_id"), "{}", err.message());
 }
 
-/// 적용 서비스가 거절한 것은 `CONFLICT` + **그 사유 문구**로 나간다(코드 하나 · 사유는 문구).
+/// What the apply service refused goes out as `CONFLICT` + **that reason text** (one code · the reason is the text).
 #[tokio::test]
 async fn an_unapplicable_request_keeps_the_services_reason() {
     let (world, queue, receiver) = queued();
@@ -1194,25 +1114,27 @@ async fn an_unapplicable_request_keeps_the_services_reason() {
         .await,
     );
     assert_eq!(err.code(), ErrorCode::Conflict);
-    assert!(!err.message().is_empty(), "사유가 비어 나가면 고칠 수 없다");
-    assert_eq!(world.main_tabs(), before, "거절됐으면 아무것도 안 바뀐다");
+    assert!(
+        !err.message().is_empty(),
+        "if the reason goes out empty it cannot be fixed"
+    );
+    assert_eq!(world.main_tabs(), before, "if refused, nothing changes");
     assert!(
         world.windows.closed.lock().unwrap().is_empty(),
-        "거절됐으면 OS 창도 안 닫는다"
+        "if refused, the OS window is not closed either"
     );
 }
 
-// ── 창 상태 명령(TRD S26-window-chrome §6-1 · §10-2) ──
+// ── Window state commands (TRD S26-window-chrome §6-1 · §10-2) ──
 
-/// 창 상태 동사는 창 인자를 푼 label 로 창 상태 포트에 가고 그 답 칸을 싣는다 — 포트는 블로킹 풀에서 불린다(실물이
-/// 메인 스레드 일을 기다린다 · §5-2).
+/// A window state verb goes to the window state port with the resolved label, from the blocking pool (the real port waits for a main-thread job, §5-2).
 #[tokio::test]
 async fn window_state_verbs_reach_the_port_with_the_resolved_label() {
     let (world, queue, receiver) = queued();
     let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
         .await
         .outcome
-        .expect("창 생성");
+        .expect("window creation");
     let popout = created["window"].as_str().expect("label").to_string();
     world.control.answer_with(Ok(Applied {
         deferred: true,
@@ -1268,16 +1190,15 @@ async fn window_state_verbs_reach_the_port_with_the_resolved_label() {
             .unwrap()
             .iter()
             .all(|thread| *thread != here),
-        "창 상태 포트는 적용 태스크의 워커가 아니라 블로킹 풀에서 불린다"
+        "the window state port is called from the blocking pool, not from the apply task's worker"
     );
 }
 
-/// 포트가 거절한 동작(보이지 않는 창 · OS 창 없음)은 `CONFLICT` + 그 문구다.
 #[tokio::test]
 async fn a_window_state_refusal_is_a_conflict_with_the_ports_reason() {
     let (world, queue, receiver) = queued();
     world.control.answer_with(Err(
-        "숨은 창 — 먼저 window.raise 또는 window.showAll".to_string()
+        "a hidden window — first window.raise or window.showAll".to_string(),
     ));
     let err = error_of(
         call(
@@ -1293,7 +1214,6 @@ async fn a_window_state_refusal_is_a_conflict_with_the_ports_reason() {
     assert!(err.message().contains("window.raise"), "{}", err.message());
 }
 
-/// `window.hideAll` 은 모두 숨기기, `window.showAll` 은 포커스를 빼앗지 않는 갈래로 모두 보이기에 가고 그 사실을 싣는다.
 #[tokio::test]
 async fn hide_all_and_show_all_reach_the_port() {
     let (world, queue, receiver) = queued();
@@ -1301,7 +1221,7 @@ async fn hide_all_and_show_all_reach_the_port() {
     let hidden = call(&receiver, &queue, &world.mail, "window.hideAll", json!({}))
         .await
         .outcome
-        .expect("모두 숨기기");
+        .expect("hide all");
     let shown = call(
         &receiver,
         &queue,
@@ -1311,12 +1231,12 @@ async fn hide_all_and_show_all_reach_the_port() {
     )
     .await
     .outcome
-    .expect("모두 보이기");
+    .expect("show all");
     assert_eq!((hidden, shown), (json!({}), json!({ "focused": true })));
     assert_eq!(world.control.calls(), ["hide_all", "show_all:NoSteal"]);
 }
 
-/// main 의 닫기는 거절이 아니라 모두 숨기기이고, 팝아웃의 닫기는 그 창을 닫는다(TRD §5-4).
+/// Closing main hides everything instead of refusing; closing a pop-out closes it (TRD §5-4).
 #[tokio::test]
 async fn window_close_hides_everything_for_main_and_closes_a_popout() {
     let (world, queue, receiver) = queued();
@@ -1329,12 +1249,12 @@ async fn window_close_hides_everything_for_main_and_closes_a_popout() {
     )
     .await
     .outcome
-    .expect("main 닫기");
+    .expect("close main");
     assert_eq!(main, json!({ "outcome": "HiddenAll" }));
     assert_eq!(world.control.calls(), ["hide_all"]);
     assert!(
         world.windows.closed.lock().unwrap().is_empty(),
-        "main 은 닫지 않는다"
+        "main is not closed"
     );
 
     let popout = call(
@@ -1346,7 +1266,7 @@ async fn window_close_hides_everything_for_main_and_closes_a_popout() {
     )
     .await
     .outcome
-    .expect("창 생성")["window"]
+    .expect("window creation")["window"]
         .as_str()
         .expect("label")
         .to_string();
@@ -1359,14 +1279,12 @@ async fn window_close_hides_everything_for_main_and_closes_a_popout() {
     )
     .await
     .outcome
-    .expect("팝아웃 닫기");
+    .expect("pop-out close");
     assert_eq!(closed, json!({ "outcome": "Closed" }));
     assert_eq!(world.windows.closed.lock().unwrap().as_slice(), &[popout]);
 }
 
-/// 모델 밖 창(모델에 없는데 OS 창은 열린 팝아웃 — 부팅 실패 화면의 낡은 팝아웃)의 창 단추가 보내는 명령 — 최소화 ·
-/// 최대화 · 원래 크기는 그 창에 바로 가고(모델 밖 동작) 닫기는 그 창을 거둔다(`Closed`). 앞으로 내기는 그대로 `CONFLICT`
-/// 다(TRD S26-window-chrome §6-2 「모델 밖 창」). 모델은 그대로다.
+/// Window buttons of a window outside the model (a stale pop-out of the boot failure screen whose OS window is open): minimize · maximize · restore act on it directly, close reaps it (`Closed`), raise stays `CONFLICT` (TRD S26-window-chrome §6-2). The model is unchanged.
 #[tokio::test]
 async fn window_buttons_of_an_unmodeled_window_reach_its_os_window() {
     let (world, queue, receiver) = queued();
@@ -1421,7 +1339,7 @@ async fn window_buttons_of_an_unmodeled_window_reach_its_os_window() {
     )
     .await
     .outcome
-    .expect("모델 밖 창 닫기");
+    .expect("close a window outside the model");
     assert_eq!(closed, json!({ "outcome": "Closed" }));
 
     assert_eq!(
@@ -1439,15 +1357,14 @@ async fn window_buttons_of_an_unmodeled_window_reach_its_os_window() {
     assert_eq!(apply::list_windows(&world.state).unwrap(), before);
 }
 
-/// `if_empty` 는 해석기 앞에서 갈린다 — 모델에 없는 창 · 탭이 있는 창 어느 쪽에도 `CONFLICT` 를 내지 않는다. 숫자만인 인자는
-/// 그보다 먼저 `INVALID_ARGUMENT` 다(TRD §4-5 동사 차례).
+/// `if_empty` is decided before the resolver (no CONFLICT for a window outside the model or one with tabs); a digits-only argument is `INVALID_ARGUMENT` even earlier (TRD §4-5).
 #[tokio::test]
 async fn window_close_if_empty_never_conflicts_but_still_refuses_a_number() {
     let (world, queue, receiver) = queued();
     let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
         .await
         .outcome
-        .expect("창 생성");
+        .expect("window creation");
     for window in [
         created["window_id"].clone(),
         json!(uuid::Uuid::new_v4().to_string()),
@@ -1462,7 +1379,7 @@ async fn window_close_if_empty_never_conflicts_but_still_refuses_a_number() {
         )
         .await
         .outcome
-        .expect("비었으면 닫기");
+        .expect("close if empty");
         assert_eq!(kept, json!({ "outcome": "Kept" }), "{window}");
     }
     assert!(world.windows.closed.lock().unwrap().is_empty());
@@ -1481,7 +1398,7 @@ async fn window_close_if_empty_never_conflicts_but_still_refuses_a_number() {
     assert!(err.message().contains("window_id"), "{}", err.message());
 }
 
-/// `window.list` 는 `windows` 를 그대로 싣고 `details` 를 번호 순으로 더한다 — OS 창을 못 읽은 행은 상태가 모두 false 다.
+/// `window.list` carries `windows` as is and adds `details` in number order — a row whose OS window could not be read has all states false.
 #[tokio::test]
 async fn window_list_keeps_windows_and_adds_details_in_number_order() {
     let (world, queue, receiver) = queued();
@@ -1497,7 +1414,7 @@ async fn window_list_keeps_windows_and_adds_details_in_number_order() {
             )
             .await
             .outcome
-            .expect("창 생성"),
+            .expect("window creation"),
         );
     }
     let second = created[1]["window"].as_str().expect("label").to_string();
@@ -1514,7 +1431,7 @@ async fn window_list_keeps_windows_and_adds_details_in_number_order() {
     let listed = call(&receiver, &queue, &world.mail, "window.list", json!({}))
         .await
         .outcome
-        .expect("창 목록");
+        .expect("window list");
     let row = |window: &serde_json::Value, number: u32, main: bool, visible: bool| {
         json!({
             "window_id": window["window_id"],
@@ -1538,7 +1455,7 @@ async fn window_list_keeps_windows_and_adds_details_in_number_order() {
     );
     let mut windows: Vec<&str> = listed["windows"]
         .as_array()
-        .expect("배열")
+        .expect("array")
         .iter()
         .map(|v| v.as_str().expect("label"))
         .collect();
@@ -1552,9 +1469,8 @@ async fn window_list_keeps_windows_and_adds_details_in_number_order() {
     assert_eq!(windows, want);
 }
 
-// ── 창 인자(TRD S26-window-chrome §4-5 · §10-2) ──
+// ── Window argument (TRD S26-window-chrome §4-5 · §10-2) ──
 
-/// 창 인자를 받는 버스 동사 전부 — (이름, 창 인자에 `window` 를 넣은 인자). `view` · `slot` = 그 동사가 함께 받는 id.
 fn window_arg_calls(
     window: &str,
     view: uuid::Uuid,
@@ -1594,7 +1510,7 @@ fn window_arg_calls(
             json!({ "tab": view, "beside_at": "top-left", "window": window, "side": "Left" }),
         ),
         ("layout.get", json!({ "window": window })),
-        // 칸 동사의 `window` — `at` 을 읽을 창(TRD S28 §7).
+        // `window` of an area verb — the window to read `at` in (TRD S28 §7).
         ("slot.focus", json!({ "at": "top-left", "window": window })),
         ("slot.close", json!({ "at": "top-left", "window": window })),
         (
@@ -1613,15 +1529,14 @@ fn window_arg_calls(
     ]
 }
 
-/// 숫자만인 창 인자는 창 번호로 읽혀 `INVALID_ARGUMENT` 다 — 그 번호의 창이 있어도 집지 않고(번호는 다시 쓰인다) 문구가
-/// window_id 로 안내한다. 아무것도 바뀌지 않는다.
+/// A digits-only window argument is a window number and `INVALID_ARGUMENT` — numbers are reused, so even an existing number does not pick; the text guides to window_id. Nothing changes.
 #[tokio::test]
 async fn a_window_number_is_an_invalid_argument_on_every_window_verb() {
     let (mut world, queue, receiver) = queued();
     let popout = call(&receiver, &queue, &world.mail, "window.create", json!({}))
         .await
         .outcome
-        .expect("창 생성")["window"]
+        .expect("window creation")["window"]
         .as_str()
         .expect("label")
         .to_string();
@@ -1649,30 +1564,33 @@ async fn a_window_number_is_an_invalid_argument_on_every_window_verb() {
             world.windows.opened.lock().unwrap().len(),
         ),
         before,
-        "번호 인자는 아무것도 바꾸지 않는다"
+        "a number argument changes nothing"
     );
     assert!(world.windows.closed.lock().unwrap().is_empty());
     assert!(
         world.control.calls().is_empty(),
-        "창 상태 포트까지 가지 않는다"
+        "does not reach the window state port"
     );
     assert!(
         world.spawn_requests.try_recv().is_err(),
-        "스폰까지 가지 않는다"
+        "does not reach the spawn"
     );
     assert!(world.theme_windows.take().is_empty());
 }
 
-/// 영속 id(window_id)는 그 창의 label 과 같은 창에 닿는다 — 답의 `window` 는 label 이다.
+/// A persistent id (window_id) reaches the same window as that window's label — the `window` of the answer is the label.
 #[tokio::test]
 async fn a_window_id_reaches_the_same_window_as_its_label() {
     let (world, queue, receiver) = queued();
     let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
         .await
         .outcome
-        .expect("창 생성");
+        .expect("window creation");
     let popout = created["window"].as_str().expect("label").to_string();
-    let window_id = created["window_id"].as_str().expect("영속 id").to_string();
+    let window_id = created["window_id"]
+        .as_str()
+        .expect("persistent id")
+        .to_string();
     assert_ne!(window_id, popout);
 
     let created = call(
@@ -1684,7 +1602,7 @@ async fn a_window_id_reaches_the_same_window_as_its_label() {
     )
     .await
     .outcome
-    .expect("영속 id 로 탭 만들기");
+    .expect("make a tab by persistent id");
     let listed = call(
         &receiver,
         &queue,
@@ -1694,7 +1612,7 @@ async fn a_window_id_reaches_the_same_window_as_its_label() {
     )
     .await
     .outcome
-    .expect("영속 id 로 탭 목록");
+    .expect("tab list by persistent id");
     assert_eq!(listed["window"].as_str(), Some(popout.as_str()));
     assert_eq!(listed["active"], created["view_id"]);
     assert_eq!(listed["tabs"].as_array().map(Vec::len), Some(2));
@@ -1713,15 +1631,14 @@ async fn a_window_id_reaches_the_same_window_as_its_label() {
     );
 }
 
-/// 앞 실행의 label(실행 표식이 없는 옛 꼴 · 다른 실행 표식)과 닫힌 창의 영속 id 는 지금 창을 가리키지 않는다 —
-/// `CONFLICT` 이고 문구가 그 인자를 싣는다.
+/// A label of an earlier run (old shape without run marker, or another run marker) and the persistent id of a closed window do not point to a current window: `CONFLICT` with that argument in the text.
 #[tokio::test]
 async fn a_label_from_a_previous_run_or_a_closed_window_id_is_a_conflict() {
     let (world, queue, receiver) = queued();
     let popout = call(&receiver, &queue, &world.mail, "window.create", json!({}))
         .await
         .outcome
-        .expect("창 생성")["window"]
+        .expect("window creation")["window"]
         .as_str()
         .expect("label")
         .to_string();
@@ -1729,7 +1646,7 @@ async fn a_label_from_a_previous_run_or_a_closed_window_id_is_a_conflict() {
     let (run, _) = popout
         .strip_prefix("slot-popup-")
         .and_then(|rest| rest.split_once('-'))
-        .expect("실행 표식");
+        .expect("run marker");
     let other_run = if run == "00000000" {
         "11111111"
     } else {
@@ -1744,7 +1661,7 @@ async fn a_label_from_a_previous_run_or_a_closed_window_id_is_a_conflict() {
     )
     .await
     .outcome
-    .expect("창 생성")["window"]
+    .expect("window creation")["window"]
         .as_str()
         .expect("label")
         .to_string();
@@ -1758,7 +1675,7 @@ async fn a_label_from_a_previous_run_or_a_closed_window_id_is_a_conflict() {
     )
     .await
     .outcome
-    .expect("닫기");
+    .expect("close");
     let (view, slot) = world.filled_slot();
 
     for stale in [
@@ -1774,17 +1691,16 @@ async fn a_label_from_a_previous_run_or_a_closed_window_id_is_a_conflict() {
     }
     assert!(
         world.slots(view).contains(&slot),
-        "옮기려던 슬롯은 그 자리에 있다"
+        "the slot being moved is still in its place"
     );
 }
 
-/// 새 창을 여는 버스 동사의 답은 그 창의 영속 id · 번호를 싣는다 — 탭 목록과 같은 값이고, 기존 창으로 옮긴 `slot.popout` 은
-/// 그 창의 것이다(TRD S26-window-chrome §5-3 · §10-2).
+/// A bus verb that opens a new window answers with that window's persistent id · number (same as the tab list); a `slot.popout` into an existing window answers that window's (TRD S26-window-chrome §5-3 · §10-2).
 #[tokio::test]
 async fn new_window_answers_carry_the_windows_id_and_number() {
     let (world, queue, receiver) = queued();
     let identity = |label: &str| {
-        let tabs = apply::list_tabs(&world.state, label).expect("그 창");
+        let tabs = apply::list_tabs(&world.state, label).expect("that window");
         (tabs.window_id, tabs.number)
     };
     let check = |answer: &serde_json::Value, want_number: u32| {
@@ -1803,7 +1719,7 @@ async fn new_window_answers_carry_the_windows_id_and_number() {
     let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
         .await
         .outcome
-        .expect("창 생성");
+        .expect("window creation");
     check(&created, 2);
 
     let (view, slot) = world.filled_slot();
@@ -1816,7 +1732,7 @@ async fn new_window_answers_carry_the_windows_id_and_number() {
     )
     .await
     .outcome
-    .expect("새 창으로 분리");
+    .expect("detach to a new window");
     check(&popped, 3);
 
     let (view, slot) = world.filled_slot();
@@ -1833,7 +1749,7 @@ async fn new_window_answers_carry_the_windows_id_and_number() {
     )
     .await
     .outcome
-    .expect("영속 id 로 기존 창에 분리");
+    .expect("detach to an existing window by persistent id");
     assert_eq!(into["window"], created["window"]);
     check(&into, 2);
 
@@ -1847,33 +1763,31 @@ async fn new_window_answers_carry_the_windows_id_and_number() {
     )
     .await
     .outcome
-    .expect("예열 창으로 생성");
+    .expect("create with a prewarmed window");
     assert_eq!(prewarmed["window"].as_str(), Some(SPARE));
     check(&prewarmed, 4);
 }
 
-/// 창 인자를 받는 동사의 summary 가 받는 꼴(window_id · 같은 실행 안 label)과 번호 거절을 말하고, `window.list` 가 번호를
-/// 다시 쓰는 규칙을 말한다(TRD S26-window-chrome §4-5 「도움말」).
+/// A verb taking a window argument states the accepted shapes (window_id · a same-run label) and the number refusal in its summary; `window.list` states the number reuse rule (TRD S26-window-chrome §4-5).
 #[test]
 fn every_window_verb_summary_says_what_the_window_argument_takes() {
     let any = uuid::Uuid::nil();
     for (name, _) in window_arg_calls("main", any, any) {
-        let spec = spec_of(name).expect("선언");
-        for want in ["window_id", "label", "번호는 받지 않는다"] {
+        let spec = spec_of(name).expect("declaration");
+        for want in ["window_id", "label", "not accepted"] {
             assert!(
                 spec.summary.contains(want),
-                "{name}: {want} 없음 — {}",
+                "{name}: {want} missing — {}",
                 spec.summary
             );
         }
     }
     assert!(spec_of("window.list")
-        .expect("선언")
+        .expect("declaration")
         .summary
-        .contains("가장 작은 수를 다시 쓴다"));
+        .contains("reuse the smallest free number"));
 }
 
-/// 태그와 곁칸이 어긋나면 조용히 고치지 않는다.
 #[tokio::test]
 async fn slot_content_refuses_a_contradictory_pair() {
     let (world, queue, receiver) = queued();
@@ -1883,7 +1797,7 @@ async fn slot_content_refuses_a_contradictory_pair() {
         .expect("view")
         .slot_spatial
         .first()
-        .expect("슬롯 하나")
+        .expect("one slot")
         .slot_id;
 
     let missing = error_of(
@@ -1917,7 +1831,6 @@ async fn slot_content_refuses_a_contradictory_pair() {
     assert_eq!(extra.code(), ErrorCode::InvalidArgument);
 }
 
-/// `show_*` 는 `content=Usage` 에만 — 다른 종류에 붙으면 호출자는 그 회사를 켠 줄 안다.
 #[tokio::test]
 async fn slot_content_refuses_usage_flags_on_other_content() {
     let (world, queue, receiver) = queued();
@@ -1940,11 +1853,11 @@ async fn slot_content_refuses_usage_flags_on_other_content() {
     assert_eq!(
         tree::find_slot(&apply::get_view(&world.state, view).unwrap().layout, slot),
         Some(&SlotContent::Empty),
-        "반려는 아무것도 안 바꾼다"
+        "a rejection changes nothing"
     );
 }
 
-/// 버스의 사용량 슬롯 — 뺀 칸은 처음엔 `true`, 그 뒤로는 지금 값이다(한 칸 토글이 다른 칸을 안 건드린다).
+/// Usage slot via the bus: a removed field is `true` at first, then the current value (a one-field toggle leaves the other alone).
 #[tokio::test]
 async fn slot_content_usage_merges_missing_flags() {
     let (world, queue, receiver) = queued();
@@ -1962,7 +1875,7 @@ async fn slot_content_usage_merges_missing_flags() {
         json!({ "view_id": view.to_string(), "slot_id": slot.to_string(), "content": "Usage" }),
     )
     .await;
-    placed.outcome.expect("사용량 슬롯 배치");
+    placed.outcome.expect("usage slot placement");
     assert_eq!(
         usage_at(&world),
         Some(SlotContent::Usage {
@@ -1986,7 +1899,7 @@ async fn slot_content_usage_merges_missing_flags() {
     )
     .await
     .outcome
-    .expect("codex 끔");
+    .expect("codex off");
     assert_eq!(
         usage_at(&world),
         Some(SlotContent::Usage {
@@ -2010,19 +1923,18 @@ async fn slot_content_usage_merges_missing_flags() {
     )
     .await
     .outcome
-    .expect("claude 끔");
+    .expect("claude off");
     assert_eq!(
         usage_at(&world),
         Some(SlotContent::Usage {
             show_claude: false,
             show_codex: false
         }),
-        "앞서 끈 codex 가 되살아나지 않는다"
+        "the earlier switched-off codex does not come back to life"
     );
 }
 
-/// ★버스에서 창을 떼어낸다★ — 클릭 없이도 슬롯이 자기 창으로 나가고, 답장이 그 창과 새 탭을 함께 준다
-/// (둘 다 없으면 호출자가 방금 만든 창을 다시 찾아 헤맨다).
+/// Detach from the bus: without a click the slot goes to its own window, and the reply gives that window and the new tab together.
 #[tokio::test]
 async fn popout_detaches_a_slot_into_a_new_window() {
     let (world, queue, receiver) = queued();
@@ -2037,40 +1949,38 @@ async fn popout_detaches_a_slot_into_a_new_window() {
     )
     .await
     .outcome
-    .expect("분리 성공");
+    .expect("detach succeeds");
 
-    let window = ok["window"].as_str().expect("창 label").to_string();
+    let window = ok["window"].as_str().expect("window label").to_string();
     assert_eq!(
         world.windows.opened.lock().unwrap().as_slice(),
         &[window.clone()],
-        "to_window 를 빼면 새 창이 열린다"
+        "omitting to_window opens a new window"
     );
-    let tabs = apply::list_tabs(&world.state, &window).expect("새 창 탭");
+    let tabs = apply::list_tabs(&world.state, &window).expect("new window tab");
     assert_eq!(
         ok["new_view_id"].as_str(),
         Some(tabs.active.to_string().as_str()),
-        "답장의 new_view_id 가 그 창의 활성 탭이다"
+        "the reply's new_view_id is that window's active tab"
     );
-    // ★인자의 `view_id`(원본)와 답의 `new_view_id`(도착지)는 다른 것을 가리킨다★ — 답을 그대로 되먹여
-    //   두 번 부르는 호출자가 원본 대신 방금 만든 탭을 집는 사고를 이름으로 막는다.
+    // `view_id` (argument, the original) and `new_view_id` (answer, the destination) are different tabs — feeding the answer back must not pick the original.
     assert!(
         ok.get("view_id").is_none(),
-        "답에 `view_id` 를 두면 인자와 같은 이름이 반대쪽을 뜻하게 된다: {ok}"
+        "if the answer carried `view_id`, the same name as the argument would mean the opposite side: {ok}"
     );
     assert!(
         !world.slots(view).contains(&slot),
-        "MOVE 다 — 원본 슬롯은 남지 않는다"
+        "it is a MOVE — the original slot does not remain"
     );
 }
 
-/// `to_window` 를 주면 그 창의 새 탭이 된다 — 창이 늘지 않는다.
 #[tokio::test]
 async fn popout_into_a_named_window_adds_a_tab_there() {
     let (world, queue, receiver) = queued();
     let target = call(&receiver, &queue, &world.mail, "window.create", json!({}))
         .await
         .outcome
-        .expect("창 생성")["window"]
+        .expect("window creation")["window"]
         .as_str()
         .expect("label")
         .to_string();
@@ -2091,23 +2001,23 @@ async fn popout_into_a_named_window_adds_a_tab_there() {
     )
     .await
     .outcome
-    .expect("분리 성공");
+    .expect("detach succeeds");
 
     assert_eq!(ok["window"].as_str(), Some(target.as_str()));
     assert_eq!(
         world.windows.opened.lock().unwrap().len(),
         opened_before,
-        "기존 창 타깃은 창을 새로 열지 않는다"
+        "an existing-window target does not open a new window"
     );
-    let tabs = apply::list_tabs(&world.state, &target).expect("대상 창 탭");
-    assert_eq!(tabs.tabs.len(), 2, "빈 탭 + 옮겨온 탭");
+    let tabs = apply::list_tabs(&world.state, &target).expect("target window tabs");
+    assert_eq!(tabs.tabs.len(), 2, "empty tab + the moved-in tab");
     assert_eq!(
         ok["new_view_id"].as_str(),
         Some(tabs.active.to_string().as_str())
     );
 }
 
-/// 빈 슬롯도 버스로 떼어낸다 — 새 창이 열리고 원본 슬롯은 닫힌다. // ADR-0228
+/// An empty slot detaches from the bus too — a new window opens and the original slot closes (ADR-0228).
 #[tokio::test]
 async fn popout_of_an_empty_slot_opens_a_window() {
     let (world, queue, receiver) = queued();
@@ -2123,25 +2033,24 @@ async fn popout_of_an_empty_slot_opens_a_window() {
     )
     .await
     .outcome
-    .expect("분리 성공");
+    .expect("detach succeeds");
 
-    let window = ok["window"].as_str().expect("창 label").to_string();
+    let window = ok["window"].as_str().expect("window label").to_string();
     assert_eq!(
         world.windows.opened.lock().unwrap().as_slice(),
         &[window.clone()]
     );
-    let tabs = apply::list_tabs(&world.state, &window).expect("새 창 탭");
+    let tabs = apply::list_tabs(&world.state, &window).expect("new window tab");
     assert_eq!(
         ok["new_view_id"].as_str(),
         Some(tabs.active.to_string().as_str())
     );
     assert!(
         !world.slots(view).contains(&slot),
-        "MOVE 다 — 원본 슬롯은 남지 않는다"
+        "it is a MOVE — the original slot does not remain"
     );
 }
 
-/// 없는 슬롯은 `CONFLICT` + 서비스의 사유 문구로 반려된다(창도 안 연다).
 #[tokio::test]
 async fn popout_of_a_missing_slot_is_refused_without_opening_a_window() {
     let (world, queue, receiver) = queued();
@@ -2160,14 +2069,18 @@ async fn popout_of_a_missing_slot_is_refused_without_opening_a_window() {
     );
 
     assert_eq!(err.code(), ErrorCode::Conflict);
-    assert!(err.message().contains("slot 없음"), "{}", err.message());
+    assert!(
+        err.message().contains("slot not found"),
+        "{}",
+        err.message()
+    );
     assert!(
         world.windows.opened.lock().unwrap().is_empty(),
-        "거절됐으면 창도 안 연다"
+        "if refused, no window is opened either"
     );
 }
 
-// ── 예열 창 — 버스의 새 창 둘도 창 포트에 먼저 묻는다(TRD S21-slot-docking §3-9 · §8-1 ⑬ · ADR-0299) ──────────
+// ── Prewarmed window — the two new windows of the bus also ask the window port first (TRD S21-slot-docking §3-9 · §8-1 ⑬ · ADR-0299) ──────────
 
 const SPARE: &str = "slot-popup-9";
 
@@ -2179,7 +2092,7 @@ async fn window_create_opens_the_prewarmed_window_under_its_label() {
     let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
         .await
         .outcome
-        .expect("창 생성");
+        .expect("window creation");
 
     assert_eq!(created["window"].as_str(), Some(SPARE));
     assert_eq!(world.windows.opened.lock().unwrap().as_slice(), [SPARE]);
@@ -2208,7 +2121,7 @@ async fn popout_into_a_new_window_opens_the_prewarmed_window() {
     )
     .await
     .outcome
-    .expect("분리 성공");
+    .expect("detach succeeds");
 
     assert_eq!(ok["window"].as_str(), Some(SPARE));
     assert_eq!(world.windows.opened.lock().unwrap().as_slice(), [SPARE]);
@@ -2218,7 +2131,7 @@ async fn popout_into_a_new_window_opens_the_prewarmed_window() {
     );
 }
 
-// 이른 거절(단계 A — 없는 슬롯)은 맡긴 창을 되물린다 — 연 적이 없으니 닫지 않는다.
+// An early rejection (phase A — a nonexistent slot) hands the handed-over window back — it was never opened, so it is not closed.
 #[tokio::test]
 async fn a_refused_popout_gives_the_prewarmed_window_back() {
     let (world, queue, receiver) = queued();
@@ -2245,11 +2158,9 @@ async fn a_refused_popout_gives_the_prewarmed_window_back() {
     assert!(world.windows.closed.lock().unwrap().is_empty());
 }
 
-// ── (B) 창 테마 — window.getTheme · window.setTheme (TRD S21-storage §5-6) ──────────────
+// ── (B) Window theme — window.getTheme · window.setTheme (TRD S21-storage §5-6) ──────────────
 //
-// 유효 테마 · 설정 · 모델은 실물이고(설정 = 임시 폴더) 창 쪽만 기록하는 가짜다. 재는 것 = 봉투가 표가 쥔 **그
-// 손잡이**에 닿나 · 답 모양 · null 해제 · 오류 코드 · 쓰기 뒤 밀기. 유효 값 계산은 `theme` 옆 단위 시험
-// (`--test lib_unit`)이 잰다 — 여기서 다시 재지 않는다.
+// Valid themes · settings · model are real (settings in a temporary folder); only the window side is a recording fake. Measured: the envelope reaches the handle the table holds, answer shape, null clearing, error codes, push after write. Valid-value computation is measured beside `theme` (`--test lib_unit`).
 
 #[tokio::test]
 async fn window_get_theme_answers_the_own_and_the_effective_theme() {
@@ -2264,20 +2175,19 @@ async fn window_get_theme_answers_the_own_and_the_effective_theme() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
 
     assert_eq!(
         ok,
         json!({ "theme": null, "effective": DEFAULT_THEME.as_wire() }),
-        "자기 테마가 없는 창 = theme null · effective 는 전역 값"
+        "a window with no theme of its own = theme null · effective is the global value"
     );
 }
 
-/// 창 쓰기가 그 창의 모델 항목에 들고, 쓴 뒤 모든 창을 다시 민다 — 자기 테마가 없는 창은 그때의 `theme.default`.
 #[tokio::test]
 async fn window_set_theme_writes_the_window_and_pushes_every_window() {
     let (world, queue, receiver) = queued();
-    world.settings.set(THEME_DEFAULT, "light").expect("쓰기");
+    world.settings.set(THEME_DEFAULT, "light").expect("write");
 
     let ok = call(
         &receiver,
@@ -2288,7 +2198,7 @@ async fn window_set_theme_writes_the_window_and_pushes_every_window() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
 
     assert_eq!(ok, json!({ "theme": "e-ink", "effective": "e-ink" }));
     assert_eq!(
@@ -2320,11 +2230,11 @@ async fn window_set_theme_writes_the_window_and_pushes_every_window() {
     )
     .await
     .outcome
-    .expect("성공 답장");
-    assert_eq!(read, ok, "읽기가 쓴 값을 그대로 돌려준다");
+    .expect("success reply");
+    assert_eq!(read, ok, "the read returns the written value as is");
 }
 
-/// ★`null` 은 지우기다★ — 그 창은 다시 `theme.default` 를 따른다. 레이아웃 번호는 안 움직인다(창 속성 번호만).
+/// `null` clears — that window follows `theme.default` again. The layout version does not move (only the window property version).
 #[tokio::test]
 async fn window_set_theme_null_clears_the_windows_own_theme() {
     let (world, queue, receiver) = queued();
@@ -2339,11 +2249,11 @@ async fn window_set_theme_null_clears_the_windows_own_theme() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
     assert_eq!(
         set,
         json!({ "theme": "light", "effective": "light" }),
-        "대소문자를 가리지 않고 정규 철자로 답한다"
+        "answers in the canonical spelling regardless of case"
     );
     let attrs_rev = world.state.0.lock().unwrap().attrs_rev();
 
@@ -2358,7 +2268,7 @@ async fn window_set_theme_null_clears_the_windows_own_theme() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
 
     assert_eq!(cleared, json!({ "theme": null, "effective": "dark" }));
     {
@@ -2369,7 +2279,7 @@ async fn window_set_theme_null_clears_the_windows_own_theme() {
     assert_eq!(
         world.main_tabs().version,
         before.version,
-        "창 테마는 레이아웃 번호를 안 올린다"
+        "a window theme does not bump the layout version"
     );
     assert_eq!(
         world.theme_windows.take(),
@@ -2380,14 +2290,14 @@ async fn window_set_theme_null_clears_the_windows_own_theme() {
     );
 }
 
-/// ★`theme` 칸 부재는 지우기가 아니다★ — 오타 필드 하나가 조용히 창 테마를 지우면 안 된다.
+/// An absent `theme` field does not clear — one typo field must not quietly erase the window theme.
 #[tokio::test]
 async fn window_set_theme_without_the_theme_field_is_refused() {
     let (world, queue, receiver) = queued();
     world
         .themes
         .set(MAIN_WINDOW_LABEL, Some(UiTheme::Light))
-        .expect("창 테마");
+        .expect("window theme");
     world.theme_windows.take();
 
     let err = error_of(
@@ -2408,7 +2318,7 @@ async fn window_set_theme_without_the_theme_field_is_refused() {
     );
     assert!(
         world.theme_windows.take().is_empty(),
-        "거절이면 밀지 않는다"
+        "on refusal there is no push"
     );
 }
 
@@ -2431,7 +2341,7 @@ async fn an_unknown_theme_is_an_invalid_argument() {
         assert_eq!(err.code(), ErrorCode::InvalidArgument, "{given:?}");
         assert!(
             err.message().contains("dark, light or e-ink"),
-            "받는 값을 알려 준다: {}",
+            "tells the accepted values: {}",
             err.message()
         );
     }
@@ -2439,7 +2349,6 @@ async fn an_unknown_theme_is_an_invalid_argument() {
     assert!(world.theme_windows.take().is_empty());
 }
 
-/// 없는 창은 이웃 `window.*` 명령과 같은 `CONFLICT` 다.
 #[tokio::test]
 async fn an_unknown_window_is_a_conflict_for_both_theme_commands() {
     let (world, queue, receiver) = queued();
@@ -2463,8 +2372,7 @@ async fn an_unknown_window_is_a_conflict_for_both_theme_commands() {
     assert!(world.theme_windows.take().is_empty());
 }
 
-/// ADR-0225: 트리 전용 창(`agent-tree`)은 걷혔다 — 그 label 도 다른 모르는 창과 같은 `CONFLICT` 이고, 쓰기는 아무
-/// 창도 만들지 않고 밀지도 않는다.
+/// ADR-0225: the tree-only window (`agent-tree`) is retired — that label is the same `CONFLICT` as any unknown window; the write makes no window and pushes nothing.
 #[tokio::test]
 async fn the_retired_tree_window_label_is_an_unknown_window_for_both_theme_commands() {
     let (world, queue, receiver) = queued();
@@ -2486,8 +2394,7 @@ async fn the_retired_tree_window_label_is_an_unknown_window_for_both_theme_comma
     assert!(world.theme_windows.take().is_empty());
 }
 
-/// ★그 창이 못 받았으면 성공이 아니다★(ADR-0166 결정 6) — `INTERNAL` 이고 문구가 그 창과 사유를 말한다. 쓴 값은
-/// 남아 `window.getTheme` 이 새 값을 답한다.
+/// A window that could not receive makes the write an `INTERNAL` failure naming that window and the reason (ADR-0166 decision 6); the written value stays and `window.getTheme` answers it.
 #[tokio::test]
 async fn a_theme_the_target_window_did_not_receive_is_internal_and_stays_written() {
     let (world, queue, receiver) = queued();
@@ -2510,7 +2417,7 @@ async fn a_theme_the_target_window_did_not_receive_is_internal_and_stays_written
         "{}",
         err.message()
     );
-    assert_eq!(world.theme_windows.take().len(), 2, "모든 창에 시도한다");
+    assert_eq!(world.theme_windows.take().len(), 2, "tries every window");
 
     world.mail.clear();
     let read = call(
@@ -2522,11 +2429,10 @@ async fn a_theme_the_target_window_did_not_receive_is_internal_and_stays_written
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
     assert_eq!(read, json!({ "theme": "light", "effective": "light" }));
 }
 
-/// 다른 창만 못 받았으면 그 쓰기는 성공이다.
 #[tokio::test]
 async fn a_theme_only_another_window_did_not_receive_is_a_success() {
     let (world, queue, receiver) = queued();
@@ -2541,20 +2447,19 @@ async fn a_theme_only_another_window_did_not_receive_is_a_success() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
 
     assert_eq!(ok, json!({ "theme": "light", "effective": "light" }));
     assert_eq!(world.theme_windows.take().len(), 2);
 }
 
-/// 팝아웃의 테마는 그 창의 모델 항목에 든다 — 창을 닫으면 함께 사라진다.
 #[tokio::test]
 async fn a_popout_theme_lives_and_dies_with_its_window() {
     let (world, queue, receiver) = queued();
     let created = call(&receiver, &queue, &world.mail, "window.create", json!({}))
         .await
         .outcome
-        .expect("성공 답장");
+        .expect("success reply");
     let popout = created["window"].as_str().expect("label").to_string();
 
     world.mail.clear();
@@ -2567,7 +2472,7 @@ async fn a_popout_theme_lives_and_dies_with_its_window() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
     assert_eq!(
         world
             .state
@@ -2590,7 +2495,7 @@ async fn a_popout_theme_lives_and_dies_with_its_window() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
     world.mail.clear();
     let err = error_of(
         call(
@@ -2605,11 +2510,9 @@ async fn a_popout_theme_lives_and_dies_with_its_window() {
     assert_eq!(err.code(), ErrorCode::Conflict);
 }
 
-// ── (B) 셸 설정 — settings.get · set · reset · schema (TRD S21-storage §5-4) ──────────
+// ── (B) Shell settings — settings.get · set · reset · schema (TRD S21-storage §5-4) ──────────
 //
-// 서비스는 실물이고(임시 폴더 위 — 셸 setup 처럼 쓰기를 연 것) 알림만 가짜다. 재는 것 = 봉투가 표가 쥔 **그
-// 서비스**에 닿나 · 서비스의 오류 종류가 같은 이름의 코드로 나가나 · **실제로 바뀐 쓰기에만** 알리나. 값
-// 정규화·파일 관용은 서비스 옆 단위 시험(`--test lib_unit`)이 잰다 — 여기서 다시 재지 않는다.
+// The service is real (temporary folder, writes opened as in shell setup); only notifications are fake. Measured: the envelope reaches the service the table holds, its error kinds go out as same-named codes, and only actually changed writes are announced. Value normalization · file tolerance are measured beside the service (`--test lib_unit`).
 
 fn setting(key: &str, value: &str, is_default: bool) -> SettingItem {
     SettingItem {
@@ -2626,7 +2529,7 @@ async fn settings_get_answers_from_the_shared_service() {
     let all = call(&receiver, &queue, &world.mail, "settings.get", json!({}))
         .await
         .outcome
-        .expect("성공 답장");
+        .expect("success reply");
     assert_eq!(all["rev"], 0);
     let items = all["items"].as_array().expect("items");
     assert_eq!(items.len(), 13);
@@ -2645,7 +2548,7 @@ async fn settings_get_answers_from_the_shared_service() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
     let keys: Vec<&str> = chat["items"]
         .as_array()
         .expect("items")
@@ -2659,8 +2562,7 @@ async fn settings_get_answers_from_the_shared_service() {
     );
 }
 
-/// ★표가 쥔 서비스가 사람 경로와 **같은 인스턴스**다★ — 다른 인스턴스면 LLM 이 바꾼 값을 화면이 못 본다.
-/// 그리고 디스크에 남아 다음 적재(= 재시작)에 읽힌다.
+/// The service the table holds is the same instance as the human path (else the screen would not see a value the LLM changed), and the value stays on disk for the next load.
 #[tokio::test]
 async fn settings_set_writes_through_the_shared_service_and_announces_once() {
     let (world, queue, receiver) = queued();
@@ -2675,9 +2577,9 @@ async fn settings_set_writes_through_the_shared_service_and_announces_once() {
     .await;
 
     assert_eq!(
-        reply.outcome.expect("성공 답장"),
+        reply.outcome.expect("success reply"),
         json!({"rev": 1, "key": "theme.default", "value": "e-ink", "changed": true}),
-        "답의 value 는 정규형이다"
+        "the answer's value is the canonical form"
     );
     assert_eq!(
         world.settings.effective(THEME_DEFAULT).as_deref(),
@@ -2693,14 +2595,14 @@ async fn settings_set_writes_through_the_shared_service_and_announces_once() {
     assert_eq!(
         world.settings_events.theme_pushes(),
         1,
-        "전역 테마가 바뀌면 창마다 다시 민다"
+        "when the global theme changes, it is pushed again for every window"
     );
     assert_eq!(
         SettingsService::load_from_dir(&world._config.0)
             .effective(THEME_DEFAULT)
             .as_deref(),
         Some("e-ink"),
-        "재시작을 넘긴다"
+        "survives a restart"
     );
 }
 
@@ -2718,7 +2620,7 @@ async fn a_set_that_changes_nothing_is_answered_but_never_announced() {
     .await;
 
     assert_eq!(
-        reply.outcome.expect("성공 답장"),
+        reply.outcome.expect("success reply"),
         json!({"rev": 0, "key": "theme.default", "value": "dark", "changed": false})
     );
     assert!(world.settings_events.changes().is_empty());
@@ -2738,7 +2640,7 @@ async fn a_change_to_another_key_is_announced_without_a_theme_push() {
     )
     .await;
 
-    assert_eq!(reply.outcome.expect("성공 답장")["value"], "15px");
+    assert_eq!(reply.outcome.expect("success reply")["value"], "15px");
     assert_eq!(
         world.settings_events.changes(),
         vec![SettingsSnapshot {
@@ -2796,15 +2698,14 @@ async fn a_malformed_setting_is_an_invalid_argument_and_changes_nothing() {
     );
     assert!(
         err.message().contains("theme.default"),
-        "어느 키의 형식인지가 문구에 있어야 한다: {}",
+        "the text must say which key's format it is: {}",
         err.message()
     );
 
-    assert_eq!(world.settings.get(None).expect("읽기").rev, 0);
+    assert_eq!(world.settings.get(None).expect("read").rev, 0);
     assert!(world.settings_events.changes().is_empty());
 }
 
-/// 셸 `setup` 이 쓰기를 열기 전에 온 쓰기 — 서비스의 `Internal` 이 `INTERNAL` 로 나가고 디스크는 그대로다.
 #[tokio::test]
 async fn a_write_before_the_shell_opens_writes_is_internal() {
     let (world, mut ports) = World::build();
@@ -2830,18 +2731,17 @@ async fn a_write_before_the_shell_opens_writes_is_internal() {
 
     assert_eq!(err.code(), ErrorCode::Internal);
     assert!(world.settings_events.changes().is_empty());
-    assert!(!closed.0.exists(), "쓰기 전에 폴더를 만들었다");
+    assert!(!closed.0.exists(), "the folder was made before writing");
 }
 
-/// ADR-0291 R2: 설정 파일이 이 셸보다 새 판이 쓴 것이면 쓰기는 `CONFLICT` 다 — `INTERNAL` 이 아니다(다시 해도
-/// 그 파일이 바뀌기 전에는 같다). 파일 바이트 · 알림 그대로.
+/// ADR-0291 R2: a settings file written by a newer version makes the write `CONFLICT`, not `INTERNAL` (retrying is the same until the file changes). File bytes · notifications unchanged.
 #[tokio::test]
 async fn a_write_over_a_settings_file_from_a_newer_version_is_conflict() {
     let (world, mut ports) = World::build();
     let newer = ConfigDir::new();
-    std::fs::create_dir_all(&newer.0).expect("폴더");
+    std::fs::create_dir_all(&newer.0).expect("folder");
     let text = r#"{"$version":2,"theme.default":"light"}"#;
-    std::fs::write(newer.0.join("settings.json"), text).expect("새 판 파일");
+    std::fs::write(newer.0.join("settings.json"), text).expect("newer-version file");
     ports.settings = newer.service();
     let queue = Arc::new(Queued::default());
     let receiver = InboundReceiver::new(
@@ -2864,24 +2764,22 @@ async fn a_write_over_a_settings_file_from_a_newer_version_is_conflict() {
     assert_eq!(err.code(), ErrorCode::Conflict);
     assert!(world.settings_events.changes().is_empty());
     assert_eq!(
-        std::fs::read_to_string(newer.0.join("settings.json")).expect("파일"),
+        std::fs::read_to_string(newer.0.join("settings.json")).expect("file"),
         text,
-        "덮지 않는다"
+        "not overwritten"
     );
     assert!(
         !newer.0.join("settings.json.corrupt").exists(),
-        "떠 두지 않는다"
+        "not copied aside"
     );
 }
 
-/// ADR-0291 R17: 쓰기 직전 다시 읽은 설정 파일을 못 읽으면 `CONFLICT` · `after-condition` 이다 — 대개 잠깐 쥔
-/// 잠김이라 조금 뒤 다시 하면 된다(새 판 파일의 `never` 와 갈린다). 값 · 알림 그대로. 못 읽는 자리는 파일 이름에
-/// 폴더를 세워 만든다 — 열기가 늘 실패한다.
+/// ADR-0291 R17: a settings file that cannot be re-read just before writing is `CONFLICT` · `after-condition` (usually a brief lock; distinct from `never` for a newer-version file). Value · notifications unchanged; the unreadable place is a folder at the file name.
 #[tokio::test]
 async fn a_write_over_an_unreadable_settings_file_is_conflict_to_retry_later() {
     let (world, mut ports) = World::build();
     let blocked = ConfigDir::new();
-    std::fs::create_dir_all(blocked.0.join("settings.json")).expect("파일 자리의 폴더");
+    std::fs::create_dir_all(blocked.0.join("settings.json")).expect("a folder at the file place");
     ports.settings = blocked.service();
     let queue = Arc::new(Queued::default());
     let receiver = InboundReceiver::new(
@@ -2909,12 +2807,11 @@ async fn a_write_over_an_unreadable_settings_file_is_conflict_to_retry_later() {
     assert!(world.settings_events.changes().is_empty());
     assert!(
         blocked.0.join("settings.json").is_dir(),
-        "그 자리를 덮지 않는다"
+        "that place is not overwritten"
     );
 }
 
-/// ★쓰기 본문은 적용 태스크를 폴링하는 런타임 스레드가 아니라 블로킹 풀에서 돈다★ — `sync_all` 을 기다리는
-/// 동안 그 워커에 얹힌 다른 태스크(연결 소켓 포함)가 서지 않게.
+/// The write body runs on the blocking pool, not on a runtime thread polling the apply task, so tasks sharing that worker (including the connection socket) do not stall on `sync_all`.
 #[tokio::test]
 async fn settings_writes_run_off_the_runtime_thread() {
     let (world, queue, receiver) = queued();
@@ -2931,7 +2828,7 @@ async fn settings_writes_run_off_the_runtime_thread() {
         call(&receiver, &queue, &world.mail, name, args)
             .await
             .outcome
-            .expect("성공 답장");
+            .expect("success reply");
     }
 
     let threads = world.settings_events.threads();
@@ -2956,7 +2853,7 @@ async fn settings_reset_names_every_covered_key_and_announces_only_the_changed_o
         )
         .await
         .outcome
-        .expect("성공 답장");
+        .expect("success reply");
     }
 
     world.mail.clear();
@@ -2969,14 +2866,14 @@ async fn settings_reset_names_every_covered_key_and_announces_only_the_changed_o
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
 
     assert_eq!(ok["rev"], 3);
     let reset = ok["reset"].as_array().expect("reset");
-    assert_eq!(reset.len(), 11, "선택자가 덮은 키 전부");
+    assert_eq!(reset.len(), 11, "every key the selector covered");
     assert!(
         ok.get("changed").is_none(),
-        "버스 답은 {{rev, reset}} 이다: {ok}"
+        "the bus answer is {{rev, reset}}: {ok}"
     );
     assert_eq!(
         world.settings_events.changes().last(),
@@ -2987,11 +2884,10 @@ async fn settings_reset_names_every_covered_key_and_announces_only_the_changed_o
                 setting("chat.style.fontSize", "13px", true),
             ],
         }),
-        "알림은 바뀐 키만 싣는다"
+        "the notification carries only changed keys"
     );
     assert_eq!(world.settings_events.theme_pushes(), 0);
 
-    // 이미 다 기본값 — 쓰지도 알리지도 않는다(rev 그대로).
     world.mail.clear();
     let again = call(
         &receiver,
@@ -3002,7 +2898,7 @@ async fn settings_reset_names_every_covered_key_and_announces_only_the_changed_o
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
     assert_eq!(again["rev"], 3);
     assert_eq!(world.settings_events.changes().len(), 3);
 }
@@ -3019,7 +2915,7 @@ async fn resetting_theme_default_pushes_themes_again() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
 
     world.mail.clear();
     let ok = call(
@@ -3031,7 +2927,7 @@ async fn resetting_theme_default_pushes_themes_again() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
 
     assert_eq!(ok, json!({"rev": 2, "reset": ["theme.default"]}));
     assert_eq!(world.settings_events.theme_pushes(), 2);
@@ -3051,7 +2947,7 @@ async fn settings_schema_describes_the_keys() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
     let row = &theme["items"][0];
     assert_eq!(row["key"], "theme.default");
     assert_eq!(row["kind"], "choice");
@@ -3070,7 +2966,7 @@ async fn settings_schema_describes_the_keys() {
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
     assert_eq!(size["items"][0]["kind"], "css-length");
     assert_eq!(size["items"][0]["min"], "8px, 0.5rem, 0.5em");
     assert!(size["items"][0]["choices"].is_null());
@@ -3079,12 +2975,11 @@ async fn settings_schema_describes_the_keys() {
     let all = call(&receiver, &queue, &world.mail, "settings.schema", json!({}))
         .await
         .outcome
-        .expect("성공 답장");
+        .expect("success reply");
     assert_eq!(all["items"].as_array().expect("items").len(), 13);
 }
 
-/// ADR-0373 — the LLM path of a `ui.language` write reaches the language hook. The hook here does what the production one does
-/// to the layout (read the stored value, `apply::language_changed`), so `tab.list` answers in the new language.
+/// ADR-0373: the LLM path of a `ui.language` write reaches the language hook, which here does what production does to the layout (`apply::language_changed`), so `tab.list` answers in the new language.
 #[tokio::test]
 async fn a_bus_ui_language_write_reaches_the_language_hook_and_renames_auto_tabs() {
     struct Applying {
@@ -3152,7 +3047,7 @@ async fn a_bus_ui_language_write_reaches_the_language_hook_and_renames_auto_tabs
     assert_eq!(*hook.heard.lock().unwrap(), 1);
     assert_eq!(
         main_tab_name(verb(&receiver, &queue, "tab.list", list.clone()).await),
-        "빈 칸"
+        "빈 칸" // hangul-ok: the Korean UI table
     );
 
     verb(
@@ -3176,8 +3071,7 @@ async fn a_bus_ui_language_write_reaches_the_language_hook_and_renames_auto_tabs
     );
 }
 
-/// ★버스 쓰기 → 알림 → 유효 테마 밀기를 한 줄로★ — 운영 어댑터(`TauriSettingsEvents`)와 같은 배선을 창 없이
-/// 세운다: 알림 포트가 표가 쥔 것과 같은 [`ThemeControl`] 로 창마다 민다.
+/// Bus write → notification → effective theme push in one line, wired like the production adapter (`TauriSettingsEvents`) but without a window.
 #[tokio::test]
 async fn a_bus_theme_default_write_reaches_every_window_without_its_own_theme() {
     struct Pushing(ThemeControl);
@@ -3196,7 +3090,7 @@ async fn a_bus_theme_default_write_reaches_every_window_without_its_own_theme() 
     world
         .themes
         .set(MAIN_WINDOW_LABEL, Some(UiTheme::EInk))
-        .expect("창 테마");
+        .expect("window theme");
     world.theme_windows.take();
     ports.settings_events = Arc::new(Pushing(world.themes.clone()));
     let queue = Arc::new(Queued::default());
@@ -3215,7 +3109,7 @@ async fn a_bus_theme_default_write_reaches_every_window_without_its_own_theme() 
     )
     .await
     .outcome
-    .expect("성공 답장");
+    .expect("success reply");
 
     assert_eq!(
         world.theme_windows.take(),
@@ -3226,13 +3120,11 @@ async fn a_bus_theme_default_write_reaches_every_window_without_its_own_theme() 
     );
 }
 
-// ── (B) 크래시 사본 — restore.status · restore.answer (TRD S21-storage §6-7) ──────────
+// ── (B) Crash copy — restore.status · restore.answer (TRD S21-storage §6-7) ──────────
 //
-// 조율자는 실물이고(포트만 가짜) 표가 쥔 **그 인스턴스**를 시험이 함께 쥔다. 재는 것 = 봉투가 그 조율자에 닿나 ·
-// 답 모양 · 조율자의 오류 종류가 `CONFLICT` · `INTERNAL` 로 나가나 · 막는 수락 본문이 런타임 스레드 밖에서 도나.
-// 수락의 화면 교체 순서 · 되돌림은 조율자 옆 단위 시험(`--test lib_unit`)이 잰다 — 여기서 다시 재지 않는다.
+// The coordinator is real (only ports are fake) and the test holds the same instance as the table. Measured: the envelope reaches it, answer shape, error kinds → `CONFLICT` · `INTERNAL`, and the blocking acceptance body runs off the runtime thread. Screen-swap order · rollback are measured beside the coordinator (`--test lib_unit`).
 
-/// 복원 수락의 창 포트 대역 — 모든 창이 보이고 만들기는 늘 성공한다. 숨긴 채 만든 창과 본문이 돈 스레드만 남긴다.
+/// Window port stand-in of the restore acceptance — every window is visible and creation always succeeds; records hidden windows and the body's thread.
 #[derive(Default)]
 struct RestoreScreen {
     opened: Mutex<Vec<String>>,
@@ -3285,7 +3177,6 @@ impl RestoreWindows for RestoreScreen {
     }
 }
 
-/// 데몬 클라이언트가 없는 셸 — 구독 재계산을 건너뛴다.
 struct NoSubscriptions;
 
 impl SubscriptionSource for NoSubscriptions {
@@ -3295,7 +3186,6 @@ impl SubscriptionSource for NoSubscriptions {
 }
 
 impl World {
-    /// 셸 setup 끝처럼 조율자에 포트를 꽂는다.
     fn attach_restore_ports(&self) -> Arc<RestoreScreen> {
         let screen = Arc::new(RestoreScreen::default());
         self.restore.attach(RestorePorts {
@@ -3307,7 +3197,7 @@ impl World {
         screen
     }
 
-    /// 부팅 단계 ⑥ — 앞 실행의 화면(main 탭 「지난 탭」 + 빈 팝아웃 `popouts` 개)을 답하지 않은 사본으로 세운다.
+    /// Boot step ⑥ — sets the previous run's screen (a main tab 「last tab」 + `popouts` empty pop-outs) as an unanswered copy.
     fn crash_copy_awaits(&self, popouts: usize) {
         self.crash_copy_awaits_with(popouts, false, StateFileStatus::Ok);
     }
@@ -3316,12 +3206,12 @@ impl World {
         let mut previous = ViewManager::new();
         let main_view = previous.windows[MAIN_WINDOW_LABEL].active;
         previous
-            .rename_tab(main_view, "지난 탭".to_string())
-            .expect("탭 이름");
+            .rename_tab(main_view, "last tab".to_string())
+            .expect("tab name");
         for n in 0..popouts {
             previous
                 .create_window(&format!("slot-popup-{}", 90 + n))
-                .expect("팝아웃");
+                .expect("pop-out");
         }
         self.restore_service.set_boot(
             Some(CrashCopy {
@@ -3353,11 +3243,11 @@ async fn restore_status_reports_the_crash_copy_shape() {
     let none = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
         .await
         .outcome
-        .expect("성공 답장");
+        .expect("success reply");
     assert_eq!(
         none,
         json!({"crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null, "durable": null, "saves": true, "state_file": "ok"}),
-        "물을 사본이 없으면 사본의 셋은 null"
+        "with no copy to ask about, the copy's three are null"
     );
 
     world.crash_copy_awaits(2);
@@ -3365,11 +3255,11 @@ async fn restore_status_reports_the_crash_copy_shape() {
     let awaiting = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
         .await
         .outcome
-        .expect("성공 답장");
+        .expect("success reply");
     assert_eq!(
         awaiting,
         json!({"crash_copy": "awaiting", "saved_at_ms": 1_700_000_000_000_u64, "windows": 3, "tabs": 3, "durable": false, "saves": false, "state_file": "ok"}),
-        "창 수 = main + 팝아웃"
+        "window count = main + pop-outs"
     );
 }
 
@@ -3383,11 +3273,11 @@ async fn restore_status_carries_the_state_file_status_in_its_wire_spelling() {
     let unreadable = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
         .await
         .outcome
-        .expect("성공 답장");
+        .expect("success reply");
     assert_eq!(
         unreadable,
         json!({"crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null, "durable": null, "saves": false, "state_file": "unreadable"}),
-        "사본이 없어도 state_file 은 값이다"
+        "state_file is a value even with no copy"
     );
 
     for (state_file, wire) in [
@@ -3400,7 +3290,7 @@ async fn restore_status_carries_the_state_file_status_in_its_wire_spelling() {
         let reply = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
             .await
             .outcome
-            .expect("성공 답장");
+            .expect("success reply");
         assert_eq!(reply["crash_copy"], json!("awaiting"));
         assert_eq!(reply["state_file"], json!(wire));
     }
@@ -3417,8 +3307,12 @@ async fn restore_status_carries_saves_always_and_durable_only_while_awaiting() {
         let none = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
             .await
             .outcome
-            .expect("성공 답장");
-        assert_eq!(none["saves"], json!(saves), "사본이 없어도 값 — {saves}");
+            .expect("success reply");
+        assert_eq!(
+            none["saves"],
+            json!(saves),
+            "a value even with no copy — {saves}"
+        );
         assert_eq!(none["durable"], json!(null));
 
         world.crash_copy_awaits_with(0, saves, StateFileStatus::Ok);
@@ -3426,12 +3320,12 @@ async fn restore_status_carries_saves_always_and_durable_only_while_awaiting() {
         let awaiting = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
             .await
             .outcome
-            .expect("성공 답장");
+            .expect("success reply");
         assert_eq!(awaiting["crash_copy"], json!("awaiting"));
         assert_eq!(awaiting["saves"], json!(saves));
         assert_eq!(
             awaiting["durable"], awaiting["saves"],
-            "묻는 동안 둘은 같다 — {saves}"
+            "while asking, the two are the same — {saves}"
         );
 
         world.mail.clear();
@@ -3444,18 +3338,22 @@ async fn restore_status_carries_saves_always_and_durable_only_while_awaiting() {
         )
         .await
         .outcome
-        .expect("거절 답장");
+        .expect("refusal reply");
         world.mail.clear();
         let answered = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
             .await
             .outcome
-            .expect("성공 답장");
+            .expect("success reply");
         assert_eq!(answered["crash_copy"], json!("answered"));
-        assert_eq!(answered["durable"], json!(null), "awaiting 밖은 null");
+        assert_eq!(
+            answered["durable"],
+            json!(null),
+            "outside awaiting it is null"
+        );
         assert_eq!(
             answered["saves"],
             json!(saves),
-            "답한 뒤에도 그 실행의 값 — {saves}"
+            "the value of that run even after answering — {saves}"
         );
     }
 }
@@ -3475,10 +3373,10 @@ async fn restore_answer_conflicts_while_not_awaiting_or_while_another_answer_run
         )
         .await,
     );
-    assert_eq!(no_copy.code(), ErrorCode::Conflict, "사본이 없다");
+    assert_eq!(no_copy.code(), ErrorCode::Conflict, "there is no copy");
 
     world.crash_copy_awaits(0);
-    let held = world.restore_service.begin_answer().expect("답할 수 있다");
+    let held = world.restore_service.begin_answer().expect("can answer");
     world.mail.clear();
     let in_flight = error_of(
         call(
@@ -3493,7 +3391,7 @@ async fn restore_answer_conflicts_while_not_awaiting_or_while_another_answer_run
     assert_eq!(
         in_flight.code(),
         ErrorCode::Conflict,
-        "다른 답이 처리 중이다"
+        "another answer is being processed"
     );
     drop(held);
 
@@ -3507,11 +3405,11 @@ async fn restore_answer_conflicts_while_not_awaiting_or_while_another_answer_run
     )
     .await
     .outcome
-    .expect("거절은 답이다");
+    .expect("a refusal is an answer");
     assert_eq!(
         rejected,
         json!({"restored_windows": 0, "durable": false}),
-        "거절은 화면을 안 바꾸고 · 기록기가 없으면 디스크에 안 붙는다"
+        "a refusal does not change the screen · and with no recorder it does not touch the disk"
     );
 
     world.mail.clear();
@@ -3525,11 +3423,11 @@ async fn restore_answer_conflicts_while_not_awaiting_or_while_another_answer_run
         )
         .await,
     );
-    assert_eq!(again.code(), ErrorCode::Conflict, "이미 답했다");
+    assert_eq!(again.code(), ErrorCode::Conflict, "already answered");
     assert_ne!(
         again.message(),
         no_copy.message(),
-        "사본 없음과 이미 답함을 문구가 가른다(사람이 읽는다)"
+        "the text tells apart no copy and already answered (a person reads it)"
     );
     assert_eq!(world.restore.status().crash_copy, CrashCopyStatus::Answered);
 }
@@ -3553,17 +3451,17 @@ async fn an_accept_before_the_shell_attaches_its_ports_is_internal_and_can_be_re
     assert_eq!(
         early.retry(),
         engram_dashboard_command::RetryMode::Never,
-        "지시는 싣지 않는다 — 데몬이 중계하며 전부 never 로 내린다(ADR-0159)"
+        "instructions are not carried — the daemon relays and lowers everything to never (ADR-0159)"
     );
     assert!(
         early.message().contains("answer again"),
-        "다시 답하라는 안내는 문구가 나른다: {}",
+        "the text carries the guidance to answer again: {}",
         early.message()
     );
     assert_eq!(
         world.restore.status().crash_copy,
         CrashCopyStatus::Awaiting,
-        "아무것도 안 바뀌었다 — 다시 답할 수 있다"
+        "nothing changed — can answer again"
     );
 
     world.attach_restore_ports();
@@ -3577,12 +3475,11 @@ async fn an_accept_before_the_shell_attaches_its_ports_is_internal_and_can_be_re
     )
     .await
     .outcome
-    .expect("포트가 선 뒤 다시 답하면 된다");
+    .expect("answer again after the port stands");
     assert_eq!(retried, json!({"restored_windows": 1, "durable": false}));
 }
 
-/// ★표가 쥔 조율자가 사람 경로와 **같은 인스턴스**다★ — 수락은 모델을 사본 화면으로 바꾸고, 막는 본문은 적용
-/// 태스크를 폴링하는 런타임 스레드가 아니라 블로킹 풀에서 돈다.
+/// The coordinator the table holds is the same instance as the human path — acceptance turns the model into the copy's screen, on the blocking pool.
 #[tokio::test]
 async fn restore_accept_swaps_the_screen_through_the_shared_coordinator_off_the_runtime_thread() {
     let (world, queue, receiver) = queued();
@@ -3599,12 +3496,16 @@ async fn restore_accept_swaps_the_screen_through_the_shared_coordinator_off_the_
     )
     .await
     .outcome
-    .expect("수락");
+    .expect("acceptance");
 
     assert_eq!(accepted, json!({"restored_windows": 2, "durable": false}));
-    assert_eq!(world.main_tab_name(), "지난 탭");
+    assert_eq!(world.main_tab_name(), "last tab");
     let opened = screen.opened.lock().unwrap().clone();
-    assert_eq!(opened, [popup_label(1)], "새 팝아웃은 공유 발급기의 label");
+    assert_eq!(
+        opened,
+        [popup_label(1)],
+        "a new pop-out gets the label of the shared issuer"
+    );
     let mut windows = world.state.0.lock().unwrap().list_windows();
     windows.sort();
     assert_eq!(windows, [MAIN_WINDOW_LABEL.to_string(), popup_label(1)]);
@@ -3625,14 +3526,13 @@ async fn restore_answer_needs_the_accept_flag() {
     assert_eq!(
         world.restore.status().crash_copy,
         CrashCopyStatus::Awaiting,
-        "인자 검문에서 멈춘다"
+        "stops at argument screening"
     );
 }
 
-// ── (B) 분할 비율 — split.setRatio · split.list (ADR-0227) ────────────────────
+// ── (B) Split ratio — split.setRatio · split.list (ADR-0227) ────────────────────
 
 impl World {
-    /// 명령을 한 번 더 부른다 — 같은 우편함을 비우고 쓴다([`Mailbox::only`] 가 「정확히 하나」를 요구한다).
     async fn ask(
         &self,
         receiver: &InboundReceiver,
@@ -3652,14 +3552,14 @@ impl World {
             .collect()
     }
 
-    /// 주 탭을 `x | (y / z)` 로 나눈 세계 — 반환 = (탭, x, y, z). 분할은 전위 순으로 바깥(좌우) · 안쪽(위아래).
+    /// Main tab split as `x | (y / z)` — returns (tab, x, y, z); preorder splits are the outer (left-right) then the inner (top-bottom).
     fn three_slots(&self) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid, uuid::Uuid) {
         let view = self.main_tabs().active;
         let x = self.empty_slot(view);
         let y = apply::split_slot(&self.state, &Subs, &Events, view, x, SplitDir::LeftRight)
-            .expect("좌우 분할");
+            .expect("left-right split");
         let z = apply::split_slot(&self.state, &Subs, &Events, view, y, SplitDir::TopBottom)
-            .expect("위아래 분할");
+            .expect("top-bottom split");
         (view, x, y, z)
     }
 }
@@ -3676,34 +3576,35 @@ fn metrics_with_min(min_pane_px: u32) -> UiMetrics {
     }
 }
 
-const A_SIDE: &str = "a 쪽(왼쪽/위) 칸의 몫";
+const A_SIDE: &str = "the share of side a's (left/top) area";
 
 #[test]
 fn both_ratio_commands_define_the_ratio_as_the_a_side_share() {
     for name in ["split.setRatio", "split.list"] {
-        let spec = spec_of(name).expect("선언돼 있다");
+        let spec = spec_of(name).expect("is declared");
         assert!(
             spec.summary.contains(A_SIDE),
-            "{name}: 요약에 ratio 의 뜻({A_SIDE})이 없다: {}",
+            "{name}: the summary lacks the meaning of ratio ({A_SIDE}): {}",
             spec.summary
         );
     }
-    let list = spec_of("split.list").expect("선언돼 있다");
-    assert!(list.summary.contains("a = 왼쪽/위"), "{}", list.summary);
-    // 요약은 손으로 쓴 글이라 상수가 바뀌면 조용히 LLM 에게 거짓을 말한다 — 상수에서 만든 문자열로 잰다.
+    let list = spec_of("split.list").expect("is declared");
+    assert!(list.summary.contains("a = left/top"), "{}", list.summary);
+    // The summary is hand-written, so a changed constant would quietly lie to the LLM — measure with a string made from the constant.
     let bounds = format!("{}~{}", tree::RATIO_MIN, tree::RATIO_MAX);
-    let set = spec_of("split.setRatio").expect("선언돼 있다");
+    let set = spec_of("split.setRatio").expect("is declared");
     assert!(
         set.summary.contains(&bounds),
-        "split.setRatio 요약이 클램프 범위 {bounds} 를 말해야 한다: {}",
+        "the split.setRatio summary must state the clamp range {bounds}: {}",
         set.summary
     );
 }
 
 #[test]
 fn set_ratio_advertises_its_three_outcomes_by_name() {
-    let spec = spec_of("split.setRatio").expect("선언돼 있다");
-    let shape: serde_json::Value = serde_json::from_str(spec.ok_schema).expect("스키마는 JSON");
+    let spec = spec_of("split.setRatio").expect("is declared");
+    let shape: serde_json::Value =
+        serde_json::from_str(spec.ok_schema).expect("the schema is JSON");
     assert_eq!(
         shape["properties"]["outcome"]["enum"],
         json!(["Applied", "Unchanged", "TooSmall"]),
@@ -3712,19 +3613,15 @@ fn set_ratio_advertises_its_three_outcomes_by_name() {
     assert_eq!(shape["properties"]["ratio"]["type"], "number");
 }
 
-/// ★같은 결말을 두 표면이 같은 철자로 말한다★(`both_surfaces_spell_the_outcome_the_same_way` 와 같은 규칙).
-///
-/// `split.setRatio` 의 답은 선언 매크로의 `RatioOutcome`, Tauri `set_split_ratio` 의 답은 셸 내부
-/// `SplitRatioApplied.outcome`(ts-rs 로 화면에 간다)으로 직렬화된다. 둘 다 variant 이름을 serde 가 그대로
-/// 내지만, 셸 쪽에 serde rename 을 달면(이 crate 의 다른 레이아웃 enum 은 snake_case 다) 두 표면이 갈린다.
-/// 핸들러의 exhaustive `match` 는 **빠진 갈래**만 잡지 철자는 못 잡는다.
+/// Both surfaces spell the outcome the same (same rule as `both_surfaces_spell_the_outcome_the_same_way`): `split.setRatio` serializes the macro's `RatioOutcome`, Tauri `set_split_ratio` the shell-internal `SplitRatioApplied.outcome` (to the screen via ts-rs). A serde rename on the shell side would diverge them, and the handler's exhaustive `match` catches only a missing branch, not the spelling.
 #[test]
 fn both_surfaces_spell_the_split_ratio_outcome_the_same_way() {
-    let spec = spec_of("split.setRatio").expect("선언돼 있다");
-    let shape: serde_json::Value = serde_json::from_str(spec.ok_schema).expect("스키마는 JSON");
+    let spec = spec_of("split.setRatio").expect("is declared");
+    let shape: serde_json::Value =
+        serde_json::from_str(spec.ok_schema).expect("the schema is JSON");
     let advertised = shape["properties"]["outcome"]["enum"]
         .as_array()
-        .expect("enum 목록")
+        .expect("enum list")
         .clone();
 
     let cases = [
@@ -3739,14 +3636,14 @@ fn both_surfaces_spell_the_split_ratio_outcome_the_same_way() {
             outcome,
             version: 1,
         };
-        let json = serde_json::to_value(payload).expect("직렬화");
+        let json = serde_json::to_value(payload).expect("serialization");
         assert_eq!(
             json["outcome"], expected,
-            "Tauri 답 쪽 철자가 갈렸다: {json}"
+            "the spelling on the Tauri answer side diverged: {json}"
         );
         assert!(
             advertised.contains(&json["outcome"]),
-            "명령 답이 광고하는 값에 {expected} 가 없다: {advertised:?}"
+            "the values the command answer advertises lack {expected}: {advertised:?}"
         );
     }
 }
@@ -3766,7 +3663,7 @@ async fn set_ratio_writes_through_the_apply_service_and_clamps_out_of_range_valu
         )
         .await
         .outcome
-        .expect("적용");
+        .expect("apply");
     assert_eq!(ok, json!({ "ratio": 0.3, "outcome": "Applied" }));
     let layout = apply::get_view(&world.state, view).expect("view");
     let left = layout
@@ -3774,7 +3671,10 @@ async fn set_ratio_writes_through_the_apply_service_and_clamps_out_of_range_valu
         .iter()
         .find(|r| r.slot_id == x)
         .expect("x");
-    assert_eq!(left.x1, 0.3, "0.3 이 그대로 a(왼쪽) 칸의 몫이 된다");
+    assert_eq!(
+        left.x1, 0.3,
+        "0.3 becomes the share of the a (left) area as is"
+    );
 
     for (asked, clamped) in [(1.5, tree::RATIO_MAX), (-1.0, tree::RATIO_MIN)] {
         let ok = world
@@ -3786,7 +3686,7 @@ async fn set_ratio_writes_through_the_apply_service_and_clamps_out_of_range_valu
             )
             .await
             .outcome
-            .expect("범위 밖은 오류가 아니다");
+            .expect("out of range is not an error");
         assert_eq!(
             ok,
             json!({ "ratio": clamped, "outcome": "Applied" }),
@@ -3803,7 +3703,7 @@ async fn set_ratio_writes_through_the_apply_service_and_clamps_out_of_range_valu
         )
         .await
         .outcome
-        .expect("이미 하한");
+        .expect("already at the lower bound");
     assert_eq!(
         ok,
         json!({ "ratio": tree::RATIO_MIN, "outcome": "Unchanged" })
@@ -3826,7 +3726,7 @@ async fn set_ratio_refuses_malformed_ids_and_non_numbers_before_applying() {
             json!({ "view_id": view.to_string(), "split_id": "nope", "ratio": 0.3 }),
             Some("split_id"),
         ),
-        // JSON 은 NaN·±∞ 를 못 싣는다 — `json!` 이 비유한 수를 null 로 적는다.
+        // JSON cannot carry NaN · ±∞ — `json!` writes a non-finite number as null.
         (
             json!({ "view_id": view.to_string(), "split_id": split.to_string(), "ratio": f64::NAN }),
             None,
@@ -3856,7 +3756,6 @@ async fn set_ratio_refuses_malformed_ids_and_non_numbers_before_applying() {
         }
     }
 
-    // 반려 문구가 id 를 얻는 곳으로 안내한다 — 분할 id 를 주는 명령은 split.list 하나뿐이다.
     let err = error_of(
         world
             .ask(
@@ -3869,7 +3768,11 @@ async fn set_ratio_refuses_malformed_ids_and_non_numbers_before_applying() {
     );
     assert!(err.message().contains("split.list"), "{}", err.message());
     assert!(!err.message().contains("tab.list"), "{}", err.message());
-    assert_eq!(world.main_tabs().version, version, "반려는 무변경");
+    assert_eq!(
+        world.main_tabs().version,
+        version,
+        "a rejection changes nothing"
+    );
 }
 
 #[tokio::test]
@@ -3888,17 +3791,20 @@ async fn set_ratio_on_a_missing_split_keeps_the_services_reason() {
                 .await,
         );
         assert_eq!(err.code(), ErrorCode::Conflict);
-        assert!(err.message().contains("split 없음"), "{}", err.message());
+        assert!(
+            err.message().contains("split not found"),
+            "{}",
+            err.message()
+        );
     }
 }
 
-/// 사람의 드래그와 같은 px 최소가 LLM 값에도 걸린다 — 두 표면이 같은 적용 서비스에 떨어진다.
 #[tokio::test]
 async fn set_ratio_is_clamped_by_the_px_minimum_once_the_window_reported_its_size() {
     let (world, queue, receiver) = queued();
     let (view, _x, _y, _z) = world.three_slots();
     let inner = world.split_ids(view)[1];
-    // 안쪽(위아래) 분할의 상자 = 오른쪽 절반 × 캔버스 높이 400px → m = 100 이면 허용 [0.25, 0.75].
+    // The box of the inner (top-bottom) split = the right half × canvas height 400px → with m = 100 the allowed range is [0.25, 0.75].
     apply::report_window_canvas(&world.state, MAIN_WINDOW_LABEL, 1000, 400).unwrap();
     apply::report_ui_metrics(&world.state, MAIN_WINDOW_LABEL, metrics_with_min(100)).unwrap();
 
@@ -3911,10 +3817,10 @@ async fn set_ratio_is_clamped_by_the_px_minimum_once_the_window_reported_its_siz
         )
         .await
         .outcome
-        .expect("클램프해 적용");
+        .expect("applied with clamping");
     assert_eq!(ok, json!({ "ratio": 0.25, "outcome": "Applied" }));
 
-    // 창이 두 쪽 최소를 못 줄 만큼 작으면 손대지 않고 TooSmall 을 싣는다(지금 값 그대로).
+    // If the window is too small to give both sides the minimum, nothing is touched and TooSmall is carried (the current value as is).
     apply::report_window_canvas(&world.state, MAIN_WINDOW_LABEL, 1000, 150).unwrap();
     let ok = world
         .ask(
@@ -3925,7 +3831,7 @@ async fn set_ratio_is_clamped_by_the_px_minimum_once_the_window_reported_its_siz
         )
         .await
         .outcome
-        .expect("TooSmall 은 오류가 아니다");
+        .expect("TooSmall is not an error");
     assert_eq!(ok, json!({ "ratio": 0.25, "outcome": "TooSmall" }));
 }
 
@@ -3945,7 +3851,7 @@ async fn split_list_names_the_slots_on_each_side_in_preorder() {
         )
         .await
         .outcome
-        .expect("목록");
+        .expect("list");
     assert_eq!(
         ok,
         json!({ "splits": [
@@ -3966,7 +3872,7 @@ async fn split_list_names_the_slots_on_each_side_in_preorder() {
         ]})
     );
 
-    // 칸 하나뿐인 탭은 빈 목록 · 형식이 깨진 id 는 반려 · 없는 탭은 적용 서비스의 사유.
+    // A tab with a single area gives an empty list · a malformed id is rejected · a nonexistent tab gets the apply service's reason.
     let fresh = apply::create_tab(&world.state, &Subs, &Events, MAIN_WINDOW_LABEL, None).unwrap();
     let ok = world
         .ask(
@@ -3977,7 +3883,7 @@ async fn split_list_names_the_slots_on_each_side_in_preorder() {
         )
         .await
         .outcome
-        .expect("목록");
+        .expect("list");
     assert_eq!(ok, json!({ "splits": [] }));
     let err = error_of(
         world
@@ -4001,10 +3907,14 @@ async fn split_list_names_the_slots_on_each_side_in_preorder() {
             .await,
     );
     assert_eq!(err.code(), ErrorCode::Conflict);
-    assert!(err.message().contains("view 없음"), "{}", err.message());
+    assert!(
+        err.message().contains("view not found"),
+        "{}",
+        err.message()
+    );
 }
 
-/// 표현할 수 없을 만큼 깊은 분할은 `CONFLICT` + 사유로 나간다(패닉·무응답 없이).
+/// A split too deep to be representable goes out as `CONFLICT` + reason (without a panic or no response).
 #[tokio::test]
 async fn a_split_too_deep_to_represent_is_a_conflict() {
     let (world, queue, receiver) = queued();
@@ -4034,17 +3944,16 @@ async fn a_split_too_deep_to_represent_is_a_conflict() {
     );
     assert_eq!(err.code(), ErrorCode::Conflict);
     assert!(
-        err.message().contains("더 나눌 수 없음"),
+        err.message().contains("too small to split further"),
         "{}",
         err.message()
     );
-    assert_eq!(world.slots(view), slots_before, "트리 불변");
+    assert_eq!(world.slots(view), slots_before, "tree unchanged");
 }
 
-// ── (B) 연결 태스크를 안 막는다 ──────────────────────────────────────────────
+// ── (B) Does not block the connection task ──────────────────────────────────────────────
 
-/// ★`on_command` 은 큐 push 하나만 하고 돌아온다★ — 반환 시점에 적용이 일어났으면 그만큼 연결 읽기 루프가
-/// 멈춰 있던 것이다.
+/// `on_command` only queues and returns — if the application happened by then, the connection read loop was stalled that long.
 #[tokio::test]
 async fn on_command_returns_before_the_handler_runs() {
     let (world, queue, receiver) = queued();
@@ -4060,25 +3969,20 @@ async fn on_command_returns_before_the_handler_runs() {
         world.mail.sink(request_id),
     );
 
-    assert_eq!(queue.pending(), 1, "적용은 태스크로 나갔다");
+    assert_eq!(queue.pending(), 1, "the application went out as a task");
     assert_eq!(
         world.main_tabs().version,
         before,
-        "on_command 안에서는 아무것도 적용되지 않는다"
+        "nothing is applied inside on_command"
     );
-    assert_eq!(world.mail.len(), 0, "답장도 아직 없다");
+    assert_eq!(world.mail.len(), 0, "no reply yet either");
 
     run(&queue).await;
     assert!(world.main_tabs().version > before);
     assert!(world.mail.only().outcome.is_ok());
 }
 
-/// ★self-deadlock 회귀★(ADR-0081 「relay 적용은 액터 밖(비블로킹)」 · ADR-0155 결정 4).
-///
-/// 합성 명령의 스폰은 **호출자 태스크가 서비스해야** 끝난다 — 여기서는 그 호출자가 스폰 요청 채널을
-/// 읽어 답을 넣는다(실제로는 데몬 답장을 읽는 연결 루프). `on_command` 이 인라인으로 기다렸다면 호출자는
-/// 그 `recv().await` 에 닿지 못하고 양쪽이 서로를 기다린다 — 아래 timeout 이 그것을 실패로 바꾼다
-/// (안 그러면 회귀가 hang 으로 나타나 원인이 안 보인다).
+/// Self-deadlock regression (ADR-0081 · ADR-0155 decision 4). A synthetic command's spawn finishes only when the caller task services it — here the caller reads the spawn request channel and answers (in reality the connection loop reading the daemon reply). If `on_command` waited inline, both would wait for each other; the timeout below turns that into a failure instead of a hang.
 #[tokio::test]
 async fn a_composite_command_does_not_wait_on_its_caller() {
     let (mut world, ports) = World::build();
@@ -4103,22 +4007,19 @@ async fn a_composite_command_does_not_wait_on_its_caller() {
         world.spawn_requests.recv(),
     )
     .await
-    .expect("호출자 태스크가 스폰 요청을 서비스하지 못했다 — 적용이 인라인으로 돈다(self-deadlock)")
-    .expect("스폰 요청이 온다");
+    .expect("the caller task could not service the spawn request — the application runs inline (self-deadlock)")
+    .expect("the spawn request comes");
     assert_eq!(cwd, "C:/work/engram");
     answer
         .send(Ok("agent-1".to_string()))
-        .expect("스폰 답을 넣는다");
+        .expect("puts in the spawn answer");
 
-    // 답장은 적용이 끝난 뒤 다른 태스크에서 온다 — 도착할 때까지 이 태스크가 양보한다.
     world.mail.settle(1).await;
-    let ok = world.mail.only().outcome.expect("배치 성공");
+    let ok = world.mail.only().outcome.expect("placement succeeds");
     assert_eq!(ok["agent_id"], "agent-1");
 }
 
-/// ★데몬이 코드를 실어 답한 스폰 실패는 그 코드로 나간다 — `CONFLICT` 를 겹쳐 씌우지 않는다★(ADR-0291 R17).
-/// 저장 쓰기 실패(`INTERNAL:`)가 `CONFLICT` 로 덮이면 「아무것도 적용 안 된 반려」로 읽히고, 문구에 코드가 둘 남는다.
-/// 코드 접두가 없는 문구는 그대로 `CONFLICT` 다.
+/// A spawn failure the daemon answered with a code goes out with that code, not layered under `CONFLICT` (ADR-0291 R17) — a storage write failure (`INTERNAL:`) wrapped in `CONFLICT` would read as "nothing was applied". Text without a code prefix is `CONFLICT`.
 #[tokio::test]
 async fn spawn_into_keeps_the_code_the_daemon_answered_with() {
     for (answered, code, message) in [
@@ -4133,9 +4034,9 @@ async fn spawn_into_keeps_the_code_the_daemon_answered_with() {
             "the agent was not created or started: writing agents.json failed: disk full",
         ),
         (
-            "backend 칸이 비었다",
+            "the backend field is empty",
             ErrorCode::Conflict,
-            "backend 칸이 비었다",
+            "the backend field is empty",
         ),
     ] {
         let (mut world, ports) = World::build();
@@ -4156,25 +4057,24 @@ async fn spawn_into_keeps_the_code_the_daemon_answered_with() {
         let (_cwd, _backend, answer) =
             tokio::time::timeout(Duration::from_secs(5), world.spawn_requests.recv())
                 .await
-                .expect("스폰 요청이 온다")
-                .expect("스폰 요청이 온다");
+                .expect("the spawn request comes")
+                .expect("the spawn request comes");
         answer
             .send(Err(answered.to_string()))
-            .expect("스폰 답을 넣는다");
+            .expect("puts in the spawn answer");
 
         world.mail.settle(1).await;
         let err = world
             .mail
             .only()
             .outcome
-            .expect_err("스폰이 실패했다");
+            .expect_err("the spawn failed");
         assert_eq!(err.code(), code, "{answered}");
         assert_eq!(err.message(), message, "{answered}");
     }
 }
 
-/// ★이 문은 `agent.new` 의 등록 공통부를 안 지난다★ — 그래서 같은 철자 규칙을 여기서 따로 잰다.
-/// 백엔드 낱말은 wire enum 의 역직렬화가(`AgentBackendKind`), cwd 는 base `normalize_spelling` 이 흡수한다.
+/// This door skips the common registration part of `agent.new`, so the same spelling rules are measured here: backend words by the wire enum (`AgentBackendKind`), cwd by `normalize_spelling`.
 #[tokio::test]
 async fn spawn_into_absorbs_the_spelling_a_person_would_type() {
     for (word, want) in [
@@ -4214,20 +4114,22 @@ async fn spawn_into_absorbs_the_spelling_a_person_would_type() {
         let (cwd, backend, answer) =
             tokio::time::timeout(Duration::from_secs(5), world.spawn_requests.recv())
                 .await
-                .unwrap_or_else(|_| panic!("{word}: 스폰까지 못 갔다"))
-                .expect("스폰 요청이 온다");
-        assert_eq!(cwd, "C:/work/engram", "{word}: cwd 철자가 안 옮겨졌다");
-        assert_eq!(backend, Some(want), "{word}: 다른 백엔드로 읽혔다");
+                .unwrap_or_else(|_| panic!("{word}: did not get as far as the spawn"))
+                .expect("the spawn request comes");
+        assert_eq!(
+            cwd, "C:/work/engram",
+            "{word}: the cwd spelling was not carried over"
+        );
+        assert_eq!(backend, Some(want), "{word}: read as a different backend");
         answer
             .send(Ok("agent-1".to_string()))
-            .expect("스폰 답을 넣는다");
+            .expect("puts in the spawn answer");
 
         world.mail.settle(1).await;
-        world.mail.only().outcome.expect("배치 성공");
+        world.mail.only().outcome.expect("placement succeeds");
     }
 }
 
-/// 관용은 **철자**에만 든다 — 오탈자는 스폰 전에 반려된다(그 그물의 근거 = `apply::parse_backend`).
 #[tokio::test]
 async fn spawn_into_still_refuses_a_backend_word_it_does_not_know() {
     let (mut world, ports) = World::build();
@@ -4251,14 +4153,13 @@ async fn spawn_into_still_refuses_a_backend_word_it_does_not_know() {
     error_of(world.mail.only());
     assert!(
         world.spawn_requests.try_recv().is_err(),
-        "반려된 낱말로 스폰이 나갔다"
+        "a spawn went out with a rejected word"
     );
 }
 
-// ── (B) 터져서 죽지 않는다 ───────────────────────────────────────────────────
+// ── (B) Does not die by blowing up ───────────────────────────────────────────────────
 
-/// ★명령 핸들러는 터져서 죽지 않는다 — 오류를 값으로 돌려준다★(TRD §4-⑨). 이 그물은 훅 없는
-/// 시험 빌드에서만 실효가 있고(운영 셸은 아무것도 가두지 않아 패닉 훅이 끝낸다 · ADR-0292), 그래서 규약이 그물보다 앞이다.
+/// A command handler returns an error as a value instead of dying by panic (TRD §4-⑨). The net works only in a test build without the hook (production confines nothing; the panic hook ends it — ADR-0292).
 #[tokio::test]
 async fn a_panicking_handler_answers_instead_of_taking_the_process_down() {
     let mut table = CommandTable::new(COMMAND_SPECS);
@@ -4271,7 +4172,7 @@ async fn a_panicking_handler_answers_instead_of_taking_the_process_down() {
                 },
             ),
         )
-        .expect("선언된 이름");
+        .expect("a declared name");
     let queue = Arc::new(Queued::default());
     let receiver = InboundReceiver::new(
         table,
@@ -4285,9 +4186,8 @@ async fn a_panicking_handler_answers_instead_of_taking_the_process_down() {
     assert_eq!(error_of(reply).code(), ErrorCode::Internal);
 }
 
-// ── (B) 연결 루프가 실제로 부를 진입점 ──────────────────────────────────────
+// ── (B) The entry point the connection loop actually calls ──────────────────────────────────────
 
-/// `accept` 은 **봉투에서** 상관 키를 꺼내 답장 자리를 만든다 — 부르는 쪽이 남의 키를 실을 방법이 없다.
 #[tokio::test]
 async fn accept_correlates_the_reply_to_the_envelope_it_was_given() {
     let (world, queue, receiver) = queued();
@@ -4305,11 +4205,10 @@ async fn accept_correlates_the_reply_to_the_envelope_it_was_given() {
 
     let reply = world.mail.only();
     assert_eq!(reply.request_id, request_id);
-    let ok = reply.outcome.expect("조회 성공");
+    let ok = reply.outcome.expect("query succeeds");
     assert_eq!(ok["window"], MAIN_WINDOW_LABEL);
 }
 
-/// 아직 안 끝난 명령 — 답을 낼 준비가 될 때까지 매달려 있는 핸들러.
 struct Gated {
     gate: Arc<Semaphore>,
 }
@@ -4327,9 +4226,7 @@ impl CommandHandler for Gated {
     }
 }
 
-/// ★읽기 루프는 느린 핸들러 뒤에 줄 서지 않는다★ — 앞 명령이 아직 매달려 있는 동안에도 다음 프레임을
-/// 계속 받아 넘긴다. 인라인 실행이면 첫 `accept` 에서 멈춰 둘째 프레임이 들어오지 못한다(연결 하나가
-/// 통째로 head-of-line 블록 — 출력·상태 이벤트까지 함께 선다).
+/// The read loop does not queue behind a slow handler: while the earlier command hangs, it keeps receiving and passing on the next frames (inline would stop at the first `accept`, head-of-line blocking output · status events).
 #[tokio::test]
 async fn a_slow_handler_does_not_stall_the_read_loop() {
     let gate = Arc::new(Semaphore::new(0));
@@ -4341,7 +4238,7 @@ async fn a_slow_handler_does_not_stall_the_read_loop() {
                 gate: Arc::clone(&gate),
             }),
         )
-        .expect("선언된 이름");
+        .expect("a declared name");
     let receiver = InboundReceiver::new(
         table,
         Arc::new(RuntimeSpawner(tokio::runtime::Handle::current())) as Arc<dyn TaskSpawner>,
@@ -4359,7 +4256,7 @@ async fn a_slow_handler_does_not_stall_the_read_loop() {
     assert_eq!(
         mail.len(),
         0,
-        "다섯 프레임을 다 받는 동안 아무것도 끝나지 않았다 — 루프가 적용을 기다리지 않았다는 뜻"
+        "nothing finished while all five frames were received — meaning the loop did not wait for the application"
     );
 
     gate.add_permits(5);
@@ -4369,31 +4266,25 @@ async fn a_slow_handler_does_not_stall_the_read_loop() {
         sent.iter()
             .map(|id| id.to_string())
             .collect::<BTreeSet<_>>(),
-        "다섯 왕복의 상관 키가 섞이지 않는다"
+        "the correlation keys of the five round trips are not mixed"
     );
 }
 
-// ── (B) 연결 구동이 걷는 바이트 경로 ────────────────────────────────────────
+// ── (B) The byte path the connection drive walks ────────────────────────────────────────
 //
-// ★The driver's daemon-command arm, rebuilt from its real parts★: the daemon's frame decodes as `AgentEvent`, the
-// envelope is unwrapped by the same edge function, the receiver gets the outcome writer the driver hands it
-// (`link::route::send_command_outcome` on the connection the request came on), and the outcome is read back as the
-// frame the shell wrote on a memory link. Delete any of those functions and these tests do not compile.
+// The driver's daemon-command arm rebuilt from its real parts: the daemon frame decodes as `AgentEvent`, the envelope is unwrapped by the same edge function, the receiver gets the outcome writer the driver hands it (`link::route::send_command_outcome`), and the outcome is read back as the frame written on a memory link. Delete any of those functions and these tests do not compile.
 //
-// ## ★What stays uncovered (residue — this spot is canonical)★
-// - The driver choosing this arm, its skip rules and its no-table answer (`connection.rs` `on_driver_event` ·
-//   `accept_inbound`) — the lib suite drives those on a memory network (`daemon_client::connection::tests`).
+// Uncovered (canonical here):
+// - The driver choosing this arm, its skip rules and no-table answer (`connection.rs` `on_driver_event` · `accept_inbound`) — driven on a memory network in `daemon_client::connection::tests`.
 // - The registration's send (`register_commands`) — what it carries is covered by the `registration_command` tests.
 
 struct WireTrip {
     world: World,
-    /// The `reply` node of the outcome frame (`AgentCommand::CommandOutcome`).
     reply: serde_json::Value,
     request_id: RequestId,
 }
 
-/// A live connection on the shell wire over a memory network — `endpoint` is the daemon's side. The other fields keep
-/// the link alive (a dropped inbox ends the peer).
+/// A live connection on the shell wire over a memory network — `endpoint` is the daemon's side; the other fields keep the link alive (a dropped inbox ends the peer).
 struct LiveLink {
     peer: Peer<ShellWire>,
     endpoint: Arc<MemoryEndpoint>,
@@ -4442,22 +4333,22 @@ async fn wire_round_trip(name: &str, args: serde_json::Value) -> WireTrip {
     let request_id = RequestId::new();
     let sent = serde_json::to_string(&AgentEvent::CommandRequest {
         envelope: serde_json::value::to_raw_value(&envelope(name, args, request_id))
-            .expect("봉투 직렬화"),
+            .expect("envelope serialization"),
     })
-    .expect("데몬이 보낼 Text 프레임");
+    .expect("a Text frame the daemon would send");
 
-    // The connection's decode — ★this frame is not a reply the shell waits for★ (a pending slot would swallow it).
-    let ev: AgentEvent = serde_json::from_str(&sent).expect("AgentEvent 로 디코드된다");
+    // This frame is not a reply the shell waits for (a pending slot would swallow it).
+    let ev: AgentEvent = serde_json::from_str(&sent).expect("decodes as AgentEvent");
     assert_eq!(
         event_reply_request_id(&ev),
         None,
-        "인바운드 요청이 reply 로 읽히면 그 명령은 실행되지 않고 사라진다"
+        "if the inbound request is read as a reply, that command is not executed and vanishes"
     );
     let AgentEvent::CommandRequest { envelope } = ev else {
-        panic!("CommandRequest arm 으로 갈라져야 한다");
+        panic!("must branch to the CommandRequest arm");
     };
-    // The envelope unwrap the driver does before handing it over (ADR-0272 decision 4) — the same edge function.
-    let envelope = envelope_from_wire(&envelope).expect("데몬이 지은 봉투는 풀린다");
+    // ADR-0272 decision 4: the driver unwraps the envelope with this same edge function.
+    let envelope = envelope_from_wire(&envelope).expect("an envelope the daemon built unpacks");
 
     let peer = link.peer.clone();
     let generation = peer.generation();
@@ -4466,7 +4357,6 @@ async fn wire_round_trip(name: &str, args: serde_json::Value) -> WireTrip {
     });
     run(&queue).await;
 
-    // The outcome frame the shell wrote on that connection.
     let mut frames = Vec::new();
     settle_until("the outcome is written", || {
         frames.extend(link.endpoint.frames());
@@ -4475,15 +4365,16 @@ async fn wire_round_trip(name: &str, args: serde_json::Value) -> WireTrip {
     .await;
     assert_eq!(frames.len(), 1, "{frames:?}");
     let Frame::Text(text) = frames.remove(0) else {
-        panic!("결말은 Text 프레임이다");
+        panic!("the outcome is a Text frame");
     };
-    let outcome: AgentCommand = serde_json::from_str(&text).expect("결말 프레임은 AgentCommand");
+    let outcome: AgentCommand =
+        serde_json::from_str(&text).expect("the outcome frame is an AgentCommand");
     assert_eq!(
         command_request_id(&outcome),
         None,
-        "답장을 보내며 pending 슬롯을 만들면 깨울 짝이 없다"
+        "if sending a reply creates a pending slot, there is no counterpart to wake"
     );
-    let back: serde_json::Value = serde_json::from_str(&text).expect("결말은 JSON");
+    let back: serde_json::Value = serde_json::from_str(&text).expect("the outcome is JSON");
     WireTrip {
         world,
         reply: back["CommandOutcome"]["reply"].clone(),
@@ -4502,9 +4393,13 @@ async fn a_daemon_frame_reaches_the_service_and_the_answer_goes_back_correlated(
     assert_eq!(reply["request_id"], request_id.to_string());
     let view_id = reply["outcome"]["Ok"]["view_id"]
         .as_str()
-        .expect("성공 결말에 새 탭 id 가 실린다");
+        .expect("the success outcome carries the new tab id");
     let tabs = world.main_tabs();
-    assert_eq!(tabs.tabs.len(), 2, "적용 서비스가 실제로 탭을 만들었다");
+    assert_eq!(
+        tabs.tabs.len(),
+        2,
+        "the apply service actually made the tab"
+    );
     assert_eq!(view_id, tabs.active.to_string());
 }
 
@@ -4517,16 +4412,14 @@ async fn an_unknown_name_from_the_daemon_comes_back_as_a_typed_error() {
     assert_eq!(reply["request_id"], request_id.to_string());
     assert_eq!(
         reply["outcome"]["Err"]["code"], "UNKNOWN_COMMAND",
-        "코드가 wire 를 건너야 호출자가 문구 대신 코드로 분기한다"
+        "the code must cross the wire so the caller branches on the code, not the text"
     );
     assert_eq!(reply["outcome"]["Err"]["retry"], "never");
 }
 
-// ── (B) 등록 패킷 · 늦게 채워지는 슬롯 ──────────────────────────────────────
+// ── (B) Registration packet · late-filled slot ──────────────────────────────────────
 
-/// ★Measures the packet that actually goes out★ — the connection driver (`register_commands`) sends exactly what
-/// `registration_command` returns (delete that function and this test does not compile). A packet rebuilt by hand would
-/// stay green when the two drift.
+/// Measures the packet that actually goes out: the driver (`register_commands`) sends exactly what `registration_command` returns (delete it and this does not compile); a hand-rebuilt packet would stay green when the two drift.
 #[test]
 fn the_registration_packet_is_the_one_the_connection_sends() {
     let (_world, ports) = World::build();
@@ -4545,30 +4438,24 @@ fn the_registration_packet_is_the_one_the_connection_sends() {
         ..
     }) = registration_command(&receiver)
     else {
-        panic!("얹을 이름이 있으면 등록 패킷이 나온다");
+        panic!("with names to put on, a registration packet comes out");
     };
-    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
+    let decls = decls_from_wire(&decls).expect("the registration field the shell wrapped unpacks");
     assert_eq!(
         decls.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
         plugged
     );
     for decl in &decls {
-        // `help` 는 데몬이 열어보지 않는 불투명 문자열이지만 **비어 있으면** 발견이 죽는다.
-        assert!(
-            !decl.help.trim().is_empty(),
-            "{}: help 가 비었다",
-            decl.name
-        );
+        assert!(!decl.help.trim().is_empty(), "{}: help is empty", decl.name);
     }
     assert_eq!(catalog_version, CATALOG_VERSION);
-    // 데몬 주인 토큰의 접두를 흉내내면 데몬이 「남의 토큰을 적은 등록」으로 보고 경고를 남긴다.
     assert!(!owner.as_str().is_empty());
     assert!(
         !owner.as_str().starts_with("conn-"),
-        "광고 토큰이 데몬 파생 토큰 형식을 흉내내면 안 된다: {owner}"
+        "the advertised token must not imitate the daemon-derived token form: {owner}"
     );
 
-    // ★얹을 것이 없으면 패킷도 없다★ — 빈 등록은 데몬 명부에 아무 뜻 없는 왕복을 하나 늘린다.
+    // With nothing to put on there is no packet — an empty registration costs the daemon roster a meaningless round trip.
     let empty = InboundReceiver::new(
         CommandTable::new(COMMAND_SPECS),
         Arc::new(Queued::default()) as Arc<dyn TaskSpawner>,
@@ -4577,14 +4464,12 @@ fn the_registration_packet_is_the_one_the_connection_sends() {
     assert!(registration_command(&empty).is_none());
 }
 
-/// ★광고는 **선언이 아니라 꽂힌 것**이다 — 그 차이를 실제로 가른다★. 같은 선언 집합으로 만든 표에 하나만
-/// 꽂으면 광고도 하나여야 하고, 선언에 없는 이름은 표가 애초에 거절한다(그래서 광고 ⊆ 선언이 성립한다).
-/// 이 구분이 없으면 못 부를 이름이 명부에 올라 데몬이 배달한 봉투가 `UNKNOWN_COMMAND` 로 되돌아간다.
+/// The advertisement is what is plugged in, not the declaration — for a table made from the same declaration set with only one plugged in, the advertisement must be one; a name not in the declaration is refused by the table (advertisement ⊆ declaration). Otherwise an uncallable name lands on the roster and the daemon's envelope returns `UNKNOWN_COMMAND`.
 #[test]
 fn advertising_follows_what_is_plugged_not_what_is_declared() {
     assert!(
         COMMAND_SPECS.len() > 1,
-        "선언이 하나뿐이면 이 구분을 잴 수 없다"
+        "with only one declaration this distinction cannot be measured"
     );
     let mut table = CommandTable::new(COMMAND_SPECS);
     table
@@ -4596,7 +4481,7 @@ fn advertising_follows_what_is_plugged_not_what_is_declared() {
                 },
             ),
         )
-        .expect("선언된 이름");
+        .expect("a declared name");
     let receiver = InboundReceiver::new(
         table,
         Arc::new(Queued::default()) as Arc<dyn TaskSpawner>,
@@ -4609,7 +4494,7 @@ fn advertising_follows_what_is_plugged_not_what_is_declared() {
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
         vec!["window.list"],
-        "꽂힌 하나만 광고한다(선언은 {}개)",
+        "only the one plugged in is advertised ({} declarations)",
         COMMAND_SPECS.len()
     );
 
@@ -4621,16 +4506,15 @@ fn advertising_follows_what_is_plugged_not_what_is_declared() {
                 |_: WindowListArgs| -> Result<serde_json::Value, CommandError> { Ok(json!({})) },
             ),
         )
-        .expect_err("선언 집합 밖 이름은 꽂히지 않는다");
+        .expect_err("a name outside the declaration set is not plugged in");
     assert_eq!(refused, TableError::NotDeclared("tab.teleport"));
 }
 
-/// 슬롯은 비어 있는 상태가 보여야 한다(그 창에 온 봉투는 호출부가 오류 답장으로 답한다) — 그리고 첫 설치만
-/// 이긴다(표를 갈아 끼우면 어느 표가 도는지 알 수 없어진다).
+/// The slot must show the empty state (an envelope to that window gets an error reply from the call site), and only the first install wins (else it is unknowable which table runs).
 #[test]
 fn an_empty_slot_is_visible_and_the_first_install_wins() {
     let slot = InboundSlot::new();
-    assert!(slot.get().is_none(), "안 꽂힌 상태가 보인다");
+    assert!(slot.get().is_none(), "the unplugged state is visible");
 
     let first = {
         let (_world, ports) = World::build();
@@ -4651,25 +4535,18 @@ fn an_empty_slot_is_visible_and_the_first_install_wins() {
     slot.set(Arc::clone(&first));
     slot.set(Arc::clone(&second));
 
-    assert!(Arc::ptr_eq(slot.get().expect("꽂혀 있다"), &first));
+    assert!(Arc::ptr_eq(slot.get().expect("is plugged in"), &first));
 }
 
-// ── (V) 웹뷰 몫 — 대리 등록과 마지막 홉 ─────────────────────────────────────
+// ── (V) Webview part — proxy registration and the last hop ─────────────────────────────────────
 //
-// ★창 0으로 잰다★: 배달 실물(`AppHandle::emit_to`)만 가짜로 끊고(`RecordingDispatch`) 나머지는 실코드다 —
-// 예약 이름 필터 · 등록 패킷 합류 · 3단계 배달의 2단계 · 답장 상관 · 마감. 그 함수들을 지우면 이 절이
-// 컴파일되지 않는다.
+// Measured with zero windows: only the real delivery (`AppHandle::emit_to`) is a fake (`RecordingDispatch`); the reserved-name filter, registration merge, stage 2 of the 3-stage delivery, reply correlation and deadline are real code. Delete those functions and this section does not compile.
 //
-// ## ★그래도 안 덮이는 것★
-// - **`TauriViewDispatch::emit_to` 자체**(실 창이 필요하다) 와 웹뷰 쪽 리스너(`src/commands/
-//   viewCommandBridge.ts` — vitest 가 투영만 잰다).
-// - **`report_view_commands`·`report_command_outcome` invoke 껍데기** — Tauri 의 `State`/`WebviewWindow`
-//   주입이 필요하다. 그 안의 판정은 전부 아래가 태우는 `ViewCommandBridge` 메서드에 있다.
+// Uncovered:
+// - `TauriViewDispatch::emit_to` itself (needs a real window) and the webview-side listener (`src/commands/viewCommandBridge.ts` — vitest measures only the projection).
+// - The `report_view_commands` · `report_command_outcome` invoke wrappers (need Tauri `State`/`WebviewWindow`); their decisions are all in the `ViewCommandBridge` methods the section below rides.
 
-/// 봉투를 받아 기록만 하는 배달 — 실물은 `emit_to` 라 창 없이 못 세운다.
-///
-/// 창 생사도 여기서 흉내낸다: `dead` 에 든 label 은 닫힌 창이다. ★`deliver` 는 그래도 성공한다★ —
-/// 운영의 `emit_to` 가 없는 label 에도 `Ok` 를 주기 때문이고, 그 성질이 바로 생사 조회를 따로 둔 이유다.
+/// A delivery that only records the envelope (the real `emit_to` needs a window). A label in `dead` is a closed window, yet `deliver` still succeeds — production's `emit_to` gives `Ok` for a nonexistent label, which is why a separate liveness lookup exists.
 struct RecordingDispatch {
     seen: mpsc::UnboundedSender<(String, ViewCommandRequest)>,
     dead: Mutex<BTreeSet<String>>,
@@ -4679,7 +4556,7 @@ impl ViewDispatch for RecordingDispatch {
     fn deliver(&self, target: &str, request: &ViewCommandRequest) -> Result<(), String> {
         self.seen
             .send((target.to_string(), request.clone()))
-            .map_err(|_| "테스트 기록 채널이 닫혔다".to_string())
+            .map_err(|_| "the test record channel is closed".to_string())
     }
 
     fn is_alive(&self, label: &str) -> bool {
@@ -4697,7 +4574,6 @@ fn recording_bridge(
     (bridge, rx)
 }
 
-/// 창을 닫아 볼 수 있는 판 — 가짜 배달을 함께 돌려준다.
 fn recording_bridge_with_windows(
     deadline: Duration,
 ) -> (
@@ -4713,8 +4589,7 @@ fn recording_bridge_with_windows(
     let bridge = Arc::new(ViewCommandBridge::with_reserved(
         Arc::clone(&dispatch) as Arc<dyn ViewDispatch>,
         deadline,
-        // ★실 예약 집합을 쓴다★ — 손으로 이름을 적으면 이 테스트가 재는 것이 「내가 적은 목록」이 되고,
-        //   어휘가 늘어도 아무 신호가 안 난다.
+        // Use the real reserved set — a hand-written list would make this measure "the list I wrote" and never signal when the vocabulary grows.
         reserved_names(),
     ));
     (bridge, rx, dispatch)
@@ -4726,7 +4601,6 @@ impl RecordingDispatch {
     }
 }
 
-/// 웹뷰가 보고하는 항목 — 인자 없는 최소형.
 fn view_decl(name: &str) -> ViewCommandDecl {
     view_decl_with_effect(name, Some(ViewEffect::Write))
 }
@@ -4735,7 +4609,7 @@ fn view_decl_with_effect(name: &str, effect: Option<ViewEffect>) -> ViewCommandD
     ViewCommandDecl {
         name: name.to_string(),
         help: ViewCommandHelp {
-            summary: format!("{name} 이 하는 일"),
+            summary: format!("what {name} does"),
             effect,
             args: BTreeMap::new(),
             required: Vec::new(),
@@ -4743,8 +4617,7 @@ fn view_decl_with_effect(name: &str, effect: Option<ViewEffect>) -> ViewCommandD
     }
 }
 
-/// 웹뷰 몫을 진 수신기 — 적용은 **실 런타임**에서 돈다(답장이 다른 태스크로 들어와야 끝나는 왕복이라
-/// 태스크를 쥐고 있는 `Queued` 로는 잴 수 없다).
+/// A receiver bearing the webview part on a real runtime (the round trip ends only when the reply comes into another task, so `Queued` cannot measure it).
 fn with_view(bridge: Arc<ViewCommandBridge>) -> (World, Arc<InboundReceiver>) {
     let (world, ports) = World::build();
     let receiver = Arc::new(InboundReceiver::with_view(
@@ -4756,26 +4629,18 @@ fn with_view(bridge: Arc<ViewCommandBridge>) -> (World, Arc<InboundReceiver>) {
     (world, receiver)
 }
 
-/// ★셸 표 이름은 표에서 온 한 번만 실리고, 데몬이 답하는 이름은 셸이 거르지 않는다★(ADR-0270 결정 2).
-///
-/// 웹뷰가 셸 표 이름 전량 · 자기 몫(`tab.next`) · 데몬이 답하는 꼴의 이름(`agent.spawn`)을 통째로 보고한
-/// 가정 상황이다(오늘 웹뷰는 `help` 를 단 것만 보고한다 — 그래서 이 상황은 누가 그 이름에 `help` 를 단 날이다).
-/// - 셸 표 이름은 예약이라 웹뷰 몫에서 빠지고 패킷에는 표에서 온 **한 번**만 실린다 — 명부는 한 패킷 안 같은
-///   이름을 오류 없이 접으므로, 두 번 실리면 어느 주인이 이기는지가 말없이 갈린다.
-/// - 데몬이 답하는 이름은 실린다 — 그 벽은 데몬의 등록 반려다(셸은 agent crate 를 의존하지 않아 그 어휘를
-///   모른다). 반려 쪽 단언 = 데몬 `connection_core.rs` 의
-///   `registering_a_name_this_daemon_answers_is_refused_as_a_conflict`.
-///
-/// ★셸 표 쪽 기대값을 손으로 적지 않는다★ — 셸 선언 전량을 훑으므로 셸 어휘가 늘면 이 그물도 함께 자란다.
+/// A shell table name is carried once, from the table, and names the daemon answers are not filtered by the shell (ADR-0270 decision 2). Hypothetical: the webview reports every shell table name, its own part (`tab.next`) and a daemon-answered name (`agent.spawn`) (today it reports only names with `help`).
+/// - Shell table names are reserved and drop out of the webview part; the packet carries them once from the table (the roster folds the same name in one packet without error, so carrying twice would silently diverge which owner wins).
+/// - Daemon-answered names are carried — that wall is the daemon's registration refusal (the shell does not know that vocabulary): `registering_a_name_this_daemon_answers_is_refused_as_a_conflict` in the daemon's `connection_core.rs`.
+/// The expected shell-table side is computed from every shell declaration, so it grows with the vocabulary.
 #[tokio::test]
 async fn the_registration_packet_carries_shell_names_once_and_leaves_daemon_names_to_the_daemon() {
-    // 데몬이 답하는 꼴의 이름 — 셸은 그 어휘를 모르므로 문자열로만 댄다.
     const DAEMON_NAME: &str = "agent.spawn";
     let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
     let shell_names: BTreeSet<&str> = COMMAND_SPECS.iter().map(|spec| spec.name).collect();
     assert!(
         !shell_names.contains(DAEMON_NAME),
-        "이 시험의 전제 — 셸 표는 {DAEMON_NAME} 를 선언하지 않는다"
+        "premise of this test — the shell table does not declare {DAEMON_NAME}"
     );
 
     let reported: Vec<ViewCommandDecl> = shell_names
@@ -4787,54 +4652,48 @@ async fn the_registration_packet_carries_shell_names_once_and_leaves_daemon_name
     let refused: BTreeSet<&str> = outcome.refused.iter().map(String::as_str).collect();
     assert_eq!(
         refused, shell_names,
-        "웹뷰 몫에서 빠지는 것은 셸 표 이름 전부이고 그것뿐이다"
+        "what drops out of the webview part is all the shell table names and nothing else"
     );
 
     let (_world, receiver) = with_view(Arc::clone(&bridge));
     let Some(AgentCommand::RegisterCommands { decls, .. }) = registration_command(&receiver) else {
-        panic!("얹을 이름이 있으면 등록 패킷이 나온다");
+        panic!("with names to put on, a registration packet comes out");
     };
-    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
+    let decls = decls_from_wire(&decls).expect("the registration field the shell wrapped unpacks");
     for name in &shell_names {
         let carried: Vec<_> = decls.iter().filter(|d| d.name == *name).collect();
-        assert_eq!(carried.len(), 1, "{name}: 셸 표 이름은 한 번만 실린다");
+        assert_eq!(
+            carried.len(),
+            1,
+            "{name}: a shell table name is carried only once"
+        );
         assert!(
             !carried[0].help.contains(&view_decl(name).help.summary),
-            "{name}: 실린 것은 셸 표의 선언이어야 한다 — 웹뷰가 보고한 설명이 실렸다"
+            "{name}: what is carried must be the shell table's declaration — the description the webview reported was carried"
         );
     }
     let names: BTreeSet<&str> = decls.iter().map(|d| d.name.as_str()).collect();
-    assert!(names.contains("tab.next"), "웹뷰 몫은 실린다");
+    assert!(names.contains("tab.next"), "the webview part is carried");
     assert!(
         names.contains(DAEMON_NAME),
-        "데몬이 답하는 이름은 셸이 거르지 않는다 — 벽은 데몬의 등록 반려다"
+        "names the daemon answers are not filtered by the shell — the wall is the daemon's registration refusal"
     );
     for decl in &decls {
-        assert!(
-            !decl.help.trim().is_empty(),
-            "{}: help 가 비었다",
-            decl.name
-        );
+        assert!(!decl.help.trim().is_empty(), "{}: help is empty", decl.name);
     }
 }
 
-/// ★★목적지 창이 닫히면 살아 있는 보고자가 이어받는다★★ — 회복 경로가 없으면 그 뒤 모든 배달이 죽은
-/// label 로 나가 마감까지 기다렸다가 `TIMEOUT` 이 되고, 이름은 명부에 남아 「있는데 영영 안 되는」 상태가
-/// 연결 내내 굳는다.
-///
-/// 재현하는 경로는 리뷰가 짚은 그것이다: main 의 **단발 보고가 실패**해(그 invoke 에 재시도가 없다) 팝아웃이
-/// host 가 된 뒤 그 팝아웃이 닫힌다.
-/// ★`deliver` 실패로는 못 잡는다는 것도 함께 박는다★ — 가짜도 운영처럼 죽은 label 에 `Ok` 를 준다.
+/// When the destination window closes, a living reporter takes over — without recovery every later delivery goes to the dead label, waits for the deadline (`TIMEOUT`) and the name stays on the roster "present but never working" for the whole connection.
+/// Path: main's single-shot report fails (no retry on that invoke), a pop-out becomes host, then closes. A `deliver` failure cannot catch this — the fake gives `Ok` to a dead label like production.
 #[tokio::test]
 async fn a_closed_host_hands_the_destination_to_a_live_reporter() {
     let (bridge, mut seen, windows) = recording_bridge_with_windows(Duration::from_secs(5));
-    // main 은 보고에 실패했다고 친다 — 아예 안 나타난다.
     bridge.report("popup-1", vec![view_decl("tab.next")]);
     bridge.report("popup-2", vec![view_decl("tab.next")]);
     assert_eq!(
         bridge.host().as_deref(),
         Some("popup-1"),
-        "먼저 온 창이 목적지"
+        "the window that came first is the destination"
     );
 
     windows.close("popup-1");
@@ -4842,7 +4701,7 @@ async fn a_closed_host_hands_the_destination_to_a_live_reporter() {
     assert_eq!(
         bridge.host().as_deref(),
         Some("popup-2"),
-        "죽은 host 를 살아 있는 보고자가 이어받는다"
+        "a living reporter takes over the dead host"
     );
     let (_world, receiver) = with_view(Arc::clone(&bridge));
     let mail = Mailbox::default();
@@ -4851,25 +4710,20 @@ async fn a_closed_host_hands_the_destination_to_a_live_reporter() {
         envelope("tab.next", json!({ "window": "main" }), request_id),
         mail.deliver(),
     );
-    let (target, request) = seen.recv().await.expect("살아 있는 창으로 내려간다");
+    let (target, request) = seen.recv().await.expect("goes down to a living window");
     assert_eq!(target, "popup-2");
     bridge
         .settle("popup-2", &request.request_id, Ok(json!({ "ok": true })))
-        .expect("이어받은 창이 답한다");
+        .expect("the window that took over answers");
     mail.settle(1).await;
     assert_eq!(mail.only().outcome, Ok(json!({ "ok": true })));
 
-    // 마지막 창까지 닫히면 광고도 함께 내려간다 — 못 부를 이름을 명부에 남기지 않는다.
     windows.close("popup-2");
     assert_eq!(bridge.host(), None);
     assert!(bridge.declarations().is_empty());
 }
 
-/// ★광고하는 명단과 봉투를 받는 창은 **같은 창에서 나온다**★ — 갈리면 데몬이 B 를 광고하는 동안 A 가
-/// 실행돼, 광고된 이름이 `UNKNOWN_COMMAND` 로 나가거나 실행되는 이름이 광고에 없다.
-///
-/// 오늘은 창마다 같은 정적 `contributions` 를 올려 두 집합이 바이트 동일하지만, 그 우연 위에 계약을 얹지
-/// 않는다 — 그래서 여기서는 **일부러 다른 목록**을 보고시킨다.
+/// The advertised list and the window receiving the envelope come from the same window — if they diverge, A runs while the daemon advertises B (`UNKNOWN_COMMAND`, or an executed name not advertised). Every window uploads the same static `contributions` today, so a deliberately different list is reported here.
 #[tokio::test]
 async fn a_non_host_report_does_not_change_what_is_advertised() {
     let (bridge, mut seen, windows) = recording_bridge_with_windows(Duration::from_secs(5));
@@ -4880,12 +4734,15 @@ async fn a_non_host_report_does_not_change_what_is_advertised() {
 
     assert!(
         !popup.changed(),
-        "host 가 아닌 창의 보고는 차분을 만들지 않는다"
+        "a report from a non-host window makes no diff"
     );
     let advertised: Vec<String> = bridge.declarations().into_iter().map(|d| d.name).collect();
-    assert_eq!(advertised, vec!["tab.next".to_string()], "광고는 host 것뿐");
+    assert_eq!(
+        advertised,
+        vec!["tab.next".to_string()],
+        "the advertisement is the host's only"
+    );
 
-    // 그 팝아웃의 이름은 배달도 안 받는다 — 광고에 없으니 명부에도 없다.
     let (_world, receiver) = with_view(Arc::clone(&bridge));
     let mail = Mailbox::default();
     let request_id = RequestId::new();
@@ -4897,7 +4754,6 @@ async fn a_non_host_report_does_not_change_what_is_advertised() {
     assert_eq!(error_of(mail.only()).code(), ErrorCode::UnknownCommand);
     assert!(seen.try_recv().is_err());
 
-    // main 이 죽으면 광고도 팝아웃 것으로 **함께** 옮겨간다(둘이 갈리지 않는다).
     windows.close(MAIN_WINDOW_LABEL);
     assert_eq!(bridge.host().as_deref(), Some("popup-1"));
     assert_eq!(
@@ -4910,11 +4766,8 @@ async fn a_non_host_report_does_not_change_what_is_advertised() {
     );
 }
 
-/// ★보고의 **상태 변경과 그 차분 송신이 한 덩이**여야 한다★ — 갈라지면 나중 보고의 차분이 먼저 나가고,
-/// 데몬은 두 보고의 합집합을 쥔 채 남는다(다리는 나중 것만 안다 → 옛 이름이 배달되면 웹뷰가 모른다고 답한다).
-///
-/// 재는 법: 첫 송신을 문 안에서 붙잡아 둔 채 둘째 보고를 넣는다. 문이 없으면 둘째가 먼저 끝나 순서가
-/// 뒤집히고, 문이 있으면 둘째는 첫 송신이 풀릴 때까지 **시작조차 못 한다**.
+/// A report's state change and the sending of its diff are one unit — if split, a later report's diff goes first and the daemon keeps the union of both (the bridge knows only the later, so an old name's delivery gets "unknown" from the webview).
+/// Measured: hold the first send inside the gate and put in the second report; without the gate the order flips, with it the second cannot start until the first send is released.
 #[tokio::test]
 async fn a_report_and_its_delta_go_out_as_one_unit() {
     let (bridge, _seen) = recording_bridge(Duration::from_secs(5));
@@ -4930,14 +4783,13 @@ async fn a_report_and_its_delta_go_out_as_one_unit() {
                     vec![view_decl("tab.next")],
                     |_, _| async move {
                         order.lock().unwrap().push("first-send-begin");
-                        let _ = gate.acquire().await.expect("게이트");
+                        let _ = gate.acquire().await.expect("gate");
                         order.lock().unwrap().push("first-send-end");
                     },
                 )
                 .await;
         })
     };
-    // 첫 송신이 문 안에서 멈출 때까지 기다린다.
     while order.lock().unwrap().is_empty() {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
@@ -4957,67 +4809,58 @@ async fn a_report_and_its_delta_go_out_as_one_unit() {
         })
     };
 
-    // 둘째가 문 앞에서 막혀 있다 — 막히지 않으면 여기서 이미 순서가 뒤집힌다.
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(
         *order.lock().unwrap(),
         vec!["first-send-begin"],
-        "둘째 보고가 첫 송신을 앞질렀다 — 데몬이 합집합을 쥔 채 남는다"
+        "the second report overtook the first send — the daemon is left holding the union"
     );
-    // ★「아직 시작도 안 했다」와 「막혀 있다」를 가른다★ — 앞 단언만이면 둘째 태스크가 굼떠도 통과한다.
-    assert!(!second.is_finished(), "둘째 보고가 문을 안 거치고 끝났다");
+    // Tells "has not started" from "is blocked" — the earlier assertion alone would pass for a merely sluggish task.
+    assert!(
+        !second.is_finished(),
+        "the second report finished without passing the gate"
+    );
 
     gate.add_permits(1);
-    first.await.expect("첫 보고");
-    second.await.expect("둘째 보고");
+    first.await.expect("first report");
+    second.await.expect("second report");
     assert_eq!(
         *order.lock().unwrap(),
         vec!["first-send-begin", "first-send-end", "second-send"]
     );
 }
 
-/// ★★TypeScript 가 **실제로 찍는 글자**를 Rust 가 읽는지 여기서만 잰다★★
-///
-/// 다른 어느 테스트도 이 경계를 안 건넌다 — Rust 쪽은 enum 을 직접 만들고 vitest 는 invoke 를 mock 한다.
-/// 철자가 갈리면 serde 가 **벡터 전체**를 실패시켜 `report_view_commands` 가 payload 를 통째로 반려하고,
-/// 그 창은 명령을 **0개** 등록한다. 유일한 신호는 웹뷰 콘솔 경고 한 줄이다.
-/// 아래 첫 문자열은 `src/commands/viewCommandBridge.ts` 의 `offeredCommands()` 가 **오늘 내는 모양
-/// 그대로**다 — 짝 단언은 `src/commands/viewCommandBridge.test.ts`(invoke 인자)와
-/// `busCommands.test.ts`(명단·effect 어휘)다.
-///
-/// ★뒤이은 둘째 문자열은 오늘 아무 명령도 안 내는 모양이다★ — `enum` 과 `read` 를 싣던 유일한 발신자가
-/// 테마 명령이었고 ADR-0167 이 그것을 내렸다. 그래도 그 두 칸은 **계약**이라 여기서 계속 잰다: 안 재면
-/// 다음에 그 모양을 내는 명령이 생길 때 이 경계가 무검증으로 그것을 만난다.
+/// Measures whether Rust reads the text TypeScript actually prints — no other test crosses this boundary (Rust builds the enum directly, vitest mocks invoke). A spelling divergence makes serde fail the whole vector, `report_view_commands` rejects the payload wholesale, and the window registers zero commands with only a console warning.
+/// The first string is exactly what `offeredCommands()` of `src/commands/viewCommandBridge.ts` emits (paired: `viewCommandBridge.test.ts` invoke arguments, `busCommands.test.ts` list · effect vocabulary).
+/// The second is a shape no command emits today (the theme command, the last sender of `enum` and `read`, was removed — ADR-0167), but those fields are a contract, so keep measuring them.
 #[test]
 fn the_frontend_spelling_of_the_report_payload_deserializes_here() {
     const FROM_WEBVIEW: &str = r#"[
       {"name":"slot.empty","help":{
-        "summary":"그 슬롯을 빈 칸으로 되돌린다(슬롯 자체는 남는다 — 없애려면 slot.close).",
+        "summary":"Returns that slot to an empty area (the slot itself stays — to remove it, slot.close).",
         "effect":"write",
-        "args":{"viewId":{"type":"string","description":"탭 id(UUID) — tab.list 가 준다."},
-                "slotId":{"type":"string","description":"슬롯 id(UUID) — slot.resolveSpatial 이 준다."}},
+        "args":{"viewId":{"type":"string","description":"Tab id (UUID) — given by tab.list."},
+                "slotId":{"type":"string","description":"Slot id (UUID) — given by slot.resolveSpatial."}},
         "required":["viewId","slotId"]}},
-      {"name":"tab.next","help":{"summary":"그 창의 활성 탭을 다음 탭으로 옮긴다.","effect":"write"}}
+      {"name":"tab.next","help":{"summary":"moves that window's active tab to the next tab.","effect":"write"}}
     ]"#;
 
     let decls: Vec<ViewCommandDecl> =
-        serde_json::from_str(FROM_WEBVIEW).expect("프론트가 찍는 모양 그대로 읽힌다");
+        serde_json::from_str(FROM_WEBVIEW).expect("reads exactly the shape the frontend prints");
 
     assert_eq!(decls.len(), 2);
     assert_eq!(decls[0].help.effect, Some(ViewEffect::Write));
-    let slot = decls[0].help.args.get("slotId").expect("인자 칸");
+    let slot = decls[0].help.args.get("slotId").expect("argument field");
     assert_eq!(slot.ty.as_deref(), Some("string"));
     assert_eq!(
         decls[0].help.required,
         vec!["viewId".to_string(), "slotId".to_string()]
     );
-    // `args`·`required` 를 안 실은 항목도 읽힌다(둘 다 `#[serde(default)]`).
     assert!(decls[1].help.args.is_empty());
 
-    // 오늘 발신자가 없는 두 칸 — `read` 철자와 `enum` 목록(위 doc).
     const NOT_EMITTED_TODAY: &str = r#"[{"name":"probe.shape","help":{"summary":"s","effect":"read","args":{"pick":{"type":"string","enum":["a","b","c"]}}}}]"#;
     let shapes: Vec<ViewCommandDecl> =
-        serde_json::from_str(NOT_EMITTED_TODAY).expect("계약에 있는 모양은 읽힌다");
+        serde_json::from_str(NOT_EMITTED_TODAY).expect("a shape in the contract is read");
     assert_eq!(shapes[0].help.effect, Some(ViewEffect::Read));
     assert_eq!(
         shapes[0].help.args["pick"]
@@ -5027,43 +4870,32 @@ fn the_frontend_spelling_of_the_report_payload_deserializes_here() {
         Some(3)
     );
 
-    // ★대문자 철자는 **안** 읽힌다 — rename 방향을 못 박는다★. 한 항목이 깨지면 벡터 전체가 실패하므로
-    //   이 반려의 대가가 「그 창은 0개 등록」이라는 것도 함께 남긴다.
+    // The uppercase spelling is not read — pins the rename direction. One broken item fails the whole vector, i.e. that window registers zero.
     let wrong = r#"[{"name":"tab.next","help":{"summary":"s","effect":"Write"}}]"#;
     assert!(
         serde_json::from_str::<Vec<ViewCommandDecl>>(wrong).is_err(),
-        "철자가 갈리면 payload 가 통째로 반려된다 — 그 창은 명령을 하나도 등록하지 못한다"
+        "if the spelling diverges the payload is rejected wholesale — that window cannot register a single command"
     );
 }
 
-/// ★★웹뷰 마감은 **데몬 자리 마감 안쪽**이어야 한다 — 뒤집히면 두 가지가 동시에 깨진다★★
-///
-/// ① **이쪽 마감이 도달 불가가 된다**: 데몬이 먼저 자리를 거둬 호출자에게 `TIMEOUT`/`retry: never` 로
-///    답하고, 뒤늦은 셸의 결말은 자리 없는 답장(`NoSeat`)으로 버려진다 — 아래 timeout 테스트가 단언하는
-///    `retry: same-request-id` 는 운영에서 **한 번도** 나올 수 없는 성질이 된다.
-/// ② **같은 명령이 두 번 돈다**: 데몬 마감 뒤 호출자가 같은 id 로 다시 부르면 아직 도는 첫 왕복 위로
-///    두 번째 봉투가 내려간다.
-///
-/// ★이 파일이 그 관계를 물 수 있는 유일한 자리다★ — 데몬 crate 는 이 패키지의 **dev 의존**이라 운영
-/// 코드가 그 상수를 못 본다. 그래서 값은 셸에 박고 부등식은 여기서 잰다. 어느 쪽 상수를 고쳐 순서를
-/// 뒤집으면 여기가 빨개진다.
+/// The webview deadline must be inside the daemon seat deadline — if reversed: (1) this side's deadline becomes unreachable (the daemon withdraws the seat first and answers `TIMEOUT`/`retry: never`; the late outcome is discarded as `NoSeat`, so `retry: same-request-id` asserted by the timeout test below can never occur), (2) the same command runs twice (a re-call with the same id after the daemon deadline sends a second envelope over the running first one).
+/// Only this file can bite the relation: the daemon crate is a dev dependency, so production code cannot see that constant — the value is pinned in the shell and the inequality measured here.
 #[test]
 fn the_webview_deadline_fits_inside_the_daemon_seat() {
     let seat = engram_dashboard_daemon::command_delivery::CommandDeliveries::DEFAULT_DEADLINE;
 
     assert!(
         VIEW_REPLY_DEADLINE + VIEW_HOP_MARGIN <= seat,
-        "웹뷰 마감({VIEW_REPLY_DEADLINE:?}) + 홉 여유({VIEW_HOP_MARGIN:?}) 가 데몬 자리 마감({seat:?}) 을 넘는다 \
-         — 이 순서가 뒤집히면 셸의 TIMEOUT 은 도달 불가가 되고 같은 명령이 두 번 돌 수 있다"
+        "webview deadline ({VIEW_REPLY_DEADLINE:?}) + hop margin ({VIEW_HOP_MARGIN:?}) exceeds the daemon seat deadline ({seat:?}) \
+         — if this order is reversed the shell's TIMEOUT becomes unreachable and the same command can run twice"
     );
     assert!(
         !VIEW_HOP_MARGIN.is_zero(),
-        "여유 항이 0이면 부등식이 산문이 된다 — 데몬↔셸 두 홉이 공짜라는 주장이다"
+        "if the margin term is 0 the inequality becomes prose — a claim that the two daemon↔shell hops are free"
     );
 }
 
-/// ★같은 번호가 도는 중이면 **안 보낸다**★ — 조용히 덮으면 부수효과가 두 번 일어나고, 먼저 온 옛 결말이
-/// 새 시도의 답으로 붙는다. 위 부등식이 이 상황을 막지만 그물은 둘이어야 한다.
+/// A number already running is not sent — covering it silently would run the side effect twice and attach the old outcome to the new attempt. The inequality above prevents this, but there must be two nets.
 #[tokio::test]
 async fn a_duplicate_request_id_is_refused_instead_of_displacing_the_live_waiter() {
     let (bridge, mut seen) = recording_bridge(Duration::from_secs(60));
@@ -5076,9 +4908,8 @@ async fn a_duplicate_request_id_is_refused_instead_of_displacing_the_live_waiter
         envelope("tab.next", json!({ "window": "main" }), request_id),
         mail.deliver(),
     );
-    let (_target, first) = seen.recv().await.expect("첫 봉투가 내려간다");
+    let (_target, first) = seen.recv().await.expect("the first envelope goes down");
 
-    // 같은 번호로 다시 — 아직 첫 왕복이 돌고 있다.
     let second = Mailbox::default();
     receiver.accept(
         envelope("tab.next", json!({ "window": "slot-popup-1" }), request_id),
@@ -5089,28 +4920,25 @@ async fn a_duplicate_request_id_is_refused_instead_of_displacing_the_live_waiter
     assert_eq!(
         error_of(second.only()).code(),
         ErrorCode::RequestIdConflict,
-        "두 번째 시도는 거절된다"
+        "the second attempt is refused"
     );
     assert!(
         seen.try_recv().is_err(),
-        "웹뷰로 두 번째 봉투가 내려가지 않았다 — 내려갔다면 명령이 두 번 돈다"
+        "a second envelope did not go down to the webview — if it had, the command would run twice"
     );
 
-    // 첫 대기자는 그대로 살아 있다 — 밀려나지 않았다.
     bridge
         .settle(
             MAIN_WINDOW_LABEL,
             &first.request_id,
             Ok(json!({ "first": true })),
         )
-        .expect("첫 자리가 남아 있다");
+        .expect("the first seat remains");
     mail.settle(1).await;
     assert_eq!(mail.only().outcome, Ok(json!({ "first": true })));
 }
 
-/// ★봉투를 받지 않은 창은 그 왕복을 끝낼 수 없다★ — 상관 키 하나로만 열면 남의 창이 위조 결말을 낼 수
-/// 있고, 호출자는 그것을 받는 동안 진짜 창의 부수효과는 그대로 일어난다.
-/// ★대조에 실패해도 자리는 남는다★ — 빼 버리면 위조 한 번이 진짜 답의 자리를 지운다.
+/// A window that did not receive the envelope cannot end that round trip — with only one correlation key someone else's window could forge an outcome the caller accepts while the real side effect still happens. The seat also stays on a failed match (removing it would let one forgery erase the real answer's seat).
 #[tokio::test]
 async fn only_the_window_that_received_the_envelope_may_settle_it() {
     let (bridge, mut seen) = recording_bridge(Duration::from_secs(60));
@@ -5123,7 +4951,7 @@ async fn only_the_window_that_received_the_envelope_may_settle_it() {
         envelope("tab.next", json!({ "window": "main" }), request_id),
         mail.deliver(),
     );
-    let (_target, request) = seen.recv().await.expect("봉투가 내려간다");
+    let (_target, request) = seen.recv().await.expect("the envelope goes down");
 
     let forged = bridge
         .settle(
@@ -5131,9 +4959,9 @@ async fn only_the_window_that_received_the_envelope_may_settle_it() {
             &request.request_id,
             Ok(json!({ "forged": true })),
         )
-        .expect_err("남의 창은 못 끝낸다");
-    assert!(forged.contains("popup-9"), "누가 답했는지 말한다: {forged}");
-    assert_eq!(mail.len(), 0, "위조는 아무 답장도 못 낸다");
+        .expect_err("someone else's window cannot end it");
+    assert!(forged.contains("popup-9"), "says who answered: {forged}");
+    assert_eq!(mail.len(), 0, "a forgery cannot produce any reply");
 
     bridge
         .settle(
@@ -5141,14 +4969,12 @@ async fn only_the_window_that_received_the_envelope_may_settle_it() {
             &request.request_id,
             Ok(json!({ "real": true })),
         )
-        .expect("진짜 창의 자리는 위조에 지워지지 않았다");
+        .expect("the real window's seat was not erased by the forgery");
     mail.settle(1).await;
     assert_eq!(mail.only().outcome, Ok(json!({ "real": true })));
 }
 
-/// ★표식은 웹뷰가 실은 값을 그대로 광고한다★ — 상수로 박으면 첫 조회 명령이 붙는 날 명부가 거짓 표식을
-/// 광고하고, 그 값은 데몬의 쓰기 보존 회계에 그대로 먹인다. 안 실은 항목은 아예 등록하지 않는다(기본값을
-/// 고르는 것이 곧 그 거짓말이다).
+/// The mark is advertised as the value the webview carried — pinned, since the day a query command is attached the roster would advertise a false mark feeding the daemon's write-retention accounting. An item with no mark is not registered (choosing a default is itself the lie).
 #[tokio::test]
 async fn the_advertised_effect_comes_from_the_webview_not_from_a_constant() {
     let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
@@ -5164,60 +4990,58 @@ async fn the_advertised_effect_comes_from_the_webview_not_from_a_constant() {
     assert_eq!(
         outcome.refused,
         vec!["view.mute".to_string()],
-        "표식 없는 항목은 등록에서 빠진다"
+        "an item with no mark is dropped from registration"
     );
     let effect_of = |name: &str| -> String {
         let decl = outcome
             .accepted
             .iter()
             .find(|d| d.name == name)
-            .unwrap_or_else(|| panic!("{name} 이 등록됐어야 한다"));
-        let item: serde_json::Value = serde_json::from_str(&decl.help).expect("help 는 JSON");
-        item["effect"].as_str().expect("effect 칸").to_string()
+            .unwrap_or_else(|| panic!("{name} should have been registered"));
+        let item: serde_json::Value = serde_json::from_str(&decl.help).expect("help is JSON");
+        item["effect"].as_str().expect("effect field").to_string()
     };
     assert_eq!(effect_of("view.peek"), "Read");
     assert_eq!(effect_of("view.poke"), "Write");
 }
 
-/// ★등록 패킷은 **매번 다시 읽는다**★ — 웹뷰 보고는 소켓과 아무 순서 관계가 없어서, 표를 꽂을 때
-/// 한 번 만들어 캐시하면 재연결이 옛 목록(대개 빈 목록)을 다시 보낸다. 그러면 창은 떠 있는데 화면
-/// 명령이 명부에 없는 상태가 재연결마다 되살아난다.
+/// The registration packet is re-read every time — webview reports have no ordering with the socket, so a packet cached at plug-in time would resend the old (usually empty) list on reconnect, reviving "window up but screen commands not on the roster".
 #[tokio::test]
 async fn a_report_that_arrives_after_the_table_still_rides_the_next_registration() {
     let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
     let (_world, receiver) = with_view(Arc::clone(&bridge));
 
-    let before = registration_command(&receiver).expect("셸 몫만으로도 패킷은 나온다");
+    let before =
+        registration_command(&receiver).expect("a packet comes out even with the shell part alone");
     let AgentCommand::RegisterCommands { decls, .. } = before else {
         panic!("RegisterCommands");
     };
-    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
+    let decls = decls_from_wire(&decls).expect("the registration field the shell wrapped unpacks");
     assert!(
         !decls.iter().any(|d| d.name == "tab.next"),
-        "아직 아무 창도 보고하지 않았다"
+        "no window has reported yet"
     );
 
     bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.next")]);
 
-    let after = registration_command(&receiver).expect("패킷");
+    let after = registration_command(&receiver).expect("packet");
     let AgentCommand::RegisterCommands { decls, .. } = after else {
         panic!("RegisterCommands");
     };
-    let decls = decls_from_wire(&decls).expect("셸이 싼 등록 칸은 풀린다");
+    let decls = decls_from_wire(&decls).expect("the registration field the shell wrapped unpacks");
     assert!(
         decls.iter().any(|d| d.name == "tab.next"),
-        "다음 (재)핸드셰이크의 패킷에는 웹뷰 몫이 합쳐져 있다"
+        "the packet of the next (re)handshake has the webview part merged in"
     );
 }
 
-/// ★버려진 왕복은 자리를 남기지 않는다★ — 답장 자리를 지우는 경로가 마감 하나뿐이면, 런타임이 접히거나
-/// 배달 future 가 취소될 때마다 자리가 쌓여 다리가 영구히 불어난다.
+/// An abandoned round trip leaves no seat — if only the deadline erased the reply seat, seats would pile up whenever the runtime folds or a delivery future is cancelled.
 #[tokio::test]
 async fn a_cancelled_delivery_gives_its_answer_slot_back() {
     let (bridge, mut seen) = recording_bridge(Duration::from_secs(60));
     bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("slot.empty")]);
 
-    // 태스크를 **쥐고만** 있다가 버린다 — 취소를 그대로 흉내낸다(`ReplySink` 의 Drop 이 답장을 낸다).
+    // Holds the task and then drops it — imitating cancellation (the Drop of `ReplySink` emits the reply).
     let (_world, ports) = World::build();
     let queue = Arc::new(Queued::default());
     let receiver = InboundReceiver::with_view(
@@ -5232,25 +5056,21 @@ async fn a_cancelled_delivery_gives_its_answer_slot_back() {
         envelope("slot.empty", json!({}), request_id),
         mail.sink(request_id),
     );
-    let mut task = Box::pin(queue.drain().pop().expect("적용 태스크 하나"));
+    let mut task = Box::pin(queue.drain().pop().expect("one apply task"));
 
-    // 첫 poll 에서 배달이 나가고 답장 자리가 선다 — 그 뒤 future 를 버린다.
     let waker = futures_util::task::noop_waker();
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(std::future::Future::poll(task.as_mut(), &mut cx).is_pending());
-    let (_target, request) = seen.try_recv().expect("웹뷰로 내려갔다");
+    let (_target, request) = seen.try_recv().expect("went down to the webview");
     drop(task);
 
-    // 자리가 남아 있으면 늦게 온 답이 그것을 붙잡아 성공한다 — 비었어야 한다.
     bridge
         .settle(MAIN_WINDOW_LABEL, &request.request_id, Ok(json!(null)))
-        .expect_err("버려진 왕복의 자리는 남지 않는다");
-    // 답장은 `ReplySink` 의 Drop 이 낸다(태스크가 답 없이 사라져도 부르는 쪽은 매달리지 않는다).
+        .expect_err("the seat of an abandoned round trip does not remain");
     assert_eq!(mail.len(), 1);
 }
 
-/// ★셸 표가 먼저 답하는 이름은 등록에서 빠진다★ — 실어도 배달은 안 갈리지만(`route` 가 표를 먼저 본다)
-/// 명부에 **닿을 수 없는 항목**이 하나 늘고, 그것을 발견한 호출자는 웹뷰 계약을 보고 셸 계약대로 답을 받는다.
+/// A name the shell table answers first is dropped from registration — carried delivery would not diverge (`route` looks at the table first), but the roster would gain an unreachable item whose discovered webview contract differs from the shell contract.
 #[tokio::test]
 async fn a_name_the_shell_table_answers_is_left_out_and_still_runs_in_the_shell() {
     let (bridge, mut seen) = recording_bridge(Duration::from_secs(1));
@@ -5271,12 +5091,15 @@ async fn a_name_the_shell_table_answers_is_left_out_and_still_runs_in_the_shell(
     );
     mail.settle(1).await;
 
-    assert!(mail.only().outcome.is_ok(), "셸 적용 서비스가 답했다");
-    assert_eq!(world.main_tabs().tabs.len(), 2, "실제로 탭이 늘었다");
-    assert!(seen.try_recv().is_err(), "웹뷰로는 아무것도 안 내려갔다");
+    assert!(
+        mail.only().outcome.is_ok(),
+        "the shell apply service answered"
+    );
+    assert_eq!(world.main_tabs().tabs.len(), 2, "a tab was actually added");
+    assert!(seen.try_recv().is_err(), "nothing went down to the webview");
 }
 
-/// ★셸 표에 없는 이름은 웹뷰로 내려가고 그 답이 같은 상관 키로 돌아온다★ — 3단계 배달의 2단계다.
+/// A name not in the shell table goes down to the webview and its answer returns with the same correlation key (stage 2 of the 3-stage delivery).
 #[tokio::test]
 async fn a_name_only_the_webview_owns_is_delivered_there_and_answered() {
     let (bridge, mut seen) = recording_bridge(Duration::from_secs(5));
@@ -5290,16 +5113,22 @@ async fn a_name_only_the_webview_owns_is_delivered_there_and_answered() {
         mail.deliver(),
     );
 
-    let (target, request) = seen.recv().await.expect("웹뷰로 내려간다");
-    assert_eq!(target, MAIN_WINDOW_LABEL, "보고한 창으로 간다");
+    let (target, request) = seen.recv().await.expect("goes down to the webview");
+    assert_eq!(
+        target, MAIN_WINDOW_LABEL,
+        "goes to the window that reported"
+    );
     assert_eq!(request.name, "tab.next");
     assert_eq!(request.args, json!({ "window": "main" }));
     assert_eq!(
         request.request_id,
         request_id.to_string(),
-        "상관 키는 전 구간 동일하다"
+        "the correlation key is the same across the whole span"
     );
-    assert!(mail.len() == 0, "웹뷰가 답하기 전에는 결말이 없다");
+    assert!(
+        mail.len() == 0,
+        "there is no outcome before the webview answers"
+    );
 
     bridge
         .settle(
@@ -5307,21 +5136,20 @@ async fn a_name_only_the_webview_owns_is_delivered_there_and_answered() {
             &request.request_id,
             Ok(json!({ "applied": true })),
         )
-        .expect("기다리는 자리가 있다");
+        .expect("there is a waiting seat");
     mail.settle(1).await;
 
     let reply = mail.only();
     assert_eq!(reply.request_id, request_id);
     assert_eq!(reply.outcome, Ok(json!({ "applied": true })));
 
-    // ★두 번째 답은 붙일 자리가 없다★ — 창 둘이 같은 봉투를 받았다는 신호라 조용히 먹지 않는다.
+    // The second answer has no seat — a sign that two windows received the same envelope, so it is not swallowed quietly.
     bridge
         .settle(MAIN_WINDOW_LABEL, &request.request_id, Ok(json!(null)))
-        .expect_err("한 request_id 에 답장은 하나다");
+        .expect_err("one reply per request_id");
 }
 
-/// ★창이 사라져도 왕복은 값으로 끝난다★ — 마감이 없으면 그 봉투는 영영 안 끝나고 호출자가 매달린다
-/// (`route` 는 마감을 안 건다 — 그것이 조립부인 이 다리의 몫이다).
+/// Even if the window vanishes the round trip ends as a value — without a deadline the envelope never ends and the caller hangs (`route` sets none; that is this bridge's job).
 #[tokio::test]
 async fn a_webview_that_never_answers_ends_as_a_timeout_not_a_hang() {
     let (bridge, mut seen) = recording_bridge(Duration::from_millis(50));
@@ -5334,7 +5162,7 @@ async fn a_webview_that_never_answers_ends_as_a_timeout_not_a_hang() {
         envelope("slot.empty", json!({}), request_id),
         mail.deliver(),
     );
-    seen.recv().await.expect("웹뷰로 내려간다");
+    seen.recv().await.expect("goes down to the webview");
 
     mail.settle(1).await;
     let err = error_of(mail.only());
@@ -5342,12 +5170,11 @@ async fn a_webview_that_never_answers_ends_as_a_timeout_not_a_hang() {
     assert_eq!(
         err.retry(),
         engram_dashboard_command::RetryMode::SameRequestId,
-        "적용 여부가 불명이라 새 id 로 다시 부르면 두 번 적용될 수 있다"
+        "whether it was applied is unknown, so calling again with a new id may apply it twice"
     );
 }
 
-/// ★아무 창도 보고하지 않았으면 「모르는 이름」이다★ — 배달할 곳이 없는데 주인이 있다고 답하면 호출자는
-/// 「그런 명령 없음」과 「보낼 곳 없음」을 구분할 수 없다.
+/// With no window reported the name is "unknown" — answering that an owner exists with nowhere to deliver would blur "no such command" and "nowhere to send".
 #[tokio::test]
 async fn a_webview_name_is_unknown_until_a_window_reports_it() {
     let (bridge, mut seen) = recording_bridge(Duration::from_secs(1));
@@ -5363,31 +5190,32 @@ async fn a_webview_name_is_unknown_until_a_window_reports_it() {
     assert_eq!(err.code(), ErrorCode::UnknownCommand);
     assert!(
         seen.try_recv().is_err(),
-        "보낼 곳이 없으니 아무것도 안 나갔다"
+        "there is nowhere to send, so nothing went out"
     );
 }
 
-/// ★같은 목록을 다시 보고하면 차분이 없다★ — 창마다 이 App 이 떠서 전부 보고하므로(main·팝아웃)
-/// 보고마다 차분을 내면 뜻 없는 왕복이 창 수만큼 는다.
-/// ★목적지는 main 이 이긴다★ — 팝아웃이 목적지를 가져가면 그 창이 닫히는 순간 웹뷰 명령 전체가 죽는다.
+/// Reporting the same list again gives no diff (every window runs this App and reports everything; a diff per report would multiply meaningless round trips by the window count). For the destination main wins — a pop-out as destination would kill all webview commands when it closes.
 #[tokio::test]
 async fn repeating_the_same_report_asks_for_no_delta_and_main_keeps_the_destination() {
     let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
 
     let first = bridge.report("popup-1", vec![view_decl("tab.next")]);
-    assert!(first.changed(), "첫 보고는 명단을 채운다");
+    assert!(first.changed(), "the first report fills the list");
     assert_eq!(
         bridge.host().as_deref(),
         Some("popup-1"),
-        "먼저 온 창을 받아 둔다"
+        "keeps the window that came first"
     );
 
     let again = bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.next")]);
-    assert!(!again.changed(), "같은 목록이면 보낼 차분이 없다");
+    assert!(
+        !again.changed(),
+        "with the same list there is no diff to send"
+    );
     assert_eq!(
         bridge.host().as_deref(),
         Some(MAIN_WINDOW_LABEL),
-        "main 이 덮는다"
+        "main overrides"
     );
 
     let stolen = bridge.report("popup-2", vec![view_decl("tab.next")]);
@@ -5395,7 +5223,7 @@ async fn repeating_the_same_report_asks_for_no_delta_and_main_keeps_the_destinat
     assert_eq!(
         bridge.host().as_deref(),
         Some(MAIN_WINDOW_LABEL),
-        "main 은 뺏기지 않는다"
+        "main is not taken over"
     );
 
     let shrunk = bridge.report(MAIN_WINDOW_LABEL, vec![]);
@@ -5403,20 +5231,18 @@ async fn repeating_the_same_report_asks_for_no_delta_and_main_keeps_the_destinat
     assert!(shrunk.accepted.is_empty());
 }
 
-/// 등록 패킷의 `help` 는 **Rust 선언이 내는 것과 같은 칸**을 쓴다 — 갈리면 명부 하나에 모양이 두 방언으로
-/// 섞여, 그것을 읽는 LLM 이 명령마다 다른 독법을 써야 한다.
+/// A registration packet's `help` uses the same fields a Rust declaration emits — otherwise one roster mixes two dialects and the LLM must read each command differently.
 #[tokio::test]
 async fn a_reported_shape_becomes_a_catalog_item_in_the_same_dialect() {
     let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
     let mut args = BTreeMap::new();
-    // ★`enum` 을 싣는 화면 명령은 오늘 하나도 없다★ — 마지막 발신자였던 테마 명령을 ADR-0167 이 내렸다.
-    //   그래도 투영이 그 칸을 흘려보내는지는 계약이라, 여기서 값을 지어내 잰다.
+    // No screen command carries `enum` today (ADR-0167 removed the last sender), but whether the projection lets the field through is a contract — a value is invented to measure it.
     args.insert(
         "window".to_string(),
         ViewArgSchema {
             ty: Some("string".to_string()),
             allowed: Some(vec!["main".to_string(), "slot-popup-1".to_string()]),
-            description: Some("대상 창 label".to_string()),
+            description: Some("target window label".to_string()),
         },
     );
     let outcome = bridge.report(
@@ -5424,47 +5250,41 @@ async fn a_reported_shape_becomes_a_catalog_item_in_the_same_dialect() {
         vec![ViewCommandDecl {
             name: "tab.next".to_string(),
             help: ViewCommandHelp {
-                summary: "  그 창의 활성 탭을 다음 탭으로 옮긴다  ".to_string(),
+                summary: "  moves that window's active tab to the next tab  ".to_string(),
                 effect: Some(ViewEffect::Write),
                 args,
-                // ★선언에 없는 칸은 required 에서 빠진다★ — 남겨 두면 그 스키마는 어떤 인자로도 만족되지
-                //   않아 호출자가 영영 못 부른다.
+                // A field not in the declaration drops out of `required` — left in, no argument could satisfy the schema.
                 required: vec!["window".to_string(), "ghost".to_string()],
             },
         }],
     );
 
     let item: serde_json::Value =
-        serde_json::from_str(&outcome.accepted[0].help).expect("help 는 JSON 이다");
+        serde_json::from_str(&outcome.accepted[0].help).expect("help is JSON");
     assert_eq!(item["name"], "tab.next");
-    assert_eq!(item["summary"], "그 창의 활성 탭을 다음 탭으로 옮긴다");
+    assert_eq!(
+        item["summary"],
+        "moves that window's active tab to the next tab"
+    );
     assert_eq!(item["args"]["properties"]["window"]["type"], "string");
     assert_eq!(
         item["args"]["properties"]["window"]["enum"][1],
         "slot-popup-1"
     );
     assert_eq!(item["args"]["required"], json!(["window"]));
-    // 카탈로그 항목의 칸 이름은 Rust 쪽과 같아야 한다 — 그 목록을 여기서 못 박는다.
     for key in ["name", "effect", "since", "summary", "args", "ok", "errors"] {
-        assert!(item.get(key).is_some(), "{key} 칸이 없다: {item}");
+        assert!(item.get(key).is_some(), "field {key} is missing: {item}");
     }
-    // ★광고하는 오류 = 이 다리가 낼 수 있는 것과 **정확히 같은 집합**이다★ — 부분집합으로 재면 안 되는
-    //   쪽이 열린다: 낼 수 없는 코드를 광고하면 호출자가 **한 번도 안 도는 분기**를 짜고, 그 코드가 안
-    //   온다는 사실은 어디서도 안 드러난다. 빠지는 쪽은 반대로 호출자가 기본 갈래로 떨어진다.
-    //   넷의 출처 —
-    //   - `INTERNAL`  : 웹뷰가 던진 실패(종류를 못 가른다) · 배달 실패 · 답장 채널 조기 종료.
-    //   - `TIMEOUT`   : 마감 초과(`a_webview_that_never_answers_ends_as_a_timeout_not_a_hang`).
-    //   - `REQUEST_ID_CONFLICT` : 같은 번호가 이미 돈다
-    //     (`a_duplicate_request_id_is_refused_instead_of_displacing_the_live_waiter`).
-    //   - `UNSUPPORTED` : ★보고한 창이 없다 — 다만 **평소엔 여기까지 안 온다**★. 조회가 먼저 「모르는
-    //     이름」으로 답해 배달이 `UNKNOWN_COMMAND` 로 끝나기 때문이다
-    //     (`a_webview_name_is_unknown_until_a_window_reports_it` 이 그것을 잰다). 이 갈래는 조회와 배달
-    //     **사이에** host 가 죽은 경우에만 열리고, 그 인터리브를 만드는 테스트는 없다(무커버 잔여).
+    // The advertised errors must equal exactly the set this bridge can emit — a subset check would allow advertising a code that never comes (the caller writes a branch that never runs); a missing one drops the caller to the default branch. The four sources:
+    // - `INTERNAL`: a failure the webview threw (kind not distinguishable) · delivery failure · early close of the reply channel.
+    // - `TIMEOUT`: deadline exceeded (`a_webview_that_never_answers_ends_as_a_timeout_not_a_hang`).
+    // - `REQUEST_ID_CONFLICT`: the same number is already running (`a_duplicate_request_id_is_refused_instead_of_displacing_the_live_waiter`).
+    // - `UNSUPPORTED`: no window reported — normally unreachable, since the lookup first answers "unknown name" and delivery ends as `UNKNOWN_COMMAND` (`a_webview_name_is_unknown_until_a_window_reports_it`); it opens only when the host died between lookup and delivery, which no test interleaves (uncovered).
     let advertised: BTreeSet<&str> = item["errors"]
         .as_array()
-        .expect("errors 는 배열")
+        .expect("errors is an array")
         .iter()
-        .map(|code| code.as_str().expect("코드는 문자열"))
+        .map(|code| code.as_str().expect("the code is a string"))
         .collect();
     let produced: BTreeSet<&str> = [
         ErrorCode::Internal,
@@ -5477,12 +5297,11 @@ async fn a_reported_shape_becomes_a_catalog_item_in_the_same_dialect() {
     .collect();
     assert_eq!(
         advertised, produced,
-        "광고와 실제가 갈렸다 — 남으면 안 도는 분기가 생기고, 빠지면 답이 광고 밖으로 나간다"
+        "the advertisement and reality diverged — a surplus makes a branch that never runs, a missing one makes an answer go out of the advertisement"
     );
 }
 
-/// ★설명 없는 항목은 등록하지 않는다★ — 이름만 오른 명령은 발견해도 인자를 채울 재료가 없어 부를 수 없다
-/// (등록에 모양을 동봉한 이유가 그 왕복을 없애는 것이다 — ADR-0156).
+/// An item with no description is not registered — a name alone cannot be called, since discovery gives no material for arguments (the registration bundles the shape to remove that round trip — ADR-0156).
 #[tokio::test]
 async fn a_reported_command_without_a_summary_is_left_out() {
     let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
@@ -5503,7 +5322,6 @@ async fn a_reported_command_without_a_summary_is_left_out() {
     assert!(outcome.accepted.is_empty());
 }
 
-/// 답을 못 내고 태스크가 사라져도 호출자는 마감시각까지 매달리지 않는다 — [`ReplySink`] 의 `Drop` 이 낸다.
 #[tokio::test]
 async fn a_dropped_task_still_answers() {
     let (world, queue, receiver) = queued();
@@ -5520,22 +5338,20 @@ async fn a_dropped_task_still_answers() {
     assert_eq!(error_of(reply).code(), ErrorCode::Internal);
 }
 
-// ── (S28) 대상을 받는 명령 — 에이전트(데몬이 바꿔 넣은 id) · 공간 낱말로 고르고 바뀐 배치를 답한다(TRD S28 §4 · §5) ─────────────
+// ── (S28) Commands that take targets — choose by agent (id the daemon swapped in) · spatial word, answer the changed layout (TRD S28 §4 · §5) ───────────
 
 impl World {
-    /// 칸에 에이전트를 놓고 셸 이름 장부에 그 표시 이름을 적는다(후보 · 배치 줄이 그 이름을 쓴다).
     fn show(&self, view: uuid::Uuid, slot: uuid::Uuid, agent: uuid::Uuid, name: &str) {
         apply::assign_agent(&self.state, &Subs, &Events, view, slot, agent.to_string())
-            .expect("에이전트 배치");
+            .expect("agent placement");
         apply::agent_names_updated(
             &self.state,
             &Events,
             &[(agent.to_string(), name.to_string())],
         )
-        .expect("이름 장부");
+        .expect("name ledger");
     }
 
-    /// 탭 하나를 든 새 팝아웃 — (label, 그 탭).
     fn popout(&self) -> (String, uuid::Uuid) {
         let created = apply::create_window(
             &self.state,
@@ -5544,20 +5360,19 @@ impl World {
             self.windows.as_ref(),
             self.labels.as_ref(),
         )
-        .expect("팝아웃");
+        .expect("pop-out");
         let tab = self.tabs(&created.window).active;
         (created.window, tab)
     }
 
-    /// 창에 빈 탭을 더한다 — 보이는 탭은 `shown` 으로 되돌린다(새 탭은 보이게 만들어진다).
     fn add_tab(&self, window: &str, shown: uuid::Uuid) -> uuid::Uuid {
-        let tab = apply::create_tab(&self.state, &Subs, &Events, window, None).expect("탭");
-        apply::switch_tab(&self.state, &Subs, &Events, window, shown).expect("보이는 탭");
+        let tab = apply::create_tab(&self.state, &Subs, &Events, window, None).expect("tab");
+        apply::switch_tab(&self.state, &Subs, &Events, window, shown).expect("visible tab");
         tab
     }
 
     fn tabs(&self, window: &str) -> WindowTabsPayload {
-        apply::list_tabs(&self.state, window).expect("창")
+        apply::list_tabs(&self.state, window).expect("window")
     }
 
     fn tab_ids(&self, window: &str) -> Vec<uuid::Uuid> {
@@ -5575,15 +5390,15 @@ impl World {
     }
 }
 
-/// 이 명령이 광고하는 오류에 `code` 가 드나 — 데몬 · CLI 가 그 선언으로 코드를 거른다(ADR-0156).
+/// Whether the errors this command advertises include `code` — the daemon · CLI filter codes by that declaration (ADR-0156).
 fn assert_declared(name: &str, code: ErrorCode) {
     let spec = COMMAND_SPECS
         .iter()
         .find(|spec| spec.name == name)
-        .unwrap_or_else(|| panic!("{name} 선언"));
+        .unwrap_or_else(|| panic!("{name} declaration"));
     assert!(
         spec.advertised_errors().contains(&code),
-        "{name} 이 {code} 를 광고하지 않는다"
+        "{name} does not advertise {code}"
     );
 }
 
@@ -5599,7 +5414,6 @@ async fn ok_of(
         .unwrap_or_else(|e| panic!("{name}: {e:?}"))
 }
 
-/// 오류 답 — 그 코드가 선언에 드는지도 본다.
 async fn refused(
     receiver: &InboundReceiver,
     queue: &Queued,
@@ -5612,14 +5426,14 @@ async fn refused(
 }
 
 fn rows(answer: &serde_json::Value, field: &str) -> Vec<serde_json::Value> {
-    answer[field].as_array().expect("줄 목록").clone()
+    answer[field].as_array().expect("row list").clone()
 }
 
-/// 기본 답의 줄은 id 칸을 아예 싣지 않는다 — `null` 도 아니다(규칙 §4 — 크기).
+/// The rows of a default answer carry no id fields at all — not even `null` (rule §4 — size).
 fn assert_no_ids(rows: &[serde_json::Value]) {
     for row in rows {
         for key in ["window_id", "tab", "slot_id", "agent_id"] {
-            assert!(row.get(key).is_none(), "{key} 가 실렸다: {row}");
+            assert!(row.get(key).is_none(), "{key} was carried: {row}");
         }
     }
 }
@@ -5632,9 +5446,7 @@ fn the_new_names_are_kept_off_the_webview_registry() {
     }
 }
 
-/// 에이전트를 고르는 칸 — 명령마다 `#[agent_ref]` 로 표시한 인자(선언 순서). 데몬은 등록 패킷의 이 목록만 보고 이름을 id 로
-/// 바꾼다(ADR-0308) — 빠지면 그 칸의 이름이 셸까지 와 INVALID_ARGUMENT 가 되고, 엉뚱한 칸이 들면 데몬이 id 칸을 이름으로
-/// 풀려다 거절한다.
+/// Fields that choose an agent — arguments marked per command with `#[agent_ref]` (declaration order). The daemon turns names into ids by this list in the registration packet (ADR-0308): a missing field's name reaches the shell as INVALID_ARGUMENT, a wrong one makes the daemon resolve an id field as a name and refuse.
 fn marked_agent_args() -> BTreeMap<&'static str, Vec<&'static str>> {
     BTreeMap::from([
         ("tab.switch", vec!["tab_of"]),
@@ -5656,10 +5468,7 @@ fn marked_agent_args() -> BTreeMap<&'static str, Vec<&'static str>> {
     ])
 }
 
-/// 등록 패킷(`decls`)이 그 표시를 `help` 밖의 칸으로 싣는다 — 표시 없는 명령은 빈 목록이다.
-/// ★표시한 명령은 데몬의 두 거절 코드를 광고한다★(데몬이 그 칸을 못 풀면 이 명령 대신 `NOT_FOUND` · `CONFLICT` 로 답한다 —
-/// ADR-0308) · ★에이전트를 받는 이름꼴의 인자는 빠짐없이 표시한다★(`*_of` · `beside` · `assign` · `agent` · `agent_id` —
-/// 표시를 잊은 새 칸은 이름이 셸까지 와 INVALID_ARGUMENT 가 된다).
+/// The registration packet (`decls`) carries the mark outside `help`; an unmarked command has an empty list. A marked command advertises the daemon's two refusal codes (`NOT_FOUND` · `CONFLICT`, ADR-0308), and every argument of a name-shaped agent form (`*_of` · `beside` · `assign` · `agent` · `agent_id`) is marked — a forgotten mark lets the name reach the shell as INVALID_ARGUMENT.
 #[test]
 fn the_registration_carries_each_commands_agent_reference_args() {
     let (_world, ports) = World::build();
@@ -5674,24 +5483,24 @@ fn the_registration_carries_each_commands_agent_reference_args() {
         assert_eq!(decl.agent_args, expected, "{}", decl.name);
         assert!(!decl.help.contains("agent_ref"), "{}", decl.name);
 
-        let help: serde_json::Value = serde_json::from_str(&decl.help).expect("help 는 JSON");
+        let help: serde_json::Value = serde_json::from_str(&decl.help).expect("help is JSON");
         if !decl.agent_args.is_empty() {
-            let errors = help["errors"].as_array().expect("errors 배열");
+            let errors = help["errors"].as_array().expect("errors array");
             for code in ["NOT_FOUND", "CONFLICT"] {
                 assert!(
                     errors.iter().any(|e| e == code),
-                    "{}: 표시한 칸이 있는데 {code} 를 광고하지 않는다 — {errors:?}",
+                    "{}: has a marked field but does not advertise {code} — {errors:?}",
                     decl.name
                 );
             }
         }
         let args = help["args"]["properties"]
             .as_object()
-            .expect("args 는 객체 스키마");
+            .expect("args is an object schema");
         for arg in args.keys().filter(|arg| names_an_agent(arg)) {
             assert!(
                 decl.agent_args.iter().any(|marked| marked == arg),
-                "{}: 에이전트를 받는 인자 {arg} 가 표시되지 않았다",
+                "{}: the agent-taking argument {arg} is not marked",
                 decl.name
             );
         }
@@ -5699,13 +5508,12 @@ fn the_registration_carries_each_commands_agent_reference_args() {
     for name in want.keys() {
         assert!(
             decls.iter().any(|decl| decl.name == *name),
-            "{name} 가 표에 없다"
+            "{name} is not in the table"
         );
     }
 }
 
-/// 표시한 칸에 UUID 가 아닌 것(데몬을 거치지 않아 이름이 그대로 온 호출)은 셸이 풀지 않고 INVALID_ARGUMENT 로 반려한다 —
-/// 아무것도 안 바뀐다.
+/// A non-UUID in a marked field (a call that bypassed the daemon, so the name arrived as is) is not resolved by the shell and gets INVALID_ARGUMENT — nothing changes.
 #[tokio::test]
 async fn a_name_in_an_agent_reference_arg_is_an_invalid_argument_here() {
     let (world, queue, receiver) = queued();
@@ -5714,13 +5522,13 @@ async fn a_name_in_an_agent_reference_arg_is_an_invalid_argument_here() {
     world.add_tab(MAIN_WINDOW_LABEL, a);
     let version = world.version();
 
-    // (명령, 표시한 칸 말고 앞 검문을 지나게 하는 인자)
+    // (command, an argument that makes it pass the earlier screening other than the marked field)
     let others = |name: &str, arg: &str| match (name, arg) {
         ("tab.move", "tab_of") => json!({ "index": 0 }),
         ("tab.move", "after_tab_of") => json!({ "tab": tab }),
         ("tab.dock", "tab_of") => json!({ "beside_at": "top-left", "side": "Left" }),
         ("tab.dock", "beside") => json!({ "tab": tab, "side": "Left" }),
-        ("tab.rename", _) => json!({ "name": "작업" }),
+        ("tab.rename", _) => json!({ "name": "work" }),
         ("slot.split", _) => json!({ "dir": "LeftRight" }),
         ("slot.assignAgent", "slot_of") => json!({ "assign": BETA }),
         ("slot.assignAgent", _) => json!({ "slot_id": slot }),
@@ -5749,7 +5557,7 @@ async fn a_name_in_an_agent_reference_arg_is_an_invalid_argument_here() {
         }
     }
     assert_eq!(checked, 19);
-    assert_eq!(world.version(), version, "아무것도 안 바뀐다");
+    assert_eq!(world.version(), version, "nothing changes");
 }
 
 // ── tab.move ──
@@ -5773,21 +5581,24 @@ async fn tab_move_by_agent_carries_its_tab_into_another_window_keeping_what_is_s
 
     assert_eq!(world.tab_ids(&pop), [p0, a, p1]);
     assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [b]);
-    assert_eq!(world.tabs(&pop).active, p0, "목적 창의 보이는 탭은 그대로");
+    assert_eq!(
+        world.tabs(&pop).active,
+        p0,
+        "the destination window's visible tab stays"
+    );
     assert_eq!(
         world.main_tabs().active,
         b,
-        "보이던 탭이 떠난 창은 이웃 탭을 보인다"
+        "a window whose visible tab left shows the neighbouring tab"
     );
     assert_eq!(answer["changed"], true);
     assert_eq!(answer["window"], json!(pop));
     assert_eq!(answer["window_id"], json!(world.tabs(&pop).window_id));
     assert_eq!(answer["number"], 2);
     assert_eq!(answer["tab"], json!(a.to_string()));
-    assert_eq!(answer["tab_index"], 1, "놓인 탭 줄 자리");
+    assert_eq!(answer["tab_index"], 1, "the placed tab's row position");
     let layout = rows(&answer, "layout");
     assert_no_ids(&layout);
-    // 바뀐 탭 = 옮긴 탭 + 원본 창에서 새로 보이게 된 탭 — 창 번호 순.
     assert_eq!(
         layout
             .iter()
@@ -5804,7 +5615,10 @@ async fn tab_move_by_agent_carries_its_tab_into_another_window_keeping_what_is_s
     );
     assert_eq!(layout[1]["agent"], "alpha");
     assert_eq!(layout[1]["content"], "Agent");
-    assert!(layout[0].get("agent").is_none(), "빈 칸은 agent 칸이 없다");
+    assert!(
+        layout[0].get("agent").is_none(),
+        "an empty area has no agent field"
+    );
 }
 
 #[tokio::test]
@@ -5823,7 +5637,7 @@ async fn tab_move_by_tab_id_reorders_its_own_window() {
     .await;
 
     assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [c, a, b]);
-    assert_eq!(world.main_tabs().active, a, "보이는 탭은 그대로");
+    assert_eq!(world.main_tabs().active, a, "the visible tab stays");
     assert_eq!(answer["changed"], true);
     assert_eq!(answer["window"], MAIN_WINDOW_LABEL);
     assert_eq!(answer["window_id"], MAIN_WINDOW_LABEL);
@@ -5838,12 +5652,11 @@ async fn tab_move_by_tab_id_reorders_its_own_window() {
         json!({ "tab": c.to_string(), "index": 0 }),
     )
     .await;
-    assert_eq!(again["changed"], false, "같은 자리");
+    assert_eq!(again["changed"], false, "the same place");
     assert_eq!(world.version(), version);
-    assert_eq!(rows(&again, "layout").len(), 1, "그 탭 하나의 줄");
+    assert_eq!(rows(&again, "layout").len(), 1, "that single tab's row");
 }
 
-/// 옮길 탭 · 뒤에 넣을 탭을 둘 다 에이전트로 고른다.
 #[tokio::test]
 async fn tab_move_after_another_agents_tab_goes_right_after_it() {
     let (world, queue, receiver) = queued();
@@ -5868,9 +5681,7 @@ async fn tab_move_after_another_agents_tab_goes_right_after_it() {
     assert_eq!(answer["tab"], json!(a.to_string()));
 }
 
-/// 에이전트가 앞서 있던 탭을 떠나 다른 탭으로 옮겨 간 뒤의 `tab_of` 는 **지금 든 탭**을 옮기고 떠난 탭은 건드리지 않는다 —
-/// 대상은 부를 때의 배치에서 찾는다. (데몬 변환과 셸 적용 사이의 끼어들기 자체는 셸 명령으로 재현할 수 없어
-/// `layout_apply.rs` 가 적용 잠금 안 풀기로 잰다 — TRD S28 §5-2.)
+/// After an agent leaves its tab for another, `tab_of` moves the tab that holds it now, not the one it left (target found at call time). The daemon-conversion/shell-application interleaving cannot be reproduced here; `layout_apply.rs` measures it by resolving inside the apply lock (TRD S28 §5-2).
 #[tokio::test]
 async fn tab_move_by_agent_moves_the_tab_it_is_in_now_not_the_one_it_left() {
     let (world, queue, receiver) = queued();
@@ -5883,8 +5694,8 @@ async fn tab_move_by_agent_moves_the_tab_it_is_in_now_not_the_one_it_left() {
     let (pop, p0) = world.popout();
 
     apply::set_slot_content(&world.state, &Subs, &Events, a, a_slot, SlotContent::Empty)
-        .expect("떠남");
-    apply::assign_agent(&world.state, &Subs, &Events, b, b_slot, alpha.to_string()).expect("옮김");
+        .expect("left");
+    apply::assign_agent(&world.state, &Subs, &Events, b, b_slot, alpha.to_string()).expect("moved");
 
     ok_of(
         &receiver,
@@ -5897,9 +5708,13 @@ async fn tab_move_by_agent_moves_the_tab_it_is_in_now_not_the_one_it_left() {
     assert_eq!(
         world.tab_ids(&pop),
         [p0, b],
-        "지금 그 에이전트가 든 탭이 간다"
+        "the tab that agent holds now is the one that goes"
     );
-    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a], "떠난 탭은 그대로");
+    assert_eq!(
+        world.tab_ids(MAIN_WINDOW_LABEL),
+        [a],
+        "the tab it left stays"
+    );
 }
 
 #[tokio::test]
@@ -5929,10 +5744,9 @@ async fn tab_move_refuses_argument_combinations_before_applying() {
         let error = refused(&receiver, &queue, "tab.move", args.clone()).await;
         assert_eq!(error.code(), ErrorCode::InvalidArgument, "{args}");
     }
-    assert_eq!(world.version(), version, "아무것도 안 바뀐다");
+    assert_eq!(world.version(), version, "nothing changes");
 }
 
-/// `tab.dock` 의 `window` 와 헷갈린 호출이 말없이 제자리 순서 바꾸기가 되지 않는다 — 받아서 갈 곳 인자를 알린다.
 #[tokio::test]
 async fn tab_move_refuses_a_window_argument_and_names_to_window() {
     let (world, queue, receiver) = queued();
@@ -5959,7 +5773,6 @@ async fn tab_move_refuses_a_window_argument_and_names_to_window() {
     assert_eq!(world.version(), version);
 }
 
-/// id 칸에 UUID 가 아닌 것(대개 에이전트 이름)을 넣으면 반려 문구가 이름 · 낱말로 고르는 짝 인자를 댄다.
 #[tokio::test]
 async fn a_non_uuid_in_an_id_argument_names_the_argument_that_takes_a_name() {
     let (world, queue, receiver) = queued();
@@ -6058,8 +5871,7 @@ async fn tab_move_after_an_agent_inside_the_moving_tab_is_an_invalid_argument() 
     );
 }
 
-/// 데몬이 아는 이름이 어느 칸에도 없으면 `NOT_FOUND` + 지금 칸에 떠 있는 이름 · 여러 탭에 떠 있으면 `CONFLICT` + 그
-/// 칸들의 id — 다음 호출 한 번에 고칠 단서다(규칙 §1-3).
+/// A name the daemon knows but no area shows: `NOT_FOUND` + the names now shown; shown in several tabs: `CONFLICT` + those areas' ids (a clue for the next call, rule §1-3).
 #[tokio::test]
 async fn tab_move_names_an_agent_not_shown_or_shown_in_two_tabs_with_candidates() {
     let (world, queue, receiver) = queued();
@@ -6117,12 +5929,11 @@ async fn tab_move_names_an_agent_not_shown_or_shown_in_two_tabs_with_candidates(
     }
     assert!(
         !error.message().contains("slot_id="),
-        "탭 줄은 탭 단위 후보"
+        "a tab row is a per-tab candidate"
     );
     assert_eq!(world.version(), version);
 }
 
-/// 탭 단위 모호 후보는 탭마다 한 줄이다(한 탭의 두 칸 = 한 줄) · `after_tab_of` 의 모호는 `after_tab` 으로 고치라고 한다.
 #[tokio::test]
 async fn tab_level_ambiguity_lists_each_tab_once_and_names_the_id_argument_of_its_row() {
     let (world, queue, receiver) = queued();
@@ -6130,7 +5941,7 @@ async fn tab_level_ambiguity_lists_each_tab_once_and_names_the_id_argument_of_it
     let a = world.main_tabs().active;
     let first = world.empty_slot(a);
     let second = apply::split_slot(&world.state, &Subs, &Events, a, first, SplitDir::LeftRight)
-        .expect("분할");
+        .expect("split");
     world.show(a, first, alpha, "alpha");
     world.show(a, second, alpha, "alpha");
     let b = world.add_tab(MAIN_WINDOW_LABEL, a);
@@ -6184,7 +5995,6 @@ async fn tab_move_of_a_tab_id_that_does_not_exist_is_not_found() {
 
 // ── tab.dock ──
 
-/// 붙인 탭은 없어지고 답의 `tab` 은 살아남은 목적 탭이다 · 배치 줄이 좌우와 몫을 드러낸다 · 보이는 탭 · 포커스는 그대로.
 #[tokio::test]
 async fn tab_dock_by_agents_attaches_beside_the_agents_slot_and_answers_the_surviving_tab() {
     let (world, queue, receiver) = queued();
@@ -6202,11 +6012,19 @@ async fn tab_dock_by_agents_attaches_beside_the_agents_slot_and_answers_the_surv
     )
     .await;
 
-    assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a], "붙인 탭은 없어진다");
+    assert_eq!(
+        world.tab_ids(MAIN_WINDOW_LABEL),
+        [a],
+        "the attached tab disappears"
+    );
     assert_eq!(world.main_tabs().active, a);
-    assert_eq!(world.focused(a), Some(beta_slot), "포커스는 그대로");
+    assert_eq!(world.focused(a), Some(beta_slot), "focus stays");
     assert_eq!(answer["changed"], true);
-    assert_eq!(answer["tab"], json!(a.to_string()), "살아남은 목적 탭");
+    assert_eq!(
+        answer["tab"],
+        json!(a.to_string()),
+        "the surviving destination tab"
+    );
     assert_eq!(answer["tab_index"], 0);
     assert_eq!(answer["window"], MAIN_WINDOW_LABEL);
     let layout = rows(&answer, "layout");
@@ -6235,7 +6053,7 @@ async fn tab_dock_by_a_spatial_word_reads_it_in_the_named_windows_shown_tab() {
     let b = world.add_tab(MAIN_WINDOW_LABEL, a);
     let (pop, p0) = world.popout();
     let left = world.empty_slot(p0);
-    apply::split_slot(&world.state, &Subs, &Events, p0, left, SplitDir::LeftRight).expect("분할");
+    apply::split_slot(&world.state, &Subs, &Events, p0, left, SplitDir::LeftRight).expect("split");
 
     let answer = ok_of(
         &receiver,
@@ -6251,7 +6069,10 @@ async fn tab_dock_by_a_spatial_word_reads_it_in_the_named_windows_shown_tab() {
     let layout = rows(&answer, "layout");
     assert_eq!(layout.len(), 3);
     let right_column = layout.iter().filter(|row| row["x"] == json!(0.5)).count();
-    assert_eq!(right_column, 2, "오른쪽 칸이 위아래로 나뉜다: {layout:?}");
+    assert_eq!(
+        right_column, 2,
+        "the right area is split top-bottom: {layout:?}"
+    );
 }
 
 #[tokio::test]
@@ -6259,7 +6080,7 @@ async fn tab_dock_on_a_whole_tab_puts_the_tab_along_its_outer_edge() {
     let (world, queue, receiver) = queued();
     let a = world.main_tabs().active;
     let a_slot = world.empty_slot(a);
-    apply::split_slot(&world.state, &Subs, &Events, a, a_slot, SplitDir::LeftRight).expect("분할");
+    apply::split_slot(&world.state, &Subs, &Events, a, a_slot, SplitDir::LeftRight).expect("split");
     let b = world.add_tab(MAIN_WINDOW_LABEL, a);
 
     let answer = ok_of(
@@ -6285,11 +6106,10 @@ async fn tab_dock_on_a_whole_tab_puts_the_tab_along_its_outer_edge() {
             layout[0]["h"].clone()
         ),
         (json!(0.0), json!(1.0), json!(0.5)),
-        "붙인 탭이 위 절반 전체"
+        "the attached tab is the whole top half"
     );
 }
 
-/// 그 에이전트가 한 탭의 두 칸에 떠 있으면 칸 옆은 모호하다(후보 = 그 칸들) — 탭 전체에 붙이면 기준이 탭이라 모호하지 않다.
 #[tokio::test]
 async fn tab_dock_beside_an_agent_in_two_slots_is_ambiguous_unless_it_takes_the_whole_tab() {
     let (world, queue, receiver) = queued();
@@ -6297,7 +6117,7 @@ async fn tab_dock_beside_an_agent_in_two_slots_is_ambiguous_unless_it_takes_the_
     let a = world.main_tabs().active;
     let first = world.empty_slot(a);
     let second = apply::split_slot(&world.state, &Subs, &Events, a, first, SplitDir::LeftRight)
-        .expect("분할");
+        .expect("split");
     world.show(a, first, alpha, "alpha");
     world.show(a, second, alpha, "alpha");
     let b = world.add_tab(MAIN_WINDOW_LABEL, a);
@@ -6348,7 +6168,7 @@ async fn tab_dock_maps_each_refusal_to_its_code() {
         "both are in one tab; tab.dock moves whole tabs — slot.popout that slot first, then tab.dock";
     const CORNERS: &str =
         "try a corner word (top-left, top-right, bottom-left, bottom-right) or beside";
-    // (인자, 코드, 문구 머리, 문구에 들 것)
+    // (argument, code, text head, what the text must contain)
     let (alpha_head, beta_head) = (
         format!("beside 'alpha' ({ALPHA}): "),
         format!("beside '{BETA}': "),
@@ -6430,7 +6250,7 @@ async fn tab_detach_opens_a_new_window_without_changing_what_is_shown() {
 
     let answer = ok_of(&receiver, &queue, "tab.detach", json!({ "tab_of": ALPHA })).await;
 
-    let window = answer["window"].as_str().expect("새 창").to_string();
+    let window = answer["window"].as_str().expect("new window").to_string();
     assert_ne!(window, MAIN_WINDOW_LABEL);
     assert_eq!(
         world.windows.opened.lock().unwrap().as_slice(),
@@ -6443,7 +6263,7 @@ async fn tab_detach_opens_a_new_window_without_changing_what_is_shown() {
     assert_eq!(answer["tab_index"], 0);
     assert_eq!(world.tab_ids(&window), [b]);
     assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a]);
-    assert_eq!(world.main_tabs().active, a, "보이는 탭은 그대로");
+    assert_eq!(world.main_tabs().active, a, "the visible tab stays");
     assert_eq!(
         world.windows.placed.lock().unwrap().as_slice(),
         [(
@@ -6454,7 +6274,7 @@ async fn tab_detach_opens_a_new_window_without_changing_what_is_shown() {
             },
             false
         )],
-        "기본 자리 · 포커스를 가져가지 않는다"
+        "default place · does not take focus"
     );
     let layout = rows(&answer, "layout");
     assert_eq!(layout.len(), 1);
@@ -6462,8 +6282,7 @@ async fn tab_detach_opens_a_new_window_without_changing_what_is_shown() {
     assert_eq!(layout[0]["agent"], "alpha");
 }
 
-/// 새 창을 여는 사이(두 락 사이) 그 에이전트가 다른 탭으로 옮겨지면 연 창을 거두고 `CONFLICT` — 아무것도 안 옮긴다
-/// (TRD S28 §4-3).
+/// If the agent moves to another tab while the new window opens (between two locks), the opened window is reaped and the result is `CONFLICT` — nothing moved (TRD S28 §4-3).
 #[tokio::test]
 async fn tab_detach_whose_agent_moves_while_the_window_opens_withdraws_it_as_a_conflict() {
     let (world, queue, receiver) = queued();
@@ -6477,8 +6296,8 @@ async fn tab_detach_whose_agent_moves_while_the_window_opens_withdraws_it_as_a_c
     let state = world.state.clone();
     *world.windows.on_open.lock().unwrap() = Some(Box::new(move || {
         apply::set_slot_content(&state, &Subs, &Events, b, b_slot, SlotContent::Empty)
-            .expect("떠남");
-        apply::assign_agent(&state, &Subs, &Events, c, c_slot, alpha.to_string()).expect("옮김");
+            .expect("left");
+        apply::assign_agent(&state, &Subs, &Events, c, c_slot, alpha.to_string()).expect("moved");
     }));
 
     let error = refused(&receiver, &queue, "tab.detach", json!({ "tab_of": ALPHA })).await;
@@ -6486,16 +6305,16 @@ async fn tab_detach_whose_agent_moves_while_the_window_opens_withdraws_it_as_a_c
     assert_eq!(error.code(), ErrorCode::Conflict);
     assert!(error.message().contains("(Moved)"), "{}", error.message());
     let opened = world.windows.opened.lock().unwrap().clone();
-    assert_eq!(opened.len(), 1, "창은 열었다");
+    assert_eq!(opened.len(), 1, "the window was opened");
     assert_eq!(
         world.windows.closed.lock().unwrap().as_slice(),
         opened.as_slice(),
-        "연 창을 거뒀다"
+        "the opened window was reaped"
     );
     assert_eq!(
         world.tab_ids(MAIN_WINDOW_LABEL),
         [a, b, c],
-        "아무것도 안 옮겼다"
+        "nothing was moved"
     );
     assert_eq!(
         apply::list_windows(&world.state).unwrap(),
@@ -6519,7 +6338,7 @@ async fn tab_detach_of_a_lone_popout_tab_changes_nothing() {
     assert_eq!(
         world.windows.opened.lock().unwrap().len(),
         opened,
-        "새 창 없음"
+        "no new window"
     );
     assert_eq!(world.version(), version);
 }
@@ -6541,9 +6360,9 @@ async fn layout_get_lists_every_slot_in_window_tab_tree_order_without_ids() {
     let (world, queue, receiver) = queued();
     let a = world.main_tabs().active;
     let left = world.empty_slot(a);
-    apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight).expect("분할");
+    apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight).expect("split");
     world.show(a, left, agent_id(ALPHA), "alpha");
-    apply::focus_slot(&world.state, &Events, a, left).expect("포커스");
+    apply::focus_slot(&world.state, &Events, a, left).expect("focus");
     let (pop, _p0) = world.popout();
 
     let answer = ok_of(&receiver, &queue, "layout.get", json!({})).await;
@@ -6580,7 +6399,7 @@ async fn layout_get_with_ids_adds_the_four_ids() {
     let a = world.main_tabs().active;
     let left = world.empty_slot(a);
     let right = apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight)
-        .expect("분할");
+        .expect("split");
     world.show(a, left, alpha, "alpha");
 
     let answer = ok_of(&receiver, &queue, "layout.get", json!({ "ids": true })).await;
@@ -6593,7 +6412,7 @@ async fn layout_get_with_ids_adds_the_four_ids() {
     assert_eq!(rows[1]["slot_id"], json!(right.to_string()));
     assert!(
         rows[1].get("agent_id").is_none(),
-        "빈 칸은 에이전트 id 가 없다"
+        "an empty area has no agent id"
     );
 }
 
@@ -6602,7 +6421,7 @@ async fn layout_get_filters_by_window_and_by_agent() {
     let (world, queue, receiver) = queued();
     let a = world.main_tabs().active;
     let left = world.empty_slot(a);
-    apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight).expect("분할");
+    apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight).expect("split");
     world.show(a, left, agent_id(ALPHA), "alpha");
     let (pop, _p0) = world.popout();
     let pop_id = world.tabs(&pop).window_id;
@@ -6622,11 +6441,10 @@ async fn layout_get_filters_by_window_and_by_agent() {
     let answer = ok_of(&receiver, &queue, "layout.get", json!({ "agent": BETA })).await;
     assert!(
         rows(&answer, "rows").is_empty(),
-        "칸에 없는 에이전트 = 빈 목록"
+        "an agent in no area = an empty list"
     );
 }
 
-/// 답의 창 · 탭 · 배치 줄은 결말을 지은 그 락의 한 모습이다 — 락을 놓은 뒤(알림 사이) 끼어든 쓰기가 답에 섞이지 않는다.
 #[tokio::test]
 async fn a_dock_reply_is_the_snapshot_of_the_lock_that_committed_it() {
     let (world, queue, receiver) = queued();
@@ -6637,7 +6455,7 @@ async fn a_dock_reply_is_the_snapshot_of_the_lock_that_committed_it() {
     let state = world.state.clone();
     *world.events.hook.lock().unwrap() = Some(Box::new(move || {
         apply::split_slot(&state, &Subs, &Events, b, b_slot, SplitDir::LeftRight)
-            .expect("끼어든 분할");
+            .expect("interleaved split");
     }));
 
     let answer = ok_of(
@@ -6648,26 +6466,33 @@ async fn a_dock_reply_is_the_snapshot_of_the_lock_that_committed_it() {
     )
     .await;
 
-    assert_eq!(world.slots(b).len(), 2, "끼어든 쓰기는 모델에 들었다");
+    assert_eq!(
+        world.slots(b).len(),
+        2,
+        "the interleaved write entered the model"
+    );
     let moved: Vec<_> = rows(&answer, "layout")
         .into_iter()
         .filter(|row| row["window"] == json!(pop))
         .collect();
-    assert_eq!(moved.len(), 1, "답은 옮긴 그 순간의 칸 하나다: {moved:?}");
+    assert_eq!(
+        moved.len(),
+        1,
+        "the answer is the single area at the moment of the move: {moved:?}"
+    );
     assert_eq!(moved[0]["w"], json!(1.0));
 }
 
-// ── (S28) 넓힌 칸 · 탭 동사 — 에이전트 · 공간 낱말로 고르고 바꾼 탭의 배치를 답한다(TRD S28 §7) ─────────────────────
+// ── (S28) Widened area · tab verbs — choose by agent · spatial word, answer the changed tab's layout (TRD S28 §7) ────────────────────
 
 impl World {
-    /// 셸 이름 장부에 표시 이름만 적는다(칸에는 놓지 않는다).
     fn name(&self, agent: uuid::Uuid, name: &str) {
         apply::agent_names_updated(
             &self.state,
             &Events,
             &[(agent.to_string(), name.to_string())],
         )
-        .expect("이름 장부");
+        .expect("name ledger");
     }
 
     fn content(&self, view: uuid::Uuid, slot: uuid::Uuid) -> Option<SlotContent> {
@@ -6679,7 +6504,6 @@ impl World {
     }
 }
 
-/// 칸 동사 전부 — (이름, 칸 줄 밖의 인자). 칸 줄(`slot_id` · `slot_of` · `at` · `view_id` · `window`)은 시험이 더한다.
 fn slot_verbs() -> Vec<(&'static str, serde_json::Value)> {
     vec![
         ("slot.focus", json!({})),
@@ -6691,16 +6515,14 @@ fn slot_verbs() -> Vec<(&'static str, serde_json::Value)> {
     ]
 }
 
-/// `base` 에 `extra` 의 칸을 더한 인자.
 fn with(base: &serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
     let mut args = base.clone();
     args.as_object_mut()
-        .expect("객체")
-        .extend(extra.as_object().expect("객체").clone());
+        .expect("object")
+        .extend(extra.as_object().expect("object").clone());
     args
 }
 
-// 줄들의 (창, 에이전트 표시 이름) — 칸 순서 그대로.
 fn row_agents(layout: &[serde_json::Value]) -> Vec<(serde_json::Value, serde_json::Value)> {
     layout
         .iter()
@@ -6738,7 +6560,6 @@ async fn slot_verbs_take_exactly_one_way_to_name_the_slot_before_applying() {
             let error = refused(&receiver, &queue, name, args.clone()).await;
             assert_eq!(error.code(), ErrorCode::InvalidArgument, "{name} {args}");
         }
-        // id 칸에 이름을 넣으면 옛 반려 문구 뒤에 이름 · 낱말로 고르는 짝 인자를 댄다.
         let error = refused(
             &receiver,
             &queue,
@@ -6754,10 +6575,9 @@ async fn slot_verbs_take_exactly_one_way_to_name_the_slot_before_applying() {
             error.message()
         );
     }
-    assert_eq!(world.version(), version, "아무것도 안 바뀐다");
+    assert_eq!(world.version(), version, "nothing changes");
 }
 
-/// 칸 동사는 에이전트 · 공간 낱말로 칸을 고르고, 배치를 바꾸면 그 탭의 칸 줄을 답한다(id 없이 — 줄의 에이전트는 표시 이름).
 #[tokio::test]
 async fn slot_verbs_by_agent_or_spatial_word_change_that_slot_and_answer_its_tab() {
     let (world, queue, receiver) = queued();
@@ -6765,10 +6585,14 @@ async fn slot_verbs_by_agent_or_spatial_word_change_that_slot_and_answer_its_tab
     let a = world.main_tabs().active;
     let left = world.empty_slot(a);
     let right = apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight)
-        .expect("분할");
+        .expect("split");
     world.show(a, left, alpha, "alpha");
     world.name(beta, "beta");
-    assert_eq!(world.focused(a), Some(right), "분할은 새 칸에 포커스");
+    assert_eq!(
+        world.focused(a),
+        Some(right),
+        "a split focuses the new area"
+    );
 
     let answer = ok_of(&receiver, &queue, "slot.focus", json!({ "slot_of": ALPHA })).await;
     assert_eq!(world.focused(a), Some(left));
@@ -6780,7 +6604,7 @@ async fn slot_verbs_by_agent_or_spatial_word_change_that_slot_and_answer_its_tab
             .map(|row| row["focused"].clone())
             .collect::<Vec<_>>(),
         [json!(true), json!(false)],
-        "그 탭의 줄 — 포커스 칸이 바뀐 모습"
+        "that tab's rows — the picture with the focus area changed"
     );
 
     let answer = ok_of(
@@ -6814,7 +6638,7 @@ async fn slot_verbs_by_agent_or_spatial_word_change_that_slot_and_answer_its_tab
         json!({ "slot_of": BETA, "dir": "TopBottom" }),
     )
     .await;
-    let below = uuid::Uuid::parse_str(answer["slot_id"].as_str().expect("새 칸")).expect("UUID");
+    let below = uuid::Uuid::parse_str(answer["slot_id"].as_str().expect("new area")).expect("UUID");
     assert_eq!(
         world.slots(a).into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([left, right, below])
@@ -6824,7 +6648,7 @@ async fn slot_verbs_by_agent_or_spatial_word_change_that_slot_and_answer_its_tab
     assert_eq!(
         (layout[2]["x"].clone(), layout[2]["y"].clone()),
         (json!(0.5), json!(0.5)),
-        "새 칸은 오른쪽 아래"
+        "the new area is bottom-right"
     );
 
     let answer = ok_of(
@@ -6857,7 +6681,7 @@ async fn slot_verbs_by_agent_or_spatial_word_change_that_slot_and_answer_its_tab
         json!({ "slot_of": ALPHA }),
     )
     .await;
-    let window = answer["window"].as_str().expect("새 창").to_string();
+    let window = answer["window"].as_str().expect("new window").to_string();
     assert_ne!(window, MAIN_WINDOW_LABEL);
     assert_eq!(world.slots(a), [right]);
     let layout = rows(&answer, "layout");
@@ -6868,12 +6692,11 @@ async fn slot_verbs_by_agent_or_spatial_word_change_that_slot_and_answer_its_tab
             (json!(MAIN_WINDOW_LABEL), json!("beta")),
             (json!(window), json!("alpha"))
         ],
-        "원본 탭 + 새 탭의 줄(창 번호 순)"
+        "rows of the original tab + the new tab (window number order)"
     );
 }
 
-/// 에이전트가 앞서 있던 칸을 떠나 다른 칸으로 옮겨 간 뒤의 `slot_of` 는 **지금 든 칸**에 쓰고 떠난 칸은 건드리지 않는다
-/// (끼어들기 자체는 `layout_apply.rs` 몫 — `tab_move_by_agent_moves_the_tab_it_is_in_now_not_the_one_it_left` 와 같다).
+/// After an agent leaves its area for another, `slot_of` writes to the area that holds it now (the interleaving is `layout_apply.rs`'s part — as in `tab_move_by_agent_moves_the_tab_it_is_in_now_not_the_one_it_left`).
 #[tokio::test]
 async fn slot_of_writes_to_the_slot_the_agent_is_in_now_not_the_one_it_left() {
     let (world, queue, receiver) = queued();
@@ -6881,11 +6704,11 @@ async fn slot_of_writes_to_the_slot_the_agent_is_in_now_not_the_one_it_left() {
     let a = world.main_tabs().active;
     let left = world.empty_slot(a);
     let right = apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight)
-        .expect("분할");
+        .expect("split");
     world.show(a, left, alpha, "alpha");
     apply::set_slot_content(&world.state, &Subs, &Events, a, left, SlotContent::Empty)
-        .expect("떠남");
-    apply::assign_agent(&world.state, &Subs, &Events, a, right, alpha.to_string()).expect("옮김");
+        .expect("left");
+    apply::assign_agent(&world.state, &Subs, &Events, a, right, alpha.to_string()).expect("moved");
 
     ok_of(
         &receiver,
@@ -6899,11 +6722,10 @@ async fn slot_of_writes_to_the_slot_the_agent_is_in_now_not_the_one_it_left() {
     assert_eq!(
         world.content(a, left),
         Some(SlotContent::Empty),
-        "떠난 칸은 그대로"
+        "the area it left stays"
     );
 }
 
-/// 넓히기 전 꼴(id 로 준 탭 · 칸)의 거절은 그 id 판이 같은 입력에 내던 답 그대로다 — `CONFLICT` + 관리자 문구.
 #[tokio::test]
 async fn old_id_calls_refuse_exactly_as_the_id_service_did() {
     let (world, queue, receiver) = queued();
@@ -6918,7 +6740,7 @@ async fn old_id_calls_refuse_exactly_as_the_id_service_did() {
         Arc::clone(&world.windows),
         Arc::clone(&world.labels),
     );
-    let old = |result: Result<(), String>| result.expect_err("옛 id 판도 거절한다");
+    let old = |result: Result<(), String>| result.expect_err("the old id edition refuses too");
     let id = |id: uuid::Uuid| id.to_string();
     let cases = [
         (
@@ -7021,12 +6843,12 @@ async fn old_id_calls_refuse_exactly_as_the_id_service_did() {
         ),
         (
             "tab.rename",
-            json!({ "view_id": id(ghost), "name": "작업" }),
+            json!({ "view_id": id(ghost), "name": "work" }),
             old(apply::rename_tab(
                 &state,
                 &Events,
                 ghost,
-                "작업".to_string(),
+                "work".to_string(),
             )),
         ),
     ];
@@ -7037,14 +6859,14 @@ async fn old_id_calls_refuse_exactly_as_the_id_service_did() {
         assert_eq!(error.code(), ErrorCode::Conflict, "{name} {args}");
         assert_eq!(error.message(), want, "{name} {args}");
     }
-    assert_eq!(world.version(), version, "아무것도 안 바뀐다");
+    assert_eq!(world.version(), version, "nothing changes");
     assert!(
         world.windows.opened.lock().unwrap().len() <= 1,
-        "팝아웃 하나 말고는 창을 안 연다"
+        "no window is opened other than one pop-out"
     );
 }
 
-/// 넓히기 전 꼴의 성공도 그대로다 — 답에 그 탭의 줄이 더해진다(넣을 id 의 명부 확인은 데몬이 중계 전에 한다 — ADR-0308).
+/// A pre-widening call still succeeds and gains that tab's rows (the daemon checks the id against the roster before relaying — ADR-0308).
 #[tokio::test]
 async fn old_id_calls_still_apply_and_gain_the_layout_field() {
     let (world, queue, receiver) = queued();
@@ -7082,12 +6904,15 @@ async fn old_id_calls_still_apply_and_gain_the_layout_field() {
     .await;
     assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL), [a]);
     let layout = rows(&answer, "layout");
-    assert_eq!(layout.len(), 1, "그 창에 이제 보이는 탭의 줄");
+    assert_eq!(
+        layout.len(),
+        1,
+        "the row of the tab now visible in that window"
+    );
     assert_eq!(layout[0]["tab_active"], true);
 }
 
-/// `slot_of` 가 여러 칸에 떠 있으면 CONFLICT + 그 칸들의 `slot_id`(그 값으로 다시 부른다) · 어느 칸에도 없으면 NOT_FOUND + 떠
-/// 있는 이름 · 낱말이 칸을 못 집으면 NOT_FOUND + 모서리 낱말 · `slot_of` 안내.
+/// `slot_of` shown in several areas: CONFLICT + those `slot_id`s; in none: NOT_FOUND + the shown names; a word picking no area: NOT_FOUND + the corner words · `slot_of` guidance.
 #[tokio::test]
 async fn slot_verbs_name_ambiguous_or_missing_agents_and_unpickable_words_with_candidates() {
     let (world, queue, receiver) = queued();
@@ -7095,7 +6920,7 @@ async fn slot_verbs_name_ambiguous_or_missing_agents_and_unpickable_words_with_c
     let a = world.main_tabs().active;
     let left = world.empty_slot(a);
     let right = apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight)
-        .expect("분할");
+        .expect("split");
     world.show(a, left, alpha, "alpha");
     world.show(a, right, alpha, "alpha");
     let version = world.version();
@@ -7132,7 +6957,7 @@ async fn slot_verbs_name_ambiguous_or_missing_agents_and_unpickable_words_with_c
     assert_eq!(
         world.focused(a),
         Some(left),
-        "후보의 slot_id 로 다시 부르면 된다"
+        "calling again with the candidate's slot_id works"
     );
 
     let error = refused(&receiver, &queue, "slot.close", json!({ "slot_of": BETA })).await;
@@ -7163,12 +6988,11 @@ async fn slot_verbs_name_ambiguous_or_missing_agents_and_unpickable_words_with_c
     assert_eq!(
         world.slots(a).into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([left, right]),
-        "아무것도 안 바뀐다"
+        "nothing changes"
     );
 }
 
-/// 넣을 에이전트 칸 검문 — `assign` · `agent_id` 는 하나만 · Agent 가 아닌 내용에는 못 준다 · 둘 다 에이전트 id 다(이름은 데몬이
-/// 중계 전에 id 로 바꾸고, 명부에 없으면 데몬이 거절해 칸이 그대로다 — ADR-0308 · TRD S28 §11-3).
+/// Screening of the agent field to put in: only one of `assign` · `agent_id`, not for non-Agent content, both agent ids (the daemon turns names into ids before relaying; off-roster it refuses and the area stays — ADR-0308 · TRD S28 §11-3).
 #[tokio::test]
 async fn the_agent_to_put_in_a_slot_is_one_agent_id_and_only_for_agent_content() {
     let (world, queue, receiver) = queued();
@@ -7213,7 +7037,7 @@ async fn the_agent_to_put_in_a_slot_is_one_agent_id_and_only_for_agent_content()
             error.message()
         );
     }
-    assert_eq!(world.version(), version, "칸은 그대로");
+    assert_eq!(world.version(), version, "the area stays");
 
     ok_of(
         &receiver,
@@ -7227,12 +7051,11 @@ async fn the_agent_to_put_in_a_slot_is_one_agent_id_and_only_for_agent_content()
         Some(SlotContent::Agent {
             agent_id: beta.to_string()
         }),
-        "받은 id 그대로 들어간다"
+        "goes in with the received id as is"
     );
 }
 
-/// 탭 동사는 `tab_of` 로 탭을 고르고 창은 그 탭에서 안다 · `window` 를 주면 그 창의 탭이어야 한다 · `tab.close` 는 그 창에 이제
-/// 보이는 탭의 줄을 답한다(창째 닫혔으면 빈 목록).
+/// A tab verb chooses a tab by `tab_of` and the window follows from that tab; a given `window` must be that tab's; `tab.close` answers the row now visible in that window (empty if the window closed with it).
 #[tokio::test]
 async fn tab_verbs_pick_their_tab_by_agent_and_take_the_window_from_it() {
     let (world, queue, receiver) = queued();
@@ -7249,16 +7072,16 @@ async fn tab_verbs_pick_their_tab_by_agent_and_take_the_window_from_it() {
         json!({})
     );
     assert_eq!(world.tabs(&pop).active, p1);
-    assert_eq!(world.main_tabs().active, a, "다른 창은 그대로");
+    assert_eq!(world.main_tabs().active, a, "the other window stays");
 
     ok_of(
         &receiver,
         &queue,
         "tab.rename",
-        json!({ "tab_of": ALPHA, "name": " 작업 " }),
+        json!({ "tab_of": ALPHA, "name": " work " }),
     )
     .await;
-    assert_eq!(world.main_tabs().tabs[0].name, "작업");
+    assert_eq!(world.main_tabs().tabs[0].name, "work");
 
     ok_of(
         &receiver,
@@ -7267,7 +7090,7 @@ async fn tab_verbs_pick_their_tab_by_agent_and_take_the_window_from_it() {
         json!({ "view_id": b.to_string() }),
     )
     .await;
-    assert_eq!(world.main_tabs().active, b, "window 없이 id 로");
+    assert_eq!(world.main_tabs().active, b, "by id without window");
 
     let version = world.version();
     let error = refused(
@@ -7280,8 +7103,8 @@ async fn tab_verbs_pick_their_tab_by_agent_and_take_the_window_from_it() {
     assert_eq!(error.code(), ErrorCode::Conflict);
     assert_eq!(
         error.message(),
-        format!("view 없음: {p1}"),
-        "그 창의 탭이 아니다"
+        format!("view not found: {p1}"),
+        "not that window's tab"
     );
     assert_eq!(world.version(), version);
 
@@ -7302,7 +7125,10 @@ async fn tab_verbs_pick_their_tab_by_agent_and_take_the_window_from_it() {
         json!({ "view_id": p0.to_string() }),
     )
     .await;
-    assert!(rows(&answer, "layout").is_empty(), "창째 닫혔다");
+    assert!(
+        rows(&answer, "layout").is_empty(),
+        "the window closed with it"
+    );
     assert_eq!(world.windows.closed.lock().unwrap().as_slice(), [pop]);
 }
 
@@ -7319,7 +7145,7 @@ async fn tab_verbs_take_exactly_one_tab_and_name_ambiguous_or_missing_agents() {
     for (name, base) in [
         ("tab.switch", json!({})),
         ("tab.close", json!({})),
-        ("tab.rename", json!({ "name": "작업" })),
+        ("tab.rename", json!({ "name": "work" })),
     ] {
         for line in [
             json!({}),
@@ -7357,7 +7183,7 @@ async fn tab_verbs_take_exactly_one_tab_and_name_ambiguous_or_missing_agents() {
         &receiver,
         &queue,
         "tab.rename",
-        json!({ "tab_of": BETA, "name": "작업" }),
+        json!({ "tab_of": BETA, "name": "work" }),
     )
     .await;
     assert_eq!(error.code(), ErrorCode::NotFound);
@@ -7370,7 +7196,6 @@ async fn tab_verbs_take_exactly_one_tab_and_name_ambiguous_or_missing_agents() {
     assert_eq!(world.version(), version);
 }
 
-// 실 런타임 표 — 스폰 답을 시험 태스크가 넣는다(`a_composite_command_does_not_wait_on_its_caller` 와 같다).
 async fn spawn_reply(
     world: &mut World,
     receiver: &InboundReceiver,
@@ -7387,16 +7212,15 @@ async fn spawn_reply(
         let (_cwd, _backend, answer) =
             tokio::time::timeout(Duration::from_secs(5), world.spawn_requests.recv())
                 .await
-                .expect("스폰 요청이 온다")
-                .expect("스폰 요청이 온다");
-        answer.send(Ok(agent)).expect("스폰 답을 넣는다");
+                .expect("the spawn request comes")
+                .expect("the spawn request comes");
+        answer.send(Ok(agent)).expect("puts in the spawn answer");
     }
     world.mail.settle(1).await;
     world.mail.only()
 }
 
-/// `agent.spawnInto` 의 `at` — window 의 보이는 탭에서 그 낱말이 집는 빈 칸에 띄운다. 못 집거나 · 차 있거나 · 탭 · 칸 id 와 함께면
-/// 스폰 전에 거절한다. 답에 놓인 탭의 줄이 붙는다(id 판도 같다).
+/// `at` of `agent.spawnInto` brings the agent up in the empty area that word picks in the window's visible tab; unpickable · occupied · or combined with a tab · area id is rejected before the spawn. The placed tab's row is attached (id edition too).
 #[tokio::test]
 async fn spawn_into_at_places_the_new_agent_in_the_slot_the_word_picks() {
     let (mut world, ports) = World::build();
@@ -7408,8 +7232,8 @@ async fn spawn_into_at_places_the_new_agent_in_the_slot_the_word_picks() {
     let a = world.main_tabs().active;
     let left = world.empty_slot(a);
     let right = apply::split_slot(&world.state, &Subs, &Events, a, left, SplitDir::LeftRight)
-        .expect("분할");
-    apply::focus_slot(&world.state, &Events, a, left).expect("포커스");
+        .expect("split");
+    apply::focus_slot(&world.state, &Events, a, left).expect("focus");
     let base = json!({ "window": MAIN_WINDOW_LABEL, "cwd": "C:/work", "backend": "claude" });
 
     for (extra, code, says) in [
@@ -7447,7 +7271,7 @@ async fn spawn_into_at_places_the_new_agent_in_the_slot_the_word_picks() {
         left,
         SlotContent::AgentList,
     )
-    .expect("채움");
+    .expect("fill");
     let error = error_of(
         spawn_reply(
             &mut world,
@@ -7459,13 +7283,13 @@ async fn spawn_into_at_places_the_new_agent_in_the_slot_the_word_picks() {
     );
     assert_eq!(error.code(), ErrorCode::Conflict, "{}", error.message());
     assert!(
-        error.message().contains("스폰 안 함") && error.message().contains("slot.split 으로"),
+        error.message().contains("Not spawned") && error.message().contains("with slot.split"),
         "{}",
         error.message()
     );
     assert!(
         world.spawn_requests.try_recv().is_err(),
-        "어느 것도 스폰하지 않았다"
+        "none of them spawned"
     );
 
     let agent = uuid::Uuid::new_v4();
@@ -7477,7 +7301,7 @@ async fn spawn_into_at_places_the_new_agent_in_the_slot_the_word_picks() {
     )
     .await
     .outcome
-    .expect("배치 성공");
+    .expect("placement succeeds");
     assert_eq!(ok["agent_id"], json!(agent.to_string()));
     assert_eq!(
         world.content(a, right),
@@ -7495,7 +7319,6 @@ async fn spawn_into_at_places_the_new_agent_in_the_slot_the_word_picks() {
         [json!("AgentList"), json!("Agent")]
     );
 
-    // window 를 빼면 main — 칸 동사와 같다.
     let ok = spawn_reply(
         &mut world,
         &receiver,
@@ -7504,9 +7327,13 @@ async fn spawn_into_at_places_the_new_agent_in_the_slot_the_word_picks() {
     )
     .await
     .outcome
-    .expect("새 탭에 배치");
+    .expect("placed in a new tab");
     let layout = rows(&ok, "layout");
-    assert_eq!(layout.len(), 1, "id 판(새 탭)도 놓인 탭의 줄을 싣는다");
+    assert_eq!(
+        layout.len(),
+        1,
+        "the id edition (new tab) carries the placed tab's rows too"
+    );
     assert_eq!(
         (layout[0]["window"].clone(), layout[0]["tab_index"].clone()),
         (json!(MAIN_WINDOW_LABEL), json!(1))
@@ -7514,7 +7341,6 @@ async fn spawn_into_at_places_the_new_agent_in_the_slot_the_word_picks() {
     assert_eq!(world.tab_ids(MAIN_WINDOW_LABEL).len(), 2);
 }
 
-/// 칸 쓰기의 답 줄은 쓴 그 락의 한 모습이다 — 락을 놓은 뒤(알림 사이) 끼어든 쓰기가 답에 섞이지 않는다.
 #[tokio::test]
 async fn a_slot_write_reply_is_the_snapshot_of_the_lock_that_wrote_it() {
     let (world, queue, receiver) = queued();
@@ -7523,7 +7349,7 @@ async fn a_slot_write_reply_is_the_snapshot_of_the_lock_that_wrote_it() {
     let state = world.state.clone();
     *world.events.hook.lock().unwrap() = Some(Box::new(move || {
         apply::split_slot(&state, &Subs, &Events, a, first, SplitDir::TopBottom)
-            .expect("끼어든 분할");
+            .expect("interleaved split");
     }));
 
     let answer = ok_of(
@@ -7534,15 +7360,18 @@ async fn a_slot_write_reply_is_the_snapshot_of_the_lock_that_wrote_it() {
     )
     .await;
 
-    assert_eq!(world.slots(a).len(), 3, "끼어든 쓰기는 모델에 들었다");
+    assert_eq!(
+        world.slots(a).len(),
+        3,
+        "the interleaved write entered the model"
+    );
     assert_eq!(
         rows(&answer, "layout").len(),
         2,
-        "답은 나눈 그 순간의 칸 둘이다"
+        "the answer is the two areas at the moment of the split"
     );
 }
 
-/// 에이전트 칸의 UUID 는 다른 철자(대문자)로 와도 칸에는 정규 철자로 적는다 — 다른 칸 · 명부가 그 id 를 정규 철자로 맞춘다.
 #[tokio::test]
 async fn an_agent_id_in_another_uuid_spelling_is_written_in_its_canonical_spelling() {
     let (world, queue, receiver) = queued();
@@ -7566,8 +7395,7 @@ async fn an_agent_id_in_another_uuid_spelling_is_written_in_its_canonical_spelli
     );
 }
 
-/// `agent.spawnInto` 에 `view_id` 만 주면 그 탭의 창에 놓는다 · 그 탭의 창이 아닌 `window` 를 주면 스폰 전에 거절한다 — 놓을
-/// 곳 없는 에이전트가 살아 남지 않는다.
+/// With only `view_id`, `agent.spawnInto` places in that tab's window; a `window` that is not that tab's is rejected before the spawn — an agent with nowhere to be placed must not survive.
 #[tokio::test]
 async fn spawn_into_a_tab_takes_its_window_and_refuses_another_before_spawning() {
     let (mut world, ports) = World::build();
@@ -7589,11 +7417,11 @@ async fn spawn_into_a_tab_takes_its_window_and_refuses_another_before_spawning()
     );
     assert_eq!(error.code(), ErrorCode::Conflict, "{}", error.message());
     assert!(
-        error.message().contains("스폰 안 함"),
+        error.message().contains("Not spawned"),
         "{}",
         error.message()
     );
-    assert!(world.spawn_requests.try_recv().is_err(), "스폰하지 않았다");
+    assert!(world.spawn_requests.try_recv().is_err(), "did not spawn");
 
     let agent = uuid::Uuid::new_v4();
     let ok = spawn_reply(
@@ -7604,7 +7432,7 @@ async fn spawn_into_a_tab_takes_its_window_and_refuses_another_before_spawning()
     )
     .await
     .outcome
-    .expect("그 탭의 창에 배치");
+    .expect("placed in that tab's window");
     assert_eq!(
         world.content(p0, world.slots(p0)[0]),
         Some(SlotContent::Agent {

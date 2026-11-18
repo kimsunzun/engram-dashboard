@@ -10,7 +10,7 @@
 - **B-3 Failed cold boot = persisted, `SkipUntilManualRestart` (provisional recommendation).** Failed is kept across boot and excluded from automatic restore until a manual restart.
 - **B-4 restore target = "restore the last running one unless it was turned off" (provisional).** `auto_restore` AND `last_known_state != Stopped`. Anything the user explicitly turned off is not revived.
 - **B-5 guard counter persistence = persist in agents.json (provisional).** Prevents the infinite loop where a daemon reboot wipes the counter to 0 (raised by the consult).
-- **Discarded:** the "ask (물어보기: ask in the UI whether to restore)" mode of ADR-0008 — the consult decided it is the **anti-pattern where the UI becomes the restore trigger**. The restore default is "automatic" (independent of the UI). The ADR-0008 correction is a follow-up.
+- **Discarded:** the "ask" (ask in the UI whether to restore) mode of ADR-0008 — the consult decided it is the **anti-pattern where the UI becomes the restore trigger**. The restore default is "automatic" (independent of the UI). The ADR-0008 correction is a follow-up.
 - Provisional items (B-3, B-4, B-5) are changed only if the user points out something wrong. Certain items (B-1, B-2) are not shaken.
 
 ## Fixed constraints (no reopening)

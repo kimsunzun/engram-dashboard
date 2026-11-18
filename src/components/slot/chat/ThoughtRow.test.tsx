@@ -19,21 +19,21 @@ globalThis.ResizeObserver ||= class {
 afterEach(() => cleanup())
 
 describe('ThoughtRow', () => {
-  it('content 있으면 인터랙티브 — 클릭으로 펼치면 추론 텍스트가 보인다', () => {
+  it('with content it is interactive — clicking to expand shows the reasoning text', () => {
     render(<ThoughtRow content="line-a\nline-b" />)
     expect(screen.queryByText(/line-a/)).toBeNull()
     fireEvent.click(screen.getByRole('button'))
     expect(screen.getByText(/line-a/)).toBeTruthy()
   })
 
-  it('빈 content(암호화 thinking) → 비-인터랙티브 라벨만(펼칠 내용 없음)', () => {
+  it('empty content (encrypted thinking) → non-interactive label only (no content to expand)', () => {
     render(<ThoughtRow content="" />)
     const btn = screen.getByRole('button')
     fireEvent.click(btn)
     expect(document.querySelector('[data-radix-scroll-area-viewport]')).toBeNull()
   })
 
-  it('★FIX-1★ 펼친 박스의 max-h 상한이 Viewport(스크롤 노드)에 붙는다 — Root 아님', () => {
+  it('★FIX-1★ the max-h cap of the expanded box attaches to the Viewport (scroll node) — not the Root', () => {
     render(<ThoughtRow content="x" />)
     fireEvent.click(screen.getByRole('button'))
     const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement

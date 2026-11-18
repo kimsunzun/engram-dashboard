@@ -45,7 +45,7 @@ function buildFrame(opts: {
 const AGENT = '12345678-9abc-def0-1234-56789abcdef0'
 
 describe('decodeOutputFrame', () => {
-  it('codec.rs 포맷대로 디코드: tag/epoch/seq/payload + agentId UUID 왕복', () => {
+  it('decodes per the codec.rs format: tag/epoch/seq/payload + agentId UUID round trip', () => {
     const payload = new Uint8Array([0x68, 0x69]) // "hi"
     const buf = buildFrame({ agentId: AGENT, epoch: 7, seq: 42, payload })
     const f = decodeOutputFrame(buf)
@@ -57,19 +57,19 @@ describe('decodeOutputFrame', () => {
     expect(Array.from(f!.payload)).toEqual([0x68, 0x69])
   })
 
-  it('대문자 입력도 소문자 UUID 로 정규화한다(byte→hex 는 항상 소문자)', () => {
+  it('normalizes uppercase input to a lowercase UUID too (byte→hex is always lowercase)', () => {
     const upper = 'ABCDEF01-2345-6789-ABCD-EF0123456789'
     const buf = buildFrame({ agentId: upper, epoch: 0, seq: 0 })
     const f = decodeOutputFrame(buf)
     expect(f!.agentId).toBe(upper.toLowerCase())
   })
 
-  it('헤더 길이 미만이면 null', () => {
+  it('null when shorter than the header length', () => {
     const buf = buildFrame({ agentId: AGENT, epoch: 1, seq: 1, truncateTo: 28 })
     expect(decodeOutputFrame(buf)).toBeNull()
   })
 
-  it('tag1(StructuredEvent) 프레임 디코드: tag=1 + payload(JSON 바이트) 그대로 추출', () => {
+  it('decodes a tag1 (StructuredEvent) frame: tag=1 + extracts the payload (JSON bytes) as is', () => {
     // S15/ADR-0045: tag1 = structured event. The codec passes the payload through as opaque (JSON interpretation is the consumer's job).
     const json = '{"type":"TextDelta","text":"hi","turn_id":null,"message_id":null}'
     const payload = new TextEncoder().encode(json)
@@ -83,12 +83,12 @@ describe('decodeOutputFrame', () => {
     expect(new TextDecoder().decode(f!.payload)).toBe(json)
   })
 
-  it('tag >= 2(미지원 variant)면 null(tag0/tag1 만 유효)', () => {
+  it('null when tag >= 2 (unsupported variant) (only tag0/tag1 are valid)', () => {
     const buf = buildFrame({ tag: 2, agentId: AGENT, epoch: 1, seq: 1 })
     expect(decodeOutputFrame(buf)).toBeNull()
   })
 
-  it('tag=255(ADR-0046 replay 경계 마커)는 조용히 skip(null) — 던지지 않음, 전방 호환(M0)', () => {
+  it('tag=255 (ADR-0046 replay boundary marker) is silently skipped (null) — does not throw, forward compatible (M0)', () => {
     // Marker frame spec src-tauri sends: [tag=255][agentId:16][epoch:4][gen:8 BE][flags:1][replay_from:8 BE]
     //   = 38 bytes. decodeOutputFrame does not consume markers (M2), so it must drop an unknown tag as null without an exception.
     //   Even if the length is at least the header (29), it is filtered at the tag gate (do not mistake it for a payload).
@@ -103,7 +103,7 @@ describe('decodeOutputFrame', () => {
     expect(decodeOutputFrame(marker)).toBeNull()
   })
 
-  it('빈 payload(헤더만)도 디코드 성공(payload 길이 0)', () => {
+  it('an empty payload (header only) also decodes successfully (payload length 0)', () => {
     const buf = buildFrame({ agentId: AGENT, epoch: 3, seq: 9 })
     const f = decodeOutputFrame(buf)
     expect(f).not.toBeNull()
@@ -112,14 +112,14 @@ describe('decodeOutputFrame', () => {
 })
 
 // ── ADR-0231: placeholder — do not leave the seq of an unknown-tag frame empty ──────────────────────────
-describe('peekFrameHeader · 자리채움', () => {
-  it('머리는 tag 를 가리지 않고 읽는다 · 머리보다 짧으면 null', () => {
+describe('peekFrameHeader · placeholder', () => {
+  it('reads the header regardless of the tag · null when shorter than the header', () => {
     const buf = buildFrame({ tag: 7, agentId: AGENT, epoch: 3, seq: 42, payload: new Uint8Array([1, 2]) })
     expect(peekFrameHeader(buf)).toEqual({ tag: 7, agentId: AGENT, epoch: 3, seq: 42 })
     expect(peekFrameHeader(buildFrame({ agentId: AGENT, epoch: 3, seq: 42, truncateTo: 28 }))).toBeNull()
   })
 
-  it('문구가 프로토콜 상수와 바이트 같고 페이로드는 그 Error 사건의 JSON 이다', () => {
+  it('the wording is byte-equal to the protocol constant and the payload is the JSON of that Error event', () => {
     const literal = /macro_rules! placeholder_message \{\s*\(\) => \{\s*"([^"]*)"/.exec(placeholderSource)
     expect(literal?.[1]).toBe(PLACEHOLDER_ERROR_MESSAGE)
     expect(placeholderSource).toContain('r#"{"type":"Error","message":""#')
@@ -151,7 +151,7 @@ function buildMarker(opts: {
 }
 
 describe('decodeReplayMarker', () => {
-  it('bit2(0x04) = 이어받기 화신 — 다른 두 비트와 독립으로 읽힌다', () => {
+  it('bit2 (0x04) = resume incarnation — read independently of the other two bits', () => {
     const m = decodeReplayMarker(buildMarker({ epoch: 7, gen: 42n, flags: 0x04 }))
     expect(m).toEqual({
       agentId: AGENT,
@@ -170,13 +170,13 @@ describe('decodeReplayMarker', () => {
   })
 
   // An old shell/daemon path that carries no marker = no bit2. Then the pre-marker behavior (first screen) must come out.
-  it.each([0x00, 0x01, 0x02, 0x03])('bit2 가 없으면(flags=%i) 이어받기 아님', (flags) => {
+  it.each([0x00, 0x01, 0x02, 0x03])('without bit2 (flags=%i) it is not a resume', (flags) => {
     expect(decodeReplayMarker(buildMarker({ epoch: 1, gen: 1n, flags }))?.continuesConversation).toBe(
       false,
     )
   })
 
-  it('길이는 38 — 37바이트와 옛 30바이트 마커는 마커가 아니다', () => {
+  it('the length is 38 — 37-byte and old 30-byte markers are not markers', () => {
     expect(decodeReplayMarker(buildMarker({ epoch: 1, gen: 1n, flags: 0x04 }))).not.toBeNull()
     expect(decodeReplayMarker(buildMarker({ epoch: 1, gen: 1n, flags: 0x04, length: 37 }))).toBeNull()
     expect(decodeReplayMarker(buildMarker({ epoch: 1, gen: 1n, flags: 0x04, length: 30 }))).toBeNull()
@@ -184,7 +184,7 @@ describe('decodeReplayMarker', () => {
 
   // ADR-0231: flush start point = max(last+1, replay head). If the field position (30..38 BE) is off, the head becomes a wrong value and
   //   the view skips history or waits for a seq that will never come.
-  it('replay 머리(30..38 BE)를 seq 와 같은 number 로 읽고 flags 와 섞이지 않는다', () => {
+  it('reads the replay head (30..38 BE) as a number like seq and does not mix it with flags', () => {
     expect(
       decodeReplayMarker(buildMarker({ epoch: 9, gen: 3n, flags: 0x07, replayFrom: 40n })),
     ).toMatchObject({ gen: 3n, truncated: true, failed: true, continuesConversation: true, replayFrom: 40 })

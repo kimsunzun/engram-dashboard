@@ -174,7 +174,7 @@ $stdout.Write($buf,0,$n);$stdout.Flush();Start-Sleep -Milliseconds 1}";
             t.send_input(InputEvent::Raw(payload))
         }) {
             Ok(h) => h,
-            Err(e) => fail!("writer {i} OS 스레드 생성 실패: {e} — 앞서 spawn 된 writer 는 Barrier 에 park(detach, 프로세스 종료 시 회수)"),
+            Err(e) => fail!("failed to create the OS thread of writer {i}: {e} — writers spawned earlier are parked at the Barrier (detached, collected when the process exits)"),
         };
         handles.push(h);
     }
@@ -186,16 +186,16 @@ $stdout.Write($buf,0,$n);$stdout.Flush();Start-Sleep -Milliseconds 1}";
     for (i, h) in handles.into_iter().enumerate() {
         while !h.is_finished() {
             if Instant::now() >= join_deadline {
-                fail!("writer {i} 가 120s 안에 반환 못함 — write_all 이 파이프 backpressure 로 hang(자식 echo drain 정지 의심)");
+                fail!("writer {i} did not return within 120s — write_all hung on pipe backpressure (suspected stall of the child's echo drain)");
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         let r = match h.join() {
             Ok(r) => r,
-            Err(_) => fail!("writer {i} 스레드가 panic — send_input 내부 실패"),
+            Err(_) => fail!("writer {i} thread panicked — internal failure of send_input"),
         };
         if !r.is_ok() {
-            fail!("writer {i} send_input 실패: {r:?}");
+            fail!("writer {i} send_input failed: {r:?}");
         }
     }
 
@@ -205,7 +205,7 @@ $stdout.Write($buf,0,$n);$stdout.Flush();Start-Sleep -Milliseconds 1}";
         if Instant::now() >= deadline {
             let got = sink.total_len();
             transport.shutdown();
-            panic!("120s 안에 echo 총량이 기대치({expected_total})에 도달 못함(현재 {got}). 자식 echo hang 의심.");
+            panic!("the echo total did not reach the expected value ({expected_total}) within 120s (now {got}). Suspected child echo hang.");
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -213,14 +213,14 @@ $stdout.Write($buf,0,$n);$stdout.Flush();Start-Sleep -Milliseconds 1}";
     let stream = sink.concat_ordered();
     if stream.len() != expected_total {
         fail!(
-            "echo 총 바이트가 N*L 과 불일치(유실/초과): got {}, want {expected_total}",
+            "the echo total bytes do not match N*L (loss/excess): got {}, want {expected_total}",
             stream.len()
         );
     }
     let runs = run_length_encode(&stream);
     if runs.len() != N {
         fail!(
-            "런 개수가 N({N})이 아님 — 인터리브 발생(stdin.lock() 회귀). 런 요약: {:?}",
+            "the run count is not N ({N}) — interleaving happened (stdin.lock() regression). Run summary: {:?}",
             summarize_runs(&runs)
         );
     }
@@ -228,16 +228,18 @@ $stdout.Write($buf,0,$n);$stdout.Flush();Start-Sleep -Milliseconds 1}";
     let mut seen_bytes = std::collections::HashSet::new();
     for (byte, len) in &runs {
         if *len != L {
-            fail!("바이트 {byte:#x} 의 런 길이가 L({L})이 아님({len}) — 유실 또는 분절");
+            fail!(
+                "the run length of byte {byte:#x} is not L ({L}) ({len}) — loss or fragmentation"
+            );
         }
         if !seen_bytes.insert(*byte) {
-            fail!("바이트 {byte:#x} 가 두 번 이상 런으로 나타남 — 중복/분절(인터리브)");
+            fail!("byte {byte:#x} appears as a run twice or more — duplication/fragmentation (interleaving)");
         }
     }
     for i in 0..N {
         let fill = b'A' + i as u8;
         if !seen_bytes.contains(&fill) {
-            fail!("fill 바이트 {fill:#x} 가 스트림에 없음 — writer {i} 유실");
+            fail!("fill byte {fill:#x} is not in the stream — writer {i} lost");
         }
     }
 
@@ -270,10 +272,10 @@ fn summarize_runs(runs: &[(u8, usize)]) -> Vec<(char, usize)> {
 
 /// ★The item that was once here (`physical_pipe_partial_write_then_err_surfaces_as_err`) **no longer
 ///   holds — because the contract changed, not because it weakened**★.
-///   The old item relied on 「`send_input` 이 호출 스레드에서 `write_all` 을 돌린다」 (send_input runs write_all on the calling thread) and measured 「prefix 가 물리적으로
-///   나간 **뒤에도** 그 호출이 `Err` 로 돌아온다」 (that call returns Err even after the prefix has physically gone out). Now `send_input` does not touch the OS and only puts into a bounded
-///   queue (module = `transport::input_queue`), so **the only failure that call can see is 「받지 않았다」 (not accepted)**.
-///   The other half the old item measured (「받아 둔 뒤의 실패를 어떻게 신고하나」 (how a failure after accepting is reported)) went to Test 3.
+///   The old item relied on 「send_input runs write_all on the calling thread」 and measured 「that call returns Err even after the prefix has physically gone out」.
+///   Now `send_input` does not touch the OS and only puts into a bounded
+///   queue (module = `transport::input_queue`), so **the only failure that call can see is 「not accepted」**.
+///   The other half the old item measured (「how a failure after accepting is reported」) went to Test 3.
 ///
 /// ★This item proves★: a payload over the queue bound is **refused whole** (`Err`), and ★as direct evidence that the refusal is not a silent
 ///   loss, **the child receives not a single byte**★. A regression that partially accepts an overflow or
@@ -311,7 +313,9 @@ $stdout.Write($buf,0,$n);$stdout.Flush()}";
     let result = transport.send_input(InputEvent::Raw(over));
     if !matches!(result, Err(PtyError::WriteFailed(_))) {
         transport.shutdown();
-        panic!("상한 초과는 WriteFailed 로 거절돼야 한다(Ok 위장 금지): {result:?}");
+        panic!(
+            "exceeding the cap must be refused with WriteFailed (no disguising as Ok): {result:?}"
+        );
     }
 
     // ★Direct evidence that it is not a silent loss★: for 1s after the refusal the child echoes nothing back.
@@ -323,14 +327,14 @@ $stdout.Write($buf,0,$n);$stdout.Flush()}";
     const PROBE: &[u8] = b"under-the-bound\n";
     transport
         .send_input(InputEvent::Raw(PROBE.to_vec()))
-        .expect("상한 아래 페이로드는 받아야 한다");
+        .expect("a payload below the cap must be accepted");
     let deadline = Instant::now() + Duration::from_secs(30);
     while sink.total_len() < PROBE.len() {
         if Instant::now() >= deadline {
             let got = sink.total_len();
             transport.shutdown();
             panic!(
-                "대조군이 30s 안에 echo 되지 않음({got}) — 통로가 애초에 죽어 있어 위 0 이 공허함"
+                "the control group was not echoed within 30s ({got}) — the link was dead to begin with, so the 0 above is vacuous"
             );
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -338,7 +342,7 @@ $stdout.Write($buf,0,$n);$stdout.Flush()}";
 
     if leaked != 0 {
         transport.shutdown();
-        panic!("거절된 페이로드의 {leaked} 바이트가 자식에게 갔다 — 부분 수용(조용한 유실) 회귀");
+        panic!("{leaked} bytes of the refused payload went to the child — regression of partial acceptance (silent loss)");
     }
 
     transport.shutdown();
@@ -429,18 +433,20 @@ exit 0"
     let p0 = payload[0];
     for s in 1..=(payload.len() - K) {
         if payload[s] == p0 && payload[s..s + K] == expected_prefix[..] {
-            fail!("무-앨리어싱 self-check 실패: shift s={s} — 시드/생성기를 바꿔 재생성 필요");
+            fail!("no-aliasing self-check failed: shift s={s} — the seed/generator must be changed and regenerated");
         }
     }
 
     // ★This call is immediately `Ok` — that is the point of this round★ (the caller does not wait for the OS write).
     let accept_start = Instant::now();
     if let Err(e) = transport.send_input(InputEvent::Raw(payload)) {
-        fail!("상한 아래 페이로드는 받아야 한다: {e:?}");
+        fail!("a payload below the cap must be accepted: {e:?}");
     }
     let accept_elapsed = accept_start.elapsed();
     if accept_elapsed >= Duration::from_secs(2) {
-        fail!("send_input 이 {accept_elapsed:?} 걸렸다 — 호출자가 OS 쓰기에 매달린 회귀");
+        fail!(
+            "send_input took {accept_elapsed:?} — regression of the caller hanging on the OS write"
+        );
     }
 
     // (b) The prefix was actually delivered physically — blocks a vacuous pass.
@@ -448,7 +454,7 @@ exit 0"
     while sink.total_len() < K {
         if Instant::now() >= prefix_deadline {
             fail!(
-                "30s 안에 echo prefix 가 K({K})에 도달 못함(현재 {}) — prefix 미배달(vacuous pass 의심)",
+                "the echo prefix did not reach K ({K}) within 30s (now {}) — prefix not delivered (suspected vacuous pass)",
                 sink.total_len()
             );
         }
@@ -457,12 +463,12 @@ exit 0"
     let echoed = sink.concat_ordered();
     if echoed.len() != K {
         fail!(
-            "echo 총량이 K({K})가 아님({}) — 자식이 정확히 K 를 소비/echo 하지 않음",
+            "the echo total is not K ({K}) ({}) — the child did not consume/echo exactly K",
             echoed.len()
         );
     }
     if echoed != expected_prefix {
-        fail!("echo prefix 가 payload[..K] 와 불일치 — 물리 배달된 게 앞쪽 prefix 가 아님(무결성 위반)");
+        fail!("the echo prefix does not match payload[..K] — what was physically delivered is not the front prefix (integrity violation)");
     }
 
     // (a) The child dies and the path closes → the **next** call is refused carrying the reason.
@@ -472,25 +478,25 @@ exit 0"
     //   when the child dies, ⓐ the writer's blocked write being freed with an error and ⓑ the pump seeing stdout EOF and
     //   closing with `WriterStop` start **at the same time**, and in measurement ⓑ won first (2026-09-17).
     //   `InputQueue::close` keeps the first reason, so the phrase then is "the stream ended". The property this item means to measure is
-    //   **「받아 둔 뒤의 실패가 조용히 삼켜지지 않는다」** (a failure after accepting is not silently swallowed), not which thread notices first,
-    //   so the assertion is set as 「거절된다」 (it is refused) + 「그 사유가 상한이 아니다」 (that reason is not the bound) (if it were the bound, this item would pass
+    //   **「a failure after accepting is not silently swallowed」**, not which thread notices first,
+    //   so the assertion is set as 「it is refused」 + 「that reason is not the bound」 (if it were the bound, this item would pass
     //   for a different reason than it set out to measure, so only that is ruled out).
     let close_deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match transport.send_input(InputEvent::Raw(b"after\n".to_vec())) {
             Err(PtyError::WriteFailed(msg)) => {
-                if msg.contains("상한") {
-                    fail!("거절 사유가 상한이다 — 통로가 닫혀서 거절된 것이 아니다: {msg}");
+                if msg.contains("cap") {
+                    fail!("the refusal reason is the cap — it was not refused because the link closed: {msg}");
                 }
                 break;
             }
             Ok(()) => {
                 if Instant::now() >= close_deadline {
-                    fail!("30s 안에 통로가 닫히지 않음 — 자식의 죽음이 조용히 삼켜졌다");
+                    fail!("the link did not close within 30s — the child's death was silently swallowed");
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(other) => fail!("WriteFailed 여야: {other:?}"),
+            Err(other) => fail!("must be WriteFailed: {other:?}"),
         }
     }
 

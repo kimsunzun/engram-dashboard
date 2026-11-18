@@ -79,7 +79,7 @@ pub struct TurnObservation {
     /// The time the last turn signal was observed for this incarnation. The axis on which a consumer judges "how old is this observation" by its own
     /// standard (stuck-turn detection etc.).
     pub last_signal: Instant,
-    /// This incarnation's last turn end was an error and there is no clean success end after it yet (stall after error). An end of kind 「그 밖」 (other) does
+    /// This incarnation's last turn end was an error and there is no clean success end after it yet (stall after error). An end of kind 「other」 does
     /// not change this value. Right after registration = false.
     // ADR-0231
     pub last_end_failed: bool,
@@ -343,7 +343,7 @@ mod tests {
         assert!(t.is_in_turn(id, 0));
         t.observe(id, 0, 1, TurnSignal::Ended(TurnEndKind::Clean));
         assert!(!t.is_in_turn(id, 0));
-        assert!(t.get(id, 0).is_some(), "종료 후에도 관측 사실은 남는다");
+        assert!(t.get(id, 0).is_some(), "the observed fact stays after exit");
     }
 
     #[test]
@@ -352,7 +352,7 @@ mod tests {
         let id = AgentId::new_v4();
         t.observe(id, 0, 1, TurnSignal::Progress);
         assert!(t.is_in_turn(id, 0));
-        assert_eq!(t.get(id, 1), None, "다른 epoch 은 미관측");
+        assert_eq!(t.get(id, 1), None, "a different epoch is unobserved");
     }
 
     #[test]
@@ -362,15 +362,22 @@ mod tests {
         let id = AgentId::new_v4();
         t.observe(id, 0, 1, TurnSignal::Progress);
         t.register(id, 1);
-        assert_eq!(t.get(id, 0), None, "등록이 옛 항목을 청소");
-        assert_eq!(t.len(), 1, "재시작마다 죽은 항목이 쌓이지 않는다");
-        assert!(!t.is_in_turn(id, 1), "등록만으로는 턴이 아니다");
+        assert_eq!(t.get(id, 0), None, "registration cleans the old entry");
+        assert_eq!(t.len(), 1, "dead entries do not pile up with each restart");
+        assert!(!t.is_in_turn(id, 1), "registration alone is not a turn");
         t.observe(id, 1, 1, TurnSignal::Progress);
         assert!(t.is_in_turn(id, 1));
 
         t.observe(id, 0, 1, TurnSignal::Progress);
-        assert_eq!(t.get(id, 0), None, "옛 표식 지각 신호는 버린다");
-        assert!(t.is_in_turn(id, 1), "현 화신 관측은 그대로");
+        assert_eq!(
+            t.get(id, 0),
+            None,
+            "a late signal with an old marker is discarded"
+        );
+        assert!(
+            t.is_in_turn(id, 1),
+            "the current incarnation's observation stays as is"
+        );
     }
 
     // ★Regression target — that half after the marker became a random number★: the old comparison was "drop if the current marker is larger". In a permutation where the dying
@@ -387,21 +394,24 @@ mod tests {
         t.observe(id, dying, 3, TurnSignal::Progress);
         t.register(id, live);
         t.observe(id, live, 0, TurnSignal::Progress);
-        assert!(t.is_in_turn(id, live), "전제: 산 화신이 턴 중으로 관측됨");
+        assert!(
+            t.is_in_turn(id, live),
+            "premise: the live incarnation is observed as in a turn"
+        );
 
         // A dead incarnation whose draining was not finished now emits a signal.
         t.observe(id, dying, 4, TurnSignal::Ended(TurnEndKind::Clean));
 
         assert!(
             t.is_in_turn(id, live),
-            "죽은 화신의 지각 신호가 산 화신의 관측을 덮으면 턴 중에 우편이 들어간다"
+            "if a dead incarnation's late signal overwrites the live incarnation's observation, mail goes in during a turn"
         );
         assert_eq!(
             t.get(id, dying),
             None,
-            "죽은 화신의 항목은 되살아나지 않는다"
+            "a dead incarnation's entry is not revived"
         );
-        assert_eq!(t.len(), 1, "한 id 에 항목 하나");
+        assert_eq!(t.len(), 1, "one entry per id");
     }
 
     #[test]
@@ -418,9 +428,9 @@ mod tests {
             t0 + Duration::from_secs(20 * 60),
         );
         assert_eq!(
-            t.get(id, 0).expect("관측됨").last_signal,
+            t.get(id, 0).expect("observed").last_signal,
             t0 + Duration::from_secs(20 * 60),
-            "갱신 없이 턴 시작 시각을 고정하면 정상 장기 턴이 소비자 상한에 잘린다"
+            "if the turn start time is fixed without updates, a normal long turn is cut off at the consumer cap"
         );
     }
 
@@ -450,12 +460,12 @@ mod tests {
         t.observe_at(id, 0, 5, TurnSignal::Progress, t0 + Duration::from_secs(1));
         assert!(
             !t.is_in_turn(id, 0),
-            "늦게 적용된 옛 신호가 끝난 턴을 되살리면 안 된다"
+            "an old signal applied late must not revive a finished turn"
         );
         assert_eq!(
-            t.get(id, 0).expect("관측됨").last_signal,
+            t.get(id, 0).expect("observed").last_signal,
             t0,
-            "밀려난 신호는 상한 축을 다시 찍지 않는다"
+            "a superseded signal does not stamp the cap axis again"
         );
 
         // The guard does not block even normal progress.
@@ -478,11 +488,14 @@ mod tests {
         // seq 6 is accepted normally (a newer emit) but its time is earlier.
         t.observe_at(id, 0, 6, TurnSignal::Ended(TurnEndKind::Clean), t0);
 
-        assert!(!t.is_in_turn(id, 0), "수용된 신호의 상태는 반영된다");
+        assert!(
+            !t.is_in_turn(id, 0),
+            "the state of an accepted signal is applied"
+        );
         assert_eq!(
-            t.get(id, 0).expect("관측됨").last_signal,
+            t.get(id, 0).expect("observed").last_signal,
             later,
-            "수용 경로도 상한 축을 되감지 않는다(`at.max(cur.last_signal)`)"
+            "the acceptance path does not rewind the cap axis either (`at.max(cur.last_signal)`)"
         );
     }
 
@@ -496,7 +509,7 @@ mod tests {
         t.observe_at(id, 1, 1, TurnSignal::Progress, t0);
         assert!(
             t.is_in_turn(id, 1),
-            "새 화신의 낮은 seq 가 옛 화신의 높은 seq 때문에 버려지면 그 에이전트는 영구 미관측이 된다"
+            "if a new incarnation's low seq is discarded because of an old incarnation's high seq, that agent becomes permanently unobserved"
         );
     }
 
@@ -510,7 +523,7 @@ mod tests {
         assert!(!t.is_in_turn(id, 7));
         assert!(t.in_turn_snapshot().is_empty());
         t.forget(id, 7);
-        assert_eq!(t.len(), 0, "등록분도 finish 가 거둔다");
+        assert_eq!(t.len(), 0, "finish also collects registered entries");
     }
 
     #[test]
@@ -529,7 +542,7 @@ mod tests {
     // ── Stall after error — `last_end_failed` folding (ADR-0231) ──
 
     fn failed_after_end(t: &TurnObservations, id: AgentId) -> bool {
-        t.get(id, 0).expect("관측됨").last_end_failed
+        t.get(id, 0).expect("observed").last_end_failed
     }
 
     #[test]
@@ -540,7 +553,10 @@ mod tests {
         t.observe(claude, 0, 1, TurnSignal::Progress);
         t.observe(claude, 0, 2, TurnSignal::Failed);
         t.observe(claude, 0, 3, TurnSignal::Ended(TurnEndKind::Clean));
-        assert!(failed_after_end(&t, claude), "오류를 쥔 채 온 끝 = 오류 끝");
+        assert!(
+            failed_after_end(&t, claude),
+            "an end that came while holding an error = an error end"
+        );
 
         let codex = AgentId::new_v4();
         t.register(codex, 0);
@@ -556,14 +572,20 @@ mod tests {
         t.register(id, 0);
         t.observe(id, 0, 1, TurnSignal::Progress);
         t.observe(id, 0, 2, TurnSignal::Failed);
-        let o = t.get(id, 0).expect("관측됨");
-        assert!(o.in_turn, "오류 신호가 턴을 끝내지 않는다");
-        assert!(!o.last_end_failed, "끝을 보기 전엔 멈춤이 서지 않는다");
+        let o = t.get(id, 0).expect("observed");
+        assert!(o.in_turn, "an error signal does not end the turn");
+        assert!(
+            !o.last_end_failed,
+            "the stop does not stand before the end is seen"
+        );
 
         let idle = AgentId::new_v4();
         t.register(idle, 0);
         t.observe(idle, 0, 1, TurnSignal::Failed);
-        assert!(!t.is_in_turn(idle, 0), "오류 신호가 턴을 켜지 않는다");
+        assert!(
+            !t.is_in_turn(idle, 0),
+            "an error signal does not turn a turn on"
+        );
     }
 
     #[test]
@@ -573,13 +595,16 @@ mod tests {
         t.register(id, 0);
         t.observe(id, 0, 1, TurnSignal::Ended(TurnEndKind::Failed));
         t.observe(id, 0, 2, TurnSignal::Ended(TurnEndKind::Other));
-        assert!(failed_after_end(&t, id), "끊긴 끝은 멈춤을 풀지 않는다");
+        assert!(
+            failed_after_end(&t, id),
+            "a cut-off end does not clear the stop"
+        );
         t.observe(id, 0, 3, TurnSignal::Ended(TurnEndKind::Clean));
-        assert!(!failed_after_end(&t, id), "깨끗한 끝이 푼다");
+        assert!(!failed_after_end(&t, id), "a clean end clears it");
         t.observe(id, 0, 4, TurnSignal::Ended(TurnEndKind::Other));
         assert!(
             !failed_after_end(&t, id),
-            "끊긴 끝은 멈춤을 세우지도 않는다"
+            "a cut-off end does not set the stop either"
         );
     }
 
@@ -591,7 +616,10 @@ mod tests {
         t.observe(id, 0, 1, TurnSignal::Ended(TurnEndKind::Failed));
         t.observe(id, 0, 2, TurnSignal::Failed);
         t.observe(id, 0, 3, TurnSignal::Ended(TurnEndKind::Clean));
-        assert!(failed_after_end(&t, id), "그 턴도 오류면 참 그대로");
+        assert!(
+            failed_after_end(&t, id),
+            "if that turn is also an error, it stays true"
+        );
         // The held error is cleared by that turn's end — if it leaked to the next turn, a clean turn would raise the stall again.
         t.observe(id, 0, 4, TurnSignal::Progress);
         t.observe(id, 0, 5, TurnSignal::Ended(TurnEndKind::Clean));
@@ -617,7 +645,7 @@ mod tests {
         t.observe(id, 0, 4, TurnSignal::Ended(TurnEndKind::Clean));
         assert!(
             failed_after_end(&t, id),
-            "늦은 깨끗한 끝이 멈춤을 풀면 안 된다"
+            "a late clean end must not clear the stop"
         );
 
         t.observe(id, 0, 6, TurnSignal::Ended(TurnEndKind::Clean));
@@ -625,7 +653,7 @@ mod tests {
         t.observe(id, 0, 7, TurnSignal::Ended(TurnEndKind::Clean));
         assert!(
             !failed_after_end(&t, id),
-            "버려진 오류 신호가 쥐어져 다음 끝을 오류로 만들면 안 된다"
+            "a discarded error signal must not be held and make the next end an error"
         );
     }
 
@@ -637,11 +665,14 @@ mod tests {
         t.register(id, 0);
         t.observe(id, 0, 6, TurnSignal::Progress);
         t.observe(id, 0, 5, TurnSignal::Ended(TurnEndKind::Failed));
-        let o = t.get(id, 0).expect("관측됨");
-        assert!(o.last_end_failed, "링 순서상 오류로 끝난 턴이다");
+        let o = t.get(id, 0).expect("observed");
+        assert!(
+            o.last_end_failed,
+            "in ring order it is a turn that ended with an error"
+        );
         assert!(
             o.in_turn,
-            "뒤 seq 의 진행은 다음 턴이다 — 늦은 끝이 끄지 않는다"
+            "progress at a later seq is the next turn — a late end does not turn it off"
         );
     }
 
@@ -655,7 +686,7 @@ mod tests {
         t.observe(id, 0, 7, TurnSignal::Ended(TurnEndKind::Clean));
         assert!(
             failed_after_end(&t, id),
-            "진행 커서에 밀린 오류가 버려지면 오류로 끝난 턴이 깨끗하게 접힌다"
+            "if an error pushed back by the progress cursor is discarded, a turn that ended with an error folds cleanly"
         );
     }
 
@@ -667,9 +698,12 @@ mod tests {
         t.register(id, 0);
         t.observe(id, 0, 7, TurnSignal::Failed);
         t.observe(id, 0, 6, TurnSignal::Ended(TurnEndKind::Clean));
-        assert!(!failed_after_end(&t, id), "앞 턴은 깨끗하게 끝났다");
+        assert!(!failed_after_end(&t, id), "the previous turn ended cleanly");
         t.observe(id, 0, 8, TurnSignal::Ended(TurnEndKind::Clean));
-        assert!(failed_after_end(&t, id), "그 오류는 다음 턴의 끝이 접는다");
+        assert!(
+            failed_after_end(&t, id),
+            "that error is folded by the next turn's end"
+        );
     }
 
     #[test]
@@ -681,6 +715,6 @@ mod tests {
         t.forget(id, 0);
         assert_eq!(t.get(id, 0), None);
         t.register(id, 1);
-        assert!(!t.get(id, 1).expect("등록됨").last_end_failed);
+        assert!(!t.get(id, 1).expect("registered").last_end_failed);
     }
 }

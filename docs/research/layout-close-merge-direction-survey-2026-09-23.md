@@ -1,6 +1,6 @@
 # Who absorbs the space when a slot is closed in a split layout — peer survey
 
-- 상태: 확정 research · **decision = keep the current behavior (A — sibling absorption, the direction is decided by the split order · user decision 2026-09-24)** · Date: 2026-09-23 · Intensity: medium · design-decision mode
+- Status: confirmed research · **decision = keep the current behavior (A — sibling absorption, the direction is decided by the split order · user decision 2026-09-24)** · Date: 2026-09-23 · Intensity: medium · design-decision mode
 - Method: main-family (Claude) 3 collector tracks (terminals · multiplexers / tiling WMs · editors / layout UI libraries) + main grounding (local clone tmux · zellij code, 3 issue bodies via the GitHub API, source-text cross-check of VS Code `grid.ts` · the Emacs manual) + one cross-family (codex, effort high, web search) adversarial review — verdict REFUTE-PARTIAL, all 6 findings incorporated (2 missing peers · 1 misattribution · 2 overstatements · 1 version detail)
 - Confidence legend: certain = 2 or more independent sources or direct check of local code / likely = supported by a single source / uncertain = unsupported · inference
 

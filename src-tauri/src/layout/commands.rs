@@ -1,51 +1,24 @@
-//! 셸이 주인인 명령 표 — `window`/`tab`/`slot` 은 **선언과 본문이 적용 서비스 옆**에 산다(ADR-0155 결정 1).
+//! The shell-owned command table: `window`/`tab`/`slot` declarations and bodies live next to the apply service (ADR-0155 decision 1).
 //!
-//! 사람 클릭(`commands/layout.rs` 의 `#[tauri::command]`)과 중계된 LLM 호출(인바운드 수신기)이 **같은
-//! 적용 서비스**(`super::apply`)에 떨어진다 — 이 파일은 그 서비스로 가는 **두 번째 껍데기**이지 두 번째
-//! 제어 표면이 아니다(ADR-0081 결정 3 · 「거부한 대안」의 `ViewManager` 직접 호출을 여기서도 하지 않는다).
+//! Human clicks (`#[tauri::command]` in `commands/layout.rs`) and relayed LLM calls (the inbound receiver) land on **the same apply service** (`super::apply`); this file is the second thin wrapper onto it, not a second control surface (ADR-0081 decision 3).
 //!
-//! ★레이아웃 밖의 셸 명령도 여기 선다★ — `window.setTheme` · `window.getTheme` · `settings.*` · `restore.*` 는 적용
-//! 서비스를 안 거치지만 **셸이 주인인 이름**이라 이 표에 든다. 두 번째 선언 블록을 만들면 등록 패킷·세대 번호·중복
-//! 검사가 표마다 갈린다(매크로 제약도 「모듈 하나에 블록 하나」다). 그 대신 포트는 자기 것을 따로 든다
-//! ([`LayoutPorts::themes`] · [`LayoutPorts::settings`] · [`LayoutPorts::settings_events`] ·
-//! [`LayoutPorts::restore`]).
+//! ★Shell commands outside the layout also live here★ — `window.setTheme` · `window.getTheme` · `settings.*` · `restore.*` skip the apply service but are shell-owned names. A second declaration block would split the registration packet, generation number and duplicate check per table (the macro also allows one block per module), so the ports carry their own services ([`LayoutPorts::themes`] · [`LayoutPorts::settings`] · [`LayoutPorts::settings_events`] · [`LayoutPorts::restore`]).
 //!
-//! 진입점: [`make_table`](fn.make_table.html)(조립) · [`LayoutPorts`](struct.LayoutPorts.html)(주입 seam).
+//! ## ★Where the declaration diverges from the service★
+//! The declaration macro's type alphabet has no `Uuid`, nested enums or recursive types:
+//! - **All ids are `String`**; the handler parses them (malformed = `INVALID_ARGUMENT`).
+//! - **`SlotContent` arrives as a tag + side fields `agent_id` · `assign` · `show_claude` · `show_codex`** (macro enums are fieldless); [`slot_content`] checks the combination.
+//! - **`get_view` is not declared** (it returns the recursive `ViewSnapshot`), so the queries are `tab.list` · `window.list` · `slot.resolveSpatial`.
 //!
-//! ## ★선언이 서비스와 갈리는 세 자리(알고 남긴 것)★
-//! 선언 매크로의 타입 알파벳이 `Uuid`·중첩 enum·재귀 타입을 못 실어서 생긴 번역이다 — 매크로 제약이
-//! 원인이고 계약을 새로 만든 것이 아니다.
-//! - **id 는 전부 `String`** 이고 핸들러가 파싱한다(형식 불량 = `INVALID_ARGUMENT`).
-//! - **`SlotContent` 는 태그 + `agent_id` · `assign` · `show_claude` · `show_codex` 곁칸으로 펴서 받는다** — 매크로의
-//!   enum 은 필드 없는 variant 만 싣는다. 조합 검사는 [`slot_content`] 가 한다.
-//! - **`get_view` 는 선언에 없다** — 반환이 `ViewSnapshot`(재귀 `LayoutNode`)이고 매크로가 재귀 타입에서
-//!   컴파일 에러로 멈춘다. 그래서 v1 조회는 `tab.list`·`window.list`·`slot.resolveSpatial` 셋이다.
+//! ## ★Codes of apply failures★ — layout commands only
+//! `window.*Theme` · `settings.*` · `restore.answer` get typed errors from their services and map by kind ([`theme_error`] · [`settings_error`] · [`restore_error`]). For the apply service:
+//! - **Verbs taking ids** (id version of the apply service — `tab.create` · `split.setRatio` …) get failures only as `String`. A code must not be synthesized from the text (no machine branching on `message`), so they use **the one code true for every failure**: `CONFLICT` = "cannot be applied in the current state" (`NOT_FOUND` is false for the main window refusal, `INTERNAL` for a mistyped id). The text carries the reason.
+//! - **Docking verbs taking a target** (`tab.move` · `tab.dock` · `tab.detach`) map by kind from the typed target-version errors ([`dock_target_error`] · [`locate_error`]). `layout.get` has no apply failure and emits only window argument errors ([`window_arg_error`]).
+//! - **Widened area · tab verbs** (`slot.*` · `layout.setSlotContent` · `tab.switch` · `tab.close` · `tab.rename`) map target-version refusals with [`target_error`]. ★A tab or area given by id that is missing stays exactly what the id version emitted (`CONFLICT` + the manager text — [`id_miss`])★; what was picked by agent or word is [`locate_error`].
 //!
-//! ## ★적용 실패의 코드★ — 레이아웃 명령만
-//! `window.*Theme` · `settings.*` · `restore.answer` 는 서비스가 타입드 오류를 내므로 종류대로 옮긴다
-//! ([`theme_error`] · [`settings_error`] · [`restore_error`]). 아래는 적용 서비스 몫이다.
-//!
-//! - **id 를 받는 동사**(적용 서비스의 id 판을 부르는 것 — `tab.create` · `split.setRatio` 등)는 실패를 `String` 으로만
-//!   받아 종류를 가를 재료가 없다. 문구로 코드를 합성하는 것은 금지다(TRD §4-⑦ — `message` 로 기계 분기하지 않는다. CLI 의
-//!   문자열 패턴매칭을 끝내려고 둔 계약이 바로 그것이다). 그래서 **모든 실패에 참인 코드**를 고른다: `CONFLICT` =
-//!   「지금 상태로는 그 요청을 적용할 수 없다」. `NOT_FOUND` 는 main 창 거부에 거짓이고 `INTERNAL` 은 오타 난 id 에
-//!   거짓이다. 사유는 문구가 그대로 나른다.
-//! - **대상을 받는 도킹 동사**(`tab.move` · `tab.dock` · `tab.detach`)는 적용 서비스의 대상판이 타입드 오류를 내므로
-//!   종류대로 옮긴다(TRD S28 §5-3) — 대응의 정본 = [`dock_target_error`] · [`locate_error`]. 조회 `layout.get` 은 적용
-//!   실패가 없고 창 인자 오류([`window_arg_error`])만 낸다.
-//! - **넓힌 칸 · 탭 동사**(`slot.*` · `layout.setSlotContent` · `tab.switch` · `tab.close` · `tab.rename` — TRD S28 §7)도
-//!   대상판을 부르고 그 거절을 [`target_error`] 로 옮긴다. ★단 id 로 준 탭 · 칸이 없으면 넓히기 전 id 판이 내던 그대로다★
-//!   (`CONFLICT` + 관리자 문구 — 옛 호출자가 보던 답 · [`id_miss`]). 에이전트 · 낱말로 고른 것은 [`locate_error`] 다.
-//!
-//! ## ★에이전트를 고르는 인자는 id 로만 들어온다★
-//! 그 칸(`tab_of` · `slot_of` · `assign` 등)은 선언에 `#[agent_ref]` 로 표시한다 — 데몬이 중계 전에 자기 해석기로 이름을
-//! id 로 바꾸고, 풀리지 않으면(없음 = NOT_FOUND · 겹침 = CONFLICT) 중계하지 않고 그 거절로 답한다(ADR-0308). 그래서 이
-//! 표의 처리기는 그 칸에서 id 만 보고, UUID 가 아니면 데몬을 거치지 않은 호출이라 INVALID_ARGUMENT 다([`agent_arg`]).
-//! 셸은 이름을 풀지 않는다 — 셸의 표시 이름 캐시는 보여 주기 몫이다(ADR-0132).
-// ADR-0155
-// ADR-0081
-// ADR-0307
-// ADR-0308
+//! ## ★Agent-picking arguments arrive only as ids★
+//! Fields marked `#[agent_ref]` (`tab_of` · `slot_of` · `assign` …): the daemon resolves names to ids before relaying and answers NOT_FOUND / CONFLICT itself without relaying (ADR-0308). So handlers see only ids there, and a non-UUID is a call that bypassed the daemon: INVALID_ARGUMENT ([`agent_arg`]). The shell does not resolve names; its display name cache is for display (ADR-0132).
+// ADR-0308 (TRD §4-⑦; TRD S28 §5-3; TRD S28 §7)
 
 use std::sync::Arc;
 
@@ -81,92 +54,38 @@ use crate::settings::{
 use crate::state::restore::{AnswerError, RestoreCoordinator};
 use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 
-// ★이름은 프론트 레지스트리가 **오늘 등록한 id** 를 그대로 쓴다★: `tab.create`·`slot.focus`·`slot.popout`·
-//   `layout.setSlotContent`·`agent.spawnInto` 는 `src/commands/*Commands.ts` 에 실재하는 id 다(실측
-//   2026-08-17). 여기서 다른 철자를 지으면 같은 동작에 이름이 둘이 되고, 화면 몫 등록(TRD §6 Step 4 —
-//   그 id 를 바꾸지 않는다고 적은 자리)이 그 둘을 다 지고 간다.
-// ★프론트에 짝이 없어 새로 짓는 이름도 있다★(아래는 예이고 전부가 아니다) — `tab.list`·`window.list`(조회는
-//   프론트 id 가 없다) · `slot.split`(프론트는 방향을 이름에 박아 `slot.split.topBottom`/
-//   `slot.split.leftRight` 둘로 두지만, 버스에서는 방향이 **인자**다 — 그래야 호출자가 방향을 값으로 고른다) ·
-//   `window.setTheme`·`window.getTheme`(화면에는 테마를 바꾸는 UI 가 없다 — TRD S21-storage §10 F7) ·
-//   `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고 레지스트리에
-//   이름을 싣지 않는다 — ADR-0227).
-// ★세대 21 = LLM 레이아웃 명령의 세대★(TRD S28 §4 · §7 · ADR-0307) — 에이전트 이름 · 공간 낱말로 탭 · 칸을 고르고 바꾼
-//   뒤의 배치를 답에 싣는다. 이름이 넷 늘었고(`tab.move` · `tab.dock` · `tab.detach` · `layout.get`), 칸 동사(`slot.focus` ·
-//   `slot.close` · `slot.split` · `slot.popout` · `slot.assignAgent` · `layout.setSlotContent`)가 `slot_of` · `at` · `window`
-//   를, 탭 동사(`tab.switch` · `tab.close` · `tab.rename`)가 `tab_of` 를, `agent.spawnInto` 가 `at` 을 받고 id 인자 · 탭
-//   동사와 `agent.spawnInto` 의 `window` 가 선택이 됐다. 넣을 에이전트는 `assign` 도 받고 데몬 명부에 없으면 거절한다. 그
-//   동사들의 답에 `layout` 이 붙고 오류 선언에 `NOT_FOUND` 가 들었다. 에이전트를 고르는 칸(옛 `agent_id` 포함)은
-//   `#[agent_ref]` 로 표시해 데몬이 중계 전에 id 로 바꾼다(ADR-0308 — 등록 패킷의 `agent_args`). 한 커밋에 들어 세대 하나로
-//   묶었다.
-// ★세대 20 = 창 상태 명령 여섯(`window.minimize` · `window.maximize` · `window.unmaximize` · `window.raise` ·
-//   `window.hideAll` · `window.showAll`)이 들고 `window.close` 가 main 을 받는 세대★(TRD S26-window-chrome §6-1 · §6-6) —
-//   `window.close` 는 `if_empty` 를 받고 답이 `outcome` 을 싣는다(main = 모든 창 숨기기 · 지금까지의 `CONFLICT` 대신).
-//   `window.list` 의 답은 `windows` 를 그대로 두고 `details` 를 더했다.
-// ★세대 19 = 창 인자가 영속 id(window_id)도 받고 숫자만인 인자(창 번호)를 `INVALID_ARGUMENT` 로 거절하는 세대★(TRD
-//   S26-window-chrome §4-5 · §6-6) — 이름 · 인자 타입은 그대로고 창 인자를 받는 동사의 받는 어휘 · 오류 어휘(앞 실행의
-//   label = `CONFLICT`)와 summary 가 바뀌었다. `window.list` 의 summary 도 번호를 다시 쓰는 규칙을 말하게 됐다. 같은
-//   세대에 `window.create` · `slot.popout` 의 답이 `window_id` · `number` 를 더했다(§3-2 · §5-3 — §6-6 의 「같은 PR 이면
-//   한 번」으로 두 단위를 한 세대에 묶었다).
-// ★세대 18 = `tab.list` 의 탭 칸에 `named` 가 붙고 `name` 이 보이는 이름(정한 이름 · 아니면 자동 이름)인 세대★(TRD
-//   S26-window-chrome §3-2 · §6-6) — 이름은 그대로고 답 모양이 바뀌었다. 같은 세대에 `tab.create` · `tab.rename` 의
-//   summary 가 자동 이름과 정한 이름의 굳음을 말하게 됐고 두 명령이 `name` 앞뒤 공백을 깎는다.
-// ★세대 17 = `settings.set`·`settings.reset` 이 설정 파일을 지금 못 읽은 쓰기를 `INTERNAL` 대신 `CONFLICT` 로 답하는
-//   세대★(ADR-0291 R17 · 사용자 결정 2026-10-11 — 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다) — 이름 · 타입 · 오류
-//   선언은 그대로고 그 답 어휘와 summary 가 바뀌었다.
-// ★세대 16 = `restore.status` 의 `state_file` 이 `newer` 를 싣고 `settings.set`·`settings.reset` 이 `CONFLICT` 를
-//   선언한 세대★(ADR-0291 — 새 판이 쓴 파일은 덮지 않는다) — 이름은 그대로고 답 어휘와 오류 선언이 바뀌었다.
-// ★세대 15 = 창 테마 명령 둘(`window.getTheme`·`window.setTheme`)이 `agent-tree` 를 받지 않는 세대★(ADR-0225 —
-//   그 label 도 모르는 창이다) — 이름도 타입도 그대로고 둘의 `window` 칸이 받는 어휘가 줄었다. summary 가 바뀐 것은
-//   `window.getTheme`(`agent-tree` 를 적던 유일한 summary)과 `restore.status`(트리 창 문구가 빠졌다)다.
-// ★세대 14 = 창 테마 명령 둘(`window.setTheme`·`window.getTheme`)이 들고 `ui.refresh` 가 빠진 세대★(TRD
-//   S21-storage §5-6 · §5-7).
-// ★세대 13 = `restore.status` 의 답에 `saves` 가 붙은 세대★(TRD S21-storage §6-5 — 가드 ⅱ 안내(ADR-0276)를 나르는
-//   칸이고 칸 자체는 구현 · 세션 판단) — 이름은 그대로고 답 모양이 바뀌었다.
-// ★세대 12 = `restore.status` 의 답에 `durable` · `state_file` 이 붙은 세대★(TRD S21-storage §6-5 · §6-7) — 이름은
-//   그대로고 답 모양이 바뀌었다.
-// ★세대 11 = 크래시 사본 명령 둘(`restore.status`·`restore.answer`)이 든 세대★(TRD S21-storage §6-7).
-// ★세대 10 = 셸 설정 명령 넷(`settings.get`·`settings.set`·`settings.reset`·`settings.schema`)이 들고
-//   `ui.refresh` 가 전역 테마를 파일이 아니라 설정 `theme.default` 에서 읽는 세대★(TRD S21-storage §5-4 ·
-//   §5-6) — 답 모양은 그대로고 `theme` 의 출처와 summary 가 바뀌었다(그 명령은 세대 14 에서 빠졌다).
-// ★세대 9 = `layout.setSlotContent` 가 사용량 슬롯(`content=Usage` + `show_claude`·`show_codex`)을 받는 세대★
-//   (TRD S21 usage-limit-slot §1-7) — 이름은 그대로고 인자 어휘와 칸이 는 세대다.
-// ★세대 8 = 분할 비율 명령 둘(`split.setRatio`·`split.list`)이 든 세대★(ADR-0227).
-// ★세대 7 = 그 `backend` 칸이 `"codex"` 를 **실제로 만드는** 세대★(2026-09-22 · ADR-0219) — 인자의
-//   **타입도 낱말 집합도 그대로**고(wire 어휘는 claude·codex 둘 그대로, 모르는 낱말은 여전히 모르는
-//   낱말) 바뀐 것은 정책이 그 낱말을 열었다는 것과 **그것을 광고하는 summary** 다. 세대 5 가 같은 축의
-//   선례다 — 거기서도 바뀐 것은 타입이 아니라 어휘와 summary 였다.
-//   (세대 6 = 그 칸이 `"codex"` 를 **정책으로** 거절하던 세대 — 그 거절은 위 ADR 이 걷었다 ·
-//   세대 5 = 그 칸이 실제로 고를 수 있게 된 세대 — 인자의 **타입은 그대로**고(`Option<String>`) 바뀐 것은
-//   그 칸이 받는 어휘와 그것을 광고하는 summary 다 · 세대 4 = `ui.refresh` 의 답에 `source` 가 붙은 세대 ·
-//   세대 3 = `ui.refresh` 자체 · 세대 2 =
-//   `slot.popout`). ★이름이 늘 때만 올리는 번호가 아니다★ — **선언이 바뀌면** 올린다(답 모양도 선언이다).
-//   매크로 계약 = `declare_commands!` 의 `CATALOG_VERSION` 항목. 안 올리면 codex 를 만들어 주는 셸과
-//   거절하는 셸이 같은 세대를 보고해 진단이 거짓말을 한다.
-//   ★분기 재료가 아니다★ — 받는 쪽이 이 번호로 거절하면 그게 틀린 것이다(`CommandEnvelope::proto_ver`).
-//   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
-//   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
+// Command names reuse the ids the frontend registry already registers (`tab.create`, `slot.focus`, ...); a second spelling would
+// give one action two names. Names without a frontend twin (queries, `slot.split` with the direction as an argument,
+// `window.*Theme`, `split.*`) are coined here.
+// `catalog_version` is bumped whenever the declarations change, including answer shapes and the vocabulary or summaries of a
+// field, not only when names grow (macro contract: the `CATALOG_VERSION` item of `declare_commands!`). Not branching material
+// for receivers (`CommandEnvelope::proto_ver`), and unrelated to `engram_dashboard_protocol::PROTOCOL_VERSION`.
+// ADR-0291
+// ADR-0227
+// ADR-0225
+// ADR-0276
+// ADR-0219 (TRD §6; TRD S21-storage §10 F7; TRD S28 §4 · §7; TRD S26-window-chrome §6-1 · §6-6; TRD S21-storage §6-5; TRD S21-storage §6-5 · §6-7; TRD S21-storage §6-7; TRD S21-storage §5-4; TRD S21 usage-limit-slot §1-7; TRD S26-window-chrome §3-2 · §4-5 · §5-3; TRD S21-storage §5-6 · §5-7)
 declare_commands! {
     catalog_version: 21;
 
-    /// 탭 바 한 칸 — `name` = 보이는 이름 · `named` = 이름을 정했나(거짓이면 `name` 은 포커스 칸 내용을 따라 바뀐다).
+    /// One tab bar entry — `name` = the visible name · `named` = whether the name was set (if false, `name` changes following the focused area's content).
     struct TabRow {
         id: String,
         name: String,
         named: bool,
     }
 
-    /// 나눌 방향 — 이름이 결과 배치를 말한다(`LeftRight` = 좌/우, `TopBottom` = 위/아래). // ADR-0140
+    /// The direction to split — the name states the resulting layout (`LeftRight` = left/right, `TopBottom` = top/bottom). // ADR-0140
     ///
-    /// ★철자가 Tauri invoke 경로(`left_right`/`top_bottom`)와 다르다★ — 선언 매크로가 serde rename 을 못
-    /// 달아 Rust variant 이름이 그대로 wire 값이 된다. 두 표면이 같은 뜻을 다른 철자로 받는 것은 알고
-    /// 남긴 것이고, 변환은 핸들러가 한다.
+    /// ★The spelling differs from the Tauri invoke path (`left_right`/`top_bottom`)★ — the declaration macro cannot attach serde rename,
+    /// so the Rust variant name becomes the wire value as is. That the two surfaces take the same meaning in different spellings is left
+    /// knowingly, and the handler does the conversion.
     enum SplitDirection {
         LeftRight,
         TopBottom,
     }
 
-    /// 슬롯에 무엇을 담나 — `Agent` 만 `agent_id` 를, `Usage` 만 `show_claude`·`show_codex` 를 함께 받는다.
+    /// What the slot holds — only `Agent` also takes `agent_id`, and only `Usage` takes `show_claude` · `show_codex`.
     enum SlotContentKind {
         Empty,
         Agent,
@@ -175,13 +94,13 @@ declare_commands! {
         Usage,
     }
 
-    /// 비율 쓰기의 결말 — `Applied` = 바꿨다 · `Unchanged` = 자른 값이 지금 값과 같다(무변경) ·
-    /// `TooSmall` = 손대지 않았다(분할이 두 쪽 모두 최소 칸 크기를 줄 만큼 크지 않거나, 그 값이면 어떤 칸의
-    /// 폭·높이가 0 이 된다).
+    /// The outcome of a ratio write — `Applied` = changed · `Unchanged` = the clamped value equals the current value (no change) ·
+    /// `TooSmall` = untouched (the split is not big enough to give both sides the minimum area size, or with that value some area's
+    /// width · height becomes 0).
     ///
-    /// 셸 안쪽 쌍둥이는 `super::types::SplitRatioOutcome` 이다(Tauri `set_split_ratio` 의 답) — 타입 이름은
-    /// 다르고 variant 철자는 같다(`SplitDirection`↔`SplitDir` 과 같은 관계 · 맞대는 테스트가 지킨다). 변환은
-    /// 핸들러가 한다.
+    /// The twin inside the shell is `super::types::SplitRatioOutcome` (the answer of Tauri `set_split_ratio`) — the type names
+    /// differ and the variant spellings are the same (the same relation as `SplitDirection`↔`SplitDir` · a test holding them against each other guards it). The handler
+    /// does the conversion.
     // ADR-0227
     enum RatioOutcome {
         Applied,
@@ -189,8 +108,8 @@ declare_commands! {
         TooSmall,
     }
 
-    /// 분할 하나 — a = 왼쪽/위, b = 오른쪽/아래(ADR-0140). `ratio` = a 쪽 칸의 몫.
-    /// `a_slots`·`b_slots` = 그 쪽 서브트리에 든 슬롯 id(트리 전위 순).
+    /// One split — a = left/top, b = right/bottom (ADR-0140). `ratio` = the share of side a's area.
+    /// `a_slots` · `b_slots` = the slot ids in that side's subtree (tree preorder).
     // ADR-0227
     struct SplitRow {
         split_id: String,
@@ -200,14 +119,14 @@ declare_commands! {
         b_slots: Vec<String>,
     }
 
-    /// 셸 설정 한 줄 — value 는 정규 문자열, is_default = 덮어쓴 값이 없어 기본값을 쓰고 있다.
+    /// One shell setting line — value is the canonical string, is_default = no overriding value, so the default is in use.
     struct SettingRow {
         key: String,
         value: String,
         is_default: bool,
     }
 
-    /// 셸 설정 키 하나의 모양.
+    /// The shape of one shell settings key.
     struct SettingSchemaRow {
         key: String,
         kind: String,
@@ -218,9 +137,9 @@ declare_commands! {
         description: String,
     }
 
-    /// 창 하나 — window_id = 재시작을 넘어 같은 창(창 인자로 넘길 값) · window = label(그 실행 안에서만) · number = 보이는
-    /// 창 번호(다시 쓰인다 — 창 인자로 받지 않는다) · main = main 창인가 · visible · minimized · maximized = 그 순간의 OS
-    /// 상태 · focused = 그 창이 OS 전경 창인가. OS 창을 못 읽은 창은 넷 다 false 다.
+    /// One window — window_id = the same window across restarts (the value to pass as the window argument) · window = label (only within that run) · number = the visible
+    /// window number (reused — not accepted as a window argument) · main = whether it is the main window · visible · minimized · maximized = the OS
+    /// state at that moment · focused = whether that window is the OS foreground window. A window whose OS window could not be read has all four false.
     struct WindowRow {
         window_id: String,
         window: String,
@@ -232,15 +151,15 @@ declare_commands! {
         focused: bool,
     }
 
-    /// window.close 의 결말 — Closed = 팝아웃을 닫았다 · HiddenAll = main 이라 닫지 않고 모든 창을 숨겼다 · Kept =
-    /// if_empty 인데 그 창에 탭이 있거나 이미 닫혀 그대로 뒀다.
+    /// The outcome of window.close — Closed = closed the popout · HiddenAll = it is main, so instead of closing, all windows were hidden · Kept =
+    /// if_empty but the window has tabs or was already closed, so it was left as is.
     enum WindowCloseOutcome {
         Closed,
         HiddenAll,
         Kept,
     }
 
-    /// 칸에 든 것의 종류 — Unknown = 이 판이 모르는 내용(더 새 판이 저장한 칸). 셸 안쪽 쌍둥이는 `rows::SlotKind` 다.
+    /// The kind of what an area holds — Unknown = content this version does not know (an area saved by a newer version). The twin inside the shell is `rows::SlotKind`.
     // ADR-0307
     enum SlotKind {
         Empty,
@@ -251,8 +170,8 @@ declare_commands! {
         Unknown,
     }
 
-    /// 붙는 탭이 놓일 쪽 — 붙일 칸(또는 탭 전체)의 그 변에 붙는다. 셸 안쪽 쌍둥이는 `dock::DockSide` 다(매크로가 블록
-    /// 밖 enum 을 못 실어 같은 철자로 하나 더 둔다).
+    /// The side where the attached tab goes — it attaches to that edge of the area to attach to (or the whole tab). The twin inside the shell is `dock::DockSide` (the macro cannot
+    /// carry enums outside the block, so one more with the same spelling is kept).
     // ADR-0307
     enum DockSide {
         Left,
@@ -261,8 +180,8 @@ declare_commands! {
         Bottom,
     }
 
-    /// 칸 하나의 줄 — 칸 뜻은 layout.get 의 summary. id 넷(window_id · tab · slot_id · agent_id)은 layout.get 의
-    /// ids = true 에서만 싣는다 — 빠진 칸은 답에서 아예 빠진다(null 이 아니다).
+    /// One area's row — the field meanings are in layout.get's summary. The four ids (window_id · tab · slot_id · agent_id) are included only with layout.get's
+    /// ids = true — omitted fields are left out of the answer entirely (not null).
     // ADR-0307
     struct LayoutRow {
         window: String,
@@ -283,10 +202,10 @@ declare_commands! {
         agent_id: Option<String>,
     }
 
-    /// 창에 빈 탭을 하나 더 만들고 활성화한다. name 을 빼면 자동 이름 — 그 탭의 포커스 칸(에이전트면 그 이름)을
-    /// 따라 바뀐다(tab.list 의 named = false). name 을 주면 정한 이름이다(앞뒤 공백은 깎는다).
-    /// window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시
-    /// 쓰인다 — INVALID_ARGUMENT). label 은 그 실행 안에서만 맞는다.
+    /// Creates one more empty tab in the window and activates it. Without name it is an auto name — it changes following that tab's focused area (for an agent, its name)
+    /// (named = false in tab.list). With name it is a set name (leading/trailing whitespace is trimmed).
+    /// window = window_id from window.list (the same window across restarts) or a label within the same run. Numbers are not accepted (they are
+    /// reused — INVALID_ARGUMENT). A label is valid only within that run.
     #[effect(Write)]
     #[since(1)]
     "tab.create" => args TabCreateArgs {
@@ -297,12 +216,12 @@ declare_commands! {
     } errors [CONFLICT];
 
     // ADR-0307
-    /// 그 창의 보이는 탭을 바꾼다(다른 창은 그대로). 탭 = view_id | tab_of(그 에이전트가 든 탭 — 이름 또는 id) 중 하나.
-    /// window 는 빼도 된다(탭에서 안다) — 주면 그 창의 탭이어야 하고 window_id 또는 같은 실행 안 label 이다(번호는 받지
-    /// 않는다).
-    /// 오류: tab_of 가 어느 칸에도 없거나 그 이름이 없으면 NOT_FOUND · 여러 탭에 떠 있으면 CONFLICT(문구 끝 candidates 의
-    /// view_id= 값을 view_id 로 다시) · 그 이름의 에이전트가 둘 이상이면 CONFLICT(candidates = 에이전트 id — tab_of 로 다시) ·
-    /// 없는 view_id 는 CONFLICT.
+    /// Changes the visible tab of the window (other windows unchanged). Tab = one of view_id | tab_of (the tab holding that agent — name or id).
+    /// window may be omitted (known from the tab) — if given, it must be that tab's window and is a window_id or a label within the same run (numbers are not
+    /// accepted).
+    /// Errors: NOT_FOUND if tab_of is in no area or that name does not exist · CONFLICT if it is up in several tabs (retry with a view_id= value of the candidates
+    /// at the end of the text as view_id) · CONFLICT if there are two or more agents with that name (candidates = agent ids — retry with tab_of) ·
+    /// CONFLICT for a missing view_id.
     #[effect(Write)]
     #[since(1)]
     "tab.switch" => args TabSwitchArgs {
@@ -313,13 +232,13 @@ declare_commands! {
     } -> ok TabSwitchOk {} errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
-    /// 탭을 닫는다 — 창의 마지막 탭이면 그 창도 닫힌다. 탭 = view_id | tab_of(그 에이전트가 든 탭 — 이름 또는 id) 중
-    /// 하나. window 는 빼도 된다(탭에서 안다) — 주면 그 창의 탭이어야 하고 window_id 또는 같은 실행 안 label 이다(번호는
-    /// 받지 않는다).
-    /// 답 = layout(그 창에 이제 보이는 탭의 칸 줄 — layout.get rows 모양 · id 없음 · 창째 닫혔으면 빈 목록).
-    /// 오류: tab_of 가 어느 칸에도 없거나 그 이름이 없으면 NOT_FOUND · 여러 탭에 떠 있으면 CONFLICT(문구 끝 candidates 의
-    /// view_id= 값을 view_id 로 다시) · 그 이름의 에이전트가 둘 이상이면 CONFLICT(candidates = 에이전트 id — tab_of 로 다시) ·
-    /// 없는 view_id 는 CONFLICT.
+    /// Closes the tab — if it is the window's last tab, that window closes too. Tab = one of view_id | tab_of (the tab holding that agent — name or
+    /// id). window may be omitted (known from the tab) — if given, it must be that tab's window and is a window_id or a label within the same run (numbers are
+    /// not accepted).
+    /// Answer = layout (the area rows of the tab now visible in that window — layout.get rows shape · no ids · an empty list if the whole window closed).
+    /// Errors: NOT_FOUND if tab_of is in no area or that name does not exist · CONFLICT if it is up in several tabs (retry with a view_id= value of the candidates
+    /// at the end of the text as view_id) · CONFLICT if there are two or more agents with that name (candidates = agent ids — retry with tab_of) ·
+    /// CONFLICT for a missing view_id.
     #[effect(Write)]
     #[since(1)]
     "tab.close" => args TabCloseArgs {
@@ -332,12 +251,12 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
-    /// 탭 이름을 바꾼다(앞뒤 공백은 깎는다 · 창은 탭에서 안다). 탭 = view_id | tab_of(그 에이전트가 든 탭 — 이름 또는 id)
-    /// 중 하나. 그 뒤 이름은 굳는다 — 지금 보이는 자동 이름과 같은 글자여도 포커스 칸 · 에이전트 이름을 더는 따라가지
-    /// 않고, 자동 이름으로 되돌리는 명령은 없다.
-    /// 오류: tab_of 가 어느 칸에도 없거나 그 이름이 없으면 NOT_FOUND · 여러 탭에 떠 있으면 CONFLICT(문구 끝 candidates 의
-    /// view_id= 값을 view_id 로 다시) · 그 이름의 에이전트가 둘 이상이면 CONFLICT(candidates = 에이전트 id — tab_of 로 다시) ·
-    /// 없는 view_id 는 CONFLICT.
+    /// Renames the tab (leading/trailing whitespace is trimmed · the window is known from the tab). Tab = one of view_id | tab_of (the tab holding that agent — name or
+    /// id). Afterwards the name is fixed — even if it is the same text as the auto name now visible, it no longer follows the focused area · agent
+    /// name, and there is no command that reverts to the auto name.
+    /// Errors: NOT_FOUND if tab_of is in no area or that name does not exist · CONFLICT if it is up in several tabs (retry with a view_id= value of the candidates
+    /// at the end of the text as view_id) · CONFLICT if there are two or more agents with that name (candidates = agent ids — retry with tab_of) ·
+    /// CONFLICT for a missing view_id.
     #[effect(Write)]
     #[since(1)]
     "tab.rename" => args TabRenameArgs {
@@ -347,9 +266,9 @@ declare_commands! {
         name: String,
     } -> ok TabRenameOk {} errors [NOT_FOUND, CONFLICT];
 
-    /// 그 창의 탭 목록 + 활성 탭 + 버전. 답의 window 는 그 창의 label 이다.
-    /// window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시
-    /// 쓰인다 — INVALID_ARGUMENT). label 은 그 실행 안에서만 맞는다.
+    /// The window's tab list + active tab + version. The window in the answer is that window's label.
+    /// window = window_id from window.list (the same window across restarts) or a label within the same run. Numbers are not accepted (they are
+    /// reused — INVALID_ARGUMENT). A label is valid only within that run.
     #[effect(Read)]
     #[since(1)]
     "tab.list" => args TabListArgs {
@@ -361,18 +280,18 @@ declare_commands! {
         version: u64,
     } errors [CONFLICT];
 
-    /// 빈 탭 하나를 든 새 창을 연다. 답 = window(label — 그 실행 안에서만 맞는다) · window_id(재시작을 넘어 같은
-    /// 창 — 창 인자로 넘길 값) · number(보이는 창 번호 — 닫힌 창의 번호를 다시 쓰므로 창 인자로 받지 않는다).
+    /// Opens a new window holding one empty tab. Answer = window (label — valid only within that run) · window_id (the same window across restarts
+    /// — the value to pass as the window argument) · number (the visible window number — closed windows' numbers are reused, so it is not accepted as a window argument).
     #[effect(Write)]
     #[since(1)]
     "window.create" => args WindowCreateArgs {}
                     -> ok   WindowCreateOk { window: String, window_id: String, number: u32 }
                     errors [CONFLICT];
 
-    /// 창을 닫는다 — 팝아웃은 탭째 닫고(outcome = Closed), main 은 닫지 않고 모든 창을 숨긴다(HiddenAll — window.hideAll
-    /// 과 같다 · window.showAll 이나 트레이 「보이기」가 되살린다). if_empty = true 면 window 는 그 창의 window_id 여야 하고,
-    /// 그 창에 탭이 들어와 있거나 이미 닫혔으면 닫지 않는다(Kept — 오류가 아니다). window 는 tab.create 와 같다(window_id
-    /// 또는 같은 실행 안 label · 번호는 받지 않는다 — if_empty 여도 INVALID_ARGUMENT).
+    /// Closes the window — a popout closes with its tabs (outcome = Closed), main is not closed but all windows are hidden (HiddenAll — the same as
+    /// window.hideAll · window.showAll or the tray 「Show」 bring them back). With if_empty = true, window must be that window's window_id, and
+    /// if tabs have come into that window or it is already closed, it is not closed (Kept — not an error). window is the same as tab.create (window_id
+    /// or a label within the same run · numbers are not accepted — INVALID_ARGUMENT even with if_empty).
     #[effect(Write)]
     #[since(1)]
     "window.close" => args WindowCloseArgs {
@@ -382,27 +301,27 @@ declare_commands! {
         outcome: WindowCloseOutcome,
     } errors [CONFLICT];
 
-    /// 지금 열려 있는 창. windows = label 전량 · details = 창마다 window_id · label · 번호 · main 인가 · OS 상태(번호 순 ·
-    /// 칸 뜻은 행 모양). 창 번호는 비어 있는 가장 작은 수를 다시 쓴다 — 닫히는 창이 아직 없어지지 않았으면 그 번호는 비지
-    /// 않는다(그 창은 목록에 없다). 창을 가리킬 때는 번호가 아니라 window_id 를 넘긴다.
+    /// The windows open now. windows = all labels · details = per window window_id · label · number · whether main · OS state (in number order ·
+    /// field meanings in the row shape). Window numbers reuse the smallest free number — while a closing window has not gone yet, its number does not
+    /// become free (that window is not in the list). To point at a window, pass the window_id, not the number.
     #[effect(Read)]
     #[since(1)]
     "window.list" => args WindowListArgs {}
                   -> ok   WindowListOk { windows: Vec<String>, details: Vec<WindowRow> }
                   errors [CONFLICT];
 
-    /// 창을 최소화한다(이미 최소화면 무동작). 보이지 않는 창은 CONFLICT — 숨은 창은 먼저 window.raise 또는
-    /// window.showAll, 아직 첫 화면 전인 창은 곧 보인다. window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label ·
-    /// 번호는 받지 않는다).
+    /// Minimizes the window (no-op if already minimized). A window that is not visible is CONFLICT — for a hidden window first window.raise or
+    /// window.showAll; a window before its first paint shows soon. window is the same as tab.create (window_id or a label within the same run ·
+    /// numbers are not accepted).
     #[effect(Write)]
     #[since(20)]
     "window.minimize" => args WindowMinimizeArgs {
         window: String,
     } -> ok WindowMinimizeOk {} errors [CONFLICT];
 
-    /// 창을 최대화한다(이미 최대화면 무동작). 보이지 않는 창(숨김 · 아직 첫 화면 전)은 화면을 건드리지 않고 미뤄 뒀다가
-    /// 그 창이 보일 때 최대화로 보인다 — deferred = true. window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label ·
-    /// 번호는 받지 않는다).
+    /// Maximizes the window (no-op if already maximized). A window that is not visible (hidden · before its first paint) is deferred without touching the screen,
+    /// and shows maximized when that window is shown — deferred = true. window is the same as tab.create (window_id or a label within the same run ·
+    /// numbers are not accepted).
     #[effect(Write)]
     #[since(20)]
     "window.maximize" => args WindowMaximizeArgs {
@@ -411,9 +330,9 @@ declare_commands! {
         deferred: bool,
     } errors [CONFLICT];
 
-    /// 최대화된 창을 원래 크기로 되돌린다(최대화가 아니면 무동작 · 보이는 최소화된 창도 무동작이다 — 먼저 window.raise). 보이지
-    /// 않는 창(숨김 · 아직 첫 화면 전)은 화면을 건드리지 않고 미뤄 뒀다가 그 창이 보일 때 원래 크기로 보인다 — deferred =
-    /// true. window 는 tab.create 와 같다(window_id 또는 같은 실행 안 label · 번호는 받지 않는다).
+    /// Restores a maximized window to its original size (no-op if not maximized · also a no-op for a visible minimized window — first window.raise). A window that is not
+    /// visible (hidden · before its first paint) is deferred without touching the screen, and shows at its original size when that window is shown — deferred =
+    /// true. window is the same as tab.create (window_id or a label within the same run · numbers are not accepted).
     #[effect(Write)]
     #[since(20)]
     "window.unmaximize" => args WindowUnmaximizeArgs {
@@ -422,10 +341,10 @@ declare_commands! {
         deferred: bool,
     } errors [CONFLICT];
 
-    /// 창을 앞으로 낸다 — 숨어 있으면 모든 창을 보이고(shown_all = true), 최소화면 펴고, 맨 위로 올린 뒤 전경을 청한다.
-    /// 빼앗지 않는다: 다른 앱이 앞이면 맨 위로만 올라 focused = false(focused 는 그 뒤 그 창이 OS 전경 창인가 그대로다).
-    /// 아직 첫 화면 전인 창은 손대지 않는다(곧 보인다 — pending = true). window 는 tab.create 와 같다(window_id 또는 같은
-    /// 실행 안 label · 번호는 받지 않는다).
+    /// Brings the window forward — if hidden, shows all windows (shown_all = true), if minimized restores it, raises it to the top, then requests the foreground.
+    /// It does not steal: if another app is in front, it is only raised to the top with focused = false (focused is whether that window is then the OS foreground window, as is).
+    /// A window before its first paint is not touched (it shows soon — pending = true). window is the same as tab.create (window_id or a label within the same
+    /// run · numbers are not accepted).
     #[effect(Write)]
     #[since(20)]
     "window.raise" => args WindowRaiseArgs {
@@ -436,13 +355,13 @@ declare_commands! {
         pending: bool,
     } errors [CONFLICT];
 
-    /// 모든 창을 숨긴다(트레이로 — main 의 닫기와 같다). 되살리려면 window.showAll 또는 window.raise.
+    /// Hides all windows (to the tray — the same as closing main). To bring them back, window.showAll or window.raise.
     #[effect(Write)]
     #[since(20)]
     "window.hideAll" => args WindowHideAllArgs {} -> ok WindowHideAllOk {} errors [];
 
-    /// 숨은 창을 모두 보인다 — 포커스를 빼앗지 않는다(다른 앱이 앞이면 보이기만 한다). 아직 첫 화면 전인 창은 건너뛴다(곧
-    /// 저절로 보인다). focused = 그 뒤 main 이 OS 전경 창인가.
+    /// Shows all hidden windows — without stealing focus (if another app is in front, it only shows them). Windows before their first paint are skipped (they show
+    /// by themselves soon). focused = whether main is then the OS foreground window.
     #[effect(Write)]
     #[since(20)]
     "window.showAll" => args WindowShowAllArgs {} -> ok WindowShowAllOk {
@@ -450,11 +369,11 @@ declare_commands! {
     } errors [];
 
     // ADR-0265
-    /// 창 하나의 테마를 읽는다. window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label —
-    /// 번호는 받지 않는다(다시 쓰인다 — INVALID_ARGUMENT).
-    /// theme = 그 창에만 정한 테마(dark · light · e-ink) — null 이면 정하지 않아 전역 테마(settings 의
-    /// theme.default)를 따른다. effective = 지금 그 창에 칠하는 테마(theme 가 null 이면 theme.default).
-    /// 없는 창 = CONFLICT.
+    /// Reads one window's theme. window = window_id from window.list (the same window across restarts) or a label within the same run —
+    /// numbers are not accepted (they are reused — INVALID_ARGUMENT).
+    /// theme = the theme set for that window only (dark · light · e-ink) — null means not set, following the global theme (settings'
+    /// theme.default). effective = the theme painted on that window now (theme.default if theme is null).
+    /// A missing window = CONFLICT.
     #[effect(Read)]
     #[since(14)]
     "window.getTheme" => args WindowGetThemeArgs {
@@ -465,15 +384,15 @@ declare_commands! {
     } errors [CONFLICT];
 
     // ADR-0265
-    /// 창 하나에만 테마를 정한다 — theme = dark · light · e-ink(대소문자 무시), 또는 null(그 창의 테마를 지워 전역
-    /// theme.default 를 따르게 한다). theme 칸은 빼면 INVALID_ARGUMENT 다 — 지우려면 null 을 준다. window 는
-    /// window.getTheme 과 같다(window_id 또는 같은 실행 안 label · 번호는 받지 않는다).
-    /// 화면 상태에 그 창과 함께 저장돼 재시작을 넘기고(창을 닫으면 함께 사라진다 · restore.status 의 saves 가 false 인
-    /// 실행은 저장하지 않는다) 그 창에 새 테마를 보낸다 — 슬롯은 다시 마운트하지 않는다(대화가 그대로다). 모든 창을
-    /// 한꺼번에 바꾸려면 settings.set theme.default.
-    /// 답 = 쓴 뒤의 theme · effective(window.getTheme 과 같은 모양) — 성공은 그 창에 보냈다는 뜻이지 칠한 것을 확인한
-    /// 것이 아니다(아직 안 뜬 창은 뜰 때 받는다). 없는 창 = CONFLICT · 모르는 테마 = INVALID_ARGUMENT · 정했지만
-    /// 그 창에 못 보냈다 = INTERNAL(값은 남아 window.getTheme 이 새 값을 답한다).
+    /// Sets a theme for one window only — theme = dark · light · e-ink (case-insensitive), or null (clears that window's theme so it follows the global
+    /// theme.default). Omitting the theme field is INVALID_ARGUMENT — to clear, give null. window is the same as
+    /// window.getTheme (window_id or a label within the same run · numbers are not accepted).
+    /// It is saved with that window in the screen state and survives restarts (it vanishes with the window when closed · a run where restore.status's saves is false
+    /// does not save) and sends the new theme to that window — slots are not remounted (the conversation stays). To change all windows
+    /// at once, settings.set theme.default.
+    /// Answer = theme · effective after the write (the same shape as window.getTheme) — success means it was sent to that window, not that the painting was
+    /// confirmed (a window not up yet receives it when it comes up). A missing window = CONFLICT · an unknown theme = INVALID_ARGUMENT · set but
+    /// could not be sent to that window = INTERNAL (the value remains and window.getTheme answers the new value).
     #[effect(Write)]
     #[since(14)]
     "window.setTheme" => args WindowSetThemeArgs {
@@ -485,14 +404,14 @@ declare_commands! {
     } errors [CONFLICT];
 
     // ADR-0307
-    /// 칸을 둘로 나눈다 — dir = LeftRight(좌/우 두 칸) · TopBottom(위/아래 두 칸). 칸 = slot_id(view_id 를 함께 주면 그 탭의
-    /// 칸이어야 한다) | slot_of(그 에이전트가 든 칸 — 이름 또는 id) | at(공간 낱말 — window 의 보이는 탭에서 · window 를
-    /// 빼면 main) 중 하나. at = top-left · top-right · bottom-left · bottom-right(그 모서리 칸) · left · right · up ·
-    /// down(포커스 칸의 그쪽 이웃). window 는 at 과만 쓰고 window_id 또는 같은 실행 안 label 이다(번호는 받지 않는다).
-    /// 답 = slot_id(새로 생긴 칸) · layout(그 탭의 칸 줄 — layout.get rows 모양 · id 없음).
-    /// 오류: slot_of 가 어느 칸에도 없거나 그 이름이 없으면 · 낱말이 칸을 못 집으면 NOT_FOUND · slot_of 가 여러 칸에 떠
-    /// 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의 에이전트가 둘 이상이면
-    /// CONFLICT(candidates = 에이전트 id — slot_of 로 다시) · 없는 slot_id · view_id 는 CONFLICT.
+    /// Splits an area in two — dir = LeftRight (two areas left/right) · TopBottom (two areas top/bottom). Area = one of slot_id (if view_id is given too, it must be an area of that
+    /// tab) | slot_of (the area holding that agent — name or id) | at (a spatial word — in window's visible tab · main if window
+    /// is omitted). at = top-left · top-right · bottom-left · bottom-right (that corner area) · left · right · up ·
+    /// down (that neighbor of the focused area). window is used only with at and is a window_id or a label within the same run (numbers are not accepted).
+    /// Answer = slot_id (the newly created area) · layout (the area rows of that tab — layout.get rows shape · no ids).
+    /// Errors: NOT_FOUND if slot_of is in no area or that name does not exist · or if the word picks no area · CONFLICT if slot_of is up in several
+    /// areas (retry with a slot_id= value of the candidates at the end of the text as slot_id) · CONFLICT if there are two or more agents with that name
+    /// (candidates = agent ids — retry with slot_of) · CONFLICT for a missing slot_id · view_id.
     #[effect(Write)]
     #[since(1)]
     "slot.split" => args SlotSplitArgs {
@@ -509,14 +428,14 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
-    /// 칸을 닫는다(형제가 그 자리를 물려받는다). 칸 = slot_id(view_id 를 함께 주면 그 탭의 칸이어야 한다) | slot_of(그
-    /// 에이전트가 든 칸 — 이름 또는 id) | at(공간 낱말 — window 의 보이는 탭에서 · window 를 빼면 main) 중 하나. at =
-    /// top-left · top-right · bottom-left · bottom-right(그 모서리 칸) · left · right · up · down(포커스 칸의 그쪽 이웃).
-    /// window 는 at 과만 쓰고 window_id 또는 같은 실행 안 label 이다(번호는 받지 않는다).
-    /// 답 = layout(그 탭의 남은 칸 줄 — layout.get rows 모양 · id 없음).
-    /// 오류: slot_of 가 어느 칸에도 없거나 그 이름이 없으면 · 낱말이 칸을 못 집으면 NOT_FOUND · slot_of 가 여러 칸에 떠
-    /// 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의 에이전트가 둘 이상이면
-    /// CONFLICT(candidates = 에이전트 id — slot_of 로 다시) · 없는 slot_id · view_id 는 CONFLICT.
+    /// Closes an area (a sibling inherits its place). Area = one of slot_id (if view_id is given too, it must be an area of that tab) | slot_of (the area
+    /// holding that agent — name or id) | at (a spatial word — in window's visible tab · main if window is omitted). at =
+    /// top-left · top-right · bottom-left · bottom-right (that corner area) · left · right · up · down (that neighbor of the focused area).
+    /// window is used only with at and is a window_id or a label within the same run (numbers are not accepted).
+    /// Answer = layout (the remaining area rows of that tab — layout.get rows shape · no ids).
+    /// Errors: NOT_FOUND if slot_of is in no area or that name does not exist · or if the word picks no area · CONFLICT if slot_of is up in several
+    /// areas (retry with a slot_id= value of the candidates at the end of the text as slot_id) · CONFLICT if there are two or more agents with that name
+    /// (candidates = agent ids — retry with slot_of) · CONFLICT for a missing slot_id · view_id.
     #[effect(Write)]
     #[since(1)]
     "slot.close" => args SlotCloseArgs {
@@ -532,14 +451,14 @@ declare_commands! {
 
     // ADR-0227
     // ADR-0140
-    /// 분할(구분선) 하나의 비율을 정한다. ratio = a 쪽(왼쪽/위) 칸의 몫 — 창 전체가 아니라 그 분할이 나누는
-    /// 영역 안의 몫이고, a 쪽에 칸이 여럿이면 그 묶음 전체의 몫이다. 0.3 이면 그 영역의 30% 를 왼쪽(위아래
-    /// 분할이면 위)이 갖는다. split_id 는 split.list 가 준다.
-    /// 범위 밖 값은 오류가 아니다: 셸이 0.01~0.99 로 자르고, 그 창의 크기를 알면 두 쪽이 각각 화면 최소 칸
-    /// 크기 이상이 되게 한 번 더 자른 뒤 그 값을 적용하고 답의 ratio 로 돌려준다.
-    /// outcome — Applied = 바꿨다 · Unchanged = 그렇게 자른 값이 지금 값과 같아 바꾼 것이 없다 ·
-    /// TooSmall = 분할이 너무 작아서(또는 그 값이면 어떤 칸이 사라져서) 손대지 않았다. Applied 가 아니면
-    /// ratio 는 손대지 않은 지금 값이다.
+    /// Sets the ratio of one split (divider). ratio = the share of side a's (left/top) area — the share within the region that split divides, not the whole
+    /// window, and if side a has several areas, the share of that whole group. With 0.3, the left (the top for a top/bottom
+    /// split) gets 30% of that region. split_id comes from split.list.
+    /// An out-of-range value is not an error: the shell clamps it to 0.01~0.99, and if it knows the window's size, clamps once more so each side is at least
+    /// the screen's minimum area size, then applies that value and returns it as the answer's ratio.
+    /// outcome — Applied = changed · Unchanged = the value clamped that way equals the current value, so nothing changed ·
+    /// TooSmall = untouched because the split is too small (or that value would make some area vanish). If not Applied,
+    /// ratio is the current untouched value.
     #[effect(Write)]
     #[since(8)]
     "split.setRatio" => args SplitSetRatioArgs {
@@ -553,13 +472,13 @@ declare_commands! {
 
     // ADR-0227
     // ADR-0140
-    /// 그 탭의 분할(구분선) 전량 — 트리 전위 순. 행 = split_id · dir(LeftRight = 좌/우, TopBottom = 위/아래) ·
-    /// ratio(= a 쪽(왼쪽/위) 칸의 몫 — 창 전체가 아니라 그 분할이 나누는 영역 안의 몫이고, a 쪽에 칸이
-    /// 여럿이면 그 묶음 전체의 몫) · a_slots(a = 왼쪽/위 쪽에 든 슬롯 id) · b_slots(b = 오른쪽/아래 쪽).
-    /// 슬롯 x 와 y 를 가르는 분할은 x 가 한쪽 목록, y 가 다른 쪽 목록에 든 행이다(하나뿐이다).
-    /// 중첩은 목록의 포함으로 읽는다 — 한 행의 a_slots·b_slots 가 전부 다른 행의 한쪽 목록에 들면 그 행은
-    /// 그쪽 영역을 다시 나누는 분할이다.
-    /// 비율을 바꾸려면 그 split_id 로 split.setRatio 를 부른다.
+    /// All splits (dividers) of that tab — in tree preorder. Row = split_id · dir (LeftRight = left/right, TopBottom = top/bottom) ·
+    /// ratio (= the share of side a's (left/top) area — the share within the region that split divides, not the whole window, and if side a has several
+    /// areas, the share of that whole group) · a_slots (slot ids on side a = left/top) · b_slots (b = right/bottom side).
+    /// The split separating slots x and y is the row where x is in one side's list and y in the other (there is only one).
+    /// Nesting is read as list inclusion — if a row's a_slots · b_slots all fall into one side's list of another row, that row
+    /// is a split that divides that side's region again.
+    /// To change a ratio, call split.setRatio with that split_id.
     #[effect(Read)]
     #[since(8)]
     "split.list" => args SplitListArgs {
@@ -568,26 +487,26 @@ declare_commands! {
         splits: Vec<SplitRow>,
     } errors [CONFLICT];
 
-    // ★알려진 과도기 분열 — 같은 id 가 두 표면에서 **받는 것도 주는 것도** 다르다★: 프론트 레지스트리에도
-    //   `slot.popout` 이 있다(`src/commands/slotCommands.ts`). 받는 것 — 그쪽은 목적지 인자가 없어 **항상 새
-    //   창**이고(포커스된 좌표만 쓴다), 여기는 `to_window` 로 기존 창도 고른다. 주는 것 — 그쪽은
-    //   `{window, tab, window_id, number}`, 여기는 `{window, new_view_id, window_id, number}`. 한쪽만 맞춰 고치지 말 것 — 합류는 프론트 자체
-    //   레지스트리를 은퇴시키는 후속 스텝(화면 몫 등록) 몫이고, 지금 한쪽을 바꾸면 그 스텝이 옮길 대상만
-    //   늘어난다. 반대편에도 같은 메모가 붙어 있다.
+    // ★A known transitional split — the same id **takes and gives** different things on the two surfaces★: the frontend registry also
+    //   has `slot.popout` (`src/commands/slotCommands.ts`). Takes — that side has no destination argument, so it is **always a new
+    //   window** (it uses only the focused coordinates), while here `to_window` also picks an existing window. Gives — that side gives
+    //   `{window, tab, window_id, number}`, here `{window, new_view_id, window_id, number}`. Do not fix only one side — the join is the job of the follow-up step that retires
+    //   the frontend's own registry (the screen-side registration), and changing one side now only grows what that step
+    //   has to move. The other side carries the same memo.
     // ADR-0307
-    /// 칸의 내용을 다른 창의 새 탭으로 옮긴다(원본 칸은 닫힌다) — to_window 를 빼면 새 창을 연다. 칸 하나만 옮긴다 — 탭째는
+    /// Moves an area's content into a new tab of another window (the original area closes) — without to_window it opens a new window. It moves only one area — for a whole tab,
     /// tab.detach.
-    /// to_window = window.list 의 window_id(재시작을 넘어 같은 창) 또는 같은 실행 안 label. 번호는 받지 않는다(다시
-    /// 쓰인다 — INVALID_ARGUMENT). label 은 그 실행 안에서만 맞는다.
-    /// 칸 = slot_id(view_id 를 함께 주면 그 탭의 칸이어야 한다) | slot_of(그 에이전트가 든 칸 — 이름 또는 id) | at(공간
-    /// 낱말 — window 의 보이는 탭에서 · window 를 빼면 main) 중 하나. at = top-left · top-right · bottom-left ·
-    /// bottom-right(그 모서리 칸) · left · right · up · down(포커스 칸의 그쪽 이웃). window 는 at 과만 쓰고 to_window 와 같은
-    /// 꼴이다.
-    /// 답 = 옮겨 간 창의 window · window_id · number(window.create 와 같은 뜻 — 기존 창이면 그 창의 것) + new_view_id
-    /// (그 창에 생긴 탭) + layout(원본 탭 · 새 탭의 칸 줄 — layout.get rows 모양 · id 없음).
-    /// 오류: slot_of 가 어느 칸에도 없거나 그 이름이 없으면 · 낱말이 칸을 못 집으면 NOT_FOUND · slot_of 가 여러 칸에 떠
-    /// 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의 에이전트가 둘 이상이면
-    /// CONFLICT(candidates = 에이전트 id — slot_of 로 다시) · 없는 slot_id · view_id · to_window 는 CONFLICT.
+    /// to_window = window_id from window.list (the same window across restarts) or a label within the same run. Numbers are not accepted (they are
+    /// reused — INVALID_ARGUMENT). A label is valid only within that run.
+    /// Area = one of slot_id (if view_id is given too, it must be an area of that tab) | slot_of (the area holding that agent — name or id) | at (a spatial
+    /// word — in window's visible tab · main if window is omitted). at = top-left · top-right · bottom-left ·
+    /// bottom-right (that corner area) · left · right · up · down (that neighbor of the focused area). window is used only with at and has the same
+    /// form as to_window.
+    /// Answer = window · window_id · number of the window it moved to (the same meaning as window.create — for an existing window, that window's) + new_view_id
+    /// (the tab created in that window) + layout (the area rows of the original tab · the new tab — layout.get rows shape · no ids).
+    /// Errors: NOT_FOUND if slot_of is in no area or that name does not exist · or if the word picks no area · CONFLICT if slot_of is up in several
+    /// areas (retry with a slot_id= value of the candidates at the end of the text as slot_id) · CONFLICT if there are two or more agents with that name
+    /// (candidates = agent ids — retry with slot_of) · CONFLICT for a missing slot_id · view_id · to_window.
     #[effect(Write)]
     #[since(2)]
     "slot.popout" => args SlotPopoutArgs {
@@ -607,15 +526,15 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
-    /// 포커스를 그 칸으로 옮긴다(출력 라우팅은 안 바뀐다). 보이는 탭은 안 바꾼다 — 그 탭을 보이려면 먼저 tab.switch tab_of.
-    /// 답 = layout(그 탭의 칸 줄 — layout.get rows 모양 · id 없음).
-    /// 칸 = slot_id(view_id 를 함께 주면 그 탭의 칸이어야 한다) |
-    /// slot_of(그 에이전트가 든 칸 — 이름 또는 id) | at(공간 낱말 — window 의 보이는 탭에서 · window 를 빼면 main) 중 하나.
-    /// at = top-left · top-right · bottom-left · bottom-right(그 모서리 칸) · left · right · up · down(포커스 칸의 그쪽 이웃).
-    /// window 는 at 과만 쓰고 window_id 또는 같은 실행 안 label 이다(번호는 받지 않는다).
-    /// 오류: slot_of 가 어느 칸에도 없거나 그 이름이 없으면 · 낱말이 칸을 못 집으면 NOT_FOUND · slot_of 가 여러 칸에 떠
-    /// 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의 에이전트가 둘 이상이면
-    /// CONFLICT(candidates = 에이전트 id — slot_of 로 다시) · 없는 slot_id · view_id 는 CONFLICT.
+    /// Moves the focus to that area (output routing does not change). The visible tab does not change — to show that tab, first tab.switch tab_of.
+    /// Answer = layout (the area rows of that tab — layout.get rows shape · no ids).
+    /// Area = slot_id (if view_id is given too, it must be an area of that tab) |
+    /// slot_of (the area holding that agent — name or id) | at (a spatial word — in window's visible tab · main if window is omitted), one of them.
+    /// at = top-left · top-right · bottom-left · bottom-right (that corner area) · left · right · up · down (that neighbor of the focused area).
+    /// window is used only with at and is a window_id or a label within the same run (numbers are not accepted).
+    /// Errors: NOT_FOUND if slot_of is in no area or that name does not exist · or if the word picks no area · CONFLICT if slot_of is up in several
+    /// areas (retry with a slot_id= value of the candidates at the end of the text as slot_id) · CONFLICT if there are two or more agents with that name
+    /// (candidates = agent ids — retry with slot_of) · CONFLICT for a missing slot_id · view_id.
     #[effect(Write)]
     #[since(1)]
     "slot.focus" => args SlotFocusArgs {
@@ -630,16 +549,16 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
-    /// 이미 살아 있는 에이전트를 그 칸에 붙인다(새로 띄우지 않는다 — 띄우려면 agent.spawnInto). 붙일 에이전트 = assign(이름
-    /// 또는 id) | agent_id(id) 중 하나 — 데몬 명부에 없으면 NOT_FOUND 이고 아무것도 안 바뀐다.
-    /// 칸 = slot_id(view_id 를 함께 주면 그 탭의 칸이어야 한다) | slot_of(그 에이전트가 든 칸 — 이름 또는 id) | at(공간
-    /// 낱말 — window 의 보이는 탭에서 · window 를 빼면 main) 중 하나. at = top-left · top-right · bottom-left ·
-    /// bottom-right(그 모서리 칸) · left · right · up · down(포커스 칸의 그쪽 이웃). window 는 at 과만 쓰고 window_id 또는
-    /// 같은 실행 안 label 이다(번호는 받지 않는다).
-    /// 답 = layout(그 탭의 칸 줄 — layout.get rows 모양 · id 없음).
-    /// 오류: 에이전트(slot_of · assign · agent_id)가 데몬 명부에 없거나 slot_of 가 어느 칸에도 없으면 · 낱말이 칸을 못 집으면
-    /// NOT_FOUND · slot_of 가 여러 칸에 떠 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의
-    /// 에이전트가 둘 이상이면 CONFLICT(candidates = 에이전트 id — 그 인자(slot_of · assign)로 다시) · 없는 slot_id · view_id 는
+    /// Attaches an already living agent to that area (does not start a new one — to start one, agent.spawnInto). The agent to attach = one of assign (name
+    /// or id) | agent_id (id) — if not in the daemon roster, NOT_FOUND and nothing changes.
+    /// Area = one of slot_id (if view_id is given too, it must be an area of that tab) | slot_of (the area holding that agent — name or id) | at (a spatial
+    /// word — in window's visible tab · main if window is omitted). at = top-left · top-right · bottom-left ·
+    /// bottom-right (that corner area) · left · right · up · down (that neighbor of the focused area). window is used only with at and is a window_id or
+    /// a label within the same run (numbers are not accepted).
+    /// Answer = layout (the area rows of that tab — layout.get rows shape · no ids).
+    /// Errors: NOT_FOUND if an agent (slot_of · assign · agent_id) is not in the daemon roster or slot_of is in no area · or if the word picks no area
+    /// · CONFLICT if slot_of is up in several areas (retry with a slot_id= value of the candidates at the end of the text as slot_id) · CONFLICT if there are two or more
+    /// agents with that name (candidates = agent ids — retry with that argument (slot_of · assign)) · for a missing slot_id · view_id,
     /// CONFLICT.
     #[effect(Write)]
     #[since(1)]
@@ -659,17 +578,17 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
-    /// 칸이 무엇을 보여줄지 바꾼다. content=Agent 일 때만 assign(이름 또는 id) | agent_id(id) 중 하나를 준다 — 데몬 명부에
-    /// 없으면 NOT_FOUND 이고 아무것도 안 바뀐다. content=Usage 일 때만 show_claude·show_codex(그 회사를 보일지)를 줄 수
-    /// 있다 — 뺀 칸은 그 칸이 이미 Usage 면 지금 값을 그대로 두고, 아니면 true 다.
-    /// 칸 = slot_id(view_id 를 함께 주면 그 탭의 칸이어야 한다) | slot_of(그 에이전트가 든 칸 — 이름 또는 id) | at(공간
-    /// 낱말 — window 의 보이는 탭에서 · window 를 빼면 main) 중 하나. at = top-left · top-right · bottom-left ·
-    /// bottom-right(그 모서리 칸) · left · right · up · down(포커스 칸의 그쪽 이웃). window 는 at 과만 쓰고 window_id 또는
-    /// 같은 실행 안 label 이다(번호는 받지 않는다).
-    /// 답 = layout(그 탭의 칸 줄 — layout.get rows 모양 · id 없음).
-    /// 오류: 에이전트(slot_of · assign · agent_id)가 데몬 명부에 없거나 slot_of 가 어느 칸에도 없으면 · 낱말이 칸을 못 집으면
-    /// NOT_FOUND · slot_of 가 여러 칸에 떠 있으면 CONFLICT(문구 끝 candidates 의 slot_id= 값을 slot_id 로 다시) · 그 이름의
-    /// 에이전트가 둘 이상이면 CONFLICT(candidates = 에이전트 id — 그 인자(slot_of · assign)로 다시) · 없는 slot_id · view_id 는
+    /// Changes what an area shows. Only with content=Agent give one of assign (name or id) | agent_id (id) — if not in the daemon roster,
+    /// NOT_FOUND and nothing changes. Only with content=Usage can show_claude · show_codex (whether to show that company) be given
+    /// — an omitted field keeps the current value if that area is already Usage, otherwise true.
+    /// Area = one of slot_id (if view_id is given too, it must be an area of that tab) | slot_of (the area holding that agent — name or id) | at (a spatial
+    /// word — in window's visible tab · main if window is omitted). at = top-left · top-right · bottom-left ·
+    /// bottom-right (that corner area) · left · right · up · down (that neighbor of the focused area). window is used only with at and is a window_id or
+    /// a label within the same run (numbers are not accepted).
+    /// Answer = layout (the area rows of that tab — layout.get rows shape · no ids).
+    /// Errors: NOT_FOUND if an agent (slot_of · assign · agent_id) is not in the daemon roster or slot_of is in no area · or if the word picks no area
+    /// · CONFLICT if slot_of is up in several areas (retry with a slot_id= value of the candidates at the end of the text as slot_id) · CONFLICT if there are two or more
+    /// agents with that name (candidates = agent ids — retry with that argument (slot_of · assign)) · for a missing slot_id · view_id,
     /// CONFLICT.
     #[effect(Write)]
     #[since(1)]
@@ -692,15 +611,15 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
-    /// 에이전트를 새로 띄우고 그 자리에 배치한다(스폰 + 필요하면 새 탭 + 슬롯 배정).
-    /// view_id 를 빼면 새 탭을 만들어 거기 넣는다 — 그 경우 slot_id 는 줄 수 없다. at(공간 낱말 top-left · top-right ·
-    /// bottom-left · bottom-right · left · right · up · down)을 주면 window 의 보이는 탭에서 그 낱말이 집는 빈 칸에 넣는다 —
-    /// view_id · slot_id 와 함께 못 주고, 못 집으면 NOT_FOUND · 비어 있지 않으면 CONFLICT(둘 다 스폰 전에 거절한다).
-    /// backend 는 `"claude"` 또는 `"codex"` — 둘 다 이 표면으로 만든다. 모르는 낱말은 스폰 전에
-    /// 거부되고, 빼면 데몬이 거절한다(기본 백엔드는 없다).
-    /// window = window_id 또는 같은 실행 안 label(번호는 받지 않는다) — 빼면 view_id 를 준 경우 그 탭의 창, 아니면 main.
-    /// view_id 가 window 의 탭이 아니면 스폰 전에 CONFLICT 다.
-    /// 답 = agent_id · layout(놓인 탭의 칸 줄 — layout.get rows 모양 · id 없음).
+    /// Starts a new agent and places it there (spawn + a new tab if needed + slot assignment).
+    /// Without view_id it creates a new tab and puts it there — in that case slot_id cannot be given. With at (spatial words top-left · top-right ·
+    /// bottom-left · bottom-right · left · right · up · down) it goes into the empty area that word picks in window's visible tab —
+    /// cannot be given with view_id · slot_id; NOT_FOUND if it picks nothing · CONFLICT if not empty (both refused before spawn).
+    /// backend is `"claude"` or `"codex"` — both are created through this surface. An unknown word is refused before
+    /// spawn, and if omitted the daemon refuses (there is no default backend).
+    /// window = window_id or a label within the same run (numbers are not accepted) — if omitted, the window of that tab when view_id is given, otherwise main.
+    /// If view_id is not a tab of window, CONFLICT before spawn.
+    /// Answer = agent_id · layout (the area rows of the tab it was placed in — layout.get rows shape · no ids).
     #[effect(Write)]
     #[since(1)]
     "agent.spawnInto" => args AgentSpawnIntoArgs {
@@ -715,9 +634,9 @@ declare_commands! {
         layout: Vec<LayoutRow>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// 공간/방향 낱말(top-left·right·up …)을 슬롯 id 로 푼다. view_id 를 빼면 그 창의 활성 탭이 대상이고,
-    /// window 도 빼면 main 창이다. 그 방향에 슬롯이 없으면 slot_id 는 null 이다. window 는 tab.create 와 같다
-    /// (window_id 또는 같은 실행 안 label · 번호는 받지 않는다).
+    /// Resolves a spatial/direction word (top-left · right · up …) into a slot id. Without view_id the target is that window's active tab,
+    /// and without window too it is the main window. If there is no slot in that direction, slot_id is null. window is the same as tab.create
+    /// (window_id or a label within the same run · numbers are not accepted).
     #[effect(Read)]
     #[since(1)]
     "slot.resolveSpatial" => args SlotResolveSpatialArgs {
@@ -729,10 +648,10 @@ declare_commands! {
     } errors [CONFLICT];
 
     // ADR-0265
-    /// 셸 설정을 읽는다. key = 정확한 키(theme.default) 또는 점으로 끝나는 접두(chat.style.) — 빼면 전부.
-    /// value 는 언제나 정규 문자열이다. is_default = 덮어쓴 값이 없어 기본값을 쓰고 있다.
-    /// rev = 값이 실제로 바뀐 쓰기마다 1 씩 오르는 번호(셸을 띄울 때 0). 맞는 키가 없으면 NOT_FOUND.
-    /// 어떤 키가 있고 무엇을 받는지는 settings.schema.
+    /// Reads shell settings. key = an exact key (theme.default) or a prefix ending with a dot (chat.style.) — omitted means all.
+    /// value is always the canonical string. is_default = no overriding value, so the default is in use.
+    /// rev = a number going up by 1 on every write that actually changed a value (0 when the shell starts). NOT_FOUND if no key matches.
+    /// Which keys exist and what they accept is in settings.schema.
     #[effect(Read)]
     #[since(10)]
     "settings.get" => args SettingsGetArgs {
@@ -742,17 +661,17 @@ declare_commands! {
         items: Vec<SettingRow>,
     } errors [NOT_FOUND];
 
-    /// 셸 설정 키 하나에 값을 쓴다 — 디스크에 남아 재시작을 넘긴다. 접두는 안 받는다.
-    /// value 는 문자열 하나이고 받는 형식은 settings.schema 의 kind 를 따른다: choice = 선택지 낱말(대소문자
-    /// 무시) · css-length = 수 + 그 키가 받는 단위(px, rem, em — 단위마다 범위가 따로) · css-number = 단위 없는 수.
-    /// 답의 value 는 정규형이다(E-INK → e-ink, 15.0PX → 15px).
-    /// 이미 그 값이면 changed=false 이고 rev · 알림이 없다(파일이 그 값과 다르게 적혀 있으면 파일만
-    /// 바로잡는다). 기본값과 같은 값을 주면 덮어쓰기가 지워진다.
-    /// theme.default 를 바꾸면 창별 테마가 없는 모든 창이 바로 그 테마로 바뀐다.
-    /// 모르는 키 = NOT_FOUND · 형식·범위 위반 = INVALID_ARGUMENT(문구에 기대 형식) · 설정 파일이 이 앱보다 새
-    /// 버전이 쓴 것이면 CONFLICT(파일을 덮지 않는다 · 값은 그대로다 — 그 파일이 바뀌기 전에는 다시 해도 같다 · 단
-    /// 유효 값이 바뀌지 않는 호출은 그때도 changed=false 로 성공한다) · 설정 파일을 지금 못 읽었으면 CONFLICT(값은
-    /// 그대로다 — 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다) · 디스크에 못 썼으면 INTERNAL(값은 그대로다).
+    /// Writes a value to one shell settings key — it stays on disk and survives restarts. Prefixes are not accepted.
+    /// value is one string and the accepted format follows settings.schema's kind: choice = a choice word (case-
+    /// insensitive) · css-length = a number + a unit that key accepts (px, rem, em — each unit has its own range) · css-number = a unitless number.
+    /// The value in the answer is the canonical form (E-INK → e-ink, 15.0PX → 15px).
+    /// If it already has that value, changed=false with no rev · notice (if the file has it written differently from that value, only the file
+    /// is corrected). Giving a value equal to the default removes the override.
+    /// Changing theme.default switches every window without a per-window theme to that theme right away.
+    /// Unknown key = NOT_FOUND · format · range violation = INVALID_ARGUMENT (the expected format in the text) · if the settings file was written by a newer
+    /// version than this app, CONFLICT (the file is not overwritten · the value is unchanged — retrying gives the same until that file changes · but
+    /// a call that does not change the effective value succeeds with changed=false even then) · if the settings file cannot be read right now, CONFLICT (the value is
+    /// unchanged — usually a briefly held lock, so retrying a bit later works) · if it could not be written to disk, INTERNAL (the value is unchanged).
     #[effect(Write)]
     #[since(10)]
     "settings.set" => args SettingsSetArgs {
@@ -765,11 +684,11 @@ declare_commands! {
         changed: bool,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// 키 하나, 또는 점으로 끝나는 접두가 덮는 키 전부를 기본값으로 되돌린다 — key 는 필수(전체 초기화는 없다).
-    /// 답의 reset = 그 선택자가 덮은 키 전부(호출 뒤 모두 기본값). 이미 다 기본값이면 rev 가 그대로다(파일에
-    /// 남은 그 키들은 지운다). 맞는 키가 없으면 NOT_FOUND. 설정 파일이 이 앱보다 새 버전이 쓴 것이면 CONFLICT ·
-    /// 지금 못 읽었으면 CONFLICT(조금 뒤 다시 하면 대개 된다) · 디스크에 못 썼으면 INTERNAL 이다(settings.set 과
-    /// 같다 — 이미 다 기본값인 호출은 새 판 파일이어도 rev 그대로 성공한다).
+    /// Resets one key, or every key a prefix ending with a dot covers, to the default — key is required (there is no full reset).
+    /// reset in the answer = every key that selector covered (all at the default after the call). If all are already default, rev stays (the
+    /// remaining entries of those keys in the file are removed). NOT_FOUND if no key matches. CONFLICT if the settings file was written by a newer version than this app ·
+    /// CONFLICT if it cannot be read right now (retrying a bit later usually works) · INTERNAL if it could not be written to disk (the same as
+    /// settings.set — a call where all are already default succeeds with rev unchanged even for a newer version's file).
     #[effect(Write)]
     #[since(10)]
     "settings.reset" => args SettingsResetArgs {
@@ -779,9 +698,9 @@ declare_commands! {
         reset: Vec<String>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// 셸 설정 키의 모양 — kind(choice · css-length · css-number) · default · choices(choice 만) ·
-    /// min · max(양 끝 포함 · css-length 는 받는 단위마다 한 값씩 ", " 로 잇는다 — "8px, 0.5rem, 0.5em") ·
-    /// description. key 는 settings.get 과 같다.
+    /// The shape of shell settings keys — kind (choice · css-length · css-number) · default · choices (choice only) ·
+    /// min · max (both ends inclusive · for css-length one value per accepted unit joined with ", " — "8px, 0.5rem, 0.5em") ·
+    /// description. key is the same as settings.get.
     #[effect(Read)]
     #[since(10)]
     "settings.schema" => args SettingsSchemaArgs {
@@ -790,23 +709,23 @@ declare_commands! {
         items: Vec<SettingSchemaRow>,
     } errors [NOT_FOUND];
 
-    /// 비정상 종료 뒤 「이전 화면을 복원할까」 상태를 읽는다 — 창 명령을 처음 부르기 전(그리고 쥔 label · view_id 가
-    /// 안 맞을 때) 이것을 본다. crash_copy = none(물을 사본이 없다) · awaiting(답을 기다린다 — 다른 창 명령보다
-    /// 먼저 주인이 정한 답을 restore.answer 로 낸다) · answered(이 실행에서 이미 답했다).
-    /// 다음 넷은 awaiting 일 때만 값이고 아니면 null 이다 — saved_at_ms = 사본을 적은 시각(유닉스 밀리초) ·
-    /// windows = 사본의 창 수(main + 팝아웃) · tabs = 그 창들의 탭 수 합 · durable = 그동안의
-    /// saves 와 같은 값(true 면 답을 디스크에 붙이고 사본을 지우려 한다 — 실제로 붙었는지는 restore.answer 의 durable ·
-    /// false 면 답해도 크래시 때 화면이 디스크에 남아 다음 시작이 다시 묻는다).
-    /// 다음 둘은 crash_copy 와 무관하게 늘 값이고 이번 실행 내내 같다(답한 뒤에도).
-    /// saves = 이번 실행이 화면 상태를 저장하나 — true = 가드가 아니다: 기록기를 띄우려 한다(띄우기 · 쓰기 성공은
-    /// 보장하지 않는다) · false = 가드다: 화면 상태를 하나도 저장하지 않고 다음 시작이 다시 판정한다(state_file 이
-    /// unreadable · newer 이거나, ok 인데 떠야 할 크래시 사본을 못 떴다).
-    /// state_file = 시작할 때 state.json 을 어떻게 읽었나: ok(읽었거나 없었다 — 저장하나는 saves 가 말한다) ·
-    /// unreadable(못 읽었다 — 파일은 그대로 두고 saves 도 false) · newer(이 앱보다 새 버전이 쓴 파일이라 기본 화면으로
-    /// 시작했다 — 떠 두지도 덮지도 않고 saves 도 false) · corrupt_copied_aside · corrupt_not_copied(못 쓰는 파일(손상 ·
-    /// 상한 초과 · UTF-8 아님)이라 기본 화면으로 시작했다 — corrupt_copied_aside 는 state.json.corrupt 로 떠 두었고
-    /// corrupt_not_copied 는 떠 두지 못해 원본이 백업 없이 덮인다. 이미 있는 state.json.corrupt 는 앞선 시작이 떠
-    /// 둔 것이지 이번 원본의 백업이 아니다).
+    /// Reads the 「restore the previous screen?」 state after an abnormal exit — look at this before calling a window command for the first time (and when the held label · view_id
+    /// do not match). crash_copy = none (no copy to ask about) · awaiting (waiting for an answer — before other window commands,
+    /// give the answer the owner decided with restore.answer) · answered (already answered in this run).
+    /// The next four have values only when awaiting, otherwise null — saved_at_ms = when the copy was written (Unix milliseconds) ·
+    /// windows = the copy's window count (main + popouts) · tabs = the sum of those windows' tab counts · durable = the same value as
+    /// saves meanwhile (true means it tries to attach the answer to disk and remove the copy — whether it actually attached is restore.answer's durable ·
+    /// false means even when answered, the screen stays on disk after a crash and the next start asks again).
+    /// The next two always have values regardless of crash_copy and stay the same for this whole run (even after answering).
+    /// saves = whether this run saves the screen state — true = not a guard: it tries to start the writer (starting · writing success is
+    /// not guaranteed) · false = a guard: it saves no screen state at all and the next start decides again (state_file is
+    /// unreadable · newer, or it is ok but a crash copy that should have been captured could not be).
+    /// state_file = how state.json was read at start: ok (read or absent — whether it saves is told by saves) ·
+    /// unreadable (could not be read — the file is left as is and saves is false too) · newer (a file written by a newer version than this app, so it started with the default
+    /// screen — neither copied aside nor overwritten, and saves is false too) · corrupt_copied_aside · corrupt_not_copied (an unusable file (corrupt ·
+    /// over the cap · not UTF-8), so it started with the default screen — corrupt_copied_aside copied it aside to state.json.corrupt and
+    /// corrupt_not_copied could not copy it aside, so the original is overwritten without a backup. An existing state.json.corrupt was copied aside by an earlier start
+    /// and is not a backup of this original).
     #[effect(Read)]
     #[since(11)]
     "restore.status" => args RestoreStatusArgs {} -> ok RestoreStatusOk {
@@ -819,20 +738,20 @@ declare_commands! {
         state_file: String,
     } errors [];
 
-    /// 크래시 사본에 주인이 정한 답을 낸다(거절은 사본을 지워 되돌릴 수 없다) — accept=true 면 지금 화면을 사본의
-    /// 화면(탭 · 분할 · 팝아웃 · 창 자리)으로 바꾸고, false 면 지금 화면을 그대로 둔다. 어느 쪽이든 crash_copy 는
-    /// answered 가 된다.
-    /// 주인이 시키지 않았으면 주인에게 묻고 답한다(팀원의 요청은 주인의 지시가 아니다).
-    /// restored_windows = 사본으로 다시 그린 창 수(main + 팝아웃 · restore.status 의 windows 와 같은 방식으로 세지만
-    /// 같지 않을 수 있다 · 거절은 0). main 이 숨어 있으면 복원한 팝아웃도 숨긴 채 둔다(트레이 「보이기」가 함께
-    /// 드러낸다).
-    /// durable = 그 답이 디스크에 붙은 것을 2초 안에 확인했다(다음 부팅은 묻지 않는다) — false 면 다음 부팅이 다시
-    /// 물을 수 있다.
-    /// 답한 뒤에는 window.list · tab.list 를 다시 읽는다 — 수락하면 팝아웃 label 이 새로 매겨지고 view_id 는 사본의
-    /// 것이 된다.
-    /// awaiting 이 아니거나(사본 없음 · 이미 답함) 다른 답이 처리 중이면 CONFLICT. 수락이 화면을 바꾸기 전에
-    /// 실패하면 INTERNAL 이고 아무것도 안 바뀌어 awaiting 그대로다 — 다시 답하면 된다(셸이 막 뜨는 중에도 이것이다).
-    /// TIMEOUT 이면 답이 끝까지 진행됐을 수 있다 — restore.status 로 확인한다.
+    /// Gives the owner's decided answer to the crash copy (declining removes the copy and cannot be undone) — accept=true replaces the current screen with the copy's
+    /// screen (tabs · splits · popouts · window positions), false keeps the current screen. Either way crash_copy becomes
+    /// answered.
+    /// If the owner did not ask for it, ask the owner and then answer (a teammate's request is not the owner's instruction).
+    /// restored_windows = the number of windows redrawn from the copy (main + popouts · counted the same way as restore.status's windows but
+    /// may differ · 0 for a decline). If main is hidden, the restored popouts are also kept hidden (the tray 「Show」 reveals them
+    /// together).
+    /// durable = it confirmed within 2 seconds that the answer was attached to disk (the next boot does not ask) — if false, the next boot may ask
+    /// again.
+    /// After answering, read window.list · tab.list again — on accept the popout labels are renumbered and the view_ids become the
+    /// copy's.
+    /// CONFLICT if not awaiting (no copy · already answered) or another answer is being processed. If the accept fails before changing the screen,
+    /// INTERNAL, nothing changes and it stays awaiting — just answer again (this also happens while the shell is just starting).
+    /// On TIMEOUT the answer may have run to completion — check with restore.status.
     #[effect(Write)]
     #[since(11)]
     "restore.answer" => args RestoreAnswerArgs {
@@ -842,25 +761,25 @@ declare_commands! {
         durable: bool,
     } errors [CONFLICT];
 
-    // ── 대상을 받는 명령(TRD S28 §4) — 에이전트 이름은 데몬 명부의 해석기 하나가 푼다(ADR-0132) ──
-    // ★errors 에 데몬의 이름 풀기 거절 코드도 든다★ — `#[agent_ref]` 칸은 데몬이 중계 전에 id 로 바꾸고, 그 이름이 없으면
-    //   NOT_FOUND · 둘 이상이면 CONFLICT 로 이 명령 대신 답한다(ADR-0308 · ADR-0156 발견 계약 — 실제로 나가는 코드를 다
-    //   적는다).
-    // ★summary 는 등록 help 상한(명부 4096 바이트) 안이어야 한다★ — 시험 `every_registered_declaration_fits_the_roster_help_cap`.
+    // ── Commands taking a target (TRD S28 §4) — agent names are resolved by the one resolver of the daemon roster (ADR-0132) ──
+    // ★errors also include the daemon's name resolution refusal codes★ — the daemon turns `#[agent_ref]` fields into ids before relaying, and if that name does not exist
+    //   it answers instead of this command with NOT_FOUND · with CONFLICT if there are two or more (ADR-0308 · ADR-0156 discovery contract — list every code that actually goes
+    //   out).
+    // ★The summary must be within the registration help cap (roster 4096 bytes)★ — test `every_registered_declaration_fits_the_roster_help_cap`.
 
     // ADR-0307
-    /// 탭 하나를 탭 줄의 다른 자리로 옮긴다(창 안 순서 · 다른 창). 옮길 탭 = tab(탭 id) | tab_of(그 에이전트가 든 탭 — 이름
-    /// 또는 id) 중 하나. tab_of 의 탭에 다른 칸이 있으면 함께 간다 — 그 칸 하나만은 slot.popout.
-    /// 갈 곳 = to_window(그 창의 index 자리) | after_tab(그 탭 id 바로 뒤) | after_tab_of(그 에이전트가 든 탭 바로 뒤) 중
-    /// 하나 — 셋 다 없으면 지금 창의 index 자리. index 는 to_window 와 그때만(0 부터 · 빼거나 넘치면 맨 끝 · 셋 다 없으면
-    /// 필수). to_window = window_id 또는 같은 실행 안 label(번호는 받지 않는다). window 인자는 INVALID_ARGUMENT(갈 곳은
+    /// Moves one tab to another position in the tab bar (order within the window · another window). Tab to move = one of tab (tab id) | tab_of (the tab holding that agent — name
+    /// or id). If the tab_of tab has other areas they go along — for just that one area, slot.popout.
+    /// Destination = one of to_window (the index position of that window) | after_tab (right after that tab id) | after_tab_of (right after the tab holding that agent)
+    /// — with none of the three, the index position of the current window. index only with to_window and then (from 0 · omitted or overflowing means the end · required when none of the three
+    /// is given). to_window = a window_id or a label within the same run (numbers are not accepted). The window argument is INVALID_ARGUMENT (the destination is
     /// to_window).
-    /// 보이는 탭 · 포커스를 바꾸지 않는다 — 단 보이던 탭이 떠난 창은 이웃 탭을(main 이 비면 새 빈 탭을) 보인다.
-    /// 답 = changed(같은 자리면 false) · window · window_id · number(놓인 창) · tab · tab_index(그 탭 · 탭 줄 자리) ·
-    /// layout(바뀐 탭의 칸 줄 — layout.get rows 모양 · id 없음).
-    /// 오류: 에이전트가 어느 칸에도 없거나 그 이름이 없으면 NOT_FOUND · 여러 탭에 있거나 이름이 둘 이상이면 CONFLICT — 문구
-    /// 끝 candidates 로 다시 부른다(tab= 값 → tab · after_tab= 값 → after_tab, 에이전트 id → tab_of · after_tab_of).
-    /// after_tab(_of) 가 옮길 탭이면 INVALID_ARGUMENT.
+    /// The visible tab · focus do not change — except that a window whose visible tab left shows a neighboring tab (a new empty tab if main empties).
+    /// Answer = changed (false at the same position) · window · window_id · number (the window it landed in) · tab · tab_index (that tab · tab bar position) ·
+    /// layout (the area rows of the changed tab — layout.get rows shape · no ids).
+    /// Errors: NOT_FOUND if the agent is in no area or that name does not exist · CONFLICT if it is in several tabs or the name matches two or more — call again with the candidates
+    /// at the end of the text (tab= value → tab · after_tab= value → after_tab, agent id → tab_of · after_tab_of).
+    /// INVALID_ARGUMENT if after_tab(_of) is the tab being moved.
     #[effect(Write)]
     #[since(21)]
     "tab.move" => args TabMoveArgs {
@@ -884,17 +803,17 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
-    /// 탭 하나를 다른 탭의 칸 옆에 붙인다(분할) — 옮긴 탭의 칸들이 그 탭 안으로 들어가고 옮긴 탭은 없어진다. 옮길 탭 =
-    /// tab | tab_of(tab.move 와 같다). tab_of 의 탭에 다른 칸이 있으면 함께 간다 — 그 칸 하나만은 slot.popout.
-    /// 붙일 칸 = beside_slot(칸 id) | beside(그 에이전트가 든 칸) | beside_at(공간 낱말 — window 의 보이는 탭에서 · window 를
-    /// 빼면 main) 중 하나. beside_at 의 left · right · up · down = 포커스 칸의 그쪽 이웃 · top-left · top-right · bottom-left
-    /// · bottom-right = 그 모서리 칸. window 는 beside_at 과만 쓰고 window_id 또는 같은 실행 안 label(번호는 받지 않는다).
-    /// side = 옮긴 탭이 놓일 쪽(Left · Right · Top · Bottom). whole = true 면 그 칸이 든 탭 전체의 바깥 변. share = 붙는 쪽
-    /// 몫(0.01~0.5) — 빼면 마우스 공식으로 잰 몫(크기를 모르면 0.5 · 원본 창이 최대화면 마우스와 조금 다를 수 있다).
-    /// 보이는 탭 · 포커스 · 답은 tab.move 와 같다(tab = 붙인 곳의 살아남은 탭) — 단 같은 창 안에서 보이던 탭을 붙이면 붙인
-    /// 곳의 탭이 보인다.
-    /// 오류는 tab.move 와 같다 — beside 가 여러 칸에 있으면 CONFLICT(candidates 의 beside_slot= 값 → beside_slot) · 붙일 칸이
-    /// 옮길 탭 안이면 INVALID_ARGUMENT · 낱말이 칸을 못 집으면 NOT_FOUND.
+    /// Attaches one tab beside an area of another tab (a split) — the moved tab's areas go into that tab and the moved tab disappears. Tab to move =
+    /// tab | tab_of (the same as tab.move). If the tab_of tab has other areas they go along — for just that one area, slot.popout.
+    /// Area to attach to = one of beside_slot (area id) | beside (the area holding that agent) | beside_at (a spatial word — in window's visible tab · main if window
+    /// is omitted). beside_at's left · right · up · down = that neighbor of the focused area · top-left · top-right · bottom-left
+    /// · bottom-right = that corner area. window is used only with beside_at and is a window_id or a label within the same run (numbers are not accepted).
+    /// side = the side where the moved tab goes (Left · Right · Top · Bottom). whole = true means the outer edge of the whole tab holding that area. share = the attaching side's
+    /// share (0.01~0.5) — omitted means the share measured by the mouse formula (0.5 if the size is unknown · may differ slightly from the mouse when the source window is maximized).
+    /// Visible tab · focus · answer are the same as tab.move (tab = the surviving tab at the attach point) — except that attaching the visible tab within the same window shows
+    /// the tab at the attach point.
+    /// Errors are the same as tab.move — CONFLICT if beside is in several areas (beside_slot= value of the candidates → beside_slot) · INVALID_ARGUMENT if the area to attach to
+    /// is inside the tab being moved · NOT_FOUND if the word picks no area.
     #[effect(Write)]
     #[since(21)]
     "tab.dock" => args TabDockArgs {
@@ -920,10 +839,10 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
-    /// 탭 하나를 새 창으로 뗀다 — 새 창은 포커스를 가져가지 않는다. 옮길 탭 = tab | tab_of(tab.move 와 같다). tab_of 의
-    /// 탭에 다른 칸이 있으면 함께 간다 — 그 칸 하나만은 slot.popout. 이미 혼자인 팝아웃이면 아무것도 안 바뀐다(changed =
-    /// false). 새 창 크기 = 원래 창이 팝아웃이면 그 크기 · main 이면 팝아웃 기본 크기. 답 · 오류는 tab.move 와 같다
-    /// (window = 새 창).
+    /// Detaches one tab into a new window — the new window does not take the focus. Tab to move = tab | tab_of (the same as tab.move). If the tab_of
+    /// tab has other areas they go along — for just that one area, slot.popout. If it is already a lone popout nothing changes (changed =
+    /// false). New window size = that window's size if the original window is a popout · the default popout size if main. Answer · errors are the same as tab.move
+    /// (window = the new window).
     #[effect(Write)]
     #[since(21)]
     "tab.detach" => args TabDetachArgs {
@@ -941,15 +860,15 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
-    /// 배치를 칸마다 한 줄로 읽는다 — 창 번호 순 → 탭 줄 순 → 탭 안 칸 순. window(window_id 또는 같은 실행 안 label ·
-    /// 번호는 받지 않는다)를 주면 그 창만, agent(이름 또는 id)를 주면 그 에이전트가 든 칸만(어느 칸에도 없으면 빈 목록).
-    /// 줄 = window · window_number · tab_index(그 창 탭 줄 자리 · 0 부터 — (window, tab_index) 가 같은 탭의 줄을 묶는
-    /// 열쇠) · tab_name · tab_active(그 창에 보이는 탭) · content(Empty · Agent · AgentList · PresetPalette · Usage ·
-    /// Unknown) · agent(표시 이름 — 모르면 빠진다) · focused(그 탭 안의 포커스 칸 — 창 · OS 포커스가 아니다) · x · y · w ·
-    /// h(탭 안 정규 좌표 0~1 — 왼쪽 위가 0,0).
-    /// ids = true 면 window_id · tab(다른 명령이 view_id 라 부르는 그 탭 id) · slot_id · agent_id 도 싣는다(기본은 빠진다 —
-    /// 칸은 에이전트 이름 · 공간 낱말로 부른다). 그런 에이전트 이름이 없으면 NOT_FOUND · 이름이 둘 이상이면 CONFLICT(문구 끝
-    /// candidates) · 없는 창이면 CONFLICT.
+    /// Reads the layout as one row per area — window number order → tab bar order → area order within the tab. With window (a window_id or a label within the same run ·
+    /// numbers are not accepted) only that window, with agent (name or id) only the areas holding that agent (an empty list if in no area).
+    /// Row = window · window_number · tab_index (position in that window's tab bar · from 0 — (window, tab_index) is the key grouping rows of the same
+    /// tab) · tab_name · tab_active (the tab visible in that window) · content (Empty · Agent · AgentList · PresetPalette · Usage ·
+    /// Unknown) · agent (display name — omitted if unknown) · focused (the focused area within that tab — not the window · OS focus) · x · y · w ·
+    /// h (normalized coordinates within the tab 0~1 — top-left is 0,0).
+    /// ids = true also includes window_id · tab (the tab id other commands call view_id) · slot_id · agent_id (omitted by default —
+    /// areas are called by agent name · spatial word). NOT_FOUND if no agent has that name · CONFLICT if the name matches two or more (candidates at the end of the
+    /// text) · CONFLICT for a missing window.
     #[effect(Read)]
     #[since(21)]
     "layout.get" => args LayoutGetArgs {
@@ -962,16 +881,10 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 }
 
-/// 이 표의 핸들러들이 잡는 실물 전량 — ★조립 때 주입된다★(ADR-0155 결정 5 / 규칙 T-1).
+/// Every real object the handlers of this table hold — ★injected at assembly★ (ADR-0155 decision 5 / rule T-1).
 ///
-/// 앞 다섯의 계약(어느 것이 락 안이고 어느 것이 락 밖인가)은 적용 서비스가, `control` 의 계약은 `super::window_ctl` 이
-/// 소유한다 — 이 구조체는 그것을 **소유형으로** 들고 있을 뿐이다. `#[tauri::command]` 쪽이 빌려 쓰는 어댑터를 `Arc` 로
-/// 바꾼 것이 차이의 전부이고, 그렇게 하는 이유는 표의 핸들러가 `'static` 이어야 하기 때문이다.
-///
-/// ★이름이 `Layout` 인데 적용 서비스 밖 포트가 넷 있다★(`themes` · `settings` · `settings_events` · `restore`) —
-/// 표가 하나라 포트 묶음도 하나다(사유 = 모듈 헤더 「레이아웃 밖의 셸 명령도 여기 선다」). 그 포트들은 적용 서비스를
-/// 안 거치고 자기 모듈(`crate::theme` · `crate::settings` · `crate::state::restore`)만 부르므로 락 규율도 그 모듈이
-/// 진다.
+/// The lock contract of the first five is owned by the apply service, and that of `control` by `super::window_ctl`; this struct only holds them in owned form (table handlers must be `'static`).
+/// ★Four ports are outside the apply service★ (`themes` · `settings` · `settings_events` · `restore`): one table, one port bundle (see the module header). They call only their own modules (`crate::theme` · `crate::settings` · `crate::state::restore`), which carry their own lock discipline.
 pub struct LayoutPorts {
     pub state: LayoutState,
     pub subs: Arc<dyn SubscriptionSync>,
@@ -979,22 +892,20 @@ pub struct LayoutPorts {
     pub windows: Arc<dyn WindowHost>,
     pub labels: Arc<dyn LabelSource>,
     pub spawner: Arc<dyn AgentSpawner>,
-    /// 창 상태(최소화 · 최대화 · 보이기 · 숨기기 · OS 상태 읽기) — 계약은 `super::window_ctl` 이 소유한다. 실물이 메인
-    /// 스레드 일을 기다리므로 이 포트를 부르는 동사는 [`offloaded_handler`] 로 꽂는다.
+    /// Window state (minimize · maximize · show · hide · reading OS state) — the contract is owned by `super::window_ctl`. The real object waits on main
+    /// thread work, so verbs calling this port are plugged in with [`offloaded_handler`].
     pub control: Arc<dyn WindowControl>,
-    /// 창 테마 읽기 · 쓰기 · 밀기 — 설정 알림 · 복원 조율자와 **같은 유효 테마 인스턴스**.
+    /// Window theme read · write · push — **the same effective theme instance** as the settings notice · restore coordinator.
     pub themes: ThemeControl,
-    /// 셸 설정 — 사람 경로(Tauri 설정 command)와 **같은 인스턴스**.
+    /// Shell settings — **the same instance** as the human path (Tauri settings commands).
     pub settings: Arc<SettingsService>,
-    /// 실제로 바뀐 설정 쓰기의 알림(모든 웹뷰 + `theme.default` 면 유효 테마 밀기).
+    /// The notice of a settings write that actually changed (all webviews + an effective theme push if `theme.default`).
     pub settings_events: Arc<dyn SettingsEvents>,
-    /// 크래시 사본 복원 — 사람 경로(Tauri `restore_*` command)와 **같은 인스턴스**.
+    /// Crash copy restore — **the same instance** as the human path (Tauri `restore_*` commands).
     pub restore: Arc<RestoreCoordinator>,
 }
 
-/// 셸의 명령 표를 조립한다 — ★핸들러 실물이 들어오는 유일한 자리★(규칙 T-1).
-///
-/// ★명령이 늘어도 조립부(`lib.rs`)는 안 바뀐다★ — 늘어나는 것은 선언 블록과 이 함수의 한 줄이다.
+/// Assembles the shell's command table — ★the only place where real handler objects come in★ (rule T-1); growing commands changes the declaration block and one line here, not the assembly site (`lib.rs`).
 // ADR-0155
 pub fn make_table(ports: LayoutPorts) -> CommandTable {
     let ports = Arc::new(ports);
@@ -1006,8 +917,6 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         "tab.create",
         blocking_handler(move |args: TabCreateArgs| verb_tab_create(&p, args)),
     );
-    // 탭 · 칸을 에이전트로 고를 수 있는 동사 — 적용을 블로킹 풀에서 돈다(`targeted_handler` · 아래 칸 동사 · `tab.move` 도
-    //   같다).
     plug(
         &mut table,
         "tab.switch",
@@ -1035,8 +944,7 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         "window.create",
         blocking_handler(move |_: WindowCreateArgs| verb_window_create(&p)),
     );
-    // 창 상태 포트를 부르는 동사 — 실물이 메인 스레드 일을 기다린다(TRD S26-window-chrome §5-2). `window.close` 는
-    //   main 이면 모두 숨기기를 기다리고, `window.list` 는 창마다 OS 상태를 읽는다.
+    // Verbs calling the window state port: the real object waits on main thread work (`window.close` waits for hiding all when it is main; `window.list` reads the OS state per window). (TRD S26-window-chrome §5-2)
     let p = Arc::clone(&ports);
     plug(
         &mut table,
@@ -1208,8 +1116,7 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         "restore.answer",
         offloaded_handler(move |args: RestoreAnswerArgs| verb_restore_answer(&p, args)),
     );
-    // 스폰이 데몬 왕복이라 `blocking_handler` 로 감쌀 수 없다(그 어댑터는 본문이 첫 poll 에서 끝까지 도는
-    //   것을 계약으로 삼는다).
+    // Spawning is a daemon round trip, so it cannot use `blocking_handler` (that adapter requires the body to run to the end on the first poll).
     plug(
         &mut table,
         "agent.spawnInto",
@@ -1241,23 +1148,17 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
     table
 }
 
-/// ★조립 때 터뜨린다★: `insert` 가 반려하는 셋(선언 집합에 없는 이름 · 중복 · 선언 스키마가 JSON 아님)은
-/// 전부 **빌드가 정하는 값**이라 런타임에 달라지지 않는다. 어느 것인지는 함께 실리는 `TableError` 가 말한다.
+/// ★Blows up at assembly★: the three things `insert` bounces (name not in the declaration set · duplicate · non-JSON declaration schema) are values the build decides, so they never vary at runtime; the accompanying `TableError` says which.
 fn plug(table: &mut CommandTable, name: &'static str, handler: Arc<dyn CommandHandler>) {
     table
         .insert(name, handler)
-        .unwrap_or_else(|e| panic!("{name} 를 표에 꽂지 못했다: {e}"));
+        .unwrap_or_else(|e| panic!("could not plug {name} into the table: {e}"));
 }
 
-/// 디스크를 기다리는 동기 본문을 **블로킹 풀**에서 돌리는 핸들러 — 인자 · 반환 직렬화는 `blocking_handler`
-/// 와 같다.
+/// A handler that runs a synchronous body waiting on disk on **the blocking pool**; argument and return serialization match `blocking_handler`.
 ///
-/// ★`blocking_handler` 로 꽂지 않는 이유★: 그 어댑터는 「폴링하는 쪽이 `spawn_blocking` 뒤에서 부른다」를
-/// 계약으로 삼는데, 이 표의 적용 태스크는 클라이언트 런타임의 async 워커에 그대로 뜬다(`RuntimeSpawner`).
-/// 거기서 `sync_all` 을 기다리면 그 워커에 얹힌 다른 태스크가 함께 선다. `block_in_place` 는 current_thread
-/// 런타임(`#[tokio::test]`)에서 패닉해 쓰지 않는다.
-/// ★답보다 본문이 오래 산다★ — 기다리던 future 가 버려져도(런타임 종료) 본문은 끝까지 돈다. tokio 런타임
-/// 밖에서 폴링되면 그 자리에서 돈다(막을 워커가 없다).
+/// ★Why not `blocking_handler`★: that adapter assumes the polling side calls it behind `spawn_blocking`, but this table's apply tasks run directly on the client runtime's async workers (`RuntimeSpawner`), so waiting on `sync_all` there stalls other tasks on that worker. `block_in_place` panics on a current_thread runtime (`#[tokio::test]`), so it is not used.
+/// ★The body outlives the answer★: if the waiting future is dropped (runtime shutdown) the body still runs to the end. Polled outside a tokio runtime it runs on the spot.
 fn offloaded_handler<A, O, F>(run: F) -> Arc<dyn CommandHandler>
 where
     F: Fn(A) -> Result<O, CommandError> + Send + Sync + 'static,
@@ -1292,16 +1193,13 @@ where
     }
 }
 
-/// 막는 본문을 블로킹 풀에서 돌린다 — tokio 런타임 밖에서 폴링되면 그 자리에서 돈다(막을 워커가 없다). 사유는
-/// [`offloaded_handler`] 와 같다. ★답보다 본문이 오래 산다★ — 기다리던 future 가 버려져도 본문은 끝까지 돈다.
+/// Runs a blocking body on the blocking pool (on the spot outside a tokio runtime), for the reason in [`offloaded_handler`]. ★The body outlives the answer★ even if the waiting future is dropped.
 async fn off_thread<T: Send + 'static>(
     body: impl FnOnce() -> Result<T, CommandError> + Send + 'static,
 ) -> Result<T, CommandError> {
     match tokio::runtime::Handle::try_current() {
         Ok(runtime) => runtime.spawn_blocking(body).await.map_err(|e| {
-            // 버스 경로의 패닉 그물(`handler_panicked`)과 같은 문구 — 본문이 블로킹 풀에서 터지면 그 그물이 못 보고
-            //   여기로 온다. 운영 셸에선 훅이 먼저 셸을 끝내 `is_panic` 갈래에 닿지 않는다 — 훅 없는 시험 빌드에서만
-            //   산다(ADR-0292).
+            // Same text as the panic net of the bus path (`handler_panicked`), which cannot see a body that blows up on the blocking pool. The production hook ends the shell first, so the `is_panic` branch lives only in test builds without the hook (ADR-0292).
             let what = if e.is_panic() {
                 "panicked"
             } else {
@@ -1313,12 +1211,10 @@ async fn off_thread<T: Send + 'static>(
     }
 }
 
-/// 탭 · 칸을 고르는 동사의 핸들러 — [`offloaded_handler`] 처럼 본문을 블로킹 풀에서 돌리고, 답은 `null` 칸을 뺀 JSON 이다
-/// ([`without_nulls`]).
+/// The handler of verbs that pick a tab · area: runs the body on the blocking pool like [`offloaded_handler`], and answers JSON without `null` fields ([`without_nulls`]).
 ///
-/// ★블로킹 풀인 이유★(TRD S28 §8): 새 창 도킹(`tab.detach` · 새 창 `slot.popout`)은 main 스레드 · 동기 명령에서 부르면 창
-/// 짓기가 교착하고(`apply::dock_tab` 문서), 예열 창을 기다리는 동안(~1 초) tokio 일꾼을 막는다. 같은 줄의 동사가 함께 쓴다.
-// ADR-0307
+/// ★Why the blocking pool★: new-window docking (`tab.detach` · new-window `slot.popout`) deadlocks the window build when called from the main thread or a synchronous command (`apply::dock_tab` docs), and waiting for a prewarm window (~1 s) blocks a tokio worker.
+// ADR-0307 (TRD S28 §8)
 fn targeted_handler<A, O, F>(ports: &Arc<LayoutPorts>, run: F) -> Arc<dyn CommandHandler>
 where
     F: Fn(&LayoutPorts, A) -> Result<O, CommandError> + Send + Sync + 'static,
@@ -1358,8 +1254,7 @@ where
     }
 }
 
-/// 객체의 `null` 칸을 (깊이 끝까지) 뺀다 — 대상을 받는 명령의 답이 선택 칸(줄의 id 넷 · 모르는 표시 이름)을 `null` 로
-/// 싣지 않게 한다(규칙 §4 — 크기). 그 칸들은 선언 스키마에서 필수가 아니라 빠져도 계약 안이다.
+/// Removes the `null` fields of an object (full depth) so answers of target-taking commands do not carry optional fields (a row's four ids, an unknown display name) as `null` (rule §4 — size). Those fields are not required in the declaration schema, so omitting them is within the contract.
 // ADR-0307
 fn without_nulls(value: serde_json::Value) -> serde_json::Value {
     match value {
@@ -1376,7 +1271,7 @@ fn without_nulls(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-// ── 동사 ────────────────────────────────────────────────────────────────────
+// ── Verbs ────────────────────────────────────────────────────────────────────
 
 fn verb_tab_create(ports: &LayoutPorts, args: TabCreateArgs) -> Result<TabCreateOk, CommandError> {
     let window = window_label(ports, "window", &args.window)?;
@@ -1429,7 +1324,7 @@ fn verb_window_create(ports: &LayoutPorts) -> Result<WindowCreateOk, CommandErro
     })
 }
 
-// 창 인자를 해석기에 넘기기 전에 `if_empty` 를 본다 — 그 길의 창은 대개 이미 모델에 없다(차례 = `window_ctl::close`).
+// Checks `if_empty` before handing the window argument to the resolver — the window on that path is usually already gone from the model (order = `window_ctl::close`).
 fn verb_window_close(
     ports: &LayoutPorts,
     args: WindowCloseArgs,
@@ -1504,8 +1399,8 @@ fn verb_window_set_theme(
     args: WindowSetThemeArgs,
 ) -> Result<WindowSetThemeOk, CommandError> {
     let window = window_label(ports, "window", &args.window)?;
-    // wire 로 들어온 부재는 여기까지 못 온다(선언 매크로가 `missing field` 로 반려한다) — 이 갈래는 코드가 인자를
-    //   직접 지어 부르는 경로 몫이다(`agent.move` 의 `parent` 와 같다).
+    // An absence coming in over the wire cannot get this far (the declaration macro bounces it with `missing field`) — this branch is for
+    //   paths where code builds the arguments itself and calls (the same as `parent` of `agent.move`).
     let Some(given) = args.theme.as_ref() else {
         return Err(CommandError::invalid_argument(
             "setTheme needs theme: dark, light or e-ink — or null to clear the window's own theme",
@@ -1517,7 +1412,7 @@ fn verb_window_set_theme(
     Ok(WindowSetThemeOk { theme, effective })
 }
 
-/// 답의 `(theme, effective)` — 두 창 테마 명령이 같은 모양을 낸다.
+/// `(theme, effective)` of the answer — the two window theme commands emit the same shape.
 fn theme_reply(theme: WindowTheme) -> (Option<String>, String) {
     (
         theme.own.map(|own| own.as_wire().to_string()),
@@ -1525,7 +1420,7 @@ fn theme_reply(theme: WindowTheme) -> (Option<String>, String) {
     )
 }
 
-/// 대소문자를 가리지 않는다 — `settings.set theme.default` 의 선택지 읽기와 같은 관용이다.
+/// Case-insensitive — the same leniency as reading the choices of `settings.set theme.default`.
 fn theme_arg(raw: &str) -> Result<UiTheme, CommandError> {
     UiTheme::from_wire(&raw.to_ascii_lowercase()).ok_or_else(|| {
         CommandError::invalid_argument(format!(
@@ -1534,9 +1429,7 @@ fn theme_arg(raw: &str) -> Result<UiTheme, CommandError> {
     })
 }
 
-/// 창 테마 서비스의 오류 종류를 코드로 — 모르는 창은 이웃 `window.*` 명령과 같은 `CONFLICT` 다(헤더 「적용 실패의
-/// 코드」). 그 창에 못 보낸 쓰기는 `INTERNAL` 이다 — 값은 이미 적혀 `CONFLICT`(「지금 상태로는 적용할 수 없다」)가
-/// 거짓이다.
+/// The window theme service's error kinds into codes: an unknown window is the same `CONFLICT` as the neighboring `window.*` commands; a write that could not be sent to that window is `INTERNAL` (the value is already written, so `CONFLICT` "cannot be applied in the current state" would be false).
 fn theme_error(error: ThemeError) -> CommandError {
     let message = error.to_string();
     match error {
@@ -1552,8 +1445,7 @@ fn verb_split_set_ratio(
 ) -> Result<SplitSetRatioOk, CommandError> {
     let view = uuid_arg("view_id", &args.view_id)?;
     let split = uuid_arg_from("split_id", &args.split_id, "split.list")?;
-    // JSON 은 NaN·±∞ 를 못 실어 보통은 역직렬화가 먼저 반려한다 — 이 검사는 그 전제가 깨질 때의 그물이다.
-    //   여기서 거르지 않으면 관리자의 같은 거절이 `CONFLICT` 로 나가 「상태 탓」처럼 읽힌다.
+    // JSON cannot carry NaN · ±∞, so deserialization usually bounces it first; this is the net for when that breaks. Unfiltered here, the manager's same refusal would go out as `CONFLICT` and read like "the state's fault".
     if !args.ratio.is_finite() {
         return Err(CommandError::invalid_argument(format!(
             "ratio must be a finite number, got {}",
@@ -1633,8 +1525,7 @@ fn verb_settings_get(
     })
 }
 
-/// 디스크에 쓰고(`sync_all` 까지) `theme.default` 면 모든 창의 유효 테마를 민다 — 그래서 [`offloaded_handler`]
-/// 로 꽂는다([`verb_settings_reset`] 도 같다).
+/// Writes to disk (`sync_all`) and, for `theme.default`, pushes the effective theme of every window, so it is plugged in with [`offloaded_handler`] ([`verb_settings_reset`] too).
 fn verb_settings_set(
     ports: &LayoutPorts,
     args: SettingsSetArgs,
@@ -1699,9 +1590,7 @@ fn verb_restore_status(ports: &LayoutPorts) -> RestoreStatusOk {
     }
 }
 
-/// ★막는 본문이라 [`offloaded_handler`] 로 꽂는다★ — 수락은 창을 만들고 · 놓고 · 거두며 이벤트 루프를 기다리고,
-/// 답은 기록기를 마감(2초)까지 기다린다(`RestoreCoordinator::answer`). 적용 태스크는 메인 스레드가 아니라 클라이언트
-/// 런타임 워커에서 돌지만(`RuntimeSpawner`) 거기서 그대로 부르면 그 워커에 얹힌 소켓 태스크가 그만큼 선다.
+/// ★A blocking body, so plug it in with [`offloaded_handler`]★: an accept creates, places and reaps windows while waiting for the event loop, and the answer waits for the writer up to the deadline (2 s, `RestoreCoordinator::answer`). The apply task runs on a client runtime worker (`RuntimeSpawner`), where calling it directly would stall the socket tasks for that long.
 fn verb_restore_answer(
     ports: &LayoutPorts,
     args: RestoreAnswerArgs,
@@ -1713,11 +1602,8 @@ fn verb_restore_answer(
     })
 }
 
-/// 복원 조율자의 오류 종류를 코드로 — `Conflict` = 지금 상태로는 답할 수 없다(사본 없음 · 이미 답함 · 다른 답이
-/// 처리 중) · `NotReady` · `Internal` = 수락이 화면을 바꾸기 전에 실패했다(`awaiting` 그대로 · 다시 답할 수 있다).
-/// ★재시도 지시는 싣지 않는다(코드의 기본 `never`)★ — 데몬이 중계하는 실패 답의 지시를 전부 `never` 로 내려
-/// (`command_delivery` 의 `send_reply` · ADR-0159) 여기서 실어도 부르는 쪽에 닿지 않는다. 「곧 다시 답하라」는
-/// `NotReady` 의 문구와 도움말(`prompts/engram-help.md`)이 나른다.
+/// The restore coordinator's error kinds into codes: `Conflict` = cannot answer in the current state (no copy · already answered · another answer in progress) · `NotReady` · `Internal` = the accept failed before changing the screen (`awaiting` unchanged; can answer again).
+/// ★No retry directive is carried (the code's default `never`)★: the daemon lowers every directive of the failure answers it relays to `never` (`send_reply` in `command_delivery`, ADR-0159), so one here would not reach the caller. "Answer again soon" is carried by the text of `NotReady` and the help (`prompts/engram-help.md`).
 fn restore_error(error: AnswerError) -> CommandError {
     let message = error.to_string();
     match error {
@@ -1726,19 +1612,14 @@ fn restore_error(error: AnswerError) -> CommandError {
     }
 }
 
-/// 설정 서비스의 오류 종류를 같은 이름의 코드로 — 레이아웃 명령의 `CONFLICT` 한 갈래와 달리 서비스가 종류를
-/// 이미 갈라 준다(TRD S21-storage §5-2).
+/// The settings service's error kinds into codes of the same name (the service already splits the kinds, unlike the single `CONFLICT` of the layout commands). (TRD S21-storage §5-2)
 fn settings_error(error: SettingsError) -> CommandError {
     match error {
         SettingsError::NotFound(message) => CommandError::not_found(message),
         SettingsError::InvalidArgument(message) => CommandError::invalid_argument(message),
-        // ADR-0291 R2: 새 판이 쓴 파일이라 덮지 않았다 — 「지금 상태로는 적용할 수 없다」라 다시 해도 그 파일이
-        //   바뀌기 전에는 같다(`never`). `INTERNAL` 로 내면 일시 실패처럼 읽힌다.
+        // ADR-0291 R2: a file written by a newer version was not overwritten; retrying gives the same until the file changes (`never`). `INTERNAL` would read like a transient failure.
         SettingsError::Conflict(message) => CommandError::of(ErrorCode::Conflict, message),
-        // ADR-0291 R17 — 사용자 결정 2026-10-11: 쓸 때마다 다시 읽으므로 이 못 읽음은 늘 실행 중 재판정의 거절이고,
-        //   대개 잠깐 쥔 잠김이라 `CONFLICT` · `after-condition` 이다(데몬 명부 저장소 · agent `store_command_error` 와
-        //   같은 나눔). 오늘 그 지시는 데몬이 중계하며 `never` 로 내리므로(`restore_error` 의 같은 조항) 「조금 뒤
-        //   다시」는 문구와 도움말이 함께 나른다.
+        // ADR-0291 R17: the file is re-read on every write, so an unreadable one is usually a briefly held lock: `CONFLICT` · `after-condition` (same split as the daemon roster store · agent `store_command_error`). The daemon lowers that directive to `never` when relaying (as in `restore_error`), so "a bit later again" is carried by the text and the help.
         SettingsError::Unreadable(message) => {
             CommandError::with_retry(ErrorCode::Conflict, message, RetryMode::AfterCondition)
         }
@@ -1746,13 +1627,9 @@ fn settings_error(error: SettingsError) -> CommandError {
     }
 }
 
-/// `agent.spawnInto` 의 핸들러 — ★async 라 [`blocking_handler`] 를 못 쓴다★. 답은 `null` 칸을 뺀 JSON 이다
-/// ([`without_nulls`] — 배치 줄의 id 칸).
+/// The handler of `agent.spawnInto` — ★async, so [`blocking_handler`] cannot be used★. Answers JSON without `null` fields ([`without_nulls`]).
 ///
-/// 본문을 `call` 안이 아니라 future 안에서 도는 것은 계약이다(마감시각이 그 형태 위에 선다 —
-/// `blocking_handler` 의 같은 조항).
-/// ★[`targeted_handler`] 와 달리 적용을 블로킹 풀로 옮기지 않는다★ — 적용이 데몬 스폰을 중간에 기다리는 async 다(TRD S28
-/// §5-2 · §8).
+/// The body must run inside the future, not inside `call` (the deadline stands on that form, as in `blocking_handler`). ★Unlike [`targeted_handler`] the apply is not moved to the blocking pool★: it is async and waits for the daemon spawn midway. (TRD S28 §5-2 · §8)
 struct SpawnInto {
     ports: Arc<LayoutPorts>,
 }
@@ -1775,10 +1652,9 @@ async fn verb_spawn_into(
     ports: &LayoutPorts,
     args: AgentSpawnIntoArgs,
 ) -> Result<AgentSpawnIntoOk, CommandError> {
-    // 빼면 낱말판은 main 을, id 판은 view_id 의 창을 쓴다(적용 서비스가 스폰 전에 고른다).
+    // If omitted, the word version uses main and the id version uses view_id's window (the apply service picks before spawning).
     let window = optional_window_label(ports, "window", args.window.as_deref())?;
-    // ★`agent.new`·`agent.spawn --cwd` 와 **같은 철자 규칙**을 받는다★ — 이 문은 그 셋의 공통 등록부
-    //   (`agent::commands::register`)를 안 지나므로, 여기서 안 부르면 같은 낱말이 문마다 다르게 읽힌다.
+    // ★Accepts **the same spelling rules** as `agent.new` · `agent.spawn --cwd`★: this door skips their common registry (`agent::commands::register`), so without calling it here the same word would read differently per door.
     let cwd = normalize_spelling(text("cwd", &args.cwd)?);
     let tab = args
         .view_id
@@ -1793,10 +1669,9 @@ async fn verb_spawn_into(
     let at = optional_text("at", args.at.as_deref())?
         .map(|word| Ok::<_, CommandError>((spatial_token("at", word)?, word)))
         .transpose()?;
-    // ★backend 를 여기서 정규화하지 않는다★ — 「명시된 backend 는 스폰 전에 거부」가 적용 서비스의 조항이라
-    //   (ADR-0058) 빈 문자열을 부재로 접으면 그 거부가 이 입구에서만 느슨해진다.
+    // ★backend is not normalized here★: "an explicit backend is refused before spawn" is the apply service's rule (ADR-0058); folding an empty string into absence would loosen it only at this entrance.
     let placed = match at {
-        // 낱말이 칸을 집으므로 탭 · 칸 id 와 함께 받으면 어느 쪽이 이기는지 모르게 된다.
+        // The word picks an area, so accepting it together with tab · area ids would leave it unknown which one wins.
         Some(_) if tab.is_some() || slot.is_some() => {
             return Err(CommandError::invalid_argument(
                 "at picks a slot in window's shown tab — give it without view_id and slot_id",
@@ -1840,8 +1715,7 @@ async fn verb_spawn_into(
     })
 }
 
-/// 낱말판 스폰의 거절 → 버스 오류. 낱말이 칸을 못 집었으면(창 없음 포함) [`locate_error`] 의 코드 · 문구에 「띄운 것이
-/// 없다」를 붙인다 · 스폰 전 그 밖의 거절(점유) = CONFLICT · 스폰 뒤 실패는 id 판과 같다([`spawn_not_applied`]).
+/// The refusal of a word-version spawn → a bus error: [`locate_error`]'s code and text, with "nothing was started" appended if the word picked no area (including no window); other pre-spawn refusals (occupied) = CONFLICT; failures after spawn are as in the id version ([`spawn_not_applied`]).
 // ADR-0307
 fn spawn_at_error(state: &LayoutState, error: SpawnAtError, said: &Choice) -> CommandError {
     match error {
@@ -1857,19 +1731,16 @@ fn spawn_at_error(state: &LayoutState, error: SpawnAtError, said: &Choice) -> Co
     }
 }
 
-// ── 대상을 받는 동사(TRD S28 §4 · §5 · §7) ──────────────────────────────────────
+// ── Verbs taking a target ──────────────────────────────────────
 //
-// 차례 = 인자 검문(락 없음) → 창 인자 풀기 + 적용 — 본문 전체가 블로킹 풀에서 돈다([`targeted_handler`]). 에이전트 칸은 데몬이
-// 중계 전에 이미 id 로 바꿨다([`agent_arg`] · ADR-0308). 대상(id · 에이전트 · 낱말 → 탭 · 칸)은 적용 서비스가 **바꾸는 그 락
-// 안에서** 풀고, 답의 창 · 탭 · 배치 줄도 결말을 짓는 그 락에서 뜬다(`apply::dock_target` · `DockOutcome::rows` ·
-// `apply::Wrote`).
+// Order: argument check (no lock) → resolve the window argument + apply, the whole body on the blocking pool ([`targeted_handler`]). The daemon already turned agent fields into ids ([`agent_arg`], ADR-0308). The target (id · agent · word → tab · area) is resolved by the apply service **inside the same lock that changes it**, and the answer's window · tab · layout rows are captured in the lock that builds the outcome (`apply::dock_target` · `DockOutcome::rows` · `apply::Wrote`).
 // ADR-0307
 
-// 넓힌 칸 · 탭 동사와 `agent.spawnInto` 의 id 반려 문구가 안내하는 출처 — 탭 · 칸 id 를 함께 주는 조회.
+// The query the id bounce text of the widened verbs and `agent.spawnInto` points to — it gives tab · area ids together. (TRD S28 §4 · §5 · §7)
 const LAYOUT_IDS: &str = "layout.get with ids";
 
 fn verb_tab_move(ports: &LayoutPorts, args: TabMoveArgs) -> Result<TabMoveOk, CommandError> {
-    // `tab.dock` 의 `window` 와 헷갈린 호출이 말없이 제자리 순서 바꾸기가 되지 않게 받아서 거절한다.
+    // Accepted and refused so that a call confusing it with the `window` of `tab.dock` does not silently become an in-place reorder.
     if args.window.is_some() {
         return Err(CommandError::invalid_argument(
             "tab.move's destination is to_window — it takes no window argument",
@@ -1979,8 +1850,7 @@ fn verb_tab_dock(ports: &LayoutPorts, args: TabDockArgs) -> Result<TabDockOk, Co
 fn verb_tab_detach(ports: &LayoutPorts, args: TabDetachArgs) -> Result<TabDetachOk, CommandError> {
     let subject = tab_choice(args.tab.as_deref(), args.tab_of.as_deref())?;
     let tab = subject.tab_target()?;
-    // 자리 · 크기를 고르지 않는다 — 새 창은 label 기본 자리 · 적용 서비스가 고른 크기이고, 혼자인 팝아웃(재사용)은 받은
-    //   자리로 창을 옮기므로 비워야 그 창이 제자리에 남는다(TRD S28 §4-3).
+    // No position or size is picked: a new window takes the label default position and the apply service's size, and a lone popout (reuse) moves to the received position — so leave them empty for that window to stay in place. (TRD S28 §4-3)
     let to = TargetDest::NewWindow {
         at: WindowPlace {
             pos: None,
@@ -2014,7 +1884,7 @@ fn verb_layout_get(ports: &LayoutPorts, args: LayoutGetArgs) -> Result<LayoutGet
         .as_deref()
         .map(|given| window_label(ports, "window", given))
         .transpose()?;
-    // 이 읽기의 실패는 락 오염뿐이다 — 상태 탓(CONFLICT)이 아니다.
+    // The only failure of this read is lock poisoning — not the state's fault (CONFLICT).
     let rows = apply::layout_rows(&ports.state, &RowFilter { window, agent })
         .map_err(CommandError::internal)?;
     Ok(LayoutGetOk {
@@ -2022,7 +1892,7 @@ fn verb_layout_get(ports: &LayoutPorts, args: LayoutGetArgs) -> Result<LayoutGet
     })
 }
 
-// ── 넓힌 탭 동사(TRD S28 §7) — 탭 = view_id | tab_of · window 는 빼면 탭에서 안다 ──
+// ── Widened tab verbs — tab = view_id | tab_of · window (known from the tab if omitted) ── (TRD S28 §7)
 
 fn verb_tab_switch(ports: &LayoutPorts, args: TabSwitchArgs) -> Result<TabSwitchOk, CommandError> {
     let tab = view_choice(args.view_id.as_deref(), args.tab_of.as_deref())?;
@@ -2074,7 +1944,7 @@ fn verb_tab_rename(ports: &LayoutPorts, args: TabRenameArgs) -> Result<TabRename
     Ok(TabRenameOk {})
 }
 
-// ── 넓힌 칸 동사(TRD S28 §7) — 칸 = slot_id(+view_id) | slot_of | at(+window) ──
+// ── Widened area verbs — area = slot_id (+view_id) | slot_of | at (+window) ── (TRD S28 §7)
 
 fn verb_slot_focus(ports: &LayoutPorts, args: SlotFocusArgs) -> Result<SlotFocusOk, CommandError> {
     let pick = SlotPick::read(
@@ -2167,10 +2037,7 @@ fn verb_slot_popout(
         to_window,
     )
     .map_err(|error| target_error(&ports.state, error, &pick.said))?;
-    // ★`view_id` 라 부르지 않는다★ — 이 명령의 인자에 이미 `view_id`(떼어낼 **원본** 탭)가 있어서, 답의 같은
-    //   이름은 반대쪽을 뜻하게 된다. 답을 그대로 되먹여 두 번 부르는 호출자는 원본 대신 방금 만든 탭을
-    //   집어 엉뚱한 뷰에서 슬롯을 떼어낸다. `new_` 접두는 그 혼동을 막으면서도 값이 view id 임을 남겨
-    //   `tab.rename`·`tab.switch` 의 `view_id` 에 그대로 꽂힌다. 서비스 쪽 이름은 `tab` 이다(프론트 wire).
+    // ★Not called `view_id`★: this command's arguments already have `view_id` (the **original** tab to detach from); the same name in the answer would mean the opposite side, and a caller feeding the answer back would pick the new tab instead of the original. `new_` keeps that the value is a view id, so it plugs into `view_id` of `tab.rename` · `tab.switch`. The service-side name is `tab` (frontend wire).
     Ok(SlotPopoutOk {
         window: popped.out.window,
         new_view_id: popped.out.tab.to_string(),
@@ -2242,11 +2109,9 @@ fn verb_set_slot_content(
     })
 }
 
-// ── 고른 말 ──
+// ── The chosen words ──
 
-/// 탭 · 칸을 고른 말 — 같은 것을 고르는 인자 한 줄에서 정확히 하나를 받은 것. `arg` · `word` = 받은 인자 이름과 받은
-/// 그대로의 값(오류 문구가 되짚는다) · `id_arg` = 그 줄의 id 인자(모호할 때 후보를 넣을 자리 — 탭 줄이면 후보가 탭 단위다) ·
-/// `agent_arg` = 그 줄에서 에이전트로 고르는 인자(낱말이 칸을 못 집었을 때 권한다 — 없으면 `None`).
+/// The words that chose a tab · area — exactly one from one line of arguments choosing the same thing. `arg` · `word` = the received argument name and value (the error text echoes them) · `id_arg` = the line's id argument (where candidates go when ambiguous; per tab for a tab line) · `agent_arg` = the line's agent-choosing argument (recommended when the word picked no area; `None` if absent).
 struct Choice {
     arg: &'static str,
     id_arg: &'static str,
@@ -2258,7 +2123,7 @@ struct Choice {
 #[derive(Clone, Copy)]
 enum ChoiceBy {
     Id(Uuid),
-    /// 그 에이전트가 든 탭 · 칸 — 데몬이 이름을 바꿔 넣은 에이전트 id(ADR-0308).
+    /// The tab · area holding that agent — the agent id the daemon put in place of the name (ADR-0308).
     Agent(Uuid),
     At(SpatialToken),
 }
@@ -2280,7 +2145,6 @@ impl Choice {
         }
     }
 
-    // 탭을 고르는 줄인가 — 모호 후보를 탭 단위로 싣는다.
     fn names_a_tab(&self) -> bool {
         matches!(self.id_arg, "tab" | "after_tab" | "view_id")
     }
@@ -2296,11 +2160,11 @@ impl Choice {
         }
     }
 
-    // `window` = 낱말을 읽을 창(이미 푼 label · `None` = main).
+    // `window` = the window to read the word in (an already resolved label · `None` = main).
     fn slot_target(&self, whole: bool, window: Option<String>) -> Result<Target, CommandError> {
         match self.by {
             ChoiceBy::Id(slot) => Ok(Target::Slot { view: None, slot }),
-            // 탭 전체의 바깥 변에 붙이면 기준이 탭이라 그 탭 안 여러 칸에 떠 있어도 모호하지 않다.
+            // Attaching to the outer edge of the whole tab makes the tab the reference, so it is not ambiguous even if up in several areas of that tab.
             ChoiceBy::Agent(agent) if whole => Ok(Target::TabOf(agent)),
             ChoiceBy::Agent(agent) => Ok(Target::SlotOf(agent)),
             ChoiceBy::At(token) => Ok(Target::At { token, window }),
@@ -2308,8 +2172,7 @@ impl Choice {
     }
 }
 
-/// 탭을 고르는 줄 — `id_arg`(그 명령의 탭 id 인자) · `tab_of` 중 정확히 하나. `what` = 그 줄이 고르는 것(문구용) · `source` =
-/// 그 id 를 돌려주는 명령(반려 문구가 안내한다).
+/// The line choosing a tab — exactly one of `id_arg` (the command's tab id argument) · `tab_of`. `what` = what the line chooses (for the text) · `source` = the command that returns that id (the bounce text points to it).
 fn tab_line(
     id_arg: &'static str,
     what: &str,
@@ -2336,7 +2199,6 @@ fn tab_line(
     })
 }
 
-/// 옮길 탭 줄(`tab` · `tab_of`) — 도킹 동사.
 fn tab_choice(tab: Option<&str>, tab_of: Option<&str>) -> Result<Choice, CommandError> {
     tab_line(
         "tab",
@@ -2347,12 +2209,11 @@ fn tab_choice(tab: Option<&str>, tab_of: Option<&str>) -> Result<Choice, Command
     )
 }
 
-/// 바꿀 탭 줄(`view_id` · `tab_of`) — 넓힌 탭 동사.
 fn view_choice(view_id: Option<&str>, tab_of: Option<&str>) -> Result<Choice, CommandError> {
     tab_line("view_id", "the tab", LAYOUT_IDS, view_id, tab_of)
 }
 
-/// 「그 탭 바로 뒤」 줄(`after_tab` · `after_tab_of`) — 하나도 없으면 `None`(갈 곳 줄의 나머지는 `to_window` · `index`).
+/// The 「right after that tab」 line (`after_tab` · `after_tab_of`) — `None` if neither (the rest of the destination line is `to_window` · `index`).
 fn after_choice(
     after_tab: Option<&str>,
     after_tab_of: Option<&str>,
@@ -2391,7 +2252,6 @@ fn after_choice(
     }))
 }
 
-/// 붙일 칸 줄(`beside_slot` · `beside` · `beside_at`).
 fn beside_choice(
     slot: Option<&str>,
     agent: Option<&str>,
@@ -2420,8 +2280,7 @@ fn beside_choice(
     })
 }
 
-/// 칸을 고르는 줄(`slot_id` · `slot_of` · `at`)과 그 곁 인자 — 넓힌 칸 동사가 함께 쓴다(TRD S28 §7). `view` = `slot_id` 와
-/// 함께 준 `view_id`(그 탭의 칸이어야 한다) · `window` = `at` 을 읽을 창(모양만 본 인자 — 모델 안 창으로는 적용 직전에 푼다).
+/// The line choosing an area (`slot_id` · `slot_of` · `at`) and its side arguments, shared by the widened area verbs. `view` = the `view_id` given with `slot_id` (it must be an area of that tab) · `window` = the window to read `at` in (shape-checked only; resolved to a model window right before applying). (TRD S28 §7)
 struct SlotPick {
     said: Choice,
     view: Option<Uuid>,
@@ -2436,7 +2295,7 @@ impl SlotPick {
         at: Option<&str>,
         window: Option<&str>,
     ) -> Result<Self, CommandError> {
-        // 탭 id 를 먼저 본다 — 넓히기 전 id 호출자의 검문 차례 그대로.
+        // The tab id is checked first — the same check order as the id callers before widening.
         let view = optional_text("view_id", view_id)?
             .map(|raw| uuid_arg_from("view_id", raw, LAYOUT_IDS))
             .transpose()?;
@@ -2478,7 +2337,6 @@ impl SlotPick {
         })
     }
 
-    // 적용 직전 — 창 인자를 모델 안 창으로 풀어 대상을 짓는다.
     fn target(&self, ports: &LayoutPorts) -> Result<Target, CommandError> {
         if let ChoiceBy::Id(slot) = self.said.by {
             return Ok(Target::Slot {
@@ -2495,8 +2353,7 @@ impl SlotPick {
     }
 }
 
-/// 칸에 넣을 에이전트 — `assign` | `agent_id`(넓히기 전 인자) 중 하나. 둘 다 `#[agent_ref]` 라 데몬이 명부로 풀어 id 를
-/// 넣고, 명부에 없으면 데몬이 거절해 여기 오지 않는다(ADR-0308). `arg` = 받은 인자 이름(문구용).
+/// The agent to put in the area — one of `assign` | `agent_id`, both `#[agent_ref]` (the daemon resolves them against the roster and refuses itself if absent — ADR-0308). `arg` = the received argument name (for the text).
 struct Assignee {
     arg: &'static str,
     id: Uuid,
@@ -2521,8 +2378,7 @@ impl Assignee {
     }
 }
 
-/// `#[agent_ref]` 칸의 값 → 에이전트 id. 데몬이 중계 전에 이름을 id 로 바꿔 넣으므로(ADR-0308) UUID 가 아니면 데몬을
-/// 거치지 않은 호출이다 — 셸은 이름을 풀지 않고 반려한다(해석기는 데몬 하나 — ADR-0132).
+/// The value of an `#[agent_ref]` field → an agent id. A non-UUID is a call that bypassed the daemon (which replaces names with ids before relaying, ADR-0308); the shell does not resolve names and bounces it (ADR-0132).
 // ADR-0308
 fn agent_arg(field: &str, given: &str) -> Result<Uuid, CommandError> {
     Uuid::parse_str(given.trim()).map_err(|_| {
@@ -2532,8 +2388,7 @@ fn agent_arg(field: &str, given: &str) -> Result<Uuid, CommandError> {
     })
 }
 
-/// id 인자 — UUID 가 아니면 [`uuid_arg_from`] 의 반려 끝에 이름 · 낱말로 고르는 짝 인자(`alternative`)를 단다(이름을
-/// id 칸에 넣은 호출이 다음 한 번에 고치게).
+/// An id argument; if not a UUID, appends the paired name · word argument (`alternative`) to the bounce of [`uuid_arg_from`], so a call that put a name into the id field can fix it.
 fn id_choice(
     field: &str,
     given: &str,
@@ -2548,7 +2403,6 @@ fn id_choice(
     })
 }
 
-/// 공간 낱말 — 모르는 낱말이면 받는 낱말을 나열해 반려한다.
 fn spatial_token(arg: &str, word: &str) -> Result<SpatialToken, CommandError> {
     SpatialToken::parse(word).ok_or_else(|| {
         CommandError::invalid_argument(format!(
@@ -2557,8 +2411,7 @@ fn spatial_token(arg: &str, word: &str) -> Result<SpatialToken, CommandError> {
     })
 }
 
-/// 같은 것을 고르는 인자 한 줄에서 정확히 하나 — (줄 안 자리, 인자 이름, 값). 빈 값은 [`optional_text`] 처럼 반려한다.
-/// `what` = 그 줄이 고르는 것(문구용).
+/// Exactly one from one line of arguments choosing the same thing — (position in the line, argument name, value). An empty value is bounced like [`optional_text`]. `what` = what the line chooses (for the text).
 fn one_of<'a>(
     fields: &[(&'static str, Option<&'a str>)],
     what: &str,
@@ -2593,8 +2446,7 @@ fn one_of<'a>(
     }
 }
 
-/// 창 인자의 모양만 먼저 본다(빈 값 · 번호 = `INVALID_ARGUMENT`) — 모델 안 창으로 푸는 것은 적용 직전의 [`window_label`]
-/// 이다(그때 없는 창 = `CONFLICT`).
+/// Checks only the shape of the window argument first (empty value · number = `INVALID_ARGUMENT`); resolving it in the model is [`window_label`] right before applying (a missing window = `CONFLICT`).
 fn optional_window_arg(field: &str, given: Option<&str>) -> Result<Option<String>, CommandError> {
     let Some(given) = optional_text(field, given)? else {
         return Ok(None);
@@ -2603,8 +2455,7 @@ fn optional_window_arg(field: &str, given: Option<&str>) -> Result<Option<String
     Ok(Some(given.to_string()))
 }
 
-// 범위는 모델 계약(`tree::RATIO_MIN..=dock::SHARE_MAX`) 그대로다 — 적용 서비스도 같은 범위로 거절하지만(`InvalidShare`)
-//   적용 락을 잡기 전에 반려한다.
+// The range is the model contract (`tree::RATIO_MIN..=dock::SHARE_MAX`); the apply service refuses the same range (`InvalidShare`), this just bounces before taking the apply lock.
 fn share_arg(share: f64) -> Result<f64, CommandError> {
     if share.is_finite() && (tree::RATIO_MIN..=dock::SHARE_MAX).contains(&share) {
         return Ok(share);
@@ -2616,10 +2467,9 @@ fn share_arg(share: f64) -> Result<f64, CommandError> {
     )))
 }
 
-// ── 대상판 도킹의 결말 · 거절 ──
+// ── Outcome · refusal of target-version docking ──
 
-/// 대상판 도킹 거절을 코드 · 문구로 옮길 재료 — 어느 명령이 옮길 탭과 갈 곳을 무슨 말로 골랐나. `dest` = 갈 곳을 대상으로
-/// 고른 말(`after_tab` · `after_tab_of` · 붙일 칸 줄 — 창 · 새 창은 `None`).
+/// The material to turn a target-version docking refusal into code · text: the words the command used to choose the tab to move, and `dest` = the words choosing the destination as a target (`after_tab` · `after_tab_of` · the attach area line; `None` for a window · new window).
 struct DockSaid {
     command: &'static str,
     subject: Choice,
@@ -2627,7 +2477,6 @@ struct DockSaid {
 }
 
 impl DockSaid {
-    // 호출자가 id 로 준 것.
     fn gave_id(&self, id: Uuid) -> bool {
         std::iter::once(&self.subject)
             .chain(self.dest.as_ref())
@@ -2635,7 +2484,7 @@ impl DockSaid {
     }
 }
 
-/// 세 도킹 명령이 함께 싣는 답 칸 — 전부 결말을 짓는 그 락의 한 모습이다(`DockOutcome::rows` · `identity`).
+/// The answer fields the three docking commands carry together — all one snapshot of the lock that builds the outcome (`DockOutcome::rows` · `identity`).
 struct Moved {
     changed: bool,
     window: String,
@@ -2646,7 +2495,7 @@ struct Moved {
     layout: Vec<LayoutRow>,
 }
 
-// PRD S21-slot-docking R11b: LLM 명령은 창 활성 · 보이는 탭 · 포커스를 안 바꾼다(`Keep` — 예외는 적용 서비스의 `dock` 승계).
+// LLM commands do not change the window's active tab · visible tab · focus (`Keep`; the exception is the apply service's `dock` succession).
 fn dock_by_target(
     ports: &LayoutPorts,
     tab: Target,
@@ -2671,16 +2520,14 @@ fn dock_by_target(
 }
 
 fn moved(outcome: DockOutcome) -> Result<Moved, CommandError> {
-    // 대상판은 결말을 짓는 락에서 옮긴 탭을 다시 찾고, 그 창이 사라졌으면 이미 `Moved` 로 거절했다(TRD S28 §4-4) — 이
-    //   갈래는 그 계약이 깨졌을 때의 그물이다.
+    // The target version finds the moved tab again in the lock that builds the outcome, and a vanished window was already refused with `Moved`; this branch is the net for when that contract breaks. (TRD S28 §4-4)
     let Some(identity) = outcome.identity else {
         return Err(CommandError::of(
             ErrorCode::Conflict,
             TargetDockError::Moved.to_string(),
         ));
     };
-    // 결말의 줄은 `tab` 을 늘 싣는다(`views` 의 첫 탭 · 같은 락) — 없으면 그 계약이 깨진 것이다. 그래도 옮기기는 이미
-    //   됐으므로 오류로 답하지 않는다(적용된 쓰기를 실패로 읽히게 하지 않는다 — ADR-0159) — 그 칸만 빼고 성공이다.
+    // The outcome rows always carry `tab` (first tab of `views`, same lock); if absent that contract broke. The move already happened, so it still answers success with only that field omitted (an applied write must not read as a failure — ADR-0159).
     let tab_index = outcome
         .rows
         .iter()
@@ -2689,7 +2536,7 @@ fn moved(outcome: DockOutcome) -> Result<Moved, CommandError> {
     if tab_index.is_none() {
         tracing::warn!(
             tab = %outcome.tab,
-            "도킹 결말의 줄에 결과 탭이 없다 — tab_index 를 빼고 성공으로 답한다"
+            "the docking outcome rows have no result tab — answering success without tab_index"
         );
     }
     Ok(Moved {
@@ -2703,15 +2550,13 @@ fn moved(outcome: DockOutcome) -> Result<Moved, CommandError> {
     })
 }
 
-/// 대상판 도킹의 거절 → 버스 오류(TRD S28 §5-3).
+/// A target-version docking refusal → a bus error.
 ///
-/// - 대상을 못 풀었다 = [`locate_error`].
-/// - `NotASlot` · `SelfTarget` · `InvalidShare` = INVALID_ARGUMENT — 인자 조합이 스스로 어긋난다. `SelfTarget` 문구는 명령마다
-///   고칠 길을 말한다(`tab.dock` = 칸 하나는 `slot.popout` 으로 먼저 뺀다).
-/// - 호출자가 **id 로 준** 탭 · 칸이 없음(`TabNotFound` · `SlotNotFound` · `SlotNotInTab`) = NOT_FOUND · 에이전트 · 낱말에서
-///   나온 id 면 CONFLICT(풀린 뒤 사라졌다 — 경합).
-/// - `WindowNotFound` = CONFLICT(ADR-0302 결정 9 — [`window_arg_error`] 와 같다) · `Moved` 와 나머지 = CONFLICT.
-// ADR-0307
+/// - Target unresolved = [`locate_error`].
+/// - `NotASlot` · `SelfTarget` · `InvalidShare` = INVALID_ARGUMENT (the arguments contradict themselves); the `SelfTarget` text tells each command the fix (`tab.dock` = take one area out first with `slot.popout`).
+/// - A tab · area the caller **gave by id** is missing (`TabNotFound` · `SlotNotFound` · `SlotNotInTab`) = NOT_FOUND; if the id came from an agent · word, CONFLICT (it vanished after resolving — a race).
+/// - `WindowNotFound` = CONFLICT (ADR-0302 decision 9, as in [`window_arg_error`]) · `Moved` and the rest = CONFLICT.
+// ADR-0307 (TRD S28 §5-3)
 fn dock_target_error(state: &LayoutState, error: TargetDockError, said: &DockSaid) -> CommandError {
     let message = error.to_string();
     match error {
@@ -2751,16 +2596,13 @@ fn dock_error(state: &LayoutState, error: DockError, said: &DockSaid) -> Command
     CommandError::of(code, message)
 }
 
-/// 대상을 못 풀었다 → 버스 오류(TRD S28 §5-2 · §5-3). 문구 = [`said_head`] + `: <사유>` + 꼬리.
+/// The target could not be resolved → a bus error. Text = [`said_head`] + `: <reason>` + tail.
 ///
-/// - 에이전트가 어느 칸에도 없음 = NOT_FOUND + ` — candidates: <떠 있는 이름>`(없으면 `none`).
-/// - 에이전트가 여러 곳 = CONFLICT + 그 줄의 id 인자로 고치라는 안내 + 후보(최대 5). 후보 머리 = 그 id 인자 이름이라 값을
-///   그대로 옮겨 적는다 — 탭 줄(`tab` · `after_tab` · `view_id`)은 탭마다 한 줄 `<인자>=<id> (window=<label>, tab_index=<n>)` ·
-///   칸 줄(`slot_id` · `beside_slot`)은 칸마다 `<인자>=<id> (…)`.
-/// - 낱말이 칸을 못 집음 = NOT_FOUND + 모서리 낱말 · 그 줄의 에이전트 인자(`beside` · `slot_of`) 안내 · 창이 없음 =
-///   CONFLICT(ADR-0302 결정 9).
-/// - id 로 준 탭 · 칸이 없음 = NOT_FOUND — 이 셋은 id 대상에서만 난다(풀린 뒤 사라진 것은 적용 단계의 [`dock_error`] 몫).
-// ADR-0307
+/// - The agent is in no area = NOT_FOUND + ` — candidates: <names that are up>` (`none` if none).
+/// - The agent is in several places = CONFLICT + guidance to fix it with that line's id argument + candidates (at most 5), headed by that id argument name so the value can be copied as is: tab lines (`tab` · `after_tab` · `view_id`) one per tab `<arg>=<id> (window=<label>, tab_index=<n>)`; area lines (`slot_id` · `beside_slot`) one per area `<arg>=<id> (…)`.
+/// - The word picks no area = NOT_FOUND + guidance on corner words · that line's agent argument (`beside` · `slot_of`); no window = CONFLICT (ADR-0302 decision 9).
+/// - A tab · area given by id is missing = NOT_FOUND (only for id targets; vanishing after resolving is [`dock_error`]'s job).
+// ADR-0307 (TRD S28 §5-2 · §5-3)
 fn locate_error(state: &LayoutState, said: &Choice, error: LocateError) -> CommandError {
     let head = format!("{}: {error}", said_head(state, said));
     let (code, message) = match &error {
@@ -2798,9 +2640,8 @@ fn locate_error(state: &LayoutState, said: &Choice, error: LocateError) -> Comma
     CommandError::of(code, message)
 }
 
-/// 받은 말 머리 `<인자> '<받은 말>'` — 에이전트 칸이면 데몬이 바꿔 넣은 id 대신 `<인자> '<표시 이름>' (<id>)` 로 적는다(셸 이름
-/// 장부 — 보여 주기 몫이지 풀이가 아니다 · ADR-0132). 장부에 없으면 id 만.
-// ★락을 쥔 채 부르지 말 것★ — 이름 장부를 읽으려고 레이아웃 락을 잡는다(적용이 돌려준 뒤의 오류 매핑에서만 부른다).
+/// The received words head `<arg> '<received words>'`; for an agent field `<arg> '<display name>' (<id>)` instead of the id the daemon put in (name ledger, display only — ADR-0132), just the id if not in the ledger.
+// ★Do not call while holding the lock★ — it takes the layout lock to read the name ledger (call only in the error mapping after the apply returned).
 fn said_head(state: &LayoutState, said: &Choice) -> String {
     match said.by {
         ChoiceBy::Agent(id) => match apply::agent_display_name(state, id) {
@@ -2811,7 +2652,7 @@ fn said_head(state: &LayoutState, said: &Choice) -> String {
     }
 }
 
-// 탭 단위 모호 후보 — 탭마다 한 줄(그 탭의 첫 칸 자리), 최대 [`target::MAX_CANDIDATES`]. `key` = 그 값을 넘길 인자 이름.
+// Per-tab ambiguous candidates, one line per tab (position of its first area), at most [`target::MAX_CANDIDATES`]. `key` = the argument name to pass that value to.
 fn tab_candidates(key: &str, places: &[Place]) -> Vec<String> {
     let mut seen: Vec<Uuid> = Vec::new();
     places
@@ -2831,8 +2672,7 @@ fn tab_candidates(key: &str, places: &[Place]) -> Vec<String> {
         .collect()
 }
 
-// 데몬 해석기 문구와 같은 꼴의 후보 꼬리 — 비면 `none`(꼬리를 빼면 「후보가 없다」와 「후보를 싣지 않는 문구」가 갈리지
-//   않는다).
+// A candidate tail in the daemon resolver's form — `none` if empty, so "no candidates" and "a text carrying no candidates" stay distinguishable.
 fn candidates_tail(candidates: &[String]) -> String {
     if candidates.is_empty() {
         return " — candidates: none".to_string();
@@ -2840,12 +2680,12 @@ fn candidates_tail(candidates: &[String]) -> String {
     format!(" — candidates: {}", candidates.join(", "))
 }
 
-/// 대상판 칸 · 탭 쓰기의 거절 → 버스 오류(TRD S28 §5-3 · §7).
+/// A refusal of a target-version area · tab write → a bus error.
 ///
-/// - id 로 준 탭 · 칸이 없음 = [`id_miss`](넓히기 전 답 그대로) · 에이전트 · 낱말로 고른 대상을 못 풀었음 = [`locate_error`].
-/// - 대상은 풀었으나 적용이 거절됐음 = CONFLICT + 서비스 문구(id 판과 같다 — [`not_applied`]).
-/// - 칸 쓰기에 탭 대상 = INTERNAL — 칸 동사는 칸 대상만 짓는다(그 계약이 깨졌을 때의 그물).
-// ADR-0307
+/// - A tab · area given by id is missing = [`id_miss`]; a target chosen by agent · word that could not be resolved = [`locate_error`].
+/// - Resolved but the apply was refused = CONFLICT + the service text (as in the id version — [`not_applied`]).
+/// - A tab target for an area write = INTERNAL (area verbs build only area targets; the net for when that breaks).
+// ADR-0307 (TRD S28 §5-3 · §7)
 fn target_error(state: &LayoutState, error: TargetError, said: &Choice) -> CommandError {
     match error {
         TargetError::Locate(error) if matches!(said.by, ChoiceBy::Id(_)) => id_miss(error),
@@ -2855,9 +2695,7 @@ fn target_error(state: &LayoutState, error: TargetError, said: &Choice) -> Comma
     }
 }
 
-/// id 로 준 탭 · 칸이 없다 — 넓히기 전 id 판(관리자 쓰기)이 내던 문구 · 코드 그대로다(CONFLICT — 모듈 머리 「적용 실패의
-/// 코드」): 없는 탭 = `ViewNotFound` · 그 탭에 없는 칸 = `SlotNotFound`. 대상판은 그 판정을 쓰기 전에 `locate` 로 먼저 하므로
-/// 문구만 관리자의 것으로 되돌린다 — 짝이 갈리면 `tests/layout_commands.rs` 의 옛 문구 대조가 빨개진다.
+/// A tab · area given by id is missing — the text and code the id version (manager write) always emitted (CONFLICT): a missing tab = `ViewNotFound`, an area not in that tab = `SlotNotFound`. The target version decides earlier with `locate`, so only the text is turned back into the manager's; if the pair diverges, the text comparison in `tests/layout_commands.rs` goes red.
 fn id_miss(error: LocateError) -> CommandError {
     let detail = match error {
         LocateError::TabNotFound(view) => LayoutError::ViewNotFound(view).to_string(),
@@ -2869,12 +2707,12 @@ fn id_miss(error: LocateError) -> CommandError {
     not_applied(detail)
 }
 
-// 쓰기가 바꾼 탭의 줄 — id 없이(규칙 §4 · 칸을 이름 · 낱말로 부른다).
+// The rows of the tab the write changed, without ids (rule §4 · areas are called by name · word).
 fn layout_of(rows: Vec<rows::LayoutRow>) -> Vec<LayoutRow> {
     rows.into_iter().map(|row| row_of(row, false)).collect()
 }
 
-// ids = false 면 id 넷을 비운다 — 답에서 그 칸은 아예 빠진다([`without_nulls`]).
+// With ids = false the four ids are emptied and left out of the answer ([`without_nulls`]).
 fn row_of(row: rows::LayoutRow, ids: bool) -> LayoutRow {
     LayoutRow {
         window: row.window,
@@ -2903,19 +2741,15 @@ fn row_of(row: rows::LayoutRow, ids: bool) -> LayoutRow {
     }
 }
 
-// ── 인자 검문 ────────────────────────────────────────────────────────────────
+// ── Argument checks ────────────────────────────────────────────────────────────────
 
-/// 적용 서비스의 실패 문구를 그대로 실어 나른다 — id 를 받는 동사의 갈래(헤더 「적용 실패의 코드」).
+/// Carries the apply service's failure text as is — the branch of verbs taking ids (see the module header).
 fn not_applied(detail: String) -> CommandError {
     CommandError::of(ErrorCode::Conflict, detail)
 }
 
-/// `agent.spawnInto` 의 실패 — 데몬이 `CODE: 문구` 로 답한 실패(저장소 거절 = `CONFLICT` · 저장 쓰기 실패 =
-/// `INTERNAL` — daemon `connection_core` 의 `store_error_text`)는 그 코드를 겉 코드로 쓰고 접두를 뗀다. 재시도 지시는
-/// 그 코드의 기본값이다(WS 문구는 지시를 싣지 않는다).
-/// ★겉에 `CONFLICT` 를 또 씌우지 않는다★ — 코드가 둘(`CONFLICT: INTERNAL: …`)이 되고, 쓰기 실패가 「아무것도 적용
-///   안 된 반려」로 읽힌다. 이 명령이 광고하지 않는 코드나 코드 접두가 없는 문구(배치 실패 · 정책 거절 등)는
-///   [`not_applied`] 다.
+/// Failures of `agent.spawnInto`: a failure the daemon answered as `CODE: text` (store refusal = `CONFLICT` · store write failure = `INTERNAL` — `store_error_text` of daemon `connection_core`) uses that code as the outer code and the prefix is stripped; the retry directive is that code's default.
+/// ★Do not wrap `CONFLICT` around it again★: two codes (`CONFLICT: INTERNAL: …`) would make a write failure read as "a bounce where nothing was applied". Codes this command does not advertise or texts without a code prefix (placement failure · policy refusal …) are [`not_applied`].
 // ADR-0291 R17
 fn spawn_not_applied(detail: String) -> CommandError {
     let advertised = AgentSpawnIntoArgs::SPEC.advertised_errors();
@@ -2927,9 +2761,7 @@ fn spawn_not_applied(detail: String) -> CommandError {
     not_applied(detail)
 }
 
-/// ★공백만 있는 값은 부재로 접지 않고 반려한다★ — 셸에서 미설정 변수가 빈 인자로 펼쳐지는 형태
-/// (`--window "$UNSET"`)가 현실적으로 들어오고, 그것을 「안 준 것」으로 접으면 오타 하나가 다른 창을
-/// 건드린다(agent 쪽 `agent.*` 의 같은 조항).
+/// ★A whitespace-only value is bounced, not folded into absence★: an unset shell variable expanding to an empty argument (`--window "$UNSET"`) is realistic, and folding it into "not given" would let one typo touch another window (as `agent.*` does on the agent side).
 fn text<'a>(field: &str, given: &'a str) -> Result<&'a str, CommandError> {
     if given.trim().is_empty() {
         return Err(CommandError::invalid_argument(format!(
@@ -2939,9 +2771,7 @@ fn text<'a>(field: &str, given: &'a str) -> Result<&'a str, CommandError> {
     Ok(given)
 }
 
-/// 창 인자를 지금 모델 안 창의 label 로 푼다(TRD S26-window-chrome §4-5) — 숫자만 = `INVALID_ARGUMENT` · 모델에 없는
-/// 창(앞 실행의 label 포함) = `CONFLICT`(적용 실패와 같은 코드). 레이아웃 락은 푸는 동안만 쥔다 — 그 뒤 창이 닫히면
-/// 적용 서비스가 같은 `CONFLICT` 로 거절한다.
+/// Resolves the window argument to the label of a window in the current model: digits only = `INVALID_ARGUMENT`; a window not in the model (including a label of an earlier run) = `CONFLICT` (as an apply failure). The layout lock is held only while resolving; if the window closes after that, the apply service refuses with the same `CONFLICT`. (TRD S26-window-chrome §4-5)
 fn window_label(ports: &LayoutPorts, field: &str, given: &str) -> Result<String, CommandError> {
     let given = text(field, given)?;
     let mgr = ports
@@ -2980,13 +2810,12 @@ fn optional_text<'a>(field: &str, given: Option<&'a str>) -> Result<Option<&'a s
     }
 }
 
-/// ★형식 불량은 적용 전에 반려한다★ — 파싱에 실패한 id 로 적용을 부르면 「없는 id」와 「형식이 깨진 id」가
-/// 같은 답을 받아, 호출자는 멀쩡한 탭을 지웠나 의심하며 목록부터 다시 뒤진다.
+/// ★Malformed values are bounced before applying★: applying with an unparsed id would give "a missing id" and "a malformed id" the same answer, and the caller would suspect a deleted tab and dig through the list.
 fn uuid_arg(field: &str, given: &str) -> Result<Uuid, CommandError> {
     uuid_arg_from(field, given, "tab.list / layout.get with ids")
 }
 
-/// `source` = 그 id 를 돌려주는 명령 — 반려 문구가 호출자를 거기로 안내한다.
+/// `source` = the command that returns that id; the bounce text guides the caller there.
 fn uuid_arg_from(field: &str, given: &str, source: &str) -> Result<Uuid, CommandError> {
     Uuid::parse_str(given.trim()).map_err(|_| {
         CommandError::invalid_argument(format!(
@@ -2995,8 +2824,7 @@ fn uuid_arg_from(field: &str, given: &str, source: &str) -> Result<Uuid, Command
     })
 }
 
-/// 버스 한 번이 슬롯에 쓰는 것. `Usage` 는 뺀 칸을 슬롯의 지금 값으로 채워야 해서 ViewManager 락 안에서야
-/// [`SlotContent`] 가 된다(`apply::set_usage_slot_at`).
+/// What one bus call writes into a slot. `Usage` must fill omitted fields with the slot's current values, so it becomes a [`SlotContent`] only inside the ViewManager lock (`apply::set_usage_slot_at`).
 enum SlotContentWrite {
     Replace(SlotContent),
     Usage {
@@ -3005,11 +2833,7 @@ enum SlotContentWrite {
     },
 }
 
-/// 태그 + 곁칸(넣을 에이전트 `assign` · `agent_id` · `show_claude`·`show_codex`) → 슬롯에 쓸 것.
-///
-/// ★어긋난 조합을 조용히 고치지 않는다★: `Agent` 인데 에이전트가 없으면 빈 슬롯이 되고, `Empty` 인데 에이전트가
-/// 붙어 있으면 호출자는 그 에이전트가 붙은 줄 안다. `Usage` 가 아닌데 `show_*` 가 붙어 있으면 호출자는 그
-/// 회사를 켠 줄 안다. 셋 다 반려한다.
+/// Tag + side fields → what to write into the slot. ★A mismatched combination is bounced, not silently fixed★: `Agent` without an agent would become an empty slot, `Empty` with an agent would make the caller think it is attached, and non-`Usage` with `show_*` would make the caller think a company was turned on.
 fn slot_content(
     kind: SlotContentKind,
     agent: Option<Assignee>,
@@ -3052,15 +2876,12 @@ fn slot_content(
     Ok(write)
 }
 
-// ★단언은 대부분 `tests/layout_commands.rs` 에 있다★ — 봉투가 표를 지나는 길로 잰다. 여기 단위 테스트는 그 길로
-//   만들 수 없는 결말(적용 서비스 계약이 깨진 그물)만 잰다. 이 패키지의 `#[cfg(test)]` 단언은
-//   `cargo test -p engram-dashboard --test lib_unit` 으로 돈다(현황 = `.claude/skill-bindings/qa.md` 「모듈별 명령」의 셸 줄 · 그 타깃을 세운
-//   결정 = ADR-0174).
+// Most assertions are in `tests/layout_commands.rs` (through the envelope path); these cover only outcomes that path cannot make. (`--test lib_unit`, ADR-0174)
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // 결말의 줄에 결과 탭이 없어도(적용 서비스 계약이 깨진 그물) 이미 옮긴 도킹은 성공으로 답한다 — 그 칸만 빠진다.
+    // Even if the outcome rows have no result tab (the net for when the apply service contract breaks), an already moved docking answers success — only that field is omitted.
     #[test]
     fn a_dock_whose_rows_miss_its_tab_still_answers_success_without_tab_index() {
         let tab = Uuid::new_v4();
@@ -3082,7 +2903,7 @@ mod tests {
             rows: Vec::new(),
         };
 
-        let m = moved(outcome).expect("성공");
+        let m = moved(outcome).expect("success");
 
         assert!(m.changed);
         assert_eq!(m.tab, tab.to_string());

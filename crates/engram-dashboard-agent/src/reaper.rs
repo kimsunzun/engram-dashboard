@@ -1,19 +1,19 @@
-//! 세션 reaper — 종료 분류(ADR-0019)의 단일 소비자.
+//! Session reaper — the single consumer of the exit classification (ADR-0019).
 //!
-//! pump 가 finish 승자일 때 발행한 `ReapMsg` 를 **단일 supervisor 스레드**가 소비해 다음을 수행한다:
-//! sessions 맵에서 제거(epoch 일치 검증 후) → 프로필 disposition(auto_restore=false 다운그레이드 /
-//! 손 안 댐 — ADR-0083 으로 자동 삭제 폐지) → 목록 통지.
+//! A **single supervisor thread** consumes the `ReapMsg` that the pump emits when it is the finish winner, and does the following:
+//! remove from the sessions map (after checking the epoch matches) → profile disposition (auto_restore=false downgrade /
+//! left untouched — auto-delete abolished by ADR-0083) → list notification.
 //!
-//! 불변식:
-//! - kill 2동사(ADR-0001)·finalize 1회(ADR-0005)는 reaper 가 건드리지 않는다 — done 신호를
-//!   소비할 뿐. ReapMsg 발행은 finalize 승자 경로 1회.
-//! - 락 순서(ADR-0006): sessions write lock 구간 = epoch 검증 + remove 만. ProfileRegistry
-//!   mutate(디스크 IO)·status_sink 통지는 lock 밖.
-//! - epoch(ADR-0007/0084): reap 전 화신 표식 **일치** 검증 → 재spawn 된 새 세션을 옛 done 이 오삭제 못 함.
-//!   대소가 아니라 일치다 — 표식은 화신마다 뽑은 난수라 순서에 뜻이 없다(`AgentProfile::epoch`).
-//!   같은 epoch-guard 를 apply_disposition 까지 확장(ADR-0084) → stale reap 이 재활성화(다른 표식)로
-//!   붙은 산 세션의 auto_restore 를 강등 못 함.
-//! - idempotency: sessions.remove() Some 승자 1명만 disposition·통지(같은 done 2회 와도 1회).
+//! Invariants:
+//! - The kill 2 verbs (ADR-0001) and finalize once (ADR-0005) are not touched by the reaper — it only consumes the done
+//!   signal. ReapMsg is emitted once, on the finalize winner path.
+//! - Lock order (ADR-0006): the sessions write-lock section = epoch check + remove only. ProfileRegistry
+//!   mutate (disk IO) and the status_sink notification are outside the lock.
+//! - epoch (ADR-0007/0084): checks the incarnation marker **matches** before reaping → an old done cannot wrongly delete a respawned new session.
+//!   A match, not an ordering — the marker is a random number drawn per incarnation, so order has no meaning (`AgentProfile::epoch`).
+//!   The same epoch-guard is extended up to apply_disposition (ADR-0084) → a stale reap cannot degrade the auto_restore of a live session
+//!   attached by reactivation (a different marker).
+//! - idempotency: only the single sessions.remove() Some winner does disposition and notification (once even if the same done comes twice).
 //!
 //! tauri import 0.
 
@@ -29,14 +29,14 @@ use crate::profile::ProfileRegistry;
 use crate::session::AgentSession;
 use crate::types::{AgentId, AgentInfo, ControlChannel, Disposition, ReapMsg, StatusSink};
 
-/// Stop 없이도 모든 Sender drop 시 recv 가 Err 로 끝나 루프가 종료된다(이중 안전).
+/// Even without Stop, when every Sender is dropped recv ends with Err and the loop exits (double safety).
 pub enum ReaperCmd {
     Reap(ReapMsg),
     Stop,
 }
 
-/// AgentManager 의 필드 Arc 들을 **그대로** 공유한다 — manager 와 reaper 가 같은
-/// sessions/profiles/status_sink/control 을 본다(사본 금지).
+/// Shares the AgentManager's field Arcs **as is** — the manager and the reaper see the same
+/// sessions/profiles/status_sink/control (no copies).
 pub struct ReaperDeps {
     pub sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     pub profiles: Arc<ProfileRegistry>,
@@ -45,13 +45,13 @@ pub struct ReaperDeps {
 }
 
 impl ReaperDeps {
-    /// reap 1건 처리(ADR-0019 §reap_one). 이 함수는 reaper 스레드(또는 테스트)에서만 호출된다.
+    /// Handles one reap (ADR-0019 §reap_one). This function is called only from the reaper thread (or tests).
     pub fn reap_one(&self, msg: ReapMsg) {
-        // 1. write lock 구간 = epoch 검증 + remove 만(ADR-0006). Arc clone 후 즉시 해제.
-        //    ★poison-tolerant★: 다른 스레드가 sessions lock 보유 중 panic 해 lock 이
-        //    poison 돼도 reaper 는 계속 reap 해야 한다(좀비 방지). 데이터는 HashMap 일 뿐 불변식이
-        //    깨진 게 아니므로 가드를 되찾아 진행한다(catch_unwind 와 이중 안전). 쓰기 락을 쥐는 자리는
-        //    가둠 표시 밖이라 운영 프로세스에서는 그 panic 을 훅이 먼저 끝낸다 — 훅 없는 시험 빌드의 그물이다.
+        // 1. Write-lock section = epoch check + remove only (ADR-0006). Released right after the Arc clone.
+        //    ★poison-tolerant★: even if another thread panics while holding the sessions lock and the lock
+        //    is poisoned, the reaper must keep reaping (zombie prevention). The data is just a HashMap and no invariant
+        //    is broken, so it recovers the guard and proceeds (double safety with catch_unwind). The place that holds the write lock is
+        //    outside the containment marker, so in the production process the hook ends that panic first — this is the net for test builds without the hook.
         // ADR-0292
         let removed = {
             let mut sessions = sync::write(&self.sessions);
@@ -61,33 +61,33 @@ impl ReaperDeps {
             }
         };
 
-        // 2. remove Some 승자 1명만 아래로 진행(idempotency).
+        // 2. Only the single remove Some winner proceeds below (idempotency).
         if removed.is_none() {
             return;
         }
-        // Arc<AgentSession> 폐기. ★"마지막" 참조라고 단정하지 않는다★: 이어받기 실패 관측
-        //   (`AgentManager::early_activation_verdict`)은 조기종료 창 동안 같은 Arc 를 들고 있으므로, 그
-        //   경로에선 실제 해제가 **그 관측자의 다음 폴링까지**(현 100ms 간격) 밀린다. 무해하다 —
-        //   terminal 전이는 pump 단독이고(ADR-0005) 통로가 쥔 무리 주인(`GroupOwner`)의 drop 은 마지막
-        //   참조가 사라질 때 그대로 돈다. 대개 자식 프로세스는 이미 죽어 있어 미뤄지는 것은 핸들 회수뿐이다.
-        // ★가둔 pump panic 의 끝은 다르다(ADR-0292 결정 6)★: CLI 가 산 채 여기 닿고, 이 drop(마지막 참조면)이
-        //   무리 주인을 놓아 `KILL_ON_JOB_CLOSE` 가 CLI 트리를 끝낸다 — 위 관측자가 쥐고 있으면 그만큼 늦다.
-        //   비-Windows 는 무리 주인이 무동작이라 CLI 가 남을 수 있다(미측정).
+        // Drops Arc<AgentSession>. ★Does not assume it is the "last" reference★: the resume-failure observation
+        //   (`AgentManager::early_activation_verdict`) holds the same Arc during the early-exit window, so on that
+        //   path the actual release is pushed back **until that observer's next poll** (currently every 100ms). Harmless —
+        //   the terminal transition is the pump's alone (ADR-0005), and the drop of the group owner (`GroupOwner`) held by the link runs as is when the last
+        //   reference goes away. Usually the child process is already dead, so only handle reclamation is deferred.
+        // ★The end of a contained pump panic is different (ADR-0292 decision 6)★: the CLI reaches here alive, and this drop (if it is the last reference)
+        //   lets go of the group owner so `KILL_ON_JOB_CLOSE` ends the CLI tree — if the observer above holds it, that much later.
+        //   On non-Windows the group owner is a no-op, so the CLI may remain (unmeasured).
         drop(removed);
 
-        // 2.5. ★여기가 모든 terminal 의 단일 수렴점★ — 크래시·EOF·정상 exit·유저 kill 어떤 경로든
-        //   이 지점을 지나므로 폐기 누락이 없다. epoch 검증 승자만 여기 오므로 stale terminal 이
-        //   재활성화로 새로 붙은 산 토큰을 지우지 않는다. kill_agent 의 선제 revoke 와 겹치는 건 무해.
+        // 2.5. ★This is the single convergence point of every terminal★ — crash, EOF, normal exit, user kill: whatever the path,
+        //   it passes this point, so no discard is missed. Only the epoch-check winner comes here, so a stale terminal
+        //   does not erase a live token newly attached by reactivation. Overlapping with kill_agent's pre-emptive revoke is harmless.
         // ADR-0086
         self.control.revoke(msg.id, msg.epoch);
 
-        // 3. disposition 적용은 lock 밖에서 — ProfileRegistry mutate 는 디스크 IO 다(락 순서 준수).
+        // 3. Applying the disposition happens outside the lock — ProfileRegistry mutate is disk IO (lock order kept).
         if !msg.shutting_down_at_finish {
             let disposition = decide(&msg);
             apply_disposition(&self.profiles, msg.id, msg.epoch, disposition);
         }
 
-        // 4. 목록 변경 통지(lock 밖, 외부 콜백). list_agents 와 동치인 스냅샷을 만든다.
+        // 4. List change notification (outside the lock, external callback). Builds a snapshot equivalent to list_agents.
         let agents = list_agents(&self.sessions, &self.profiles);
         self.status_sink.agent_list_updated(agents);
 
@@ -100,15 +100,15 @@ impl ReaperDeps {
     }
 }
 
-/// 종료 분류(ADR-0019 §decide). frozen snapshot(intent/shutting_down)으로만 판정.
+/// Exit classification (ADR-0019 §decide). Decides only from the frozen snapshot (intent/shutting_down).
 ///
 /// ```text
-/// shutting_down_at_finish        => KeepAsIs               // 데몬 셧다운: 부팅 복원(auto_restore 그대로)
-/// 그 외 모든 종료(유저 kill·정상 exit·크래시·EOF·signal)
-///                                => KeepDisableAutoRestore // 시체 보존 + auto_restore=false
+/// shutting_down_at_finish        => KeepAsIs               // daemon shutdown: boot restore (auto_restore as is)
+/// every other exit (user kill, normal exit, crash, EOF, signal)
+///                                => KeepDisableAutoRestore // keep the corpse + auto_restore=false
 /// ```
-/// 사용자 정책(ADR-0082 계승 "삭제하지마, 시체로라도 남겨")대로 모든 런타임 종료는 세션만 맵에서
-/// 수거하고 프로필은 시체로 보존한다(backend_session_id 유지 → 재활성화 시 --resume 로 이어받음).
+/// Per the user policy (inherited from ADR-0082: "don't delete it, keep it even as a corpse"), every runtime exit only collects the session from the map
+/// and keeps the profile as a corpse (backend_session_id kept → resumed with --resume on reactivation).
 // ADR-0083
 pub fn decide(msg: &ReapMsg) -> Disposition {
     if msg.shutting_down_at_finish {
@@ -117,21 +117,21 @@ pub fn decide(msg: &ReapMsg) -> Disposition {
     Disposition::KeepDisableAutoRestore
 }
 
-/// disposition 을 ProfileRegistry 에 적용(ADR-0019, ADR-0084 epoch-guard).
-/// **downgrade-only**: auto_restore 를 절대 true 로 올리지 않는다 — KeepDisableAutoRestore 는 false 로만
-/// 내린다(하드킬 안전망 성립 조건). KeepAsIs 는 무동작.
+/// Applies the disposition to the ProfileRegistry (ADR-0019, ADR-0084 epoch-guard).
+/// **downgrade-only**: never raises auto_restore to true — KeepDisableAutoRestore only lowers it
+/// to false (the condition for the hard-kill safety net to hold). KeepAsIs is a no-op.
 ///
-/// ★ADR-0084 epoch-guard★: `reaped_epoch`(= ReapMsg.epoch = 죽은 세션이 spawn 될 때 읽은 프로필
-///   epoch. session.epoch 과 동일 값)와 **현재 프로필 epoch 이 일치할 때만** auto_restore 를 내린다.
-///   sessions.remove 후 이 lock-free disposition 사이에 재활성화가 `epoch_for_spawn`(manager.rs spawn
-///   갈래)로 프로필에 **새 화신 표식**을 심었다면, `p.epoch != reaped_epoch` → 다운그레이드를 **건너뛴다**(그
-///   사이 새로 붙은 산 세션을 stale reap 이 강등하지 못하게). sessions.remove 의 epoch-guard(ADR-0007)
-///   와 같은 원리를 disposition 계층까지 확장한 것이다.
-/// ★lock 순서(ADR-0006)★: 비교를 **update_with 클로저 안**(프로필 락 보유 중)에서 한다 —
-///   sessions 락은 여기서 절대 잡지 않는다(disposition 은 sessions lock-free 유지). epoch 판정을
-///   프로필의 in-memory 필드로만 하므로 sessions 맵을 볼 필요가 없다.
-/// ★레지스트리 내부 입구다(`try_` 로 바꾸지 말 것)★ — 저장이 실패 · 거절돼도 메모리에 내리고 dirty 를 세운다.
-///   내리기를 버리면 메모리의 `true` 가 다음 저장에 실려 죽은 에이전트가 다음 부팅 복원에 되살아난다(크래시 루프).
+/// ★ADR-0084 epoch-guard★: lowers auto_restore **only when** `reaped_epoch` (= ReapMsg.epoch = the profile
+///   epoch the dead session read when spawned; the same value as session.epoch) **matches the current profile epoch**.
+///   If, between sessions.remove and this lock-free disposition, reactivation planted a **new incarnation marker** in the profile via `epoch_for_spawn` (the manager.rs spawn
+///   branch), then `p.epoch != reaped_epoch` → the downgrade is **skipped** (so that a stale reap cannot degrade
+///   a live session newly attached in between). It extends the same principle as the epoch-guard of sessions.remove (ADR-0007)
+///   up to the disposition layer.
+/// ★Lock order (ADR-0006)★: the comparison is made **inside the update_with closure** (while holding the profile lock) —
+///   the sessions lock is never taken here (disposition stays sessions-lock-free). The epoch decision is made
+///   only from the profile's in-memory field, so there is no need to look at the sessions map.
+/// ★This is the registry's internal entry (do not change it to `try_`)★ — even if saving fails or is refused, it lowers it in memory and sets dirty.
+///   If the lowering is dropped, the in-memory `true` is carried by the next save and the dead agent comes back at the next boot restore (crash loop).
 // ADR-0291 (E1)
 fn apply_disposition(
     profiles: &ProfileRegistry,
@@ -151,30 +151,30 @@ fn apply_disposition(
     }
 }
 
-/// sessions 맵 스냅샷 → AgentInfo. manager.list_agents 와 동일 로직을 reaper 가 lock 밖에서 만들 수
-/// 있게 분리(통지용). sessions read lock 을 먼저 놓고 조립한다 — profiles lock 과 비중첩(ADR-0006).
+/// sessions map snapshot → AgentInfo. Split out so the reaper can build, outside the lock, the same logic as manager.list_agents
+/// (for notification). Releases the sessions read lock first and then assembles — no nesting with the profiles lock (ADR-0006).
 fn list_agents(
     sessions: &Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     profiles: &Arc<ProfileRegistry>,
 ) -> Vec<AgentInfo> {
     let snapshot: Vec<Arc<AgentSession>> = {
-        // poison-tolerant(reap_one 1과 동일 이유): 통지용 스냅샷이라 가드 회수로 진행한다.
+        // poison-tolerant (same reason as reap_one step 1): it is a snapshot for notification, so it proceeds by recovering the guard.
         let guard = sync::read(sessions);
         guard.values().cloned().collect()
     };
     snapshot.iter().map(|s| session_info(s, profiles)).collect()
 }
 
-/// session → AgentInfo(manager.agent_info 와 **byte-identical** 매핑). sessions lock 미보유에서만 호출.
+/// session → AgentInfo (a **byte-identical** mapping to manager.agent_info). Called only without holding the sessions lock.
 ///
-/// ★ADR-0101 (WYSIWYA): manager.agent_info 와 반드시 같은 이름 사슬을 써야 한다★ — reap_one 은 세션
-///   종료마다 이 스냅샷을 agent_list_updated 로 브로드캐스트하는 hot path 라, 여기서 옛 규칙(profile.name)
-///   을 쓰면 아무 reap 때마다 트리 이름이 예전 full-path 라벨로 되돌아간다. 그래서 canonical name 을
-///   agent_info 와 동일하게 display_name(override) ?? basename(session.cwd) 로 파생하고, 프로필 부재
-///   fallback 도 같은 공유 코어(name::canonical_name_or_id_fallback)로 맞춘다(로직 복제 금지).
+/// ★ADR-0101 (WYSIWYA): must use the same name chain as manager.agent_info★ — reap_one is the hot path that broadcasts this snapshot
+///   as agent_list_updated on every session exit, so if the old rule (profile.name) were used here,
+///   the tree names would revert to the old full-path labels on any reap. So the canonical name is
+///   derived the same way as agent_info, display_name(override) ?? basename(session.cwd), and the profile-absent
+///   fallback also goes through the same shared core (name::canonical_name_or_id_fallback) (no duplicated logic).
 ///
-/// ★cwd 출처 = session.cwd★: AgentInfo.cwd 에 넣는 값과 동일(canonical). profile.cwd(raw)에서
-///   파생하면 트리 basename 과 어긋난다 — agent_info 와 같은 이유(manager.rs resolve_canonical_name 참조).
+/// ★cwd source = session.cwd★: the same value as what goes into AgentInfo.cwd (canonical). Deriving from profile.cwd (raw)
+///   diverges from the tree basename — the same reason as agent_info (see manager.rs resolve_canonical_name).
 // ADR-0101
 fn session_info(session: &Arc<AgentSession>, profiles: &Arc<ProfileRegistry>) -> AgentInfo {
     use std::sync::atomic::Ordering;
@@ -195,7 +195,7 @@ fn session_info(session: &Arc<AgentSession>, profiles: &Arc<ProfileRegistry>) ->
     }
 }
 
-/// AgentManager 가 생성 시 1회 호출. ReapMsg 를 **직렬** 소비하는 supervisor 스레드를 띄운다.
+/// Called once by the AgentManager on creation. Launches the supervisor thread that consumes ReapMsg **serially**.
 pub fn spawn_reaper(deps: ReaperDeps) -> (Sender<ReaperCmd>, JoinHandle<()>) {
     let (tx, rx): (Sender<ReaperCmd>, Receiver<ReaperCmd>) = std::sync::mpsc::channel();
     let handle = std::thread::Builder::new()
@@ -203,12 +203,12 @@ pub fn spawn_reaper(deps: ReaperDeps) -> (Sender<ReaperCmd>, JoinHandle<()>) {
         .spawn(move || {
             while let Ok(cmd) = rx.recv() {
                 match cmd {
-                    // ★reaper 는 가두지 않는다(ADR-0292)★ — 운영 프로세스에서 reap_one 의 panic 은
-                    //   훅이 프로세스를 끝내므로 아래 catch_unwind 는 훅 없는 시험 빌드에서만 닿는다.
-                    //   그 빌드에서 막는 것: reaper 는 전역 단일 스레드라 reap_one 한 건의 panic(예: lock
-                    //   poison→expect, decide/apply 내부 패닉)이 스레드 전체를 죽이면 **이후 모든 세션이
-                    //   맵에서 영영 안 빠져 좀비화**한다. &deps 는 unwind 후에도 재사용하므로
-                    //   AssertUnwindSafe 로 감싼다(여기서 deps 를 옮기지 않음).
+                    // ★The reaper is not contained (ADR-0292)★ — in the production process a reap_one panic
+                    //   is ended by the hook, so the catch_unwind below is reached only in test builds without the hook.
+                    //   What it prevents in that build: the reaper is a global single thread, so if one reap_one panic (e.g. lock
+                    //   poison→expect, a panic inside decide/apply) killed the whole thread, **every later session would
+                    //   never be removed from the map and become a zombie**. &deps is reused after unwinding, so
+                    //   it is wrapped in AssertUnwindSafe (deps is not moved here).
                     ReaperCmd::Reap(msg) => {
                         let deps = &deps;
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
@@ -216,7 +216,7 @@ pub fn spawn_reaper(deps: ReaperDeps) -> (Sender<ReaperCmd>, JoinHandle<()>) {
                         ));
                         if let Err(e) = result {
                             let detail = payload_text(&*e);
-                            tracing::error!(panic = %detail, "reap_one panicked — reaper 루프 생존, 다음 메시지 계속");
+                            tracing::error!(panic = %detail, "reap_one panicked — reaper loop survives, continuing with the next message");
                         }
                     }
                     ReaperCmd::Stop => break,
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn decide_clean_exit_keeps_corpse() {
-        // code-0 갭(ADR-0082 §열린항목 ②)을 닫는 케이스.
+        // The case that closes the code-0 gap (ADR-0082 §Open items ②).
         let m = msg(
             TerminationIntent::None,
             false,
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn decide_crash_keeps_and_disables() {
-        // exit 1 = 크래시.
+        // exit 1 = crash.
         let m = msg(
             TerminationIntent::None,
             false,
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn decide_shutting_down_keeps_as_is() {
-        // 픽스처의 UserKill·exit1 은 "그 두 축이 무관하다"를 보이려고 넣은 것.
+        // The fixture's UserKill and exit1 are there to show that "those two axes are unrelated".
         let m = msg(
             TerminationIntent::UserKill,
             true,

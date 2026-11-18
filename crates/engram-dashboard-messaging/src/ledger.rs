@@ -27,12 +27,12 @@ use crate::PeerId;
 /// History ring buffer capacity — when exceeded, the oldest record is evicted first (spec §5 "history ring buffer").
 ///
 /// ★4096 (user-ratified 2026-07-26 — raised from 1024)★: the unit of this ring is not a message but a **delivery record**.
-///   One broadcast writes **N** `(msg_id, 멤버)` records (spec §4 "1 msg_id : N delivery records"), so broadcasting 100 times
+///   One broadcast writes **N** `(msg_id, member)` records (spec §4 "1 msg_id : N delivery records"), so broadcasting 100 times
 ///   to a 10-member group filled 1024 by itself — rotation was too fast, so ① the queryable history got sharply shorter and ② expiry/recall
 ///   transitions fell to `NotFound` and that fact never reached the ledger (the only evidence left then is the debug log
 ///   of `sweep`/`flush_for` — C4 review fix J). Raising it 4x absorbs group-sized fan-out.
 /// ★Memory profile (honest upper bound)★: a record **keeps the full body as is** (no summary, no truncation). So the worst case is
-///   `본문 최대 크기 × 용량` = 64KiB(`control::ingress::MAX_BODY_BYTES`) × 4096 ≈ **256MiB** — human-conversation-sized bodies
+///   `max body size × capacity` = 64KiB(`control::ingress::MAX_BODY_BYTES`) × 4096 ≈ **256MiB** — human-conversation-sized bodies
 ///   (hundreds of bytes to a few KiB) come to only ~1–2MB, but a pathological stream of consecutive max-size
 ///   messages is far larger. This value is for the in-memory stage only and is a tuning target that can be changed without breaking anything.
 /// ★Follow-ups (identified only — not implemented now, user mention 2026-07-26)★: ⓐ expose this value as a runtime setting/command
@@ -156,7 +156,7 @@ pub struct MessageRecord {
     ///   group rows are recorded in **two phases** (parked/skipped under the plan lock, then delivered in the per-member section).
     ///   Rows of other messages can slip in between, so the rows of one msg_id are **not contiguous** in the ring — even when the front rows
     ///   are evicted and only the back rows remain, the ring front may be someone else's row. So the position-based proof "if it is not the front, it is complete"
-    ///   gives a **false negative**. Pinning the expected count at send time turns it into the **deterministic** comparison `남은 행 수 < 기대`
+    ///   gives a **false negative**. Pinning the expected count at send time turns it into the **deterministic** comparison `remaining rows < expected`
     ///   (it does not depend on position or order).
     /// ★Why u16★: a broadcast's member count is roster-sized, so 65535 is enough, and at 2 bytes per record it adds only
     ///   8KiB to a 4096-entry ring (negligible next to the cost of keeping bodies).
@@ -467,10 +467,10 @@ pub struct DueTimeout {
     pub sender_id: PeerId,
     /// Recipient name (**at send time** — for the notice body).
     pub recipient: String,
-    /// The recipient axis of the contract key — the re-check 「그 사이 닫혔나」 (did it close in the meantime) just before notifying finds the contract by this key.
+    /// The recipient axis of the contract key — the re-check 「did it close in the meantime」 just before notifying finds the contract by this key.
     pub recipient_id: PeerId,
     /// ★The **original spelling** of the exceeded deadline (C3 review fix 6 — for the notice text)★: the spec §1 notice template exposes
-    ///   `기한({reply_by})` as is, so the spelling the sender wrote (`"60m"`) is carried **as is**.
+    ///   `deadline ({reply_by})` as is, so the spelling the sender wrote (`"60m"`) is carried **as is**.
     pub reply_by_raw: String,
 }
 
@@ -489,7 +489,7 @@ pub struct OpenRequestView {
     /// The request sender's PeerId — the axis a pending lookup uses to tell "requests I made" apart **by id, not by name** (review B1).
     pub sender_id: PeerId,
     pub recipient: String,
-    /// The axis a pending lookup uses to tell apart 「내가 답할 의무」 (the obligation I owe an answer) (ADR-0309 — not told apart by name).
+    /// The axis a pending lookup uses to tell apart 「the obligation I owe an answer」 (ADR-0309 — not told apart by name).
     pub recipient_id: PeerId,
     pub reply_by_raw: Option<String>,
     pub created_at: Instant,
@@ -931,7 +931,7 @@ impl Ledger {
     /// ★The contract is picked by the replier (ADR-0111 decision 5)★: under one `request_id` there can be
     ///   **several** contracts (multi-recipient request), so `in_reply_to` alone cannot
     ///   identify which contract to close. Spec §3 says "only **that replier's contract** closes (other recipients' contracts stay open — no
-    ///   reply-all)", so the matching key is `(request_id, 회신자 id)`.
+    ///   reply-all)", so the matching key is `(request_id, replier id)`.
     /// ★"Not my contract" = `NoMatch` = **delivery unchanged** (spec §3 item 7-②)★: an unknown id, an already closed contract, or
     ///   a contract I do not have — in every case **only the contract side is a no-op** and the reply message itself is delivered normally. Having the reply
     ///   vanish entirely would be worse.
@@ -943,7 +943,7 @@ impl Ledger {
         replier_id: PeerId,
         now: Instant,
     ) -> ReplyOutcome {
-        // Closes the tracking entry (the source of truth). The history row is picked by the same key as the contract, `(msg_id, 수신자 id)` (ADR-0309).
+        // Closes the tracking entry (the source of truth). The history row is picked by the same key as the contract, `(msg_id, recipient id)` (ADR-0309).
         let matched = self.match_contract_for_replier(in_reply_to, replier_id);
         let recipient_id = match matched.map(|i| &mut self.requests[i]) {
             Some(r) if r.closed => return ReplyOutcome::AlreadyClosed,
@@ -1179,12 +1179,12 @@ impl Ledger {
         self.history.iter().filter(|r| r.msg_id == msg_id).collect()
     }
 
-    /// ★`records_for` + **incompleteness signal** (D review B2 · decision replaced by round-2 review F3)★ — `(행 목록, truncated)`.
+    /// ★`records_for` + **incompleteness signal** (D review B2 · decision replaced by round-2 review F3)★ — `(rows, truncated)`.
     ///
     /// ★Why it is needed★: when the ring (4096) fills up, the front rows silently disappear. But the `messages { id }` response shows the remaining
     ///   rows as if they were **all of that message** — if 6 rows of a 10-member broadcast are pushed out, the sender misreads it as "it went to only 4
     ///   people" (in fact it went to all 10 and only the records vanished).
-    /// ★Decision = `남은 행 수 < 기대 행 수` (deterministic)★ — `MessageRecord.expected_rows`.
+    /// ★Decision = `remaining rows < expected rows` (deterministic)★ — `MessageRecord.expected_rows`.
     /// ★The case where rows vanished **entirely** is not visible here★: that goes out as an empty list and the upper layer answers with the contract view or
     ///   `MESSAGE_NOT_FOUND` (whose hint announces the history rotation).
     // review B2 / round-2 review F3
@@ -1422,7 +1422,7 @@ mod tests {
         assert_eq!(
             l.transition(id, tid("bob"), DeliveryStatus::Delivered, now),
             Ok(()),
-            "전제: 주입까지 끝난 계약"
+            "premise: a contract that has finished up to inject"
         );
     }
 
@@ -1464,10 +1464,10 @@ mod tests {
                 now,
             );
         }
-        assert_eq!(l.history_len(), 3, "용량 상한 유지");
-        assert!(l.records_for("m0").is_empty(), "가장 오래된 것부터 evict");
+        assert_eq!(l.history_len(), 3, "capacity cap kept");
+        assert!(l.records_for("m0").is_empty(), "evicted oldest first");
         assert!(l.records_for("m1").is_empty());
-        assert_eq!(l.records_for("m4").len(), 1, "최근 것은 잔존");
+        assert_eq!(l.records_for("m4").len(), 1, "the recent ones remain");
     }
 
     #[test]
@@ -1491,8 +1491,8 @@ mod tests {
         );
         let rec = l.records_for("m1")[0];
         assert_eq!(rec.status, DeliveryStatus::Delivered);
-        assert_eq!(rec.transitioned_at, later, "전이 시각 기록");
-        assert_eq!(rec.created_at, now, "발신 시각은 불변");
+        assert_eq!(rec.transitioned_at, later, "transition time recorded");
+        assert_eq!(rec.created_at, now, "send time unchanged");
     }
 
     #[test]
@@ -1535,13 +1535,13 @@ mod tests {
             Ok(())
         );
         let recs = l.records_for("g1");
-        assert_eq!(recs.len(), 3, "한 msg_id 에 배달기록 3개");
+        assert_eq!(recs.len(), 3, "3 delivery records for one msg_id");
         let a = recs.iter().find(|r| r.to == "a").unwrap();
         let b = recs.iter().find(|r| r.to == "b").unwrap();
         let c = recs.iter().find(|r| r.to == "c").unwrap();
         assert_eq!(a.status, DeliveryStatus::Delivered);
-        assert_eq!(b.status, DeliveryStatus::Pending, "b 는 안 건드려짐");
-        assert_eq!(c.status, DeliveryStatus::Skipped, "죽은 멤버 skipped");
+        assert_eq!(b.status, DeliveryStatus::Pending, "b is untouched");
+        assert_eq!(c.status, DeliveryStatus::Skipped, "dead member skipped");
     }
 
     #[test]
@@ -1571,7 +1571,7 @@ mod tests {
         assert_eq!(
             l.transition("e1", tid("b"), DeliveryStatus::Expired, now),
             Ok(()),
-            "Pending → Expired 는 합법"
+            "Pending → Expired is legal"
         );
         assert_eq!(
             l.transition(
@@ -1584,12 +1584,12 @@ mod tests {
                 from: DeliveryStatus::Expired,
                 to: DeliveryStatus::Delivered
             }),
-            "Expired → Delivered 는 불법"
+            "Expired → Delivered is illegal"
         );
         assert_eq!(
             l.records_for("e1")[0].status,
             DeliveryStatus::Expired,
-            "불법 전이는 상태를 안 바꿈"
+            "an illegal transition does not change the state"
         );
 
         l.record(
@@ -1608,7 +1608,7 @@ mod tests {
                 from: DeliveryStatus::Pending,
                 to: DeliveryStatus::Replied
             }),
-            "Pending → Replied 는 불법(Delivered 경유 필요)"
+            "Pending → Replied is illegal (must go through Delivered)"
         );
 
         l.record(
@@ -1635,7 +1635,7 @@ mod tests {
                 from: DeliveryStatus::Replied,
                 to: DeliveryStatus::Pending
             }),
-            "Replied → Pending 은 불법(terminal 되돌림)"
+            "Replied → Pending is illegal (reverting a terminal)"
         );
 
         l.record(
@@ -1654,7 +1654,7 @@ mod tests {
                 from: DeliveryStatus::Skipped,
                 to: DeliveryStatus::Pending
             }),
-            "Skipped → Pending 은 불법"
+            "Skipped → Pending is illegal"
         );
     }
 
@@ -1740,7 +1740,7 @@ mod tests {
         );
         assert_eq!(l.open_request_count(), 1);
         assert_eq!(reply(&mut l, "req-1", now), ReplyOutcome::Closed);
-        assert_eq!(l.open_request_count(), 0, "회신으로 닫힘");
+        assert_eq!(l.open_request_count(), 0, "closed by the reply");
     }
 
     #[test]
@@ -1749,7 +1749,11 @@ mod tests {
         let now = t0();
         l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now);
         assert_eq!(reply(&mut l, "req-999", now), ReplyOutcome::NoMatch);
-        assert_eq!(l.open_request_count(), 1, "틀린 id 는 request 를 안 닫아야");
+        assert_eq!(
+            l.open_request_count(),
+            1,
+            "a wrong id must not close the request"
+        );
     }
 
     #[test]
@@ -1773,17 +1777,17 @@ mod tests {
         assert_eq!(
             l.open_request("req-1", "alice", sid(), "carol", tid("carol"), None, now),
             OpenOutcome::Opened,
-            "같은 메시지 id 의 **다른 수신자** = 독립 계약(다중 수신자 request)"
+            "**a different recipient** of the same message id = an independent contract (multi-recipient request)"
         );
         assert_eq!(
             l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now),
             OpenOutcome::DuplicateId,
-            "같은 계약 키(id, 수신자)의 재오픈은 거부"
+            "reopening the same contract key (id, recipient) is refused"
         );
         assert_eq!(
             l.open_request_count(),
             2,
-            "열린 계약 = (req-1,bob)·(req-1,carol) 둘뿐 — 중복 키는 추적에 추가 안 됨"
+            "open contracts = only (req-1,bob)·(req-1,carol) — a duplicate key is not added to tracking"
         );
     }
 
@@ -1796,13 +1800,13 @@ mod tests {
         assert_eq!(
             l.open_request("req-1", "alice", sid(), "bob", tid("bob"), None, now),
             OpenOutcome::DuplicateId,
-            "닫힌 id 재오픈은 거부(유일성 전제)"
+            "reopening a closed id is refused (uniqueness premise)"
         );
-        assert_eq!(l.open_request_count(), 0, "재오픈 안 됐으니 오픈 0");
+        assert_eq!(l.open_request_count(), 0, "not reopened, so 0 open");
         assert_eq!(
             reply(&mut l, "req-1", now),
             ReplyOutcome::AlreadyClosed,
-            "재오픈 없이 회신하면 AlreadyClosed(shadowing 없음)"
+            "replying without reopening gives AlreadyClosed (no shadowing)"
         );
     }
 
@@ -1816,7 +1820,7 @@ mod tests {
             tid("alice"),
             "bob",
             Some(tid("bob")),
-            "질문",
+            "question",
             DeliveryStatus::Pending,
             now,
         );
@@ -1830,10 +1834,10 @@ mod tests {
         let reply_at = now + Duration::from_secs(30);
         assert_eq!(reply(&mut l, "req-1", reply_at), ReplyOutcome::Closed);
         let rec = l.records_for("req-1")[0];
-        assert_eq!(rec.status, DeliveryStatus::Replied, "이력이 Replied 로");
+        assert_eq!(rec.status, DeliveryStatus::Replied, "history to Replied");
         assert_eq!(
             rec.transitioned_at, reply_at,
-            "전이 시각 = 회신 시각(spec §5)"
+            "transition time = reply time (spec §5)"
         );
     }
 
@@ -1857,17 +1861,17 @@ mod tests {
             ReplyOutcome::ClosedHistoryAnomaly {
                 from: DeliveryStatus::Pending
             },
-            "불법 이력 전이는 anomaly 로 노출(은폐 금지)"
+            "an illegal history transition is exposed as an anomaly (no hiding)"
         );
         assert_eq!(
             l.open_request_count(),
             0,
-            "그래도 계약은 닫힘(재오픈이 더 나쁨)"
+            "the contract still closes (reopening would be worse)"
         );
         assert_eq!(
             l.records_for("req-1")[0].status,
             DeliveryStatus::Pending,
-            "이력은 불법 전이라 안 건드려짐(그대로 Pending)"
+            "the history is untouched because it is an illegal transition (stays Pending)"
         );
     }
 
@@ -1890,9 +1894,9 @@ mod tests {
         assert_eq!(
             reply(&mut l, "req-1", now),
             ReplyOutcome::Closed,
-            "가리킬 이력 없음(NotFound)은 anomaly 아님 → Closed"
+            "no history to point to (NotFound) is not an anomaly → Closed"
         );
-        assert_eq!(l.open_request_count(), 0, "계약 닫힘");
+        assert_eq!(l.open_request_count(), 0, "contract closed");
     }
 
     // ── reply_by timeout ─────────────────────────────────────────────────────────
@@ -1904,12 +1908,15 @@ mod tests {
         open_committed(&mut l, "req-1", rb(reply_by), now);
         assert!(
             l.due_timeouts(now + reply_by).is_empty(),
-            "정확히 기한은 due 아님"
+            "exactly at the deadline is not due"
         );
         let due = l.due_timeouts(now + reply_by + Duration::from_nanos(1));
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].request_id, "req-1");
-        assert_eq!(due[0].sender, "alice", "notice 는 발신자에게(spec §3)");
+        assert_eq!(
+            due[0].sender, "alice",
+            "the notice goes to the sender (spec §3)"
+        );
         assert_eq!(due[0].recipient, "bob");
     }
 
@@ -1932,10 +1939,13 @@ mod tests {
         commit(&mut l, Some("req-1"), None);
         let due = l.due_timeouts(now + reply_by + Duration::from_secs(1));
         assert_eq!(due.len(), 1);
-        assert_eq!(due[0].sender_id, sender, "발신자 id 동봉(개명 대비 힌트)");
+        assert_eq!(
+            due[0].sender_id, sender,
+            "sender id attached (hint in case of rename)"
+        );
         assert_eq!(
             due[0].reply_by_raw, "60m",
-            "표기 원본 그대로(1h 로 정규화 금지)"
+            "original notation as is (no normalizing to 1h)"
         );
     }
 
@@ -1946,10 +1956,14 @@ mod tests {
         let reply_by = Duration::from_secs(600);
         open_delivered_request(&mut l, "req-1", rb(reply_by), now);
         let over = now + reply_by + Duration::from_secs(1);
-        assert_eq!(l.due_timeouts(over).len(), 1, "첫 산출은 보고");
+        assert_eq!(
+            l.due_timeouts(over).len(),
+            1,
+            "the first computation reports"
+        );
         assert!(
             l.due_timeouts(over).is_empty(),
-            "두 번째 호출은 이미 통지된 request 를 다시 안 냄(이중 통지 방지)"
+            "the second call does not emit an already notified request again (prevents double notice)"
         );
     }
 
@@ -1971,7 +1985,7 @@ mod tests {
         let over = now + reply_by + Duration::from_secs(60);
         assert!(
             l.due_timeouts(over).is_empty(),
-            "회신된 request 는 타임아웃 대상 아님"
+            "a replied request is not a timeout target"
         );
     }
 
@@ -1994,7 +2008,7 @@ mod tests {
                 now
             ),
             OpenOutcome::DuplicateId,
-            "닫힌 항목은 추적에 남아 재오픈을 막는다"
+            "a closed item stays in tracking and blocks reopening"
         );
 
         l.open_request(
@@ -2009,12 +2023,12 @@ mod tests {
         assert_eq!(
             drop_req(&mut l, "dropped-1"),
             DropOutcome::Removed { notified: false },
-            "제거 성공 — 통지 전이었으므로 notified=false"
+            "removal succeeded — it was before the notice, so notified=false"
         );
         assert_eq!(
             drop_req(&mut l, "dropped-1"),
             DropOutcome::NotFound,
-            "멱등 — 두 번째는 NotFound"
+            "idempotent — the second is NotFound"
         );
         assert_eq!(
             l.open_request(
@@ -2027,9 +2041,13 @@ mod tests {
                 now
             ),
             OpenOutcome::Opened,
-            "제거된 id 는 다시 열 수 있다(계약 미성립 = 흔적 없음)"
+            "a removed id can be opened again (contract not established = no trace)"
         );
-        assert_eq!(l.open_request_count(), 1, "열린 계약은 방금 것 하나뿐");
+        assert_eq!(
+            l.open_request_count(),
+            1,
+            "the only open contract is the one just made"
+        );
     }
 
     #[test]
@@ -2040,7 +2058,7 @@ mod tests {
         let far = now + Duration::from_secs(100_000);
         assert!(
             l.due_timeouts(far).is_empty(),
-            "기한 없는 request 는 타임아웃 없음"
+            "a request without a deadline has no timeout"
         );
     }
 
@@ -2094,14 +2112,14 @@ mod tests {
                 now,
             );
         }
-        assert_eq!(l.history_len(), cap, "이력은 용량 유계");
+        assert_eq!(l.history_len(), cap, "the history is capacity-bounded");
         assert!(
             l.records_for("done").is_empty(),
-            "전제: done 이력은 evict 됐다"
+            "premise: the done history was evicted"
         );
         assert!(
             !l.msg_id_in_use("done"),
-            "끝난 계약의 추적은 이력 evict 와 함께 드롭(유계 유지)"
+            "tracking of a finished contract is dropped along with the history evict (stays bounded)"
         );
     }
 
@@ -2134,14 +2152,17 @@ mod tests {
                 now,
             );
         }
-        assert!(l.records_for("req-1").is_empty(), "전제: 이력은 evict 됐다");
-        assert_eq!(
-            l.open_request_count(),
-            1,
-            "살아 있는 계약은 evict 를 견딘다"
+        assert!(
+            l.records_for("req-1").is_empty(),
+            "premise: the history was evicted"
         );
+        assert_eq!(l.open_request_count(), 1, "a live contract survives evict");
         let due = l.due_timeouts(now + reply_by + Duration::from_secs(1));
-        assert_eq!(due.len(), 1, "evict 됐어도 타임아웃 통지는 살아 있다");
+        assert_eq!(
+            due.len(),
+            1,
+            "even after evict, the timeout notice is alive"
+        );
         assert_eq!(due[0].request_id, "req-1");
 
         // Reproduced with another ledger — separated so it is not mixed with the item already notified above.
@@ -2172,7 +2193,7 @@ mod tests {
         assert_eq!(
             reply(&mut l2, "req-2", now),
             ReplyOutcome::Closed,
-            "이력이 evict 됐어도 회신은 계약을 닫는다(가리킬 이력만 없음)"
+            "even if the history was evicted, the reply closes the contract (only the history to point to is missing)"
         );
         assert_eq!(l2.open_request_count(), 0);
     }
@@ -2208,11 +2229,14 @@ mod tests {
                 now,
             );
         }
-        assert!(l.records_for(id).is_empty(), "전제: 그 계약의 이력은 evict");
+        assert!(
+            l.records_for(id).is_empty(),
+            "premise: that contract's history is evicted"
+        );
         assert_eq!(
             l.tracking_len(),
             1,
-            "전제: 살아 있는 계약은 evict 를 견딘다"
+            "premise: a live contract survives evict"
         );
         l
     }
@@ -2225,9 +2249,9 @@ mod tests {
         assert_eq!(
             l.tracking_len(),
             0,
-            "닫히는 순간 고아 추적 항목을 제거(좀비 없음)"
+            "removes the orphan tracking entry the moment it closes (no zombies)"
         );
-        assert!(!l.msg_id_in_use("req-1"), "추적에도 이력에도 없다");
+        assert!(!l.msg_id_in_use("req-1"), "in neither tracking nor history");
     }
 
     #[test]
@@ -2236,18 +2260,29 @@ mod tests {
         let reply_by = Duration::from_secs(600);
         let mut l = ledger_with_evicted_live_contract(2, "req-1", rb(reply_by), now);
         let due = l.due_timeouts(now + reply_by + Duration::from_secs(1));
-        assert_eq!(due.len(), 1, "evict 됐어도 통지는 나간다(fix 3 유지)");
+        assert_eq!(
+            due.len(),
+            1,
+            "the notice goes out even after evict (fix 3 kept)"
+        );
         assert_eq!(due[0].request_id, "req-1");
         assert_eq!(
             l.tracking_len(),
             1,
-            "통지는 회신이 아니다 — 미회신 계약은 추적에 남는다(B3)"
+            "a notice is not a reply — an unreplied contract stays in tracking (B3)"
         );
         let open = l.open_requests();
-        assert_eq!(open.len(), 1, "미결 목록에 남아야: {open:?}");
-        assert!(open[0].notified, "통지 사실은 플래그로만 구분");
+        assert_eq!(open.len(), 1, "must stay in the outstanding list: {open:?}");
+        assert!(
+            open[0].notified,
+            "the notice fact is told apart only by a flag"
+        );
         assert_eq!(reply(&mut l, "req-1", now), ReplyOutcome::Closed);
-        assert_eq!(l.tracking_len(), 0, "닫히는 순간 고아 항목 제거");
+        assert_eq!(
+            l.tracking_len(),
+            0,
+            "removes the orphan item the moment it closes"
+        );
     }
 
     #[test]
@@ -2281,12 +2316,12 @@ mod tests {
                     now,
                 );
             }
-            assert!(l.records_for(&id).is_empty(), "전제: 이력 evict");
+            assert!(l.records_for(&id).is_empty(), "premise: history evicted");
             assert_eq!(reply(&mut l, &id, now), ReplyOutcome::Closed);
             assert_eq!(
                 l.tracking_len(),
                 0,
-                "라운드마다 추적이 0 으로 수렴(좀비 누적 없음)"
+                "tracking converges to 0 each round (no zombie accumulation)"
             );
         }
     }
@@ -2317,38 +2352,42 @@ mod tests {
         assert_eq!(
             l.due_timeouts(over).len(),
             MAX_OPEN_REQUESTS,
-            "전원 기한 초과 통지(= 발신자는 이미 결말을 통보받았다 → 은퇴 가능)"
+            "all got deadline-exceeded notices (= the sender was already told the outcome → retirable)"
         );
         assert_eq!(
             l.tracking_len(),
             MAX_OPEN_REQUESTS,
-            "통지돼도 미회신이면 남는다(B3)"
+            "stays if unreplied even after being notified (B3)"
         );
 
         let outcome = l.open_request("over", "alice", sid(), "bob", tid("bob"), None, over);
         match outcome {
             OpenOutcome::OpenedAfterMarking(r) => {
-                assert_eq!(r.request_id, "r0", "가장 오래된 것부터 은퇴 표시");
+                assert_eq!(r.request_id, "r0", "marked for retirement oldest first");
                 assert_eq!(r.sender, "alice");
                 assert_eq!(r.recipient, "bob");
             }
-            other => panic!("표시 후 수용이어야: {other:?}"),
+            other => panic!("must be accepted after marking: {other:?}"),
         }
         assert!(
             l.open_requests().iter().any(|r| r.request_id == "r0"),
-            "커밋 전에는 희생자가 여전히 열린 계약이다"
+            "before commit, the victim is still an open contract"
         );
         assert_eq!(
             l.tracking_len(),
             MAX_OPEN_REQUESTS + 1,
-            "표시 구간엔 +1(잠정분)"
+            "+1 during the marked section (the provisional one)"
         );
         commit(&mut l, Some("over"), Some("r0"));
         assert!(
             !l.open_requests().iter().any(|r| r.request_id == "r0"),
-            "커밋에서 비로소 은퇴한다"
+            "it retires only at commit"
         );
-        assert_eq!(l.tracking_len(), MAX_OPEN_REQUESTS, "유계 유지(512 불변)");
+        assert_eq!(
+            l.tracking_len(),
+            MAX_OPEN_REQUESTS,
+            "stays bounded (512 unchanged)"
+        );
         assert!(l.open_requests().iter().any(|r| r.request_id == "over"));
     }
 
@@ -2365,7 +2404,7 @@ mod tests {
         let outcome = l.open_request("over", "alice", sid(), "bob", tid("bob"), None, now);
         assert!(
             matches!(outcome, OpenOutcome::OpenedAfterMarking(ref r) if r.request_id == "r0"),
-            "기한 없는 계약은 통지 빚이 없어 은퇴 가능: {outcome:?}"
+            "a contract without a deadline owes no notice, so it is retirable: {outcome:?}"
         );
         commit(&mut l, Some("over"), Some("r0"));
         assert_eq!(l.tracking_len(), MAX_OPEN_REQUESTS);
@@ -2382,17 +2421,16 @@ mod tests {
                 OpenOutcome::Opened
             );
         }
-        assert!(l.due_timeouts(now).is_empty(), "전제: 기한 전");
+        assert!(
+            l.due_timeouts(now).is_empty(),
+            "premise: before the deadline"
+        );
         assert_eq!(
             l.open_request("over", "alice", sid(), "bob", tid("bob"), rb(reply_by), now),
             OpenOutcome::Full,
-            "은퇴 가능한 계약이 없으면 반려(통지 약속을 어기지 않는다)"
+            "bounced if there is no retirable contract (does not break the notice promise)"
         );
-        assert_eq!(
-            l.tracking_len(),
-            MAX_OPEN_REQUESTS,
-            "아무도 지워지지 않았다"
-        );
+        assert_eq!(l.tracking_len(), MAX_OPEN_REQUESTS, "nobody was erased");
         let over = now + reply_by + Duration::from_secs(1);
         assert_eq!(l.due_timeouts(over).len(), MAX_OPEN_REQUESTS);
         assert!(matches!(
@@ -2434,12 +2472,12 @@ mod tests {
         assert_eq!(open[0].sender_id, sender);
         assert_eq!(
             open[0].recipient_id, recipient,
-            "해석된 수신자는 id 를 남긴다(동명 다수 오귀속 차단의 재료)"
+            "a resolved recipient leaves its id (material for blocking misattribution among many same-named ones)"
         );
         assert_eq!(
             open[1].recipient_id,
             tid("ghost"),
-            "잠듦 파킹도 열 때부터 그 프로필 id 를 든다(ADR-0309)"
+            "asleep parking also holds that profile id from opening (ADR-0309)"
         );
     }
 
@@ -2459,7 +2497,7 @@ mod tests {
         );
         let (rows, truncated) = l.records_for_detailed("m1");
         assert_eq!(rows.len(), 1);
-        assert!(!truncated, "기대 1행이 그대로 있으면 완전");
+        assert!(!truncated, "complete if the expected 1 row is still there");
 
         for to in ["x", "y", "z"] {
             l.record_with_expected(
@@ -2476,7 +2514,7 @@ mod tests {
         }
         let (rows, truncated) = l.records_for_detailed("g1");
         assert_eq!(rows.len(), 3);
-        assert!(!truncated, "3/3 이면 완전");
+        assert!(!truncated, "complete if 3/3");
 
         let mut l2 = Ledger::with_capacity(4);
         l2.record_with_expected(
@@ -2543,13 +2581,16 @@ mod tests {
             now,
         );
         let (rows, truncated) = l2.records_for_detailed("g2");
-        assert_eq!(rows.len(), 1, "g2 는 3행 중 1행만 남았다: {rows:?}");
+        assert_eq!(rows.len(), 1, "g2 has only 1 of 3 rows left: {rows:?}");
         assert_ne!(
             l2.all_records()[0].msg_id,
             "g2",
-            "전제: 링 front 는 남의 행 — 옛 위치 증명이 '완전' 이라 답하던 배치"
+            "premise: the ring front is someone else's row — the layout where the old position proof answered 'complete'"
         );
-        assert!(truncated, "남은 행(1) < 기대(3) 이면 잘림(F3)");
+        assert!(
+            truncated,
+            "truncated if remaining rows (1) < expected (3) (F3)"
+        );
     }
 
     #[test]
@@ -2568,14 +2609,18 @@ mod tests {
         assert_eq!(
             l.open_request("over", "alice", sid(), "bob", tid("bob"), rb(reply_by), now),
             OpenOutcome::Full,
-            "cap 도달 + 은퇴 가능분 없음 → Full"
+            "cap reached + nothing retirable → Full"
         );
-        assert_eq!(l.open_request_count(), MAX_OPEN_REQUESTS, "기존 계약 불변");
+        assert_eq!(
+            l.open_request_count(),
+            MAX_OPEN_REQUESTS,
+            "existing contracts unchanged"
+        );
         assert_eq!(reply(&mut l, "r0", now), ReplyOutcome::Closed);
         assert_eq!(
             l.open_request("over", "alice", sid(), "bob", tid("bob"), rb(reply_by), now),
             OpenOutcome::Opened,
-            "닫힌 계약은 cap 계수에서 빠진다"
+            "a closed contract leaves the cap count"
         );
     }
 
@@ -2599,7 +2644,7 @@ mod tests {
         let OpenOutcome::OpenedAfterMarking(victim) =
             l.open_request("new", "alice", sid(), "bob", tid("bob"), None, over)
         else {
-            panic!("전제: 표시 후 수용");
+            panic!("premise: accepted after marking");
         };
         assert_eq!(victim.request_id, "r0");
 
@@ -2609,14 +2654,14 @@ mod tests {
             .into_iter()
             .map(|r| r.request_id)
             .collect();
-        assert_eq!(after, before, "목록·순서가 원상 복구");
+        assert_eq!(after, before, "the list·order restored to the original");
         let r0 = l
             .open_requests()
             .into_iter()
             .find(|r| r.request_id == "r0")
-            .expect("그대로 있다");
-        assert!(r0.notified, "통지 플래그 불변(건드린 적이 없다)");
-        assert_eq!(r0.created_at, now, "나이 불변");
+            .expect("stays as is");
+        assert!(r0.notified, "notice flag unchanged (never touched)");
+        assert_eq!(r0.created_at, now, "age unchanged");
         assert!(matches!(
             l.open_request("new2", "alice", sid(), "bob", tid("bob"), None, over),
             OpenOutcome::OpenedAfterMarking(ref v) if v.request_id == "r0"
@@ -2634,7 +2679,7 @@ mod tests {
             for i in 0..cap {
                 open_committed(&mut l, &format!("c{i}"), None, now);
             }
-            assert_eq!(l.occupied_slots(), cap, "전제: 상한");
+            assert_eq!(l.occupied_slots(), cap, "premise: cap");
             l
         };
 
@@ -2643,50 +2688,58 @@ mod tests {
         let OpenOutcome::OpenedAfterMarking(v1) =
             l.open_request("PA", "alice", sid(), "bob", tid("bob"), None, now)
         else {
-            panic!("전제: 표시 후 수용");
+            panic!("premise: accepted after marking");
         };
         assert_eq!(v1.request_id, "c0");
-        assert_eq!(l.occupied_slots(), cap, "표시+삽입 후에도 정확히 상한");
+        assert_eq!(
+            l.occupied_slots(),
+            cap,
+            "exactly the cap even after mark+insert"
+        );
         assert_eq!(reply(&mut l, "PA", now), ReplyOutcome::Closed);
         assert_eq!(
             l.occupied_slots(),
             cap,
-            "닫힌 잠정 계약도 정산 전까지 자리를 지킨다(round-6 I1)"
+            "a closed provisional contract also keeps its spot until settlement (round-6 I1)"
         );
         let b = l.open_request("PB", "carol", sid(), "dave", tid("dave"), None, now);
         assert!(
             matches!(b, OpenOutcome::OpenedAfterMarking(ref v) if v.request_id == "c1"),
-            "B 도 자기 몫의 희생자를 표시해야: {b:?}"
+            "B must also mark its own victim: {b:?}"
         );
         assert_eq!(l.occupied_slots(), cap);
         rollback(&mut l, Some("PA"), Some("c0"));
         assert_eq!(
             l.occupied_slots(),
             cap,
-            "롤백 뒤에도 정확히 상한 — 513 고착 없음(round-6 I1)"
+            "exactly the cap even after rollback — no getting stuck at 513 (round-6 I1)"
         );
         commit(&mut l, Some("PB"), Some("c1"));
-        assert_eq!(l.occupied_slots(), cap, "B 커밋 후에도 상한 유지");
+        assert_eq!(
+            l.occupied_slots(),
+            cap,
+            "the cap holds even after B commits"
+        );
 
         // ── commit branch ────────────────────────────────────────────────────────────
         let mut l = build();
         let OpenOutcome::OpenedAfterMarking(v1) =
             l.open_request("PA", "alice", sid(), "bob", tid("bob"), None, now)
         else {
-            panic!("전제");
+            panic!("premise");
         };
         assert_eq!(v1.request_id, "c0");
         assert_eq!(reply(&mut l, "PA", now), ReplyOutcome::Closed);
-        assert_eq!(l.occupied_slots(), cap, "정산 전엔 자리 유지");
+        assert_eq!(l.occupied_slots(), cap, "keeps its spot before settlement");
         commit(&mut l, Some("PA"), Some("c0"));
         assert_eq!(
             l.occupied_slots(),
             cap - 1,
-            "회신으로 끝난 계약은 커밋 시점에 자리를 놓는다(초과 아님 — 여유가 생긴 것)"
+            "a contract finished by reply gives up its spot at commit time (not an excess — room was freed)"
         );
         assert!(
             l.occupied_slots() <= MAX_OPEN_REQUESTS,
-            "어느 갈래도 상한 초과 없음"
+            "no branch exceeds the cap"
         );
     }
 
@@ -2699,18 +2752,18 @@ mod tests {
         l.open_request("p", "alice", sid(), "bob", tid("bob"), rb(reply_by), now);
         assert!(
             l.due_timeouts(over).is_empty(),
-            "잠정 계약은 sweep 대상이 아니다(round-6 I2)"
+            "a provisional contract is not a sweep target (round-6 I2)"
         );
         assert!(l.open_requests().iter().all(|r| !r.notified));
 
         commit(&mut l, Some("p"), None);
         let due = l.due_timeouts(over);
-        assert_eq!(due.len(), 1, "커밋 후엔 곧바로 수집된다");
+        assert_eq!(due.len(), 1, "collected right away after commit");
         assert_eq!(due[0].request_id, "p");
         assert_eq!(
             due[0].reply_by_raw,
             format!("{}s", reply_by.as_secs()),
-            "표기 원본 그대로"
+            "original notation as is"
         );
 
         let mut l = Ledger::new();
@@ -2719,7 +2772,7 @@ mod tests {
         rollback(&mut l, Some("q"), None);
         assert!(
             l.due_timeouts(over + Duration::from_secs(9999)).is_empty(),
-            "반려된 요청엔 기한 통지가 없다"
+            "a bounced request has no deadline notice"
         );
     }
 
@@ -2745,7 +2798,7 @@ mod tests {
         assert_eq!(
             b,
             OpenOutcome::Full,
-            "잠정 계약을 희생자로 고르면 안 된다 — 고를 게 없으면 Full 이 정답: {b:?}"
+            "a provisional contract must not be picked as the victim — if there is nothing to pick, Full is the right answer: {b:?}"
         );
         assert!(l.open_requests().iter().any(|r| r.request_id == "A"));
         assert_eq!(reply(&mut l, "A", a_at), ReplyOutcome::Closed);
@@ -2763,35 +2816,39 @@ mod tests {
             let OpenOutcome::OpenedAfterMarking(victim) =
                 l.open_request(&provisional, "alice", sid(), "bob", tid("bob"), None, now)
             else {
-                panic!("전제: 매 사이클 표시 후 수용");
+                panic!("premise: accepted after marking in every cycle");
             };
             assert_eq!(
                 victim.request_id, "r0",
-                "사이클 {k}: 늘 같은 최고령이 표시된다"
+                "cycle {k}: the same oldest one is always marked"
             );
             let dropped = rollback(&mut l, Some(provisional.as_str()), Some("r0"));
             assert_eq!(
                 dropped,
                 Some(DropOutcome::Removed { notified: false }),
-                "사이클 {k}: 잠정 계약이 같은 구간에서 제거됐다"
+                "cycle {k}: the provisional contract was removed within the same section"
             );
             assert_eq!(
                 l.open_request_count(),
                 MAX_OPEN_REQUESTS,
-                "사이클 {k}: 계약 수는 정확히 상한(513 로 새지 않는다)"
+                "cycle {k}: the contract count is exactly the cap (does not leak to 513)"
             );
             assert!(
                 !l.open_requests()
                     .iter()
                     .any(|r| r.request_id == provisional),
-                "사이클 {k}: 잠정 계약은 남지 않는다"
+                "cycle {k}: no provisional contract remains"
             );
             assert!(
                 l.open_requests().iter().any(|r| r.request_id == "r0"),
-                "사이클 {k}: 희생자는 표시만 지워진 채 그대로다"
+                "cycle {k}: the victim stays as is with only its mark cleared"
             );
         }
-        assert_eq!(l.tracking_len(), MAX_OPEN_REQUESTS, "추적 총량도 불변");
+        assert_eq!(
+            l.tracking_len(),
+            MAX_OPEN_REQUESTS,
+            "the tracking total is unchanged too"
+        );
     }
 
     #[test]
@@ -2807,44 +2864,48 @@ mod tests {
         let OpenOutcome::OpenedAfterMarking(victim) =
             l.open_request("p-live", "alice", sid(), "bob", tid("bob"), None, now)
         else {
-            panic!("전제: 상한 압력으로 표시 후 수용");
+            panic!("premise: accepted after marking under cap pressure");
         };
         assert_eq!(victim.request_id, "r0");
         let live = ReservationLiveness::new();
         l.attach_reservation_liveness("p-live", tid("bob"), live.watch());
-        assert_eq!(l.marked_retirement_count_for_test(), 1, "표시 1건");
+        assert_eq!(l.marked_retirement_count_for_test(), 1, "1 mark");
 
         for round in 0..3 {
             assert!(
                 l.reclaim_abandoned_reservations().is_empty(),
-                "round {round}: 소유자 생존 예약은 sweep 대상이 아니다"
+                "round {round}: a reservation whose owner is alive is not a sweep target"
             );
         }
         assert!(
             l.is_tracked_for_test("p-live", tid("bob")),
-            "그대로 남아 있어야"
+            "must remain as is"
         );
-        assert_eq!(l.marked_retirement_count_for_test(), 1, "표시도 그대로");
+        assert_eq!(
+            l.marked_retirement_count_for_test(),
+            1,
+            "the mark stays too"
+        );
 
         drop(live);
         let reclaimed = l.reclaim_abandoned_reservations();
         assert_eq!(
             reclaimed,
             vec![("p-live".to_string(), tid("bob"))],
-            "회수한 계약 키를 호출자에게 알려야(락 밖 기록용): {reclaimed:?}"
+            "must tell the caller the reclaimed contract keys (for out-of-lock recording): {reclaimed:?}"
         );
         assert!(
             !l.is_tracked_for_test("p-live", tid("bob")),
-            "잠정 계약이 제거돼야"
+            "the provisional contract must be removed"
         );
         assert_eq!(
             l.marked_retirement_count_for_test(),
             0,
-            "희생자 표시도 풀려야 — 남으면 cap 분모가 영구히 준다"
+            "the victim mark must be released too — if it remains, the cap denominator shrinks forever"
         );
         assert!(
             l.open_requests().iter().any(|r| r.request_id == "r0"),
-            "희생자 자신은 열린 채 그대로(교환이 성립하지 않았으니)"
+            "the victim itself stays open (since the exchange did not happen)"
         );
         assert_eq!(l.occupied_slots(), occupied_before);
         assert_eq!(l.tracking_len(), tracking_before);
@@ -2869,21 +2930,21 @@ mod tests {
         let OpenOutcome::Opened =
             l.open_request("p-ok", "alice", sid(), "bob", tid("bob"), None, now)
         else {
-            panic!("전제: 여유 상태에서 오픈");
+            panic!("premise: opened while there is room");
         };
         let live = ReservationLiveness::new();
         l.attach_reservation_liveness("p-ok", tid("bob"), live.watch());
         let committed = l.commit_open(Some(("p-ok", tid("bob"))), None);
-        assert!(committed.confirmed, "전제: 커밋이 항목을 찾았다");
+        assert!(committed.confirmed, "premise: the commit found the item");
         drop(live);
 
         assert!(
             l.reclaim_abandoned_reservations().is_empty(),
-            "정산된 계약을 회수하면 접수 보고한 request 가 계약 없이 남는다"
+            "reclaiming a settled contract would leave a request reported as accepted without a contract"
         );
         assert!(
             l.is_tracked_for_test("p-ok", tid("bob")),
-            "계약은 그대로 살아 있어야"
+            "the contract must stay alive"
         );
     }
 
@@ -2898,7 +2959,7 @@ mod tests {
         let OpenOutcome::OpenedAfterMarking(v) =
             l.open_request("p1", "alice", sid(), "bob", tid("bob"), None, now)
         else {
-            panic!("전제: 표시 후 수용");
+            panic!("premise: accepted after marking");
         };
         let out = l.commit_open(
             Some(("p1", tid("bob"))),
@@ -2910,13 +2971,13 @@ mod tests {
                 confirmed: true,
                 retired: true
             },
-            "실제로 은퇴했으면 그렇다고 답해야"
+            "if it actually retired, it must say so"
         );
 
         let OpenOutcome::OpenedAfterMarking(v2) =
             l.open_request("p2", "alice", sid(), "bob2", tid("bob2"), None, now)
         else {
-            panic!("전제: 표시 후 수용");
+            panic!("premise: accepted after marking");
         };
         // Remove the marked victim from outside to create "already gone at commit time" (the same result shape as the purge path).
         assert!(matches!(
@@ -2933,7 +2994,7 @@ mod tests {
                 confirmed: true,
                 retired: false
             },
-            "계약은 확정됐지만 은퇴는 없었다 — 이 값이 계측의 조건이다(R2)"
+            "the contract was settled but there was no retirement — this value is the metering condition (R2)"
         );
 
         let out3 = l.commit_open(Some(("nope", tid("nobody"))), None);
@@ -2984,26 +3045,26 @@ mod tests {
         assert_eq!(
             reply(&mut l, "v", win),
             ReplyOutcome::Closed,
-            "표시는 매칭을 가리지 않는다(round-5)"
+            "the mark does not hide matching (round-5)"
         );
         let tracked_before = l.tracking_len();
         rollback(&mut l, Some("new"), Some("v"));
         assert_eq!(
             l.tracking_len(),
             tracked_before - 1,
-            "잠정 계약 1건만 줄어야 — 롤백이 희생자를 **지우면** 안 된다(표시 해제뿐)"
+            "only 1 provisional contract must go — the rollback must not **erase** the victim (only unmark it)"
         );
         assert!(
             l.msg_id_in_use("v"),
-            "닫힌 희생자는 추적에 그대로 남는다(삭제 아님)"
+            "a closed victim stays in tracking as is (not deleted)"
         );
         assert!(
             !l.open_requests().iter().any(|r| r.request_id == "v"),
-            "회신으로 닫혔으므로 미결이 아니다"
+            "closed by the reply, so not outstanding"
         );
         assert!(
             l.due_timeouts(win + Duration::from_secs(99999)).is_empty(),
-            "닫힌 계약엔 헛 기한 통지가 나가지 않는다"
+            "no spurious deadline notice goes out for a closed contract"
         );
         assert!(!l.open_requests().iter().any(|r| r.request_id == "new"));
 
@@ -3023,7 +3084,7 @@ mod tests {
         assert_eq!(
             l.open_request_count(),
             MAX_OPEN_REQUESTS,
-            "커밋 후 계수는 정확히 상한"
+            "the count after commit is exactly the cap"
         );
     }
 
@@ -3058,7 +3119,7 @@ mod tests {
                 now,
             );
         }
-        assert!(l.records_for("r0").is_empty(), "전제: 이력 evict");
+        assert!(l.records_for("r0").is_empty(), "premise: history evicted");
 
         assert!(matches!(
             l.open_request("new", "alice", sid(), "bob", tid("bob"), None, now),
@@ -3066,12 +3127,15 @@ mod tests {
         ));
         assert!(
             l.msg_id_in_use("r0"),
-            "표시된 희생자는 추적에 그대로 있어 사용 중으로 보인다"
+            "the marked victim stays in tracking and looks in use"
         );
-        assert!(l.msg_id_in_use("new"), "잠정 계약도 사용 중");
+        assert!(
+            l.msg_id_in_use("new"),
+            "the provisional contract is in use too"
+        );
         commit(&mut l, Some("new"), Some("r0"));
         assert!(!l.msg_id_in_use("r0"));
-        assert!(l.msg_id_in_use("new"), "확정된 계약은 계속 사용 중");
+        assert!(l.msg_id_in_use("new"), "a settled contract stays in use");
     }
 
     #[test]
@@ -3090,7 +3154,7 @@ mod tests {
         assert_eq!(
             ids,
             vec!["early", "middle", "late"],
-            "추가 순서(late→middle→early)와 무관하게 오래된 순이어야(H4)"
+            "must be oldest first regardless of the insertion order (late→middle→early) (H4)"
         );
         let times: Vec<_> = l
             .open_requests()
@@ -3099,7 +3163,7 @@ mod tests {
             .collect();
         assert!(
             times.windows(2).all(|w| w[0] <= w[1]),
-            "created_at 오름차순"
+            "created_at ascending"
         );
     }
 
@@ -3120,9 +3184,9 @@ mod tests {
             None,
             base + Duration::from_secs(9999),
         ) else {
-            panic!("전제");
+            panic!("premise");
         };
-        assert_eq!(victim.request_id, "r0", "가장 오래된 것이 희생자");
+        assert_eq!(victim.request_id, "r0", "the oldest is the victim");
         rollback(&mut l, Some("new"), Some(victim.request_id.as_str()));
         let times: Vec<_> = l
             .open_requests()
@@ -3131,12 +3195,12 @@ mod tests {
             .collect();
         assert!(
             times.windows(2).all(|w| w[0] <= w[1]),
-            "복원 뒤에도 오래된 순: {times:?}"
+            "oldest first even after restoring: {times:?}"
         );
         assert_eq!(
             l.open_requests().first().map(|r| r.request_id.clone()),
             Some("r0".to_string()),
-            "복원된 최고령 계약이 다시 맨 앞"
+            "the restored oldest contract is at the front again"
         );
     }
 
@@ -3163,19 +3227,19 @@ mod tests {
         assert_eq!(
             l.close_on_reply("r1", sid(), now),
             ReplyOutcome::NoMatch,
-            "이름만 같은 제3자는 닫지 못한다"
+            "a third party with only the same name cannot close it"
         );
         assert_eq!(
             l.fail_on_undeliverable_reply("r1", sid()),
             ReplyFailOutcome::NoMatch,
-            "실패 종결도 같은 규칙"
+            "failure termination follows the same rule"
         );
         assert_eq!(l.close_on_reply("r1", b, now), ReplyOutcome::Closed);
         assert_eq!(l.contract_outcome_for_test("r1", b), Some("replied"));
         assert_eq!(
             l.contract_outcome_for_test("r1", a),
             Some("awaiting_reply"),
-            "다른 id 의 계약은 그대로 열려 있다"
+            "the contract of another id stays open"
         );
     }
 
@@ -3183,7 +3247,7 @@ mod tests {
     fn msg_id_in_use_sees_history_and_tracking() {
         let mut l = Ledger::new();
         let now = t0();
-        assert!(!l.msg_id_in_use("m1"), "미사용 id");
+        assert!(!l.msg_id_in_use("m1"), "unused id");
         l.record(
             "m1",
             "a",
@@ -3194,14 +3258,14 @@ mod tests {
             DeliveryStatus::Delivered,
             now,
         );
-        assert!(l.msg_id_in_use("m1"), "이력에 있으면 사용 중");
+        assert!(l.msg_id_in_use("m1"), "in use if in the history");
         l.open_request("r1", "a", sid(), "b", tid("b"), None, now);
-        assert!(l.msg_id_in_use("r1"), "추적에만 있어도 사용 중");
+        assert!(l.msg_id_in_use("r1"), "in use even if only in tracking");
         open_delivered_request(&mut l, "r2", None, now);
         assert_eq!(reply(&mut l, "r2", now), ReplyOutcome::Closed);
         assert!(
             l.msg_id_in_use("r2"),
-            "닫혀도 이력·추적에 남아 있으면 사용 중"
+            "in use if it remains in history·tracking even when closed"
         );
     }
 
@@ -3210,10 +3274,13 @@ mod tests {
         let mut l = Ledger::new();
         let now = t0();
         open_delivered_request(&mut l, "r1", None, now);
-        assert!(!closed(&l, "r1"), "열린 계약은 false");
-        assert!(!closed(&l, "nope"), "없는 id 는 false(통지 막지 않음)");
+        assert!(!closed(&l, "r1"), "an open contract is false");
+        assert!(
+            !closed(&l, "nope"),
+            "a nonexistent id is false (does not block the notice)"
+        );
         assert_eq!(reply(&mut l, "r1", now), ReplyOutcome::Closed);
-        assert!(closed(&l, "r1"), "회신으로 닫히면 true");
+        assert!(closed(&l, "r1"), "true once closed by a reply");
     }
 
     #[test]
@@ -3230,7 +3297,7 @@ mod tests {
         assert_eq!(
             drop_req(&mut l, "r1"),
             DropOutcome::Removed { notified: true },
-            "이미 통지된 계약의 회수는 그 사실을 동봉"
+            "reclaiming an already notified contract carries that fact"
         );
     }
 
@@ -3274,21 +3341,21 @@ mod tests {
 
         let open = l.open_requests();
         assert_eq!(open.len(), 2);
-        assert_eq!(open[0].request_id, "r1", "오래된 순");
+        assert_eq!(open[0].request_id, "r1", "oldest first");
         assert_eq!(open[0].sender, "alice");
         assert_eq!(open[0].recipient, "bob");
         assert_eq!(
             open[0].reply_by_raw.as_deref(),
             Some("600s"),
-            "표기는 발신자 원본 그대로(역산 금지)"
+            "the notation is the sender's original as is (no back-calculation)"
         );
         assert_eq!(
             open[0].created_at, now,
-            "발송 시각 그대로(장부는 벽시계 모름)"
+            "send time as is (the ledger does not know the wall clock)"
         );
         assert!(!open[0].notified);
         assert_eq!(open[1].request_id, "r2");
-        assert_eq!(open[1].reply_by_raw, None, "기한 없는 request");
+        assert_eq!(open[1].reply_by_raw, None, "request without a deadline");
     }
 
     #[test]
@@ -3302,11 +3369,15 @@ mod tests {
         assert_eq!(l.due_timeouts(now + d + Duration::from_secs(1)).len(), 1);
 
         let open = l.open_requests();
-        assert_eq!(open.len(), 1, "회신으로 닫힌 계약은 빠진다: {open:?}");
+        assert_eq!(
+            open.len(),
+            1,
+            "contracts closed by a reply are left out: {open:?}"
+        );
         assert_eq!(open[0].request_id, "timedout");
         assert!(
             open[0].notified,
-            "통지 나간 사실은 필드로 노출(목록에서 제외하지 않는다)"
+            "the fact that a notice went out is exposed as a field (not excluded from the list)"
         );
     }
 
@@ -3349,7 +3420,7 @@ mod tests {
                 from: DeliveryStatus::Pending,
                 to: DeliveryStatus::Failed
             }),
-            "임의 pending→failed 호출은 거부된다(간선은 전용 동사에만 열려 있다)"
+            "an arbitrary pending→failed call is refused (the edge is open only to the dedicated verb)"
         );
         assert_eq!(
             l.fail_pending("m1", tid("b"), "RECIPIENT_DELETED", now),
@@ -3360,7 +3431,7 @@ mod tests {
         assert_eq!(
             rows[0].fail_code,
             Some("RECIPIENT_DELETED"),
-            "사유 코드가 레코드에 남아 조회가 이유를 답할 수 있다"
+            "the reason code remains in the record so a query can answer why"
         );
 
         l.record(
@@ -3379,7 +3450,7 @@ mod tests {
                 from: DeliveryStatus::Delivered,
                 to: DeliveryStatus::Failed
             }),
-            "delivered→failed 는 여전히 불법"
+            "delivered→failed is still illegal"
         );
         assert_eq!(
             l.fail_pending("nope", tid("b"), "RECIPIENT_DELETED", now),
@@ -3406,7 +3477,7 @@ mod tests {
         assert_eq!(
             l.fail_on_undeliverable_reply("m1", w),
             ReplyFailOutcome::GuardHeld,
-            "잠정 계약은 건드리지 않는다"
+            "the provisional contract is not touched"
         );
         assert_eq!(
             l.contract_outcome_for_test("m1", tid("worker")),
@@ -3461,7 +3532,7 @@ mod tests {
         assert_eq!(
             l.due_timeouts(over).len(),
             MAX_OPEN_REQUESTS,
-            "전원 통지 완료 = 은퇴 가능"
+            "all notified = retirable"
         );
         let marked = match l.open_request(
             "over",
@@ -3473,7 +3544,7 @@ mod tests {
             over,
         ) {
             OpenOutcome::OpenedAfterMarking(r) => r,
-            other => panic!("표시 후 수용이어야: {other:?}"),
+            other => panic!("must be accepted after marking: {other:?}"),
         };
         assert_eq!(marked.request_id, "r0");
         assert_eq!(l.marked_retirement_count_for_test(), 1);
@@ -3481,7 +3552,7 @@ mod tests {
         assert_eq!(
             l.fail_on_undeliverable_reply("r0", tid("bob")),
             ReplyFailOutcome::GuardHeld,
-            "은퇴 예정 표시 계약은 실패 종결 대상이 아니다(ADR-0118 결정 3)"
+            "a contract marked for retirement is not a target of failure termination (ADR-0118 decision 3)"
         );
         assert_eq!(
             l.contract_outcome_for_test("r0", tid("bob")),
@@ -3491,21 +3562,21 @@ mod tests {
         let out = l.fail_open_requests_from(tid("alice"));
         assert!(
             !out.failed.iter().any(|(id, _)| id == "r0" || id == "over"),
-            "표시된 계약(r0=은퇴 예정 · over=잠정)은 종결 목록에 없어야: {out:?}"
+            "marked contracts (r0=retiring · over=provisional) must not be in the termination list: {out:?}"
         );
         assert!(
             out.guard_held >= 2,
-            "두 표시가 모두 건너뛴 수로 보고돼야: {out:?}"
+            "both marks must be reported in the skipped count: {out:?}"
         );
         assert_eq!(
             l.contract_outcome_for_test("r0", tid("bob")),
             Some("awaiting_reply"),
-            "은퇴 예정 표시 계약의 수명은 그 가드 소유다"
+            "the lifetime of a contract marked for retirement is owned by its guard"
         );
         assert_eq!(
             l.contract_outcome_for_test("over", tid("bob2")),
             Some("awaiting_reply"),
-            "잠정 계약도 그대로(기존 커버리지 유지)"
+            "the provisional contract stays too (existing coverage kept)"
         );
     }
 
@@ -3531,12 +3602,12 @@ mod tests {
                 from: DeliveryStatus::Delivered,
                 to: DeliveryStatus::Failed
             }),
-            "delivered→failed 는 범용 전이에서 불법(§6)"
+            "delivered→failed is illegal in the general transition (§6)"
         );
         assert_eq!(
             l.records_for("m-del")[0].status,
             DeliveryStatus::Delivered,
-            "거부된 전이는 상태를 바꾸지 않는다"
+            "a refused transition does not change the state"
         );
         l.record(
             "m-park",
@@ -3554,12 +3625,12 @@ mod tests {
                 from: DeliveryStatus::Pending,
                 to: DeliveryStatus::Failed
             }),
-            "임의 pending→failed 호출은 거부된다(간선은 fail_pending 에만 열려 있다)"
+            "an arbitrary pending→failed call is refused (the edge is open only to fail_pending)"
         );
         assert_eq!(l.records_for("m-park")[0].status, DeliveryStatus::Pending);
         assert!(
             l.records_for("m-park")[0].fail_code.is_none(),
-            "거부된 전이는 사유 코드도 남기지 않는다"
+            "a refused transition leaves no reason code either"
         );
     }
 
@@ -3619,14 +3690,17 @@ mod tests {
                 ("m-open".to_string(), tid("w1")),
                 ("m-old-name".to_string(), tid("w5")),
             ],
-            "그 id 가 요청자인 오픈 계약만 종결 — 보낼 때 이름과 무관: {out:?}"
+            "only open contracts whose requester is that id are terminated — regardless of the name at send time: {out:?}"
         );
         assert_eq!(
             l.contract_outcome_for_test("m-namesake", tid("w6")),
             Some("awaiting_reply"),
-            "같은 이름의 다른 에이전트가 요청자인 계약은 그대로"
+            "contracts whose requester is another agent with the same name stay"
         );
-        assert_eq!(out.guard_held, 1, "잠정 계약은 건너뛴 수로 보고된다");
+        assert_eq!(
+            out.guard_held, 1,
+            "the provisional contract is reported in the skipped count"
+        );
         assert_eq!(
             l.contract_outcome_for_test("m-open", tid("w1")),
             Some("reply_failed")
@@ -3634,22 +3708,22 @@ mod tests {
         assert_eq!(
             l.contract_outcome_for_test("m-done", tid("w2")),
             Some("replied"),
-            "★되돌리지 않는다★ — 수용 = 완료(spec §3 항목 7-④)"
+            "★not reverted★ — accepted = complete (spec §3 item 7-④)"
         );
         assert_eq!(
             l.contract_outcome_for_test("m-prov", tid("w3")),
             Some("awaiting_reply"),
-            "가드 보유 계약은 그대로"
+            "guard-held contracts stay"
         );
         assert_eq!(
             l.contract_outcome_for_test("m-other", tid("w4")),
             Some("awaiting_reply"),
-            "남의 계약은 무관"
+            "others' contracts are unrelated"
         );
         assert_eq!(
             l.occupied_slots(),
             3,
-            "m-prov(잠정) + m-other + m-namesake 만 자리를 차지한다"
+            "only m-prov (provisional) + m-other + m-namesake take spots"
         );
     }
 }

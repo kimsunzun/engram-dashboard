@@ -1,9 +1,6 @@
-// Number · phrasing computation for the usage slot (TRD S21 usage-limit-slot §1-8 · PRD R10·R21·R31·R32) — all clocks are taken as arguments.
-//
-// ★Do not mix the two clocks★: the relative fields of the snapshot (`age_secs`·`next_attempt_in_secs`·`retry_in_secs`) are based on the moment of receipt
-//   (`performance.now()`), so only the time elapsed since then is added or subtracted — so they do not wobble even if the wall clock is rewound. The wall clock is
-//   used only when comparing with the absolute time the server gave (`resets_at`) (R29).
-// ★Sentence word order and joining marks all live in the `t()` templates (R28)★ — here we only decide which template to pick.
+// Number · phrasing computation for the usage slot (TRD S21 usage-limit-slot §1-8 · PRD R10·R21·R31·R32); all clocks are arguments.
+// ★Do not mix the two clocks★: the snapshot's relative fields (`age_secs`·`next_attempt_in_secs`·`retry_in_secs`) are relative to the moment of receipt (`performance.now()`) — only the time elapsed since then is added/subtracted, so they do not wobble if the wall clock is rewound. The wall clock is only for the server's absolute time (`resets_at`) (R29).
+// ★Sentence word order and joining marks live in the `t()` templates (R28)★ — here only the template choice is decided.
 
 import type { UsageStateDetail } from '../../../crates/engram-dashboard-protocol/bindings/UsageStateDetail'
 import type { UsageVendorState } from '../../../crates/engram-dashboard-protocol/bindings/UsageVendorState'
@@ -16,10 +13,7 @@ export const STALE_AFTER_SECS = 1800
 
 export type UsageLevel = 'ok' | 'warn' | 'danger' | 'none'
 
-/**
- * How a window looks right now. `none` = no value held (it is not 0% — R21) — for a window carrying only a reset time, that time is
- * held.
- */
+/** How a window looks right now. `none` = no value held (not 0% — R21); a window carrying only a reset time holds that time. */
 export type WindowReading =
   | {
       kind: 'none'
@@ -45,10 +39,7 @@ export function leftFromUsed(usedPct: number): number {
   return 100 - usedPct
 }
 
-/**
- * Visible number = the remaining amount clamped to 0–100 then floored (R10·D17) — do not inflate the remaining amount (19.9999… is 19). Color is
- * decided by this number too.
- */
+/** Visible number = remaining clamped to 0–100 then floored (R10·D17) — never inflate (19.9999… is 19). Color is decided by this number too. */
 export function visibleLeft(left: number): number {
   return Math.floor(Math.min(100, Math.max(0, left)))
 }
@@ -107,10 +98,7 @@ export function readWindow(win: UsageWindow | null, elapsed: number, nowWallSecs
   }
 }
 
-/**
- * Time remaining in minutes — rounded up and never goes below 1 minute (once the reset passes, 「리셋됨」 (reset) stands in place of this phrase, and when the refusal ends
- * the state the daemon changed takes over).
- */
+/** Time remaining in minutes — rounded up, never below 1 minute (once the reset passes "reset" replaces this phrase; when a refusal ends the daemon's changed state takes over). */
 export function formatDuration(secs: number): string {
   const total = Math.max(1, Math.ceil(secs / 60))
   const days = Math.floor(total / 1440)
@@ -152,8 +140,7 @@ function sameLocalDay(a: Date, b: Date): boolean {
 
 // ADR-0258: a reset that is not today shows a date instead of a weekday.
 /**
- * Reset time (user decision 2026-09-29) — on the same local date as now 「HH:MM」, otherwise 「M/D HH:MM」 (no weekday · no zero padding of
- * month · day). The small display and the popup use the same rule.
+ * Reset time — same local date as now "HH:MM", otherwise "M/D HH:MM" (no weekday, no zero padding of month · day). Small display and popup use the same rule.
  */
 export function formatResetAt(epochSecs: number, nowWallSecs: number): string {
   const at = new Date(epochSecs * 1000)
@@ -168,8 +155,7 @@ export function formatResetClock(epochSecs: number, nowWallSecs: number): string
 }
 
 /**
- * Append detail to the status phrase. `afterWait` = the phrase head already carries the wait time with a 「—」 (거절됨 — N분 뒤) — then
- * join the upstream raw text with a different template so the 「—」 does not double up.
+ * Append detail to the status phrase. `afterWait` = the phrase head already carries the wait time with "—" (refused — in N min), so the upstream raw text joins with a different template to avoid a doubled "—".
  */
 function withDetail(status: string, detail: UsageStateDetail | null, source: string, afterWait: boolean): string {
   if (detail === null) return status
@@ -195,9 +181,7 @@ function rejectedHead(retryInSecs: number, elapsed: number): string {
   return t('usage.stateRejected', { duration: formatDuration(remainingSecs(retryInSecs, elapsed)) })
 }
 
-/**
- * Short name of an abnormal state (without detail · next attempt) — for a place that must speak briefly, like the accessibility name of the summary button. null for `Ready`.
- */
+/** Short name of an abnormal state (no detail · next attempt) for places that must speak briefly, like the summary button's accessibility name. null for `Ready`. */
 export function stateHead(state: UsageVendorState, elapsed: number): string | null {
   switch (state.kind) {
     case 'Ready':
@@ -216,11 +200,8 @@ export function stateHead(state: UsageVendorState, elapsed: number): string | nu
 }
 
 /**
- * Sentence of an abnormal state (R31) — without the company name. Shape = status phrase + detail (with upstream raw text 「응답[ (code)]: <원문>」,
- * without it 「(kind[ · code])」) + number. The upstream raw text is inserted as is, untranslated. null for `Ready`.
- *
- * ★Source word★: the raw text of `NotInstalled` may be the OS's execution error, not the company's response, so it is called 「오류」 (error).
- * `elapsed` = seconds elapsed since the snapshot was received.
+ * Sentence of an abnormal state (R31), without the company name: status phrase + detail (upstream raw text "response[ (code)]: <raw text>", else "(kind[ · code])") + number. The upstream raw text is inserted as is, untranslated. null for `Ready`.
+ * ★Source word★: `NotInstalled`'s raw text may be the OS's execution error, not the company's response, so it is called "error". `elapsed` = seconds since the snapshot was received.
  */
 export function statusSentence(state: UsageVendorState, elapsed: number, nowWallSecs: number): string | null {
   const response = t('usage.sourceResponse')
@@ -243,10 +224,7 @@ export function statusSentence(state: UsageVendorState, elapsed: number, nowWall
   }
 }
 
-/**
- * One line with the company name in front — the badge's `aria-label`·`title` and the top line of the popup use this same string (R31). Within a sentence
- * the company name is not repeated (「Claude 조회 실패 — 응답: …」).
- */
+/** One line with the company name in front — the badge's `aria-label`·`title` and the popup's top line use this string (R31); the name is not repeated within a sentence. */
 export function statusLine(vendorName: string, sentence: string): string {
   return t('usage.statusLine', { vendor: vendorName, sentence })
 }

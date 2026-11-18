@@ -16,8 +16,8 @@ const KINDS: AgentFailureKind[] = [
   'Other',
 ]
 
-describe('failureKinds — 처분표', () => {
-  it('종류마다 문구·행동이 비어 있지 않다', () => {
+describe('failureKinds — disposition table', () => {
+  it('every kind has non-empty text and action', () => {
     for (const k of KINDS) {
       const spec = failureSpec(k)
       expect(spec.reason.length).toBeGreaterThan(0)
@@ -26,33 +26,33 @@ describe('failureKinds — 처분표', () => {
   })
 
   // ★This table is the single copy of this decision (there is no Rust pair table — failureKinds.ts header)★.
-  it('잠그는 종류는 「이어받을 대화 없음」 하나뿐이고 나머지는 재시도 가능(fail-open)', () => {
+  it('the only locking kind is 「no conversation to take over」 and the rest are retryable (fail-open)', () => {
     expect(failureSpec('NoConversationToResume').retryable).toBe(false)
     expect(failureSpec('SpawnFailed').retryable).toBe(true)
     expect(failureSpec('EarlyExitAfterResume').retryable).toBe(true)
     expect(failureSpec('Other').retryable).toBe(true)
   })
 
-  it('문구는 i18n 에서 온다(컴포넌트·표 어디에도 한국어를 박지 않는다)', () => {
+  it('the text comes from i18n (no Korean is hard-coded in components or the table)', () => {
     expect(failureSpec('NoConversationToResume').reason).toBe(t('agent.failureNoConversation'))
     expect(failureSpec('SpawnFailed').reason).toBe(t('agent.failureSpawn'))
     expect(failureSpec('EarlyExitAfterResume').reason).toBe(t('agent.failureEarlyExit'))
     expect(failureSpec('Other').reason).toBe(t('agent.failureOther'))
   })
 
-  it('한 줄은 문구와 권하는 행동을 함께 담는다', () => {
+  it('one line carries the text and the recommended action together', () => {
     const spec = failureSpec('NoConversationToResume')
     expect(failureLine('NoConversationToResume')).toBe(
       t('agent.failureLine', { reason: spec.reason, action: spec.action }),
     )
   })
 
-  it('없는 값은 보일 것이 없다(null/undefined)', () => {
+  it('a missing value has nothing to show (null/undefined)', () => {
     expect(failureLine(null)).toBeNull()
     expect(failureLine(undefined)).toBeNull()
   })
 
-  it('★모르는 종류는 막지 않는다(fail-open)★ — 백엔드가 어휘를 늘려도 화면이 답을 낸다', () => {
+  it('★an unknown kind is not blocked (fail-open)★ — even if the backend widens its vocabulary the screen gives an answer', () => {
     const unknown = 'SomethingNewFromTheDaemon' as AgentFailureKind
     const spec = failureSpec(unknown)
     expect(spec.retryable).toBe(true)

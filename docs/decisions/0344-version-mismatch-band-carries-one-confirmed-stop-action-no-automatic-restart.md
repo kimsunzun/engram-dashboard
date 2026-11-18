@@ -1,7 +1,7 @@
 # ADR-0344: Version-mismatch band carries one confirmed stop action, no automatic restart
 
-- 상태: 확정 (2026-11-05, 근거: 사용자 결정 2026-11-05 「행동 버튼하나 둬 그럼」 + 조사 `docs/research/banner-action-buttons-2026-11-05.md` (light)) · 부분 폐기 by ADR-0350 (결정 4와 5의 안내 문구) · 부분 폐기 by ADR-0356 (결정 1에서 4의 띠 끄기 버튼)
-- 관련: Amends ADR-0180 (결정 1 띠는 알리기만 한다) · Amends ADR-0343 (결정 1 재시작 행동과 결정 4 새 데몬 자동 시작) · ADR-0287 (band layer and ✕ close — unchanged) · ADR-0342 (version mismatch on the existing connection-failure surface) · ADR-0158 결정 3 (no automatic kill — kept) · `src/components/layout/ConnectionNotice.tsx` · `src-tauri/src/daemon_client/stop.rs` · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-2 U5 · step-log S21 · Amended by ADR-0350 (결정 4와 5의 안내 문구) · Amended by ADR-0356 (결정 1에서 4의 띠 끄기 버튼)
+- 상태: 확정 (2026-11-05, basis: user decision 2026-11-05 「행동 버튼하나 둬 그럼」 + survey `docs/research/banner-action-buttons-2026-11-05.md` (light)) · 부분 폐기 by ADR-0350 (the guidance text of decisions 4 and 5) · 부분 폐기 by ADR-0356 (the stop button of the band in decisions 1 through 4)
+- 관련: Amends ADR-0180 (decision 1: the strip only announces) · Amends ADR-0343 (the restart action in decision 1 and the automatic start of a new daemon in decision 4) · ADR-0287 (band layer and ✕ close — unchanged) · ADR-0342 (version mismatch on the existing connection-failure surface) · ADR-0158 decision 3 (no automatic kill — kept) · `src/components/layout/ConnectionNotice.tsx` · `src-tauri/src/daemon_client/stop.rs` · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-2 U5 · step-log S21 · Amended by ADR-0350 (the guidance text of decisions 4 and 5) · Amended by ADR-0356 (the stop button of the band in decisions 1 through 4)
 
 ## 맥락
 
@@ -22,9 +22,9 @@ The survey (light) found an action button on a dismissible top banner is convent
 
 ## 거부한 대안
 
-- **Band notice-only; the action lives in the tray menu** — follows the project's ADR-0180 decision 1 but not open-source/industry convention, and the user must find the tray item from the text. Rejected by the user (「행동 버튼하나 둬 그럼」). 근거 = 조사(WinUI InfoBar 원문).
-- **Restart action that also starts the new daemon (ADR-0343 decision 4)** — the user wants the app to inform and the user to decide; stopping is the one step the user cannot do from the app today. Rejected by the user. 약함 — 사용자 직접 기각.
-- **No confirmation step** — the press ends the old daemon's agents; nothing in the survey supports a destructive banner action without confirmation. 약함 (main judgement).
+- **Band notice-only; the action lives in the tray menu** — follows the project's ADR-0180 decision 1 but not open-source/industry convention, and the user must find the tray item from the text. Rejected by the user (「행동 버튼하나 둬 그럼」). Basis = survey(WinUI InfoBar original text).
+- **Restart action that also starts the new daemon (ADR-0343 decision 4)** — the user wants the app to inform and the user to decide; stopping is the one step the user cannot do from the app today. Rejected by the user. Weak — rejected directly by the user.
+- **No confirmation step** — the press ends the old daemon's agents; nothing in the survey supports a destructive banner action without confirmation. Weak (main judgement).
 
 ## 근거
 

@@ -41,20 +41,27 @@ impl ScratchDir {
         root: &Path,
         mut next_name: impl FnMut() -> String,
     ) -> Result<Self, ProbeError> {
-        fs::create_dir_all(root)
-            .map_err(|e| ProbeError::Io(format!("임시 폴더의 부모를 만들지 못했다: {e}")))?;
+        fs::create_dir_all(root).map_err(|e| {
+            ProbeError::Io(format!(
+                "could not create the parent of the scratch folder: {e}"
+            ))
+        })?;
         for _ in 0..SCRATCH_CREATE_ATTEMPTS {
             let path = root.join(next_name());
             match fs::create_dir(&path) {
                 Ok(()) => return Ok(Self { path }),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    tracing::debug!(path = %path.display(), "임시 폴더 이름이 이미 있다 — 새 이름을 뽑는다");
+                    tracing::debug!(path = %path.display(), "scratch folder name already exists — drawing a new name");
                 }
-                Err(e) => return Err(ProbeError::Io(format!("임시 폴더를 만들지 못했다: {e}"))),
+                Err(e) => {
+                    return Err(ProbeError::Io(format!(
+                        "could not create the scratch folder: {e}"
+                    )))
+                }
             }
         }
         Err(ProbeError::Io(format!(
-            "임시 폴더 이름이 {SCRATCH_CREATE_ATTEMPTS}번 모두 이미 있었다"
+            "the scratch folder name already existed on all {SCRATCH_CREATE_ATTEMPTS} attempts"
         )))
     }
 
@@ -85,7 +92,7 @@ impl Drop for ScratchDir {
             other => other,
         });
         if let Err(err) = outcome {
-            tracing::debug!(path = %self.path.display(), "임시 폴더 삭제 실패 — 기동 때 쓸기가 거둔다: {err}");
+            tracing::debug!(path = %self.path.display(), "scratch folder delete failed — the sweep at startup will collect it: {err}");
         }
     }
 }
@@ -108,7 +115,7 @@ pub fn sweep_stale_scratch(root: &Path) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return,
         Err(e) => {
-            tracing::warn!(dir = %root.display(), "임시 폴더 쓸기 미실행 — 지난 조회의 폴더가 남아 있을 수 있다: {e}");
+            tracing::warn!(dir = %root.display(), "scratch folder sweep not run — folders from past queries may remain: {e}");
             return;
         }
     };
@@ -126,12 +133,15 @@ pub fn sweep_stale_scratch(root: &Path) {
         match fs::remove_dir_all(&path) {
             Ok(()) => removed += 1,
             Err(e) => {
-                tracing::debug!(path = %path.display(), "임시 폴더 쓸기: 삭제 실패(계속): {e}")
+                tracing::debug!(path = %path.display(), "scratch folder sweep: delete failed (continuing): {e}")
             }
         }
     }
     if removed > 0 {
-        tracing::info!(count = removed, "임시 폴더 쓸기: 지난 조회의 폴더를 지웠다");
+        tracing::info!(
+            count = removed,
+            "scratch folder sweep: removed folders from past queries"
+        );
     }
 }
 
@@ -144,42 +154,45 @@ mod tests {
     #[test]
     fn create_makes_a_fresh_dir_with_the_sweepable_name_and_drop_removes_it() {
         let root = TempRoot::new("scratch-create");
-        let scratch = ScratchDir::create(&root.path().join("nested")).expect("생성");
+        let scratch = ScratchDir::create(&root.path().join("nested")).expect("create");
         let path = scratch.path().to_path_buf();
         assert!(path.is_dir());
-        let name = path.file_name().and_then(|n| n.to_str()).expect("이름");
-        assert!(is_scratch_name(name), "쓸기 문법과 어긋난 이름: {name}");
-        fs::write(path.join("config.json"), "{}").expect("파일");
+        let name = path.file_name().and_then(|n| n.to_str()).expect("name");
+        assert!(
+            is_scratch_name(name),
+            "name does not match the sweep syntax: {name}"
+        );
+        fs::write(path.join("config.json"), "{}").expect("file");
 
         drop(scratch);
-        assert!(!path.exists(), "drop 뒤에도 남았다");
+        assert!(!path.exists(), "still there after drop");
     }
 
     #[test]
     fn a_name_that_already_exists_is_never_reused() {
         let root = TempRoot::new("scratch-taken");
         let planted = root.path().join("taken");
-        fs::create_dir(&planted).expect("미리 심은 폴더");
-        fs::write(planted.join("config.json"), "planted").expect("심은 파일");
+        fs::create_dir(&planted).expect("pre-planted folder");
+        fs::write(planted.join("config.json"), "planted").expect("planted file");
 
         let mut names = ["taken", "fresh"].into_iter();
         let scratch =
-            ScratchDir::create_named(root.path(), || names.next().expect("이름").to_owned())
-                .expect("생성");
+            ScratchDir::create_named(root.path(), || names.next().expect("name").to_owned())
+                .expect("create");
         assert_eq!(scratch.path(), root.path().join("fresh"));
 
         drop(scratch);
         assert_eq!(
-            fs::read_to_string(planted.join("config.json")).expect("심은 파일"),
+            fs::read_to_string(planted.join("config.json")).expect("planted file"),
             "planted",
-            "남의 폴더를 건드렸다"
+            "touched someone else's folder"
         );
     }
 
     #[test]
     fn creation_gives_up_after_bounded_attempts() {
         let root = TempRoot::new("scratch-exhausted");
-        fs::create_dir(root.path().join("same")).expect("미리 심은 폴더");
+        fs::create_dir(root.path().join("same")).expect("pre-planted folder");
         let mut calls = 0usize;
         let result = ScratchDir::create_named(root.path(), || {
             calls += 1;
@@ -192,8 +205,8 @@ mod tests {
     #[test]
     fn drop_ignores_a_dir_that_is_already_gone() {
         let root = TempRoot::new("scratch-gone");
-        let scratch = ScratchDir::create(root.path()).expect("생성");
-        fs::remove_dir_all(scratch.path()).expect("먼저 지움");
+        let scratch = ScratchDir::create(root.path()).expect("create");
+        fs::remove_dir_all(scratch.path()).expect("remove first");
         drop(scratch);
     }
 
@@ -204,7 +217,7 @@ mod tests {
         use std::os::windows::fs::OpenOptionsExt;
 
         let root = TempRoot::new("scratch-locked");
-        let scratch = ScratchDir::create(root.path()).expect("생성");
+        let scratch = ScratchDir::create(root.path()).expect("create");
         let path = scratch.path().to_path_buf();
         let locked = fs::OpenOptions::new()
             .write(true)
@@ -212,16 +225,16 @@ mod tests {
             .truncate(true)
             .share_mode(0)
             .open(path.join("held.txt"))
-            .expect("배타 열기");
+            .expect("exclusive open");
 
         drop(scratch);
         assert!(
             path.join("held.txt").exists(),
-            "지우기가 실패해야 하는 조건이 안 섰다"
+            "the condition under which the delete must fail was not set up"
         );
 
         drop(locked);
-        fs::remove_dir_all(&path).expect("정리");
+        fs::remove_dir_all(&path).expect("cleanup");
     }
 
     /// If the lock is released soon during drop, the retried delete succeeds — the case where a grandchild lets go of the working folder a little late.
@@ -231,7 +244,7 @@ mod tests {
         use std::os::windows::fs::OpenOptionsExt;
 
         let root = TempRoot::new("scratch-brief-lock");
-        let scratch = ScratchDir::create(root.path()).expect("생성");
+        let scratch = ScratchDir::create(root.path()).expect("create");
         let path = scratch.path().to_path_buf();
         let locked = fs::OpenOptions::new()
             .write(true)
@@ -239,43 +252,49 @@ mod tests {
             .truncate(true)
             .share_mode(0)
             .open(path.join("held.txt"))
-            .expect("배타 열기");
+            .expect("exclusive open");
         let release = thread::spawn(move || {
             thread::sleep(Duration::from_millis(40));
             drop(locked);
         });
 
         drop(scratch);
-        release.join().expect("잠금 풀기");
-        assert!(!path.exists(), "잠금이 풀린 뒤에도 남았다");
+        release.join().expect("release the lock");
+        assert!(!path.exists(), "still there after the lock was released");
     }
 
     #[test]
     fn sweep_removes_only_scratch_dirs() {
         let root = TempRoot::new("scratch-sweep");
-        let stale = ScratchDir::create(root.path()).expect("생성");
+        let stale = ScratchDir::create(root.path()).expect("create");
         let stale_path = stale.path().to_path_buf();
-        fs::write(stale_path.join("config.json"), "{}").expect("파일");
+        fs::write(stale_path.join("config.json"), "{}").expect("file");
         // Pretends to be a leftover folder — forgets the value so that drop does not delete it.
         std::mem::forget(stale);
 
         let other_dir = root.path().join("keep-me");
-        fs::create_dir(&other_dir).expect("다른 폴더");
+        fs::create_dir(&other_dir).expect("other folder");
         let upper = root
             .path()
             .join(format!("{SCRATCH_PREFIX}{}", "A".repeat(SCRATCH_HEX_LEN)));
-        fs::create_dir(&upper).expect("대문자 이름");
+        fs::create_dir(&upper).expect("uppercase name");
         let same_name_file = root
             .path()
             .join(format!("{SCRATCH_PREFIX}{}", Uuid::new_v4().simple()));
-        fs::write(&same_name_file, "not a dir").expect("같은 문법의 파일");
+        fs::write(&same_name_file, "not a dir").expect("file with the same syntax");
 
         sweep_stale_scratch(root.path());
 
-        assert!(!stale_path.exists(), "남은 임시 폴더를 안 지웠다");
+        assert!(
+            !stale_path.exists(),
+            "did not remove the leftover scratch folder"
+        );
         assert!(other_dir.is_dir());
-        assert!(upper.is_dir(), "문법 밖 이름을 지웠다");
-        assert!(same_name_file.is_file(), "폴더가 아닌 것을 지웠다");
+        assert!(upper.is_dir(), "removed a name outside the syntax");
+        assert!(
+            same_name_file.is_file(),
+            "removed something that is not a folder"
+        );
     }
 
     #[test]

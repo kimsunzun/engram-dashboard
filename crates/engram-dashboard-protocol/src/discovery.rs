@@ -99,9 +99,9 @@ mod tests {
         for shown in [format!("{info:?}"), format!("{info:#?}")] {
             assert!(
                 !shown.contains(info.token.expose()),
-                "Debug 가 토큰을 찍었다: {shown}"
+                "Debug printed the token: {shown}"
             );
-            assert!(shown.contains("51234"), "가린 것은 토큰뿐: {shown}");
+            assert!(shown.contains("51234"), "only the token is masked: {shown}");
         }
     }
 
@@ -127,7 +127,7 @@ mod tests {
             "protocol_version",
             "start_time",
         ] {
-            assert!(json.contains(&format!("\"{f}\"")), "필드 {f} 누락");
+            assert!(json.contains(&format!("\"{f}\"")), "field {f} missing");
         }
     }
 
@@ -135,8 +135,8 @@ mod tests {
     fn parse_old_json_without_start_time_defaults_to_zero() {
         let json =
             br#"{"pid":7,"host":"127.0.0.1","port":9,"token":"deadbeef","protocol_version":1}"#;
-        let info = DaemonInfo::parse(json).expect("옛 파일(start_time 없음)도 파싱돼야 함");
-        assert_eq!(info.start_time, 0, "누락 시 default=0(미상)");
+        let info = DaemonInfo::parse(json).expect("an old file (no start_time) must parse too");
+        assert_eq!(info.start_time, 0, "default=0 (unknown) when missing");
         assert_eq!(info.pid, 7);
     }
 

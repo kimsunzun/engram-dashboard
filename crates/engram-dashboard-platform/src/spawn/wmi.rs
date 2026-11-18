@@ -83,7 +83,7 @@ pub(super) fn create(exe: &Path, create_flags: Option<i32>) -> Result<u32, Detac
             },
             ComInit::Failed(code) => {
                 return Err(DetachedSpawnError::Io(io::Error::other(format!(
-                    "CoInitializeEx 실패 HRESULT {:#010x}",
+                    "CoInitializeEx failed HRESULT {:#010x}",
                     code as u32
                 ))));
             }

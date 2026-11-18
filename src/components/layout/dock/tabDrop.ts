@@ -1,7 +1,5 @@
-// TRD S21-slot-docking §3-1 · §4-2 · §4-6: the wrapper of the drop command `tab_drop` and listening to the result notice `tab_drop:done` — per drag at most two commands after
-//   it ends (`drag_end` of the source dragend · `drop` of the receiving window), and the result comes not as an answer but as the source window's `done`.
-// ★Call invoke/listen directly★: the drop is wiring inside a webview that the shell owns, so agentClient should not carry it, and it is not a bus command either (the LLM command
-//   for the same action = T-65 `tab.dock` · TRD §3-6). The two are cut apart with `TabDropIpc` so the test plugs in a fake (ADR-0012).
+// TRD S21-slot-docking §3-1 · §4-2 · §4-6: wrapper of the drop command `tab_drop` and the result notice `tab_drop:done` — per drag at most two commands after it ends (`drag_end` of the source dragend · `drop` of the receiving window), and the result comes not as an answer but as the source window's `done`.
+// ★Call invoke/listen directly★: the drop is wiring inside a webview the shell owns, so agentClient should not carry it, and it is not a bus command (the LLM command for the same action = T-65 `tab.dock` · TRD §3-6). Cut apart with `TabDropIpc` so the test plugs in a fake (ADR-0012).
 // ADR-0296
 
 import { invoke } from '@tauri-apps/api/core'
@@ -58,14 +56,14 @@ export function createTabDropClient(ipc: TabDropIpc): TabDropClient {
             if (disposed) return
             const done = doneOf(raw)
             if (done === null) {
-              console.warn(`[tabDrop] ${EVT_TAB_DROP_DONE}: 모양이 계약과 다르다 — 버린다:`, raw)
+              console.warn(`[tabDrop] ${EVT_TAB_DROP_DONE}: shape differs from the contract — dropped:`, raw)
               return
             }
             handler(done)
           }),
         {
           isCancelled: () => disposed,
-          onRetry: (err, attempt) => console.warn(`[tabDrop] ${EVT_TAB_DROP_DONE} 구독 재시도 #${attempt}:`, err),
+          onRetry: (err, attempt) => console.warn(`[tabDrop] ${EVT_TAB_DROP_DONE} subscription retry #${attempt}:`, err),
         },
       )
         .then(unlisten => {
@@ -75,7 +73,7 @@ export function createTabDropClient(ipc: TabDropIpc): TabDropClient {
         .catch(err => {
           if (err instanceof RetryCancelledError) return
           // This window cannot receive the drop result — swap redraw is released by the net (next tabs-updated · pointerdown).
-          console.error(`[tabDrop] ${EVT_TAB_DROP_DONE} 구독 최종 실패:`, err)
+          console.error(`[tabDrop] ${EVT_TAB_DROP_DONE} subscription final failure:`, err)
         })
       return () => {
         disposed = true
@@ -87,8 +85,7 @@ export function createTabDropClient(ipc: TabDropIpc): TabDropClient {
 }
 
 const tauriIpc: TabDropIpc = {
-  // ★`target` = its own label★ — even if the shell emits only to that window with `emit_to`, the default target `Any` also receives notices addressed to another window (TRD §2-2 ·
-  //   the same clause of `api/restoreClient.ts`). The body has no window label, so the receiver cannot tell them apart either.
+  // ★`target` = own label★: even if the shell emits only to that window with `emit_to`, the default target `Any` also receives notices addressed to another window (TRD §2-2 · same clause as `api/restoreClient.ts`); the body has no window label, so the receiver cannot tell them apart either.
   listen: (event, handler) => listen<unknown>(event, e => handler(e.payload), { target: getCurrentWindow().label }),
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => invoke<T>(cmd, args),
 }

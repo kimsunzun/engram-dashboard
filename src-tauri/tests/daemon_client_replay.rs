@@ -1,33 +1,21 @@
-//! Integration test of the daemon client's replay single-flight **wiring** — zero sockets · daemons · Tauri.
+//! Integration test of the daemon client's replay single-flight wiring — zero sockets · daemons · Tauri.
+//! Why `tests/`: the rules measured here sit behind a connection in the driver; the functions holding them (`daemon_client::replay_events`) are driven here without one. The driver's own suite (`src/daemon_client/connection/tests.rs`, `--test lib_unit`) drives the same path on a memory network — this target buys determinism and speed, not the only way (decision = ADR-0174,
+// hangul-ok-begin
+//! status = `.claude/skill-bindings/qa.md` 「모듈별 명령」). Run:
+// hangul-ok-end
+//! `cargo test -p engram-dashboard --test daemon_client_replay` (no child process, so
+// hangul-ok-begin
+//! no `-- --test-threads=4` — rule = `.claude/skill-bindings/qa.md` 「모듈별 명령」). CI has a dedicated step for this target (`.github/workflows/ci.yml`).
+// hangul-ok-end
 //!
-//! ★Why `tests/` (an integration target)★: the rules measured here sit behind a connection in the driver, and the
-//! functions that hold them (`daemon_client::replay_events`) are driven here without one — no socket, daemon or Tauri.
-//! The driver's own suite (`src/daemon_client/connection/tests.rs`, `--test lib_unit`) drives the same path on a memory
-//! network; this target buys determinism and speed, not the only way (the target's decision = ADR-0174 · status =
-//! `.claude/skill-bindings/qa.md` 「모듈별 명령」). Run:
-//! `cargo test -p engram-dashboard --test daemon_client_replay` (it launches no child process at all, so
-//! do not add `-- --test-threads=4` — the authority for the decision rule = `.claude/skill-bindings/qa.md` 「모듈별 명령」).
-//! CI also has a dedicated step that calls only this target (`.github/workflows/ci.yml`).
+//! ## What it guards — a refused subscription can go out again
+//! Right after a daemon restart there is no session (boot auto-restore OFF), so the reconnect replay's `Subscribe` is refused. A refusal is not followed by `SubscribeAck`/`ReplayComplete`, so unless that signal releases the slot it stays a zombie and that agent's Subscribe can never go out again — output stays cut off in every window even after re-spawn (measured 2026-08-19). Measured: a refusal releases the slot · the merged next-generation `Subscribe` is actually built and goes out (deleting this arm gives the zombie symptom) · an already acked subscription is not released by a refusal.
 //!
-//! ## ★What it guards — a refused subscription can go out again★
-//! Right after a daemon restart there is no session (boot auto-restore OFF), so the `Subscribe` of the reconnect replay is refused. A refusal is not
-//! followed by `SubscribeAck`/`ReplayComplete`, so unless that signal releases the slot, the slot is left as a zombie and
-//! **that agent's Subscribe can never go out again**, so even after re-spawn output is permanently cut off in every window
-//! (measured 2026-08-19). So what is measured here is three things: a refusal releases the slot · the merged **next-generation
-//! `Subscribe` is actually built and goes out** (deleting this arm gives the same symptom as a zombie) · an already accepted (acked)
-//! subscription is not released by a refusal.
+//! ## The event branches run here too
+//! Which branch the daemon's `SubscribeAck` · `ReplayComplete` · `SubscribeFailed` go to is owned by [`apply_replay_event`]. When that branching was inline in `select!`, deleting the refusal arm left every gate green — though it is the only junction connecting the daemon's new event to the production carrier's slot release. Here the junction is exercised: an event goes in, the marker goes out all the way to the window, and the merged generation's `Subscribe` is built, measured with a real `OutputRouter`.
 //!
-//! ## ★The event branches run here too★
-//! The `SubscribeAck` · `ReplayComplete` · `SubscribeFailed` the daemon sent — even **which branch to send them to** is
-//! owned by [`apply_replay_event`]. In the days when that branching was inline inside `select!`, deleting the refusal arm entirely
-//! left every gate green — even though that arm is **the only
-//! junction** connecting the daemon's new event to the production carrier's slot release. Here that junction is exercised: an event goes in, the marker goes out **all the way to the window**, and the merged generation's
-//! `Subscribe` is built, measured with a real `OutputRouter`.
-//!
-//! ## ★What is not covered here★
-//! The driver's call of this function and its write of the returned `Subscribe` — the driver's suite covers those on
-//! a memory network. The delivery itself (`output_channel::send_to_windows`) needs a `tauri::ipc::Channel`; instead
-//! **which windows · which bytes** are measured against a real routing table.
+//! ## Not covered here
+//! The driver's call of this function and its write of the returned `Subscribe` (the driver's suite covers those on a memory network). The delivery itself (`output_channel::send_to_windows`) needs a `tauri::ipc::Channel`; instead which windows · which bytes are measured against a real routing table.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -46,19 +34,17 @@ use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId};
 // The same type as the map the connection task carries — here it holds only the epoch guard.
 type Subs = HashMap<AgentId, SubState>;
 
-// ★Use the real routing table (do not imitate it with a fake)★: what we want to measure is "the marker goes to **the window where that agent is seen**",
-//   so if the test invents the destination, it ends up verifying the invented value. Plug the agent into main window's first empty slot
-//   and actually rebuild the router.
+// Use the real routing table, not a fake: what is measured is "the marker goes to the window where that agent is seen", and an invented destination would verify the invented value. Plug the agent into main window's first empty slot and actually rebuild the router.
 fn router_showing(agent: AgentId) -> OutputRouter {
     let mut mgr = ViewManager::new();
     let view = mgr
         .list_tabs(MAIN_WINDOW_LABEL)
-        .expect("main 창은 항상 있다")
+        .expect("the main window always exists")
         .active;
-    let slot = tree::first_empty_slot_id(&mgr.snapshot(view).expect("뷰 존재").layout)
-        .expect("빈 슬롯 존재");
+    let slot = tree::first_empty_slot_id(&mgr.snapshot(view).expect("view exists").layout)
+        .expect("an empty slot exists");
     mgr.assign_agent(view, slot, agent.to_string())
-        .expect("슬롯 배치");
+        .expect("slot placement");
     let router = OutputRouter::new();
     router.rebuild(&mgr);
     router
@@ -91,21 +77,15 @@ fn flight() -> ReplayFlightSet {
     ReplayFlightSet::new(Duration::from_secs(10))
 }
 
-// Take back out of the marker frame gen (BE u64) · flag set (bit0~2) · replay head (BE u64) — the canonical layout is the
-// `engram_dashboard_lib::daemon_client::replay_flight::encode_marker_frame` paragraph, and here those values are
-// only read.
+// Reads gen (BE u64) · flag set (bit0~2) · replay head (BE u64) back out of the marker frame — the canonical layout is the `engram_dashboard_lib::daemon_client::replay_flight::encode_marker_frame` paragraph; here the values are only read.
 fn decode_marker(frame: &[u8]) -> (AgentId, u32, Marker) {
-    assert_eq!(frame.len(), MARKER_FRAME_LEN, "마커 프레임 길이");
+    assert_eq!(frame.len(), MARKER_FRAME_LEN, "marker frame length");
     assert_eq!(frame[0], MARKER_TAG, "tag=255");
-    let agent = AgentId::from_slice(&frame[1..17]).expect("agentId 16바이트");
+    let agent = AgentId::from_slice(&frame[1..17]).expect("agentId 16 bytes");
     let epoch = u32::from_be_bytes(frame[17..21].try_into().unwrap());
     let generation = u64::from_be_bytes(frame[21..29].try_into().unwrap());
     let flags = frame[29];
-    assert_eq!(
-        flags & !0b0000_0111,
-        0,
-        "정의 안 된 플래그 비트: {flags:#010b}"
-    );
+    assert_eq!(flags & !0b0000_0111, 0, "undefined flag bit: {flags:#010b}");
     let replay_from = u64::from_be_bytes(frame[30..38].try_into().unwrap());
     (
         agent,
@@ -129,22 +109,32 @@ fn refusal_releases_slot_so_the_next_request_can_send_again() {
     let now = Instant::now();
 
     let first = fs.request_replay(agent, now);
-    assert!(first.send_now, "idle 요청은 즉시 Subscribe");
+    assert!(first.send_now, "an idle request subscribes immediately");
 
     let plan = plan_subscribe_refusal(&mut fs, &subs, agent, now);
-    let frame = plan.marker_frame.expect("첫 거절은 실패 마커를 낸다");
+    let frame = plan
+        .marker_frame
+        .expect("the first refusal yields a failure marker");
     let (got_agent, _epoch, marker) = decode_marker(&frame);
-    assert_eq!(got_agent, agent, "마커는 자기 에이전트 앞으로");
-    assert_eq!(marker.generation, first.generation, "해제되는 건 그 세대");
-    assert!(marker.failed, "거절 = 실패 마커(뷰가 10초를 안 기다리게)");
-    assert!(plan.next_subscribe.is_none(), "대기열이 없으면 다음 없음");
+    assert_eq!(got_agent, agent, "the marker is addressed to its own agent");
+    assert_eq!(
+        marker.generation, first.generation,
+        "what is released is that generation"
+    );
+    assert!(
+        marker.failed,
+        "refusal = failure marker (so the view does not wait 10 s)"
+    );
+    assert!(plan.next_subscribe.is_none(), "no queue means no next one");
 
     let next = fs.request_replay(agent, now);
-    assert!(next.send_now, "해제됐으니 새 Subscribe 가 즉시 나간다");
+    assert!(
+        next.send_now,
+        "released, so the new Subscribe goes out immediately"
+    );
 }
 
-// ★The `next_subscribe` arm is this suite's second reason to exist★: if you delete it (or do not build it), the merged generation's
-//   Subscribe cannot go out on the wire and the symptom becomes exactly the zombie — the slot is released but no one asks again.
+// The `next_subscribe` arm is this suite's second reason to exist: deleted (or not built), the merged generation's Subscribe cannot go out and the symptom is exactly the zombie — the slot is released but no one asks again.
 #[test]
 fn refusal_hands_the_coalesced_generation_a_subscribe_to_send() {
     let mut fs = flight();
@@ -157,16 +147,22 @@ fn refusal_hands_the_coalesced_generation_a_subscribe_to_send() {
 
     let first = fs.request_replay(agent, now); // gen_k = went out on the wire
     let waiter = fs.request_replay(agent, now); // gen_k+1 = merged (not yet gone out)
-    assert!(!waiter.send_now, "in-flight 중이라 병합");
+    assert!(!waiter.send_now, "in flight, so merged");
 
     let plan = plan_subscribe_refusal(&mut fs, &subs, agent, now);
-    let (_, epoch, marker) = decode_marker(&plan.marker_frame.expect("실패 마커"));
-    assert_eq!(marker.generation, first.generation, "해제되는 건 앞 세대");
-    assert_eq!(epoch, 7, "마지막으로 알려진 epoch 를 싣는다(권위값 아님)");
+    let (_, epoch, marker) = decode_marker(&plan.marker_frame.expect("failure marker"));
+    assert_eq!(
+        marker.generation, first.generation,
+        "what is released is the earlier generation"
+    );
+    assert_eq!(
+        epoch, 7,
+        "carries the last known epoch (not an authoritative value)"
+    );
 
     match plan
         .next_subscribe
-        .expect("병합된 세대의 Subscribe 가 나와야")
+        .expect("the merged generation's Subscribe must come out")
     {
         AgentCommand::Subscribe {
             agent_id,
@@ -174,19 +170,24 @@ fn refusal_hands_the_coalesced_generation_a_subscribe_to_send() {
             after_seq,
         } => {
             assert_eq!(agent_id, agent);
-            assert_eq!(epoch, Some(7), "현재 알려진 epoch 로 재구독");
-            assert_eq!(after_seq, None, "재replay 는 항상 전량(from-oldest)");
+            assert_eq!(
+                epoch,
+                Some(7),
+                "re-subscribes with the currently known epoch"
+            );
+            assert_eq!(
+                after_seq, None,
+                "a re-replay is always in full (from-oldest)"
+            );
         }
-        other => panic!("Subscribe 여야: {other:?}"),
+        other => panic!("should be Subscribe: {other:?}"),
     }
 
     // That generation has risen to in-flight — a new request is merged again, and the normal completion path stays alive.
     assert!(!fs.request_replay(agent, now).send_now);
 }
 
-// ★Defense★: a subscription that received Ack was accepted by the daemon, so it cannot coexist with a refusal. The reason we still do not release it =
-//   if released, the ReplayComplete that follows meets an empty slot and is ignored, and the view waiting for that replay never
-//   receives the success marker (a path where one wrongly fired refusal kills a normal replay).
+// Defense: a subscription that got an Ack was accepted by the daemon and cannot coexist with a refusal. Releasing it anyway would make the following ReplayComplete meet an empty slot and be ignored, so the view waiting for that replay never gets the success marker (one wrongly fired refusal killing a normal replay).
 #[test]
 fn refusal_leaves_an_acked_healthy_subscription_alone() {
     let mut fs = flight();
@@ -198,16 +199,18 @@ fn refusal_leaves_an_acked_healthy_subscription_alone() {
     fs.on_ack(agent, false, false, 0, now);
 
     let plan = plan_subscribe_refusal(&mut fs, &subs, agent, now);
-    assert!(plan.marker_frame.is_none(), "acked 슬롯엔 실패 마커 없음");
-    assert!(plan.next_subscribe.is_none(), "대기열 전진도 없음");
+    assert!(
+        plan.marker_frame.is_none(),
+        "no failure marker for an acked slot"
+    );
+    assert!(plan.next_subscribe.is_none(), "no queue advance either");
     assert!(
         !fs.request_replay(agent, now).send_now,
-        "슬롯은 그대로 점유"
+        "the slot stays occupied"
     );
 }
 
-// A refusal of a subscription we never issued (stray) · a second refusal of an already released slot does nothing —
-// a duplicate failure marker pushes the view's re-request ladder twice.
+// A refusal of a subscription we never issued (stray) · a second refusal of an already released slot does nothing — a duplicate failure marker would push the view's re-request ladder twice.
 #[test]
 fn stray_refusal_produces_nothing() {
     let mut fs = flight();
@@ -223,17 +226,12 @@ fn stray_refusal_produces_nothing() {
     let second = plan_subscribe_refusal(&mut fs, &subs, agent, now);
     assert!(
         second.marker_frame.is_none() && second.next_subscribe.is_none(),
-        "이미 해제된 슬롯의 두 번째 거절은 무시"
+        "a second refusal on an already released slot is ignored"
     );
 }
 
-// ★Do not create a phantom entry in `subs`★: the most common reason for a refusal is "that agent does not exist", so if inserted here,
-//   an empty SubState for a nonexistent agent would pile up for the whole life of the connection.
-//
-// ★`plan_subscribe_refusal` cannot measure this (that function takes `&HashMap` and the type already blocks it — if the defect
-//   is revived, compilation breaks rather than the source going red)★. So we measure it through the outer entry point **that holds `&mut`** —
-//   there `entry().or_default()` compiles. One and the same event represents the rule of the three read spots (next-generation re-subscription ·
-//   expiry marker · refusal marker) (`known_epoch`).
+// Do not create a phantom entry in `subs`: the most common refusal reason is "that agent does not exist", so inserting here would pile up empty SubStates for nonexistent agents for the whole connection.
+// `plan_subscribe_refusal` cannot measure this (it takes `&HashMap`, so the type already blocks it — a revived defect breaks compilation rather than turning the test red); it is measured through the outer entry point holding `&mut`, where `entry().or_default()` compiles. One event represents the rule of the three read spots (next-generation re-subscription · expiry marker · refusal marker) (`known_epoch`).
 #[test]
 fn a_refusal_for_an_unknown_agent_leaves_no_ghost_substate() {
     let mut fs = flight();
@@ -255,13 +253,12 @@ fn a_refusal_for_an_unknown_agent_leaves_no_ghost_substate() {
     );
     assert!(
         subs.is_empty(),
-        "읽기 자리는 항목을 만들지 않는다 — 사라진 에이전트의 빈 항목이 연결 수명 내내 쌓인다"
+        "a read site does not create entries — empty entries of vanished agents would pile up for the whole connection lifetime"
     );
 }
 
-// ── The junction from event to window (the branching that the select! arm held inline) ─────────────
-// ★This suite's reason to exist★: in the days when the refusal arm was inline, deleting that arm entirely left every gate green.
-//   The three tests here catch that junction (event recognition → slot release → **marker to the window** → next-generation Subscribe).
+// ── The junction from event to window (the branching the select! arm held inline) ─────────────
+// This suite's reason to exist: with the refusal arm inline, deleting it left every gate green. The three tests catch that junction (event recognition → slot release → marker to the window → next-generation Subscribe).
 #[test]
 fn a_refusal_delivers_a_failure_marker_to_the_windows_showing_that_agent() {
     let mut fs = flight();
@@ -271,7 +268,10 @@ fn a_refusal_delivers_a_failure_marker_to_the_windows_showing_that_agent() {
     let now = Instant::now();
 
     let first = fs.request_replay(agent, now);
-    assert!(first.send_now, "전제: 이 세대가 wire 로 나갔다");
+    assert!(
+        first.send_now,
+        "precondition: this generation went out on the wire"
+    );
 
     let (out, follow) = feed(
         &AgentEvent::SubscribeFailed {
@@ -284,30 +284,35 @@ fn a_refusal_delivers_a_failure_marker_to_the_windows_showing_that_agent() {
         now,
     );
 
-    assert_eq!(out.0.len(), 1, "거절 하나 = 마커 하나");
+    assert_eq!(out.0.len(), 1, "one refusal = one marker");
     let (labels, frame) = &out.0[0];
     assert_eq!(
         labels.as_slice(),
         &[MAIN_WINDOW_LABEL.to_string()],
-        "그 에이전트가 보이는 창으로 간다(router.targets)"
+        "goes to the windows where that agent is visible (router.targets)"
     );
     let (got_agent, _epoch, marker) = decode_marker(frame);
-    assert_eq!(got_agent, agent, "마커는 자기 에이전트 앞으로");
-    assert_eq!(marker.generation, first.generation, "해제되는 건 그 세대");
-    assert!(marker.failed, "거절 = 실패 마커(뷰가 10초를 안 기다리게)");
+    assert_eq!(got_agent, agent, "the marker is addressed to its own agent");
+    assert_eq!(
+        marker.generation, first.generation,
+        "what is released is that generation"
+    );
+    assert!(
+        marker.failed,
+        "refusal = failure marker (so the view does not wait 10 s)"
+    );
     assert!(
         matches!(follow, ReplayFollowUp::Handled(None)),
-        "대기열이 없으면 다음 Subscribe 없음"
+        "no queue means no next Subscribe"
     );
 
     assert!(
         fs.request_replay(agent, now).send_now,
-        "슬롯이 풀려 새 Subscribe 가 다시 나간다(이게 결함의 핵심)"
+        "the slot is released and a new Subscribe goes out again (this is the heart of the defect)"
     );
 }
 
-// The merged generation must come out **as a command to go out on the wire** — if not, the slot is released but no one asks again, so the
-// symptom becomes the same as a zombie.
+// The merged generation must come out as a command to go out on the wire — else the slot is released but no one asks again, the zombie symptom.
 #[test]
 fn a_refusal_hands_back_the_coalesced_generations_subscribe() {
     let mut fs = flight();
@@ -333,13 +338,16 @@ fn a_refusal_hands_back_the_coalesced_generations_subscribe() {
         &router,
         now,
     );
-    assert!(ack_out.0.is_empty(), "Ack 자체는 창으로 아무것도 안 보낸다");
+    assert!(
+        ack_out.0.is_empty(),
+        "the Ack itself sends nothing to the window"
+    );
     assert!(matches!(ack_follow, ReplayFollowUp::Handled(None)));
 
     // That Ack was from a time when nothing was in-flight, so it does not create a slot — now issue the two real requests.
     let first = fs.request_replay(agent, now);
     let waiter = fs.request_replay(agent, now);
-    assert!(!waiter.send_now, "in-flight 중이라 병합");
+    assert!(!waiter.send_now, "in flight, so merged");
 
     let (out, follow) = feed(
         &AgentEvent::SubscribeFailed {
@@ -353,11 +361,17 @@ fn a_refusal_hands_back_the_coalesced_generations_subscribe() {
     );
 
     let (_, epoch, marker) = decode_marker(&out.0[0].1);
-    assert_eq!(marker.generation, first.generation, "해제되는 건 앞 세대");
-    assert_eq!(epoch, 7, "마지막으로 알려진 epoch 를 싣는다(권위값 아님)");
+    assert_eq!(
+        marker.generation, first.generation,
+        "what is released is the earlier generation"
+    );
+    assert_eq!(
+        epoch, 7,
+        "carries the last known epoch (not an authoritative value)"
+    );
     assert!(
         !marker.continues_conversation,
-        "앞선 Ack(표식 참)은 어느 슬롯에도 안 앉았고 거절되는 슬롯은 Ack 을 받은 적이 없다 — bit2 는 0"
+        "the earlier Ack (flag true) sat in no slot and the refused slot never received an Ack — bit2 is 0"
     );
 
     match follow {
@@ -367,10 +381,17 @@ fn a_refusal_hands_back_the_coalesced_generations_subscribe() {
             after_seq,
         })) => {
             assert_eq!(agent_id, agent);
-            assert_eq!(epoch, Some(7), "현재 알려진 epoch 로 재구독");
-            assert_eq!(after_seq, None, "재replay 는 항상 전량(from-oldest)");
+            assert_eq!(
+                epoch,
+                Some(7),
+                "re-subscribes with the currently known epoch"
+            );
+            assert_eq!(
+                after_seq, None,
+                "a re-replay is always in full (from-oldest)"
+            );
         }
-        other => panic!("병합된 세대의 Subscribe 가 나와야: {other:?}"),
+        other => panic!("the merged generation's Subscribe must come out: {other:?}"),
     }
 }
 
@@ -412,27 +433,25 @@ fn a_replay_complete_delivers_a_success_marker_to_the_same_windows() {
         now,
     );
 
-    assert_eq!(out.0.len(), 1, "완료 하나 = 마커 하나");
+    assert_eq!(out.0.len(), 1, "one completion = one marker");
     let (labels, frame) = &out.0[0];
     assert_eq!(labels.as_slice(), &[MAIN_WINDOW_LABEL.to_string()]);
     let (_, epoch, marker) = decode_marker(frame);
-    assert_eq!(epoch, 3, "완료된 replay 의 epoch 를 싣는다");
+    assert_eq!(epoch, 3, "carries the completed replay's epoch");
     assert_eq!(marker.generation, first.generation);
-    assert!(!marker.failed, "완료 = 성공 마커");
-    assert!(marker.truncated, "Ack 의 truncated 가 마커까지 전파");
+    assert!(!marker.failed, "completion = success marker");
+    assert!(
+        marker.truncated,
+        "the Ack's truncated propagates to the marker"
+    );
     assert!(
         !marker.continues_conversation,
-        "Ack 이 이어받기 화신이 아니라고 했다"
+        "the Ack said it is not a continuing incarnation"
     );
-    assert!(
-        matches!(follow, ReplayFollowUp::Handled(None)),
-        "대기열 없음"
-    );
+    assert!(matches!(follow, ReplayFollowUp::Handled(None)), "no queue");
 }
 
-// ★The Ack's resume marker reaches bit2 of the bytes going to the window (ADR-0226)★ — the webview uses this bit to draw loading instead of the first
-//   screen. truncated · the marker value are flipped relative to the test right above, so even if the two fields are wired swapped, one of the
-//   two goes red.
+// The Ack's resume marker reaches bit2 of the bytes going to the window (ADR-0226) — the webview uses this bit to draw loading instead of the first screen. truncated · the marker value are flipped relative to the test right above, so a swapped wiring turns one of the two red.
 #[test]
 fn a_replay_complete_carries_the_acks_continues_conversation_in_bit2() {
     let mut fs = flight();
@@ -469,20 +488,17 @@ fn a_replay_complete_carries_the_acks_continues_conversation_in_bit2() {
         now,
     );
 
-    assert_eq!(out.0.len(), 1, "완료 하나 = 마커 하나");
+    assert_eq!(out.0.len(), 1, "one completion = one marker");
     let (labels, frame) = &out.0[0];
     assert_eq!(labels.as_slice(), &[MAIN_WINDOW_LABEL.to_string()]);
-    assert_eq!(frame.len(), MARKER_FRAME_LEN, "길이 38 불변");
-    assert_eq!(frame[29], 0b0000_0100, "성공 + 이어받기 = bit2 하나만");
+    assert_eq!(frame.len(), MARKER_FRAME_LEN, "length stays 38");
+    assert_eq!(frame[29], 0b0000_0100, "success + continuation = bit2 only");
     let (_, _, marker) = decode_marker(frame);
     assert!(marker.continues_conversation);
     assert!(!marker.truncated && !marker.failed);
 }
 
-// ★The Ack's replay head reaches the marker bytes going to the window (ADR-0231)★ — the old wiring threw this field of the Ack away with the pattern `..`.
-//   The view starts the success flush with this value (`max(마지막+1, replay_from)`), so if missing, a seq 0 that arrives late after the marker
-//   would be skipped in a new incarnation with an empty replay. The value is set to a nonzero number to block the shape where 「안 실어도 0」 (0 even if not carried)
-//   happens to match.
+// The Ack's replay head reaches the marker bytes going to the window (ADR-0231) — the old wiring threw this field away with the pattern `..`. The view starts the success flush with it (`max(last+1, replay_from)`), so missing, a seq 0 arriving late after the marker would be skipped in a new incarnation with an empty replay. A nonzero value blocks the shape where "0 even if not carried" happens to match.
 #[test]
 fn a_replay_complete_carries_the_acks_replay_from() {
     let mut fs = flight();
@@ -519,14 +535,16 @@ fn a_replay_complete_carries_the_acks_replay_from() {
         now,
     );
 
-    assert_eq!(out.0.len(), 1, "완료 하나 = 마커 하나");
+    assert_eq!(out.0.len(), 1, "one completion = one marker");
     let (_, _, marker) = decode_marker(&out.0[0].1);
     assert!(!marker.failed);
-    assert_eq!(marker.replay_from, 40, "Ack 의 replay 머리가 마커까지");
+    assert_eq!(
+        marker.replay_from, 40,
+        "the Ack's replay head reaches the marker"
+    );
 }
 
-// Events that are not of the replay family must not be swallowed by this function — if swallowed, inbound commands and broadcast vanish
-// entirely (the only entrance of those two is this function's `NotHandled` branch).
+// Events outside the replay family must not be swallowed by this function — swallowed, inbound commands and broadcast would vanish entirely (their only entrance is this function's `NotHandled` branch).
 #[test]
 fn unrelated_events_fall_through_to_the_callers_other_branches() {
     let mut fs = flight();
@@ -541,6 +559,6 @@ fn unrelated_events_fall_through_to_the_callers_other_branches() {
         &router,
         Instant::now(),
     );
-    assert!(out.0.is_empty(), "창으로 아무것도 안 보낸다");
+    assert!(out.0.is_empty(), "sends nothing to the window");
     assert!(matches!(follow, ReplayFollowUp::NotHandled));
 }

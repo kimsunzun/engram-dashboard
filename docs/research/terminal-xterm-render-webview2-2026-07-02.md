@@ -9,7 +9,7 @@ When a full-screen TUI such as claude Code was shown in an xterm.js slot, the **
 
 ## ★ The biggest lesson of this session — the real cause of the "black screen" was not the renderer ★
 
-During debugging the terminal came out entirely black, and we **misdiagnosed it as a renderer problem** and spent a lot of effort on webgl/xterm-bump, but the **real cause was a polluted daemon state** (the user pointed it out exactly as "claude 실행이 안 되는 것" (claude does not launch)).
+During debugging the terminal came out entirely black, and we **misdiagnosed it as a renderer problem** and spent a lot of effort on webgl/xterm-bump, but the **real cause was a polluted daemon state** (the user pointed it out exactly as 「claude 실행이 안 되는 것」 (claude does not launch)).
 
 - The app was restarted many times during the session → **18 orphan claude processes accumulated** + **a daemon tangled by re-attach** (the single engram-dashboard-daemon instance persists across restarts). Output routing (subscription/replay) broke, so the slot stayed empty with only the cursor shown.
 - **Fix:** kill only the daemon process (child agents are cleaned up by the Job Object) → clean restart from the baseline → a fresh claude gave **normal output and rendering immediately**. **Certain** (measured).
@@ -43,7 +43,7 @@ The OSS standard = **client-first**: fix the real cols/rows in the frontend → 
 
 ## Recommendation (when retrying the clipping next time)
 
-- The **canvas renderer**, which can be self-verified through CDP, is best, but the version blocks it with xterm 6 → (a) wait for a release of the canvas addon that supports xterm6, or (b) use webgl but retry on the premise of **the font-resolution fix + human-eye verification** (but whether this WebView2 texture failure is due to the font or the GPU must be re-verified separately from item 3), or (c) keep DOM + accept the cosmetic clip (the user said "대충 OK" (roughly OK)).
+- The **canvas renderer**, which can be self-verified through CDP, is best, but the version blocks it with xterm 6 → (a) wait for a release of the canvas addon that supports xterm6, or (b) use webgl but retry on the premise of **the font-resolution fix + human-eye verification** (but whether this WebView2 texture failure is due to the font or the GPU must be re-verified separately from item 3), or (c) keep DOM + accept the cosmetic clip (the user said 「대충 OK」 (roughly OK)).
 - **Do not promote to a beta xterm.** When changing the renderer, do it one piece at a time from the baseline, verifying with CDP capture.
 
 ## do-not / re-verification needed

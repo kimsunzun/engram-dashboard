@@ -3,14 +3,14 @@ import type { StoreRefusalWord } from "./StoreRefusalWord";
 import type { StoreStateWord } from "./StoreStateWord";
 
 /**
- * 저장소 파일 하나의 상태 행.
+ * The state row of one store file.
  */
 export type StoreStatusRow = { state: StoreStateWord, 
 /**
- * `ReadOnly` · `Refusing` 의 까닭 — `Writable` 이면 `null`.
+ * The reason for `ReadOnly` · `Refusing` — `null` if `Writable`.
  */
 reason?: StoreRefusalWord | null, 
 /**
- * `Newer` 일 때 그 파일이 적은 판 번호 — 그 밖은 `null`.
+ * For `Newer`, the edition number that file wrote — otherwise `null`.
  */
 file_version?: bigint | null, };

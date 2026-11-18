@@ -58,7 +58,7 @@ pub trait OutputDecoder: Send {
 //   its only consumer was codex's TUI status-line scanner, and it was withdrawn together when that recovery moved from screen reading to
 //   **lock ownership decision** (today that recovery does not pass through the path at all). Reviving it brings back a structure where someone else's code runs above the pump (the only PTY
 //   reader) — taking a lock or panicking there become child
-//   backpressure and 「멀쩡한 세션이 Failed 로 보고」 (a healthy session reported as Failed) respectively.
+//   backpressure and 「a healthy session reported as Failed」 respectively.
 // ADR-0217
 // ADR-0218
 
@@ -66,7 +66,7 @@ pub trait AgentTransport: Send + Sync {
     /// Start the output pump/stream → connect to the core. Called once right after spawn.
     fn start(&self, core: Arc<OutputCore>);
 
-    /// ★The acceptance meaning is **「받았다」 (received), not 「갔다」 (gone)**★: `Ok` = we accepted all of it with its order fixed,
+    /// ★The acceptance meaning is **「received」, not 「gone」**★: `Ok` = we accepted all of it with its order fixed,
     ///   `Err` = we did not accept it (a partial acceptance is not reported down as `Ok`). Today all three implementations put it into a bounded queue
     ///   and a dedicated writer pulls and writes, so **this call does not wait for the OS write** — that is the point of
     ///   this seam (even if the child does not read stdin, the caller does not hang with it).
@@ -106,7 +106,7 @@ pub trait AgentTransport: Send + Sync {
 
     /// ★Wait until the input accepted up to the time of this call **has actually gone out**★ — `Ok` = gone out.
     ///
-    /// ★Why it exists★: the `Ok` of [`AgentTransport::send_input`] is 「받았다」 (received), not 「갔다」 (gone). There is one caller that **must not put
+    /// ★Why it exists★: the `Ok` of [`AgentTransport::send_input`] is 「received」, not 「gone」. There is one caller that **must not put
     ///   the difference between the two on the delivery receipt** — mail delivery (the "transmission failure" and "model ignored" that ADR-0088 wants to tell apart get flipped).
     ///   Only that caller passes this verb and restores the meaning of `Ok`.
     /// ★★The keystroke path does not call this — it must not★★: waiting there would bring back the very
@@ -114,10 +114,10 @@ pub trait AgentTransport: Send + Sync {
     ///   that accepts blocking**.
     /// ★The default implementation being `Unsupported` is intended — it does not disguise itself as `Ok`★: if a path with no means to
     ///   confirm write completion returned `Ok`, that would be exactly the flip above. It is more honest for the side that **says** it has no means of confirmation, and
-    ///   the caller can see that signal and treat it as 「예전과 같은 수준의 앎」 (knowledge at the same level as before) (that judgment is written by the call site).
+    ///   the caller can see that signal and treat it as 「knowledge at the same level as before」 (that judgment is written by the call site).
     fn flush_input(&self, _timeout: Duration) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
-            "flush_input (이 통로는 쓰기 완료를 확인할 수단이 없다)".into(),
+            "flush_input (this link has no means of confirming write completion)".into(),
         ))
     }
 
@@ -155,24 +155,24 @@ pub trait AgentTransport: Send + Sync {
 ///   `Up` remains and is read as success.) A value, once **delivered**, is not withdrawn, so that gap does not exist at all.
 /// ★The incarnation marker is **stamped by the assembly point**★ — this port is `Fn(LinkResolution)` and the path does not know the incarnation
 ///   (the same shape and reason as [`SessionIdSink`]). The consumer looks at that marker **only as match/mismatch**
-///   (ADR-0163/0164 — deriving 「더 새 것」 (the newer one) by magnitude brings ① back).
-/// ★★The contract is **at most once** (zero-or-once) — not 「정확히 한 번」 (exactly once)★★. There are two outcomes:
+///   (ADR-0163/0164 — deriving 「the newer one」 by magnitude brings ① back).
+/// ★★The contract is **at most once** (zero-or-once) — not 「exactly once」★★. There are two outcomes:
 ///   - **Once** — the moment the connection yields an outcome. It is not called after that.
-///   - **Zero (零)** — the user turned this incarnation off. A handshake released by kill is not 「상대가 답했다」 (the peer answered), so
+///   - **Zero (零)** — the user turned this incarnation off. A handshake released by kill is not 「the peer answered」, so
 ///     it is not delivered (if that branch were delivered, the user's cancel would be recorded as a resume failure — defect ③).
-/// ★★So **the receiving side must handle 「영」 (zero) — this is the point of this paragraph**★★: this spot once
-///   wrote 「정확히 한 번」 (exactly once) and 「껐으면 안 부른다」 (if turned off, not called) together three lines apart, and the consumer written on trust of the former was
+/// ★★So **the receiving side must handle 「zero」 — this is the point of this paragraph**★★: this spot once
+///   wrote 「exactly once」 and 「if turned off, not called」 together three lines apart, and the consumer written on trust of the former was
 ///   the channel-gone branch of [`crate::manager::AgentManager::link_activation_verdict`] — when delivery is suppressed
-///   the sending end drops, and it read that as 「통로가 결말을 못 냈다」 (the path could not produce an outcome) and **recorded the user's cancel as an activation failure.**
+///   the sending end drops, and it read that as 「the path could not produce an outcome」 and **recorded the user's cancel as an activation failure.**
 ///   Now that branch looks at the termination-intent latch **first**.
 /// ★What is suppressed is **only the message, not the channel-gone**★ — the one holding this port is a single writer thread, so when that
-///   thread ends the sending end drops. That signal cannot be suppressed, so the observable form of 「영」 (zero) is
+///   thread ends the sending end drops. That signal cannot be suppressed, so the observable form of 「zero」 is
 ///   **channel-gone**. The receiving side must not read it as an outcome.
 /// ★Delivery does not **drive** termination★ — the path still kills nothing and does not call `finish` either
 ///   (the line of ADR-0199). Stating an outcome and enforcing an outcome are different things.
 pub type LinkSink = Arc<dyn Fn(LinkResolution) + Send + Sync>;
 
-/// How the connection ended — ★only two values and both are **confirmed**★ (「아직」 (not yet) is not delivered).
+/// How the connection ended — ★only two values and both are **confirmed**★ (「not yet」 is not delivered).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkResolution {
     /// The peer **signaled that it is ready to receive input** = activation established (user decision).
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(
             *t.0.lock().unwrap(),
             vec![b"echo hi\r\n\x03".to_vec(), b"echo hi\r\n\x03".to_vec()],
-            "기본 구현은 출처와 무관하게 본문만 그대로 넘긴다 — id·출처는 바이트에 안 섞인다"
+            "the default implementation passes only the body as is, regardless of origin — id and origin are not mixed into the bytes"
         );
     }
 
@@ -250,10 +250,7 @@ mod tests {
     fn the_default_withdraw_holds_nothing() {
         let t = RawOnly(Mutex::new(Vec::new()));
         assert_eq!(t.withdraw("id-1"), Withdraw::NotHeld);
-        assert!(
-            t.0.lock().unwrap().is_empty(),
-            "거두기는 아무것도 쓰지 않는다"
-        );
+        assert!(t.0.lock().unwrap().is_empty(), "withdrawing writes nothing");
     }
 
     #[test]
@@ -304,7 +301,7 @@ pub(crate) mod pump_marks {
                 return Ok(());
             }
             self.0.at_send.lock().unwrap().push(is_contained());
-            panic!("구독자가 emit 안에서 panic");
+            panic!("subscriber panic inside emit");
         }
         fn sink_id(&self) -> SinkId {
             self.1
@@ -328,18 +325,21 @@ pub(crate) mod pump_marks {
         assert_eq!(
             *marks.at_send.lock().unwrap(),
             vec![true],
-            "펌프 본체가 표시 안에서 돌지 않았다"
+            "the pump body did not run inside the marker"
         );
         match marks.at_status.lock().unwrap().as_slice() {
             [(AgentStatus::Failed { message }, marked)] => {
                 assert!(message.starts_with("pump panicked: "), "{message}");
-                assert!(message.contains("구독자가 emit 안에서 panic"), "{message}");
+                assert!(
+                    message.contains("subscriber panic inside emit"),
+                    "{message}"
+                );
                 assert!(
                     !marked,
-                    "finish 가 표시 안에서 돌았다 — 그 안의 panic 이 가둬지면 `Running` 이 남는다"
+                    "finish ran inside the marker — if a panic in it is contained, `Running` remains"
                 );
             }
-            other => panic!("가둔 panic 은 Failed 한 번이어야: {other:?}"),
+            other => panic!("a contained panic must be Failed once: {other:?}"),
         }
     }
 }

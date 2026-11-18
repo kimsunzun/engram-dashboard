@@ -1,7 +1,7 @@
 # ADR-0011: agentClient control-surface facade (daemon preparation)
 
 - 상태: 확정 (frontend integration, S12 preparation)
-- 관련: CLAUDE.md §5·프론트 파일 구조 · `api/{agentClient,embeddedClient,clientFactory}.ts`
+- 관련: CLAUDE.md §5·frontend file structure · `api/{agentClient,embeddedClient,clientFactory}.ts`
 
 ## 맥락
 When daemonizing, if the frontend calls `invoke`/Channel directly, the transport path (in-process ↔ WebSocket) cannot be swapped. Also, §5 (LLM-first control) requires every action to have a single control surface that the LLM can reach.

@@ -44,9 +44,9 @@ pub struct InterruptOut {
     pub on_written: Option<OnWritten>,
 }
 
-/// A backend function that makes one set of stdin lines meaning 「지금 도는 턴을 멈춰 달라」 (stop the turn now running). The path does not know the meaning of those bytes (dumb pipe).
+/// A backend function that makes one set of stdin lines meaning 「stop the turn now running」. The path does not know the meaning of those bytes (dumb pipe).
 ///
-/// `None` = 「지금은 끊을 턴이 없다」 (there is no turn to interrupt now) — the decision is the backend's, and the path passes it on as `Unsupported` as is. A pipe has
+/// `None` = 「there is no turn to interrupt now」 — the decision is the backend's, and the path passes it on as `Unsupported` as is. A pipe has
 /// no interrupt means of the path's own like Ctrl-C, so interrupting is knowledge of whoever makes this line.
 // ADR-0238
 pub type InterruptLine = Arc<dyn Fn() -> Option<InterruptOut> + Send + Sync>;
@@ -128,7 +128,7 @@ impl StdioTransport {
     }
 
     /// A weak handle to the process group this path spawned — it also carries a read-only copy of the retire mark. The path does not know what
-    /// it is used for (ADR-0044 「바보 파이프」). `None` = this OS has no means of binding a group (outside Windows).
+    /// it is used for (ADR-0044 「dumb pipe」). `None` = this OS has no means of binding a group (outside Windows).
     // ADR-0262
     pub(crate) fn process_group(&self) -> Option<ProcessGroup> {
         self.group
@@ -136,7 +136,7 @@ impl StdioTransport {
             .map(|group| ProcessGroup::new(group, RetiringSignal::of(&self.retiring)))
     }
 
-    /// Plugs in the interrupt-line function — once plugged in, the capability `control.interrupt` becomes true (meaning 「끊을 수 있는 통로다」 (this is a path that can interrupt), not 「지금 턴이 있다」 (a turn exists now)).
+    /// Plugs in the interrupt-line function — once plugged in, the capability `control.interrupt` becomes true (meaning 「this is a path that can interrupt」, not 「a turn exists now」).
     /// It is not an `open` argument so that callers without injection (plain-text stdio · tests) keep standing as they do today.
     // ADR-0238
     pub fn with_interrupt(mut self, line: InterruptLine) -> Self {
@@ -146,13 +146,13 @@ impl StdioTransport {
 }
 
 /// One actual write by the writer thread. ★If `shutdown()` has already taken the handle away, it falls through to `BrokenPipe` and
-/// [`input_queue::drain`] closes the queue★ — that combination shuts off the branch of 「kill 뒤에 남은 입력이 조용히 쌓이는」 (input left after kill silently piling up).
+/// [`input_queue::drain`] closes the queue★ — that combination shuts off the branch of 「input left after kill silently piling up」.
 fn write_stdin(stdin: &Mutex<Option<ChildStdin>>, bytes: &[u8]) -> std::io::Result<()> {
     // ★The only place that does a blocking `write_all` under this lock★ — the basis for `shutdown()` using `try_lock`
     //   (the order invariant of that function) points here.
     let mut guard = sync::lock(stdin);
     let stdin = guard.as_mut().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin 이 이미 닫혔다")
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin is already closed")
     })?;
     stdin.write_all(bytes)?;
     stdin.flush()
@@ -163,7 +163,8 @@ struct WriterStop(Arc<InputQueue>);
 
 impl Drop for WriterStop {
     fn drop(&mut self) {
-        self.0.close("stdio 스트림이 끝났다 — 더 보낼 곳이 없다");
+        self.0
+            .close("the stdio stream ended — nowhere left to send");
     }
 }
 
@@ -211,7 +212,7 @@ impl AgentTransport for StdioTransport {
             if let Err(e) = spawn_result {
                 // Without a writer, `send_input` returns `Ok` while the bytes never go out — a silent
                 //   loss, so close the queue and refuse honestly from that moment.
-                let reason = format!("stdio 입력 라이터 스레드 기동 실패: {e}");
+                let reason = format!("failed to start the stdio input writer thread: {e}");
                 tracing::warn!(agent = %agent_id, "{reason}");
                 self.input.close(&reason);
             }
@@ -315,7 +316,7 @@ impl AgentTransport for StdioTransport {
     /// (AgentSession wraps it with InputEncoder and hands it over as Raw, ADR-0044 isolation).
     /// Puts it in the queue and returns **immediately** — the OS write is the job of the dedicated writer thread.
     ///
-    /// ★The canonical source of the contract · the bound · 「받아 둔 뒤의 실패」 (failure after accepting) is the header of the [`crate::transport::input_queue`] module★.
+    /// ★The canonical source of the contract · the bound · 「failure after accepting」 is the header of the [`crate::transport::input_queue`] module★.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
         let InputEvent::Raw(bytes) = input;
         self.input.push(bytes)
@@ -327,25 +328,25 @@ impl AgentTransport for StdioTransport {
 
     fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
-            "StdioTransport::resize (파이프는 터미널 크기 없음)".into(),
+            "StdioTransport::resize (a pipe has no terminal size)".into(),
         ))
     }
 
     /// Puts the line given by the injected function into the input queue — the same writer thread as for user lines writes it **whole**, so lines do not mix.
     /// ★It does not take the input lock (`input_order`)★ — an interrupt is not bound to an input id, so there is no order for that lock to protect, and so
-    ///   there is no new edge in the lock order. `Ok` means 「받았다」 (received), as with [`Self::send_input`], and not 「턴이 멈췄다」 (the turn has stopped).
+    ///   there is no new edge in the lock order. `Ok` means 「received」, as with [`Self::send_input`], and not 「the turn has stopped」.
     // ADR-0238
     fn interrupt(&self) -> Result<(), PtyError> {
         let Some(line) = &self.interrupt else {
             return Err(PtyError::Unsupported(
-                "StdioTransport::interrupt (이 통로엔 끊기 줄이 없다 — 파이프엔 Ctrl-C 가 없다)"
+                "StdioTransport::interrupt (this link has no interrupt line — a pipe has no Ctrl-C)"
                     .into(),
             ));
         };
         match line() {
             Some(InterruptOut { bytes, on_written }) => self.input.push_with(bytes, on_written),
             None => Err(PtyError::Unsupported(
-                "StdioTransport::interrupt (끊을 턴이 없다)".into(),
+                "StdioTransport::interrupt (no turn to interrupt)".into(),
             )),
         }
     }
@@ -362,7 +363,7 @@ impl AgentTransport for StdioTransport {
     ///   the core of the causality (if only cmd.exe is killed and claude stays alive, the write handles do not close and no EOF comes).
     ///
     /// ★Order invariant — stdin close must never come before kill (deadlock, FIX 1)★:
-    ///   ★It once read 「send_input 은 …」 (send_input is …) here — only the holder of that lock changed, and the danger is the same★.
+    ///   ★It once read 「send_input is …」 here — only the holder of that lock changed, and the danger is the same★.
     ///   Now what holds that lock is the **writer thread** (`write_stdin`, throughout the blocking `write_all`). If the child
     ///   does not read stdin (pipe backpressure), that write_all blocks forever and never releases the lock. If we then try to close it with
     ///   `stdin.lock()` **before** the kill, we can never get that lock, so we cannot even reach the kill → the pump
@@ -383,7 +384,7 @@ impl AgentTransport for StdioTransport {
         //     it cannot hang★: a writer hanging on the stdin lock has already released the queue lock (`InputQueue::close` doc).
         //     So this one line does not touch the order invariant below (kill first) — it is a different lock.
         //     ★Cost = input not yet sent out disappears★.
-        self.input.close("에이전트를 종료했다");
+        self.input.close("the agent was terminated");
 
         // 2. wait is reap (prevents zombies). The second call is Err since it is already dead — ignored (idempotent).
         {
@@ -440,9 +441,12 @@ mod tests {
         match resolve_pump_reason(result) {
             TerminalReason::Error(msg) => {
                 assert!(msg.starts_with("pump panicked:"), "Error prefix: {msg}");
-                assert!(msg.contains("boom in stdio pump"), "원 메시지 보존: {msg}");
+                assert!(
+                    msg.contains("boom in stdio pump"),
+                    "original message preserved: {msg}"
+                );
             }
-            other => panic!("panic 은 Error 로 매핑돼야: {other:?}"),
+            other => panic!("a panic must map to Error: {other:?}"),
         }
     }
 
@@ -473,20 +477,23 @@ mod tests {
         let (plain, _pid) = StdioTransport::open(&spec, false, None).expect("open plain");
         assert!(
             !plain.capabilities().output.structured,
-            "평문 stdio 주입 → structured=false(파이프가 아니라 mode 가 결정)"
+            "plain stdio injected → structured=false (decided by mode, not by the pipe)"
         );
         plain.shutdown();
 
         let (json, _pid) = StdioTransport::open(&spec, true, None).expect("open json");
         let caps = json.capabilities();
-        assert!(caps.output.structured, "json 캐리어 주입 → structured=true");
-        assert!(!caps.output.terminal_bytes, "터미널 바이트 아님");
-        assert!(!caps.control.resize, "파이프 resize 불가");
+        assert!(
+            caps.output.structured,
+            "json carrier injected → structured=true"
+        );
+        assert!(!caps.output.terminal_bytes, "not terminal bytes");
+        assert!(!caps.control.resize, "a pipe cannot resize");
         assert!(
             !caps.control.interrupt,
-            "끊기 줄을 주입하지 않은 통로 = 끊기 능력 없음"
+            "a link with no interrupt line injected = no interrupt capability"
         );
-        assert!(caps.input.raw, "stdin raw 쓰기 가능");
+        assert!(caps.input.raw, "stdin raw write possible");
         assert!(matches!(json.interrupt(), Err(PtyError::Unsupported(_))));
         assert!(matches!(json.resize(80, 24), Err(PtyError::Unsupported(_))));
         json.shutdown();
@@ -541,7 +548,7 @@ mod tests {
         let transport = transport.with_interrupt(line);
         assert!(
             transport.capabilities().control.interrupt,
-            "주입이 있으면 능력은 참 — 지금 턴이 있나와 무관하다"
+            "with an injection the capability is true — regardless of whether there is a turn now"
         );
 
         assert!(matches!(
@@ -551,20 +558,25 @@ mod tests {
         assert_eq!(
             transport.input.queued_bytes(),
             0,
-            "거절한 끊기는 큐를 건드리지 않는다"
+            "a refused interrupt does not touch the queue"
         );
 
         turn_open.store(true, Ordering::SeqCst);
-        transport.interrupt().expect("턴이 열려 있으면 줄을 받는다");
+        transport
+            .interrupt()
+            .expect("with a turn open it accepts the line");
         assert_eq!(transport.input.queued_bytes(), b"{\"stop\":1}\n".len());
-        let (bytes, on_written) = transport.input.pop().expect("큐에 든 끊기 줄");
+        let (bytes, on_written) = transport
+            .input
+            .pop()
+            .expect("the interrupt line in the queue");
         assert_eq!(bytes, b"{\"stop\":1}\n".to_vec());
-        on_written.expect("줄과 함께 준 부를 것이 큐까지 따라온다")();
+        on_written.expect("the callback given with the line follows it into the queue")();
         assert!(fired.load(Ordering::SeqCst));
         turn_open.store(false, Ordering::SeqCst);
         assert!(
             transport.capabilities().control.interrupt,
-            "능력은 문 값을 따라 흔들리지 않는다"
+            "the capability does not sway with the gate value"
         );
         transport.shutdown();
     }
@@ -591,22 +603,22 @@ mod tests {
         assert_eq!(
             handed.is_some(),
             cfg!(windows),
-            "무리 손잡이는 Windows 통로에만 있다"
+            "the group handle exists only on the Windows link"
         );
         assert!(
             !announced.retiring.load(Ordering::Acquire),
-            "갓 연 통로가 이미 물러나는 중이다"
+            "a freshly opened link is already retreating"
         );
         assert!(!handed.as_ref().is_some_and(|signal| signal.is_set()));
         announced.begin_retire();
         assert!(announced.retiring.load(Ordering::Acquire));
         assert!(
             handed.as_ref().is_none_or(|signal| signal.is_set()),
-            "내준 표시가 예고를 못 본다"
+            "the handed-out marker does not see the notice"
         );
         announced
             .send_input(InputEvent::Raw(b"still-open\n".to_vec()))
-            .expect("예고가 입력 큐를 닫았다 — 거두기는 shutdown 몫이다");
+            .expect("the notice closed the input queue — collecting is shutdown's job");
         announced.shutdown();
 
         let (shut, _pid) = StdioTransport::open(&spec, true, None).expect("open");
@@ -616,12 +628,12 @@ mod tests {
         shut.shutdown();
         assert!(
             shut.retiring.load(Ordering::Acquire),
-            "예고 없이 온 종료가 물러남 표시를 세우지 않는다"
+            "an exit that came without a notice does not set the retreat marker"
         );
         drop(shut);
         assert!(
             handed.as_ref().is_none_or(|signal| signal.is_set()),
-            "예고 없이 온 종료를 내준 표시가 못 본다 — 통로가 사라진 뒤에도 선 채여야 한다"
+            "the handed-out marker does not see an exit that came without a notice — it must stay set even after the link is gone"
         );
     }
 
@@ -675,7 +687,7 @@ mod tests {
         // 1MiB = far beyond the pipe buffer · under the queue cap (2MiB). The writer bites into this and blocks.
         transport
             .send_input(InputEvent::Raw(vec![b'x'; 1024 * 1024]))
-            .expect("상한 아래라 받아야 한다");
+            .expect("below the cap, so it must be accepted");
 
         // Yield briefly (generously) so the writer surely enters write_all and takes the stdin lock.
         std::thread::sleep(Duration::from_millis(500));
@@ -685,11 +697,11 @@ mod tests {
         let probe_start = Instant::now();
         transport
             .send_input(InputEvent::Raw(b"probe\n".to_vec()))
-            .expect("큐에 자리가 있으므로 받아야 한다");
+            .expect("there is room in the queue, so it must be accepted");
         let probe_elapsed = probe_start.elapsed();
         assert!(
             probe_elapsed < Duration::from_secs(2),
-            "라이터가 막힌 동안 send_input 이 {probe_elapsed:?} 매달렸다 — 호출자 분리 회귀"
+            "send_input hung for {probe_elapsed:?} while the writer was blocked — caller separation regression"
         );
 
         // (B) FIX 1 — in the same state shutdown completes without deadlock.
@@ -701,7 +713,7 @@ mod tests {
         while !shutdown_thread.is_finished() {
             assert!(
                 Instant::now() < deadline,
-                "shutdown 이 10s 안에 완료되지 않음 — stdin 락 데드락 회귀(FIX 1)"
+                "shutdown did not complete within 10s — stdin lock deadlock regression (FIX 1)"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -713,7 +725,7 @@ mod tests {
                 transport.send_input(InputEvent::Raw(b"late\n".to_vec())),
                 Err(PtyError::WriteFailed(_))
             ),
-            "shutdown 뒤의 send_input 은 거절돼야 한다"
+            "send_input after shutdown must be refused"
         );
 
         core.join_pump(Duration::from_secs(5));
@@ -754,35 +766,35 @@ mod tests {
             cwd: std::path::PathBuf::from("."),
         };
         let (transport, pid) = StdioTransport::open(&spec, true, None).expect("open");
-        let root_pid = pid.expect("자식 PID");
+        let root_pid = pid.expect("child PID");
         let group = transport
             .process_group()
-            .expect("Windows 통로는 무리를 내준다");
+            .expect("the Windows link hands out a group");
         let root = group
             .pin(root_pid, false)
-            .expect("붙들기")
-            .expect("뿌리는 우리 멤버다");
+            .expect("hold on")
+            .expect("the root is our member");
 
         // The console host attaches when cmd starts — snapshot the list and open the gate well after that, and the member that was not in that list = ping
         //   is told apart that way (we do not compare times).
         std::thread::sleep(Duration::from_millis(100));
-        let before_gate = group.member_pids().expect("문 앞 명단");
+        let before_gate = group.member_pids().expect("list before the gate");
         assert!(
             before_gate.contains(&root_pid),
-            "뿌리가 명단에 없다: {before_gate:?}"
+            "the root is not in the list: {before_gate:?}"
         );
         {
             let mut stdin = transport.stdin.lock().unwrap_or_else(|p| p.into_inner());
-            let stdin = stdin.as_mut().expect("stdin 파이프");
-            stdin.write_all(b"go\r\n").expect("문 열기");
-            stdin.flush().expect("문 열기");
+            let stdin = stdin.as_mut().expect("stdin pipe");
+            stdin.write_all(b"go\r\n").expect("open the gate");
+            stdin.flush().expect("open the gate");
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         let ping = loop {
-            let members = group.member_pids().expect("명단");
+            let members = group.member_pids().expect("list");
             assert!(
                 members.contains(&root_pid),
-                "뿌리가 명단에 없다: {members:?}"
+                "the root is not in the list: {members:?}"
             );
             let born_after_gate = members
                 .into_iter()
@@ -793,29 +805,29 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "10 초 안에 Job 안의 ping 을 못 봤다"
+                "did not see ping inside the Job within 10 seconds"
             );
             std::thread::sleep(Duration::from_millis(20));
         };
-        assert!(!root.exited().expect("끝났나") && !ping.exited().expect("끝났나"));
+        assert!(!root.exited().expect("exited?") && !ping.exited().expect("exited?"));
 
         drop(transport);
         assert_eq!(
-            group.member_pids().expect("명단"),
+            group.member_pids().expect("list"),
             Vec::<u32>::new(),
-            "통로가 사라졌는데 명단이 남았다 — 손잡이가 Job 을 붙들고 있다"
+            "the link is gone but the list remains — the handle is holding on to the Job"
         );
         assert!(
-            group.pin(root_pid, false).expect("붙들기").is_none(),
-            "통로가 사라졌는데 뿌리를 붙들었다"
+            group.pin(root_pid, false).expect("hold on").is_none(),
+            "the link is gone but it held on to the root"
         );
 
         let deadline = Instant::now() + Duration::from_secs(5);
         for member in [&root, &ping] {
             let left = deadline.saturating_duration_since(Instant::now());
             assert!(
-                member.wait_exit(left).expect("끝나기 대기"),
-                "통로를 버린 뒤 5 초가 지나도 뿌리나 ping 이 살아 있다 — Job 이 안 닫혔다: {:?}",
+                member.wait_exit(left).expect("wait for exit"),
+                "5 seconds after dropping the link the root or ping is still alive — the Job did not close: {:?}",
                 member.facts()
             );
         }

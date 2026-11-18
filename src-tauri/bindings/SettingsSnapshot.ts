@@ -5,8 +5,8 @@ import type { SettingItem } from "./SettingItem";
  * The answer of `settings_get` and the payload of the `settings:changed` notification — for a notification `items` holds only the changed keys.
  *
  * ★The receiver applies **per key** by `rev`★ — an item is applied when it is the first time seeing that key, or when it is greater than the `rev`
- * last applied to that key. ★A key seen for the first time is applied as is★ — the answer right after the shell starts has `rev` 0, so comparing with 「0 보다
- * 클 때」(when greater than 0) would drop the first value. The `settings_get` answer also follows the same rule per item with the answer's `rev`: if the answer
+ * last applied to that key. ★A key seen for the first time is applied as is★ — the answer right after the shell starts has `rev` 0, so comparing with 「greater than 0」
+ * would drop the first value. The `settings_get` answer also follows the same rule per item with the answer's `rev`: if the answer
  * is dropped as a whole, keys only in that answer are lost, and if applied as a whole, a new notification that arrived earlier is overwritten with the old value. Notifications go out among themselves
  * in `rev` order.
  */

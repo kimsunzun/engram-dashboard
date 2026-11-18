@@ -14,28 +14,28 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('fireAndForget (ADR-0055 fire-and-forget 안전망)', () => {
-  it('동기 handler 를 실행하고 인자(단일 가방)를 전달한다', () => {
+describe('fireAndForget (ADR-0055 fire-and-forget safety net)', () => {
+  it('runs a synchronous handler and passes the argument (single bag)', () => {
     const spy = vi.fn()
     register({ id: 'x', title: () => 'x', run: spy })
     fireAndForget('x', { a: 1 })
     expect(spy).toHaveBeenCalledWith({ a: 1 })
   })
 
-  it('동기 throw 를 삼킨다(전파 안 함) + warn', () => {
+  it('swallows a synchronous throw (no propagation) + warn', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     register({ id: 'boom', title: () => 'boom', run: () => { throw new Error('nope') } })
     expect(() => fireAndForget('boom')).not.toThrow()
     expect(warn).toHaveBeenCalled()
   })
 
-  it('모르는 id(run throw)도 삼킨다(리스너가 죽지 않게)', () => {
+  it('swallows an unknown id (run throws) too (so the listener does not die)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     expect(() => fireAndForget('missing.id')).not.toThrow()
     expect(warn).toHaveBeenCalled()
   })
 
-  it('reject 되는 Promise 반환: unhandled rejection 없이 삼킨다 + warn', async () => {
+  it('returns a Promise that rejects: swallowed without an unhandled rejection + warn', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     register({ id: 'async.reject', title: () => 'r', run: () => Promise.reject(new Error('async-nope')) })
     fireAndForget('async.reject')
@@ -45,7 +45,7 @@ describe('fireAndForget (ADR-0055 fire-and-forget 안전망)', () => {
     expect(warn).toHaveBeenCalled()
   })
 
-  it('thenable(비 네이티브 Promise) reject 도 삼킨다(FIX-3: instanceof 로 안 좁힘)', async () => {
+  it('swallows a thenable (non-native Promise) reject too (FIX-3: not narrowed by instanceof)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const thenable = { then: (_res: unknown, rej: (e: unknown) => void) => rej(new Error('thenable-nope')) }
     register({ id: 'thenable.reject', title: () => 't', run: () => thenable })

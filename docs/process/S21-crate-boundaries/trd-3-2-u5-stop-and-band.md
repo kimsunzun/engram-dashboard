@@ -51,9 +51,9 @@
 
 ### 3-2. Stop client (`link/stop.rs`, no `tauri`)
 
-- `resolve_stop_target(reader, liveness)` reads `daemon.json` → `{address, token, protocol_version, pid, start_time}` or `NoTarget` (no record · broken · dead pid · **newer than the app**). A sharing-violation read is retried briefly (제안 5 × 100 ms) inside the flight deadline. Reader / liveness are seams (B1).
+- `resolve_stop_target(reader, liveness)` reads `daemon.json` → `{address, token, protocol_version, pid, start_time}` or `NoTarget` (no record · broken · dead pid · **newer than the app**). A sharing-violation read is retried briefly (proposal 5 × 100 ms) inside the flight deadline. Reader / liveness are seams (B1).
 - `StopHandshake`: Auth with the daemon's own version; `Done` on any text frame whose top-level JSON key is `"Hello"`; an `Error` frame = refusal (masked log). Only `StopDaemon` follows `Hello` (pinned by a test).
-- One-shot `Registry<ShellWire>` per flight, `max_attempts = 0`, **one dial**, `connect_timeout` (dial + handshake) = the remaining graceful time: 10 s − elapsed − a small reserve (제안 0.5 s), so a slow-but-alive daemon gets the whole window to answer `Hello`. Inbox drained on the same task. `Connected` → `notify(StopDaemon{force:true, kill_agents:true})`. Raw outcomes (R13): `Sent` (then read until the first `Disconnected`/`GaveUp`; the Ack is ignored) or `NothingSent` (anything that ends the dial without `Hello` — refused, reset, closed in handshake, `Error` frame, timeout — or a `notify` `Err`). No decision is read from failure texts.
+- One-shot `Registry<ShellWire>` per flight, `max_attempts = 0`, **one dial**, `connect_timeout` (dial + handshake) = the remaining graceful time: 10 s − elapsed − a small reserve (proposal 0.5 s), so a slow-but-alive daemon gets the whole window to answer `Hello`. Inbox drained on the same task. `Connected` → `notify(StopDaemon{force:true, kill_agents:true})`. Raw outcomes (R13): `Sent` (then read until the first `Disconnected`/`GaveUp`; the Ack is ignored) or `NothingSent` (anything that ends the dial without `Hello` — refused, reset, closed in handshake, `Error` frame, timeout — or a `notify` `Err`). No decision is read from failure texts.
 
 ### 3-3. The one stop path — `DaemonClient::stop_daemon(plan, origin)` (`daemon_client/shutdown.rs`)
 
@@ -97,8 +97,8 @@ Delete `stop.rs` (move its wire-shape tests); promote `terminate_if_same` from `
 
 | Band | When | Text | Button (main window only) |
 |---|---|---|---|
-| ① 연결 안 됨 | cold-start failure · runtime loss after the first failed reconnect (D1) · token refusal · after any stop (U4 — the re-add fails) | 「데몬에 연결하지 못했습니다.」 + token refusal: 「데몬이 이 앱의 인증을 거절했습니다」 · or `connectionError` (R14) | 「다시 연결」 |
-| ② 버전 다름 | any version mismatch | 「데몬에 연결하지 못했습니다.」 + 「실행 중인 데몬이 이 앱과 버전이 다릅니다」 | 「데몬 끄기」 only when `can_stop` |
+| ① not connected | cold-start failure · runtime loss after the first failed reconnect (D1) · token refusal · after any stop (U4 — the re-add fails) | 「데몬에 연결하지 못했습니다.」 + token refusal: 「데몬이 이 앱의 인증을 거절했습니다」 · or `connectionError` (R14) | 「다시 연결」 |
+| ② version mismatch | any version mismatch | 「데몬에 연결하지 못했습니다.」 + 「실행 중인 데몬이 이 앱과 버전이 다릅니다」 | 「데몬 끄기」 only when `can_stop` |
 
 - No band: connected · an explicit frontend close (`daemon_close` — `window.__ENGRAM_AGENT__.disconnect()`; no production caller since U5a (`DaemonControl.stop()` was its only one)) · a runtime loss before the first reconnect attempt failed.
 - 「데몬 끄기」 confirms first (ADR-0344 d2): 「이전 데몬을 끕니다. 실행 중인 에이전트가 멈춥니다 — 나중에 이어서 실행할 수 있지만 진행 중인 응답은 사라집니다」 · 「끄기」 / 「취소」.
@@ -214,8 +214,8 @@ Docs: main TRD row 404 → pointer here, §6-4 ③ and ⑤ wording · `docs/refe
 - **R18** (round 2: codex must · lead N3 · risk N7) `Exit` keeps reading after `Sent` until the first `Disconnected` or 3 s — no `close_after_flush` behind `StopDaemon`.
 - **R19** (round 3: risk N-2 · codex · lead batched 2) Flight expiry aborts the flight task; every side effect is gated on the deadline; a late `daemon.json` read is discarded; the re-add is fired at expiry.
 - **R20** (round 3: lead M-A = risk N-1) Shell-side `boot_start_pending` flag, set at `DaemonClient` construction, keeps never-connected handles bandless until the main window's boot start answers (failed `daemon_start`, `connect()`'s first answer, or a safety bound).
-- **R22** (round 3: codex, carried twice) Forced kill with agent children — expected: daemon and descendants gone. Each agent's tree runs in a Job with `KILL_ON_JOB_CLOSE` whose handle the daemon holds (`platform/src/group/windows.rs:4-5`), so terminating the daemon closes it and the Job kills the tree. A process that broke away from its Job survives by design (`agent/examples/spike_breakaway.rs`), and so may a child launched before its parent was assigned — the agent paths assign after launch (`group/windows.rs:10-14`). conhost membership 미확인. QA row in §5.
-- **R24** (round 4: lead 권장 · risk R20-a/b, B-1, B-2, B-4, B-6 · codex 권장) R20 short bound armed when main's `daemon_start` begins (60 s cap before); R20 clear = actor step that re-derives and re-emits; R19 pins; `Exit` dial bound; R22 assign-after-launch gap + grandchild fixture; R4 caller scope; §9 additions.
+- **R22** (round 3: codex, carried twice) Forced kill with agent children — expected: daemon and descendants gone. Each agent's tree runs in a Job with `KILL_ON_JOB_CLOSE` whose handle the daemon holds (`platform/src/group/windows.rs:4-5`), so terminating the daemon closes it and the Job kills the tree. A process that broke away from its Job survives by design (`agent/examples/spike_breakaway.rs`), and so may a child launched before its parent was assigned — the agent paths assign after launch (`group/windows.rs:10-14`). conhost membership unchecked. QA row in §5.
+- **R24** (round 4: lead recommendations · risk R20-a/b, B-1, B-2, B-4, B-6 · codex recommendations) R20 short bound armed when main's `daemon_start` begins (60 s cap before); R20 clear = actor step that re-derives and re-emits; R19 pins; `Exit` dial bound; R22 assign-after-launch gap + grandchild fixture; R4 caller scope; §9 additions.
 - **R23** (round 3 batched: lead 1, lead 3) `daemon.stop`'s `status` is the snapshot before the re-add answers; lead 3 moot after R13. **Superseded by U6** — the reply has no `status`.
 - **ADR follow-ups (main files them):** amend ADR-0344 d4–d5 (button rule kept, wording dropped) · ADR-0025 — a user-pressed 「다시 연결」 revives a dead daemon, and boot start is main-window only (R17) · ADR-0021 d5 — the `daemon_stop` surface becomes `daemon_shutdown`; its 「영향」 fallback order is now the shell's · ADR-0343 d3 — kill timing R13 and the `Exit` exception · ADR-0343 d6 (version-independent stop frame) has no landing unit · D6–D7 against ADR-0271 d5 · parent §6-4 ⑤ superseded for stops (U4).
 
@@ -225,7 +225,7 @@ Docs: main TRD row 404 → pointer here, §6-4 ③ and ⑤ wording · `docs/refe
 
 ## 9. Risks
 
-- **A spawning search racing a stop that starts after it** (U5a code review, risk 권장) — a `daemon_connect` / tray Start whose search spawns a daemon after a tray stop resolved `NoTarget` leaves that daemon running (the User re-add attaches it). No crash or data loss; the tray probe shows the truth. Accepted.
+- **A spawning search racing a stop that starts after it** (U5a code review, risk recommendation) — a `daemon_connect` / tray Start whose search spawns a daemon after a tray stop resolved `NoTarget` leaves that daemon running (the User re-add attaches it). No crash or data loss; the tray probe shows the truth. Accepted.
 - **Older daemons cancel their own shutdown** (accepted): a shipped daemon stopped by `Exit` whose `shutdown_all` outlasts the 3 s wait may survive with zero agents (`shutting_down` was set first, so boot auto-restore marks stay). `User` stops wait 10 s and kill a survivor.
 - **Kill during cleanup** — bounded: `shutdown_all` ≈5 s under the 10 s deadline; an at-once kill hits only a daemon to which nothing was sent.
 - **Unknown liveness** — an open / query failure other than 87 is "unknown": the stop reports `timeout` rather than claim gone; a process that denies `PROCESS_QUERY_LIMITED_INFORMATION` never reads as gone.
@@ -247,4 +247,4 @@ Docs: main TRD row 404 → pointer here, §6-4 ③ and ⑤ wording · `docs/refe
 - 2026-11-08 · deep · FIX (lead M1 M2 · risk F1 · codex 2 must) → edition 3
 - 2026-11-08 · delta round 2 · FIX ×3 → same-class raised to user (latch) → edition 4
 - 2026-11-09 · delta round 3 · FIX ×3 → edition 5
-- 2026-11-09 · delta round 4 · lead PASS · risk FIX (no must) · codex PASS → **PRD+TRD review PASSED** (deep, 4 delta rounds); 권장/batched folded into 5.1
+- 2026-11-09 · delta round 4 · lead PASS · risk FIX (no must) · codex PASS → **PRD+TRD review PASSED** (deep, 4 delta rounds); recommendations/batched folded into 5.1

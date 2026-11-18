@@ -16,24 +16,24 @@ describe('bandView · bandText', () => {
   })
 
   it("① plain carries a failed start's cause", () => {
-    const view = bandView({ kind: 'not_connected', refused: false }, '폴더에 쓸 수 없음')
-    expect(view).toEqual({ kind: 'not_connected', cause: { kind: 'error', message: '폴더에 쓸 수 없음' } })
-    expect(bandText(view!)).toBe(`${HEAD} 폴더에 쓸 수 없음`)
+    const view = bandView({ kind: 'not_connected', refused: false }, 'cannot write to the folder')
+    expect(view).toEqual({ kind: 'not_connected', cause: { kind: 'error', message: 'cannot write to the folder' } })
+    expect(bandText(view!)).toBe(`${HEAD} cannot write to the folder`)
   })
 
   it('① refused shows the refusal, not the start cause', () => {
-    const view = bandView({ kind: 'not_connected', refused: true }, '폴더에 쓸 수 없음')
+    const view = bandView({ kind: 'not_connected', refused: true }, 'cannot write to the folder')
     expect(view).toEqual({ kind: 'not_connected', cause: { kind: 'refused' } })
     expect(bandText(view!)).toBe(`${HEAD} ${REFUSED}`)
   })
 
   it.each([true, false])('② (can_stop %s) shows the version text and ignores the start cause', canStop => {
-    const view = bandView({ kind: 'version', can_stop: canStop }, '폴더에 쓸 수 없음')
+    const view = bandView({ kind: 'version', can_stop: canStop }, 'cannot write to the folder')
     expect(view).toEqual({ kind: 'version', cause: { kind: 'version' } })
     expect(bandText(view!)).toBe(`${HEAD} ${VERSION}`)
   })
 
   it('no band = no view, even with a start cause', () => {
-    expect(bandView(null, '폴더에 쓸 수 없음')).toBeNull()
+    expect(bandView(null, 'cannot write to the folder')).toBeNull()
   })
 })

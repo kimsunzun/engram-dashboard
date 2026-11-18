@@ -1,4 +1,4 @@
-// ADR-0242: the 「맨 아래로」 (jump to bottom) button — shown after a short delay when follow is released and there is something to scroll (U3), and pressing it pins
+// ADR-0242: the 「jump to bottom」 button — shown after a short delay when follow is released and there is something to scroll (U3), and pressing it pins
 //   to the bottom at once.
 //   Placed as a child of ScrollArea: the absolute reference is the seam's Root (relative) so it does not scroll (`ui/scroll-area.tsx` header).
 
@@ -18,7 +18,7 @@ export function JumpToBottom({
   follow: Pick<ScrollFollow, 'pinned' | 'unseenGrowth' | 'scrollable' | 'pin'>
 }) {
   const free = JUMP_BUTTON_MODE === 'whenFree' ? !follow.pinned : !follow.pinned && follow.unseenGrowth
-  // If the viewport grows or content shrinks and everything fits while off the bottom, it is already 「바닥」 (the bottom) — the pin is not measured again, so it is hidden here.
+  // If the viewport grows or content shrinks and everything fits while off the bottom, it is already 「the bottom」 — the pin is not measured again, so it is hidden here.
   const wanted = free && follow.scrollable
   const [shown, setShown] = useState(false)
 

@@ -15,7 +15,7 @@
 //!
 //! The call order and flags are the same as verified by measurement on Windows in the Phase 0 spike (agent `examples/spike.rs`).
 //! ★Nothing is used except the `windows` crate and the standard library★ — the result, fact and notification types are also kept here and the outer layer moves them
-//! into its own public types (ADR-0262 「[구현] 고른 것」 (Implementation: what was chosen) — user decision 2026-09-29). Only the tests borrow `process` and
+//! into its own public types (ADR-0262 「Implementation: what was chosen」 — user decision 2026-09-29). Only the tests borrow `process` and
 //! `testing` from the same crate.
 
 use std::io;
@@ -200,8 +200,7 @@ impl JobObjectHandle {
         unsafe { TerminateJobObject(self.handle, exit_code) }.map_err(win_err)
     }
 
-    /// Number of processes in the Job that have not yet ended. `terminate` only starts the ending and returns, so a side that waits for 「트리가 다
-    /// 끝났다」 (the tree has all ended) checks with this.
+    /// Number of processes in the Job that have not yet ended. `terminate` only starts the ending and returns, so a side that waits for 「the tree has all ended」 checks with this.
     pub(crate) fn active_processes(&self) -> io::Result<u32> {
         let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
         // SAFETY: QueryInformationJobObject — passes a valid Job handle, a stack struct pointer matching the class (BasicAccounting)
@@ -221,7 +220,7 @@ impl JobObjectHandle {
     /// All PIDs of processes now in this Job (including members of nested Jobs; the order has no meaning).
     ///
     /// ★`Ok` only when complete★ — if the list count does not equal the Job's member count within the re-ask limit it is `Err`. A missing member
-    /// would read to the caller as 「우리 것이 아니다」 (not ours).
+    /// would read to the caller as 「not ours」.
     // ADR-0262
     pub(crate) fn member_pids(&self) -> io::Result<Vec<u32>> {
         self.member_pids_with_capacity(MEMBER_LIST_INITIAL)
@@ -244,7 +243,9 @@ impl JobObjectHandle {
             // Taken as usize slots to keep the struct alignment — a ULONG_PTR entry follows the two u32 header fields.
             let mut buf = vec![0usize; HEAD_WORDS + capacity];
             let bytes = u32::try_from(core::mem::size_of_val(buf.as_slice())).map_err(|_| {
-                io::Error::other(format!("Job 멤버 명단 버퍼가 너무 크다({capacity} 칸)"))
+                io::Error::other(format!(
+                    "the Job member list buffer is too large ({capacity} entries)"
+                ))
             })?;
             // SAFETY: a valid Job handle + a writable `bytes`-byte buffer (usize-aligned, header + at least 1 entry slot).
             let asked = unsafe {
@@ -275,14 +276,14 @@ impl JobObjectHandle {
                     .get(HEAD_WORDS..HEAD_WORDS + listed as usize)
                     .ok_or_else(|| {
                         io::Error::other(format!(
-                            "Job 멤버 명단이 {listed} 개라는데 버퍼는 {capacity} 칸이다"
+                            "the Job member list says {listed} but the buffer has {capacity} entries"
                         ))
                     })?;
                 return entries
                     .iter()
                     .map(|&pid| {
                         u32::try_from(pid).map_err(|_| {
-                            io::Error::other(format!("Job 멤버 PID {pid:#x} 가 u32 를 넘는다"))
+                            io::Error::other(format!("Job member PID {pid:#x} exceeds u32"))
                         })
                     })
                     .collect();
@@ -297,8 +298,8 @@ impl JobObjectHandle {
         }
         let (assigned, listed, asked, more_data) = last;
         Err(io::Error::other(format!(
-            "Job 멤버 명단이 {MEMBER_LIST_ATTEMPTS} 번 안에 완전해지지 않았다 — 마지막 답: 멤버 {assigned} · \
-             명단 {listed} · 물은 칸 {asked} · 잘린 답 {more_data}"
+            "the Job member list did not become complete within {MEMBER_LIST_ATTEMPTS} attempts — last answer: members {assigned} · \
+              listed {listed} · asked entries {asked} · truncated answer {more_data}"
         )))
     }
 
@@ -327,8 +328,7 @@ impl JobObjectHandle {
         };
 
         let mut in_job = BOOL::default();
-        // SAFETY: two valid handles + stack output. ★The Job argument is always our handle★ — if it were NULL it would turn into 「아무 Job 에나
-        //   들었나」 (is it in any Job at all) and see someone else's Job member as ours.
+        // SAFETY: two valid handles + stack output. ★The Job argument is always our handle★ — if it were NULL it would turn into 「is it in any Job at all」 and see someone else's Job member as ours.
         unsafe { IsProcessInJob(member.handle, self.handle, &mut in_job) }.map_err(win_err)?;
         if !in_job.as_bool() {
             return Ok(None);
@@ -431,7 +431,9 @@ impl BirthPort {
                 // A Job notification carries a PID, not a pointer, in the OVERLAPPED field — it is not dereferenced.
                 let pid = overlapped as usize;
                 u32::try_from(pid).map(PortOutcome::Joined).map_err(|_| {
-                    io::Error::other(format!("Job 가입 알림의 PID {pid:#x} 가 u32 를 넘는다"))
+                    io::Error::other(format!(
+                        "the PID {pid:#x} of a Job join notification exceeds u32"
+                    ))
                 })
             }
             Ok(()) => Ok(PortOutcome::Other),
@@ -497,7 +499,7 @@ fn signaled_within(handle: HANDLE, millis: u32) -> io::Result<bool> {
         WAIT_TIMEOUT => Ok(false),
         WAIT_FAILED => Err(io::Error::last_os_error()),
         other => Err(io::Error::other(format!(
-            "프로세스 대기가 뜻밖의 값 {:#x} 를 돌려줬다",
+            "the process wait returned an unexpected value {:#x}",
             other.0
         ))),
     }
@@ -651,7 +653,7 @@ pub fn resume_suspended_process(process_id: u32) -> io::Result<()> {
         (Some(e), _) => Err(e),
         (None, 0) => Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("그 프로세스에 멈춘 스레드가 없다(스냅숏에서 본 스레드 {seen}개)"),
+            format!("that process has no suspended thread (threads seen in the snapshot: {seen})"),
         )),
         (None, _) => Ok(()),
     }
@@ -680,7 +682,7 @@ fn resume_own_thread(thread_id: u32, process_id: u32) -> io::Result<Resumed> {
         return Ok(Resumed::NotOurs);
     };
     // SAFETY: the valid thread handle just opened. On failure it is 0 — 0 is the number of the System Idle process, so it cannot be the number of the
-    // child we launched, and so the comparison below sorts it as 「남의 것」 (someone else's).
+    // child we launched, and so the comparison below sorts it as 「someone else's」.
     let owner = unsafe { GetProcessIdOfThread(thread) };
     let result = if owner != process_id {
         Ok(Resumed::NotOurs)
@@ -706,7 +708,7 @@ fn win_err(e: windows::core::Error) -> io::Error {
     io::Error::other(e)
 }
 
-// Real-process tests — at most four per test (console host included): do not launch them in a burst (local parallel limit `--test-threads=4` — `.claude/skill-bindings/qa.md` 「모듈별 명령」).
+// Real-process tests — at most four per test (console host included): do not launch them in a burst (local parallel limit `--test-threads=4` — `.claude/skill-bindings/qa.md` 「모듈별 명령」). // hangul-ok
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -733,11 +735,14 @@ mod tests {
         loop {
             let event = port
                 .next(Duration::from_millis(100))
-                .expect("포트에서 꺼내기");
+                .expect("take from the port");
             if want(event) {
                 return event;
             }
-            assert!(Instant::now() < deadline, "10 초 안에 {what} 를 못 봤다");
+            assert!(
+                Instant::now() < deadline,
+                "did not see {what} within 10 seconds"
+            );
         }
     }
 
@@ -746,79 +751,85 @@ mod tests {
         for _ in 0..100 {
             if port
                 .next(Duration::from_millis(300))
-                .expect("포트에서 꺼내기")
+                .expect("take from the port")
                 == PortOutcome::Timeout
             {
                 return;
             }
         }
-        panic!("알림이 그치지 않는다");
+        panic!("the notifications do not stop");
     }
 
     /// ⑥ Facts read through the pinned handle — parent = this test process that launched it · creation is later than this test process · executable ·
     /// command line (with the query right only). One pinned with the query right only cannot be ended.
     #[test]
     fn a_pinned_member_carries_its_facts_and_ends_only_with_the_kill_right() {
-        let job = JobObjectHandle::new().expect("Job 생성");
+        let job = JobObjectHandle::new().expect("create Job");
         assert!(
             job.pin_member(std::process::id(), false)
-                .expect("붙들기")
+                .expect("pin")
                 .is_none(),
-            "Job 밖의 이 시험 프로세스를 붙들었다"
+            "pinned this test process outside the Job"
         );
         assert!(
-            job.pin_member(0, false).expect("붙들기").is_none(),
-            "없는 번호를 붙들었다"
+            job.pin_member(0, false).expect("pin").is_none(),
+            "pinned a nonexistent number"
         );
 
         let mut x = spawn_gated_cmd("rem t40-facts", CREATE_NO_WINDOW.0);
-        job.assign(x.id()).expect("Job 편입");
+        job.assign(x.id()).expect("join the Job");
 
         let watcher = job
             .pin_member(x.id(), false)
-            .expect("붙들기")
-            .expect("우리 멤버");
+            .expect("pin")
+            .expect("our member");
         let facts = watcher.facts();
-        assert_eq!(facts.ppid, std::process::id(), "부모: {facts:?}");
+        assert_eq!(facts.ppid, std::process::id(), "parent: {facts:?}");
         let ProcessStart::Known(me) = process_start(std::process::id()) else {
-            panic!("이 시험 프로세스의 생성 시각을 못 읽었다");
+            panic!("could not read this test process's creation time");
         };
-        assert!(facts.create >= me, "생성이 부모보다 이르다: {facts:?}");
+        assert!(
+            facts.create >= me,
+            "created earlier than the parent: {facts:?}"
+        );
         assert!(
             facts.image.to_ascii_lowercase().ends_with("\\cmd.exe"),
-            "실행 파일: {facts:?}"
+            "executable: {facts:?}"
         );
         assert!(
             facts.cmdline.contains("set /p _= & rem t40-facts"),
-            "명령줄: {facts:?}"
+            "command line: {facts:?}"
         );
-        assert!(!watcher.exited().expect("끝났나"));
+        assert!(!watcher.exited().expect("has it ended"));
 
         let refused = watcher.terminate_raw(EXIT_CODE);
-        assert!(refused.is_err(), "끝내기 권한 없이 끝냈다");
+        assert!(refused.is_err(), "ended it without the termination right");
         assert!(
             watcher.classify(refused).is_err(),
-            "산 프로세스의 거절이 Gone 으로 읽혔다"
+            "the refusal of a live process was read as Gone"
         );
-        assert!(x.try_wait().expect("상태").is_none(), "조회 핸들이 죽였다");
+        assert!(
+            x.try_wait().expect("status").is_none(),
+            "the query handle killed it"
+        );
 
         let killer = job
             .pin_member(x.id(), true)
-            .expect("붙들기")
-            .expect("우리 멤버");
+            .expect("pin")
+            .expect("our member");
         let raw = killer.terminate_raw(EXIT_CODE);
         assert_eq!(
-            killer.classify(raw).expect("끝내기"),
+            killer.classify(raw).expect("end"),
             MemberOutcome::Terminated
         );
         assert!(
             watcher
                 .wait_exit(Duration::from_secs(5))
-                .expect("끝나기 대기"),
-            "5 초 안에 안 끝났다"
+                .expect("wait for exit"),
+            "did not end within 5 seconds"
         );
-        assert!(watcher.exited().expect("끝났나"));
-        let status = x.wait().expect("종료");
+        assert!(watcher.exited().expect("has it ended"));
+        let status = x.wait().expect("exit");
         assert_eq!(status.code(), Some(EXIT_CODE as i32));
     }
 
@@ -826,34 +837,38 @@ mod tests {
     /// arrives (had it been attached, both would already be piled up — ⑦-b).
     #[test]
     fn a_failed_start_leaves_the_job_unwatched() {
-        let job = JobObjectHandle::new().expect("Job 생성");
+        let job = JobObjectHandle::new().expect("create Job");
         let mut x = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW.0);
-        job.assign(x.id()).expect("Job 편입");
+        job.assign(x.id()).expect("join the Job");
 
         let mut held = None;
         let refused = job.watch_births(|port| {
             held = Some(port);
-            Err(io::Error::other("기동 실패 흉내"))
+            Err(io::Error::other("mimicked launch failure"))
         });
         assert_eq!(
             refused
-                .expect_err("start 의 실패가 그대로 와야 한다")
+                .expect_err("start's failure must come through as is")
                 .to_string(),
-            "기동 실패 흉내"
+            "mimicked launch failure"
         );
-        let port = held.expect("start 가 포트를 받았다");
+        let port = held.expect("start received the port");
 
         open_gate(&mut x);
-        wait_until("Job 안의 ping", || {
+        wait_until("ping inside the Job", || {
             job.member_pids()
                 .ok()?
                 .into_iter()
                 .find(|&pid| is_ping(pid))
         });
-        let event = port.next(Duration::from_millis(500)).expect("꺼내기");
-        assert_eq!(event, PortOutcome::Timeout, "붙지 않은 포트에 알림이 왔다");
+        let event = port.next(Duration::from_millis(500)).expect("take out");
+        assert_eq!(
+            event,
+            PortOutcome::Timeout,
+            "a notification came to a port that is not attached"
+        );
 
-        job.terminate(1).expect("Job 끝내기");
+        job.terminate(1).expect("end the Job");
         let _ = x.wait();
     }
 
@@ -861,59 +876,59 @@ mod tests {
     /// `Other` · members born after detaching are not announced.
     #[test]
     fn a_watched_job_reports_births_until_unwatched() {
-        let job = JobObjectHandle::new().expect("Job 생성");
+        let job = JobObjectHandle::new().expect("create Job");
         // There are two gates — the first ping on the first line, the second ping on the second line. The second gate is opened after detaching.
         let mut x = spawn_gated_cmd(
             "ping -n 30 127.0.0.1 & set /p _= & ping -n 30 127.0.0.1",
             CREATE_NO_WINDOW.0,
         );
         let root = x.id();
-        job.assign(root).expect("Job 편입");
-        let mut gate = x.stdin.take().expect("stdin 파이프");
+        job.assign(root).expect("join the Job");
+        let mut gate = x.stdin.take().expect("stdin pipe");
 
         let mut held = None;
         job.watch_births(|port| {
             held = Some(port);
             Ok(())
         })
-        .expect("붙이기");
-        let port = held.expect("start 가 포트를 받았다");
-        next_matching(&port, "X 의 되알림", |e| e == PortOutcome::Joined(root));
+        .expect("attach");
+        let port = held.expect("start received the port");
+        next_matching(&port, "X's echoed notification", |e| {
+            e == PortOutcome::Joined(root)
+        });
 
-        gate.write_all(b"go\r\n").expect("첫 문");
+        gate.write_all(b"go\r\n").expect("first gate");
         let PortOutcome::Joined(first) = next_matching(
             &port,
-            "X 가 띄운 ping",
+            "the ping X launched",
             |e| matches!(e, PortOutcome::Joined(pid) if is_ping(pid)),
         ) else {
-            unreachable!("Joined 만 고른다")
+            unreachable!("picks only Joined")
         };
         // Hold it to the end — so the second ping cannot reuse this number.
         let ping = job
             .pin_member(first, true)
-            .expect("붙들기")
-            .expect("우리 멤버");
-        assert_eq!(ping.facts().ppid, root, "ping 의 부모: {:?}", ping.facts());
+            .expect("pin")
+            .expect("our member");
+        assert_eq!(ping.facts().ppid, root, "ping's parent: {:?}", ping.facts());
         // Drain before ending — the `Other` below then comes from after the ending, and the only member left then is the waiting X, so there is no place for it to come from
         // other than the ping's ending.
         drain(&port);
         let raw = ping.terminate_raw(EXIT_CODE);
-        assert_eq!(
-            ping.classify(raw).expect("끝내기"),
-            MemberOutcome::Terminated
-        );
-        next_matching(&port, "ping 의 끝남", |e| e == PortOutcome::Other);
+        assert_eq!(ping.classify(raw).expect("end"), MemberOutcome::Terminated);
+        next_matching(&port, "ping's exit", |e| e == PortOutcome::Other);
         // Do not ask `exited()` right away — the ending notification may stand before the process object's signal (not measured).
         assert!(
-            ping.wait_exit(Duration::from_secs(5)).expect("끝나기 대기"),
-            "`Other` 가 왔는데 붙든 ping 이 끝나지 않았다"
+            ping.wait_exit(Duration::from_secs(5))
+                .expect("wait for exit"),
+            "`Other` came but the pinned ping did not end"
         );
 
-        job.unwatch_births().expect("떼기");
+        job.unwatch_births().expect("detach");
         drain(&port);
 
-        gate.write_all(b"go\r\n").expect("둘째 문");
-        let second = wait_until("뗀 뒤 태어난 ping", || {
+        gate.write_all(b"go\r\n").expect("second gate");
+        let second = wait_until("the ping born after detaching", || {
             job.member_pids()
                 .ok()?
                 .into_iter()
@@ -921,14 +936,14 @@ mod tests {
         });
         let deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < deadline {
-            let event = port.next(Duration::from_millis(100)).expect("꺼내기");
+            let event = port.next(Duration::from_millis(100)).expect("take out");
             assert!(
                 !matches!(event, PortOutcome::Joined(_)),
-                "뗀 뒤 태어난 {second} 이 알려졌다: {event:?}"
+                "{second}, born after detaching, was reported: {event:?}"
             );
         }
 
-        job.terminate(1).expect("Job 끝내기");
+        job.terminate(1).expect("end the Job");
         drop(gate);
         let _ = x.wait();
     }
@@ -936,23 +951,25 @@ mod tests {
     /// ① Even asking with a single first slot, growing and re-asking returns everything.
     #[test]
     fn a_one_slot_first_ask_still_lists_every_member() {
-        let job = JobObjectHandle::new().expect("Job 생성");
+        let job = JobObjectHandle::new().expect("create Job");
         let mut root = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW.0);
-        job.assign(root.id()).expect("Job 편입");
+        job.assign(root.id()).expect("join the Job");
         open_gate(&mut root);
 
-        let mut full = wait_until("cmd 와 ping", || {
+        let mut full = wait_until("cmd and ping", || {
             let pids = job.member_pids().ok()?;
             pids.iter().any(|&pid| is_ping(pid)).then_some(pids)
         });
-        let mut grown = job.member_pids_with_capacity(1).expect("늘려 되묻기");
+        let mut grown = job
+            .member_pids_with_capacity(1)
+            .expect("grow and ask again");
         full.sort_unstable();
         grown.sort_unstable();
         assert!(
             grown.len() >= 2,
-            "멤버가 둘 이상이어야 늘리기를 지난다: {grown:?}"
+            "there must be two or more members to go through growing: {grown:?}"
         );
-        assert!(grown.contains(&root.id()), "뿌리가 빠졌다: {grown:?}");
+        assert!(grown.contains(&root.id()), "the root is missing: {grown:?}");
         assert_eq!(grown, full);
 
         let _ = root.kill();
@@ -965,13 +982,13 @@ mod tests {
     /// everything is born inside the Job. Launched without a console so it does not drag in a console host (shell · script · subshell ·
     /// `sleep`: four).
     #[test]
-    #[ignore = "Git Bash(C:\\Program Files\\Git\\usr\\bin\\bash.exe) 가 있어야 한다"]
+    #[ignore = "needs Git Bash (C:\\Program Files\\Git\\usr\\bin\\bash.exe)"]
     fn msys_births_carry_exec_fork_and_foreign_command_lines() {
         use std::os::windows::process::CommandExt;
         const BASH: &str = r"C:\Program Files\Git\usr\bin\bash.exe";
         assert!(
             std::path::Path::new(BASH).exists(),
-            "{BASH} 가 없다 — PATH 의 bash 로 대신하지 않는다"
+            "{BASH} is missing — the bash on PATH is not used instead"
         );
         let script = std::env::temp_dir().join(format!("t40-facts-{}.sh", std::process::id()));
         // A non-interactive shell redirects a background command's stdin to /dev/null — the subshell lives to the end only if it receives the pipe as fd 3 and waits
@@ -980,15 +997,15 @@ mod tests {
             &script,
             "exec 3<&0\n( read _ <&3 ) &\nexec /usr/bin/sleep 30\n",
         )
-        .expect("스크립트 쓰기");
+        .expect("write the script");
         let script_arg = script.to_string_lossy().replace('\\', "/");
         let script_name = script
             .file_name()
-            .expect("파일 이름")
+            .expect("file name")
             .to_string_lossy()
             .into_owned();
 
-        let job = JobObjectHandle::new().expect("Job 생성");
+        let job = JobObjectHandle::new().expect("create Job");
         // Call `/usr/bin` by absolute path — `usr\bin\bash.exe`, started without the Git launcher, has no `/usr/bin` in `PATH`
         // (measured).
         let mut shell = Command::new(BASH)
@@ -998,24 +1015,24 @@ mod tests {
             .stderr(Stdio::null())
             .creation_flags(DETACHED_PROCESS.0)
             .spawn()
-            .expect("bash 기동");
+            .expect("launch bash");
         let root = shell.id();
-        job.assign(root).expect("Job 편입");
+        job.assign(root).expect("join the Job");
         // The subshell's `read _` waits on this pipe — hold it to the end.
-        let mut gate = shell.stdin.take().expect("stdin 파이프");
+        let mut gate = shell.stdin.take().expect("stdin pipe");
         let shell_pin = job
             .pin_member(root, false)
-            .expect("붙들기")
-            .expect("우리 멤버");
+            .expect("pin")
+            .expect("our member");
 
         let mut held = None;
         job.watch_births(|port| {
             held = Some(port);
             Ok(())
         })
-        .expect("붙이기");
-        let port = held.expect("start 가 포트를 받았다");
-        gate.write_all(b"go\n").expect("문");
+        .expect("attach");
+        let port = held.expect("start received the port");
+        gate.write_all(b"go\n").expect("gate");
 
         // Pin as soon as it is born — open the short-lived fork before it ends.
         let mut births: Vec<(u32, PinnedMember)> = Vec::new();
@@ -1044,16 +1061,17 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "10 초 안에 스크립트 · 서브셸 · sleep 을 다 못 봤다: {:#?}",
+                "did not see all of the script · subshell · sleep within 10 seconds: {:#?}",
                 births
                     .iter()
                     .map(|(pid, m)| (pid, m.facts()))
                     .collect::<Vec<_>>()
             );
-            if let PortOutcome::Joined(pid) = port.next(Duration::from_millis(100)).expect("꺼내기")
+            if let PortOutcome::Joined(pid) =
+                port.next(Duration::from_millis(100)).expect("take out")
             {
                 if pid != root {
-                    if let Some(member) = job.pin_member(pid, false).expect("붙들기") {
+                    if let Some(member) = job.pin_member(pid, false).expect("pin") {
                         births.push((pid, member));
                     }
                 }
@@ -1063,29 +1081,29 @@ mod tests {
 
         assert!(
             shell_facts.cmdline.contains("exec /usr/bin/bash"),
-            "껍데기: {shell_facts:?}"
+            "shell: {shell_facts:?}"
         );
         assert!(
             script_facts.cmdline.contains(&script_name)
                 && script_facts.cmdline != shell_facts.cmdline,
-            "exec 한 스크립트가 제 명령줄을 갖지 않는다: {script_facts:?} / {shell_facts:?}"
+            "the exec'd script does not have its own command line: {script_facts:?} / {shell_facts:?}"
         );
         assert_eq!(
             fork_facts.image, script_facts.image,
-            "서브셸: {fork_facts:?}"
+            "subshell: {fork_facts:?}"
         );
         assert_eq!(
             fork_facts.cmdline, script_facts.cmdline,
-            "서브셸이 스크립트의 명령줄 사본이 아니다"
+            "the subshell is not a copy of the script's command line"
         );
         assert!(
             sleep_facts.cmdline.contains("sleep") && sleep_facts.cmdline != script_facts.cmdline,
-            "sleep 이 스크립트의 명령줄을 가졌다: {sleep_facts:?}"
+            "sleep has the script's command line: {sleep_facts:?}"
         );
 
         // Detach before letting go of the port (the BirthPort rule).
-        job.unwatch_births().expect("떼기");
-        job.terminate(1).expect("Job 끝내기");
+        job.unwatch_births().expect("detach");
+        job.terminate(1).expect("end the Job");
         drop(gate);
         let _ = shell.wait();
         let _ = std::fs::remove_file(&script);

@@ -1,28 +1,28 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
 
-  // ADR-0137 — dev 빌드에 별도 번들 identifier(릴리스 앱과 동시 실행)
-  // ★dev 전용 오버레이 — 릴리즈(`tauri.conf.json`)의 identifier 와 절대 통일하지 말 것(되살리지 마라)★
-  //   tauri-plugin-single-instance 는 Windows 전역 뮤텍스 이름을 `{identifier}-sim` 으로 만든다
-  //   (실측: tauri-plugin-single-instance 2.4.2 `src/platform_impl/windows.rs:67`). 두 빌드가 같은
-  //   identifier 를 쓰면 같은 뮤텍스를 잡으므로, 릴리즈 앱이 떠 있는 동안 dev 앱은 창도 자기 데몬도
-  //   없이 즉시 종료된다(실측). 플러그인 Builder 는 Windows 용 이름 override 를 노출하지 않아
-  //   (`callback` 과 Linux 전용 `dbus_id` 뿐) identifier 를 가르는 것이 유일한 수단이다.
-  //   dev/release 는 데이터 폴더부터 서로 다른 독립 배포다(discovery `default_data_dir`).
-  //   ★이 파일을 실제로 먹이는 주입 지점은 둘이다(하나만 고치지 마라)★: (1) `scripts/tauri-cli.mjs`
-  //   가 `tauri dev` 서브커맨드에 `--config` 로 끼운다(Tauri CLI 경로 전용) · (2)
-  //   `scripts/build-client-shell.mjs` 가 `TAURI_CONFIG` 로 실어 `cargo build -p engram-dashboard`
-  //   에 넘긴다(CLI 를 지나지 않는 경로 — debug 런처 `.bat` 둘과 `/engram-qa` 가 그 스크립트를 부른다).
-  //   (2)가 없던 동안 debug exe 가 release identifier 로 빌드됐다(실측).
-  //   WebView2 데이터 폴더는 identifier 가 아니라 데이터 폴더(`.engram-dev`) 아래 `webview` 다(TRD
-  //   S21-storage §4) — 그 폴더에 못 쓸 때만 identifier 의 Tauri 기본 폴더로 물러난다(`webview_env.rs`).
-  //   ★값 제약★: `.app` 으로 끝내지 말 것(macOS 가 디렉터리를 앱으로 오인 — tauri#12674, CLI 가
-  //   PR#13618 이후 거부한다) · 점 없는 단일 토큰 금지(Linux 크래시 — tauri#10353).
+  // ADR-0137 — a separate bundle identifier for dev builds (run alongside the release app)
+  // ★dev-only overlay — never unify it with the identifier of release (`tauri.conf.json`) (do not bring it back)★
+  //   tauri-plugin-single-instance builds the Windows global mutex name as `{identifier}-sim`
+  //   (measured: tauri-plugin-single-instance 2.4.2 `src/platform_impl/windows.rs:67`). If the two builds use the same
+  //   identifier they take the same mutex, so while the release app is up the dev app exits immediately with neither a window nor its own daemon
+  //   (measured). The plugin Builder exposes no Windows name override
+  //   (only `callback` and the Linux-only `dbus_id`), so splitting the identifier is the only means.
+  //   dev/release are independent deployments, different down to the data folder (discovery `default_data_dir`).
+  //   ★There are two injection points that actually feed this file (do not fix only one)★: (1) `scripts/tauri-cli.mjs`
+  //   inserts it into the `tauri dev` subcommand with `--config` (Tauri CLI path only) · (2)
+  //   `scripts/build-client-shell.mjs` carries it as `TAURI_CONFIG` and hands it to `cargo build -p engram-dashboard`
+  //   (the path that does not go through the CLI — the two debug launcher `.bat` files and `/engram-qa` call that script).
+  //   While (2) was missing, the debug exe was built with the release identifier (measured).
+  //   The WebView2 data folder is not the identifier but `webview` under the data folder (`.engram-dev`) (TRD
+  //   S21-storage §4) — only when that folder is not writable does it fall back to the identifier's Tauri default folder (`webview_env.rs`).
+  //   ★Value constraints★: do not end it with `.app` (macOS mistakes a directory for an app — tauri#12674, the CLI rejects it
+  //   since PR#13618) · no single token without a dot (Linux crash — tauri#10353).
   "identifier": "com.engram.dashboard.dev",
 
-  // 실측(2026-08-16 `tauri bundle`): productName 은 exe 이름을 바꾸지 않는다 — 그건 `mainBinaryName`
-  //   담당이고 그나마 `tauri build` 에서만 적용된다. 여기선 산출물·표시 이름만 갈라 dev 결과물이
-  //   릴리즈 이름으로 위장하지 않게 한다. 그래서 dev exe 는 양쪽 다 `engram-dashboard.exe` 이고,
-  //   프로세스를 가르는 기준은 이름이 아니라 **exe 경로**다(dev = `target\debug\`).
+  // Measured (2026-08-16 `tauri bundle`): productName does not change the exe name — that is the job of `mainBinaryName`,
+  //   and even that applies only in `tauri build`. Here only the artifact and display names are split so that the dev output does not
+  //   pose as the release name. So the dev exe is `engram-dashboard.exe` on both sides,
+  //   and what tells the processes apart is not the name but the **exe path** (dev = `target\debug\`).
   "productName": "engram-dashboard-dev"
 }

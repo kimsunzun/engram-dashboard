@@ -1,4 +1,4 @@
-//! A [`StatusSink`] decorator that hands pickup observations straight to the usage service (TRD §1-4 「줍기 경로」 (pickup path) · ADR-0247) — without piling them up,
+//! A [`StatusSink`] decorator that hands pickup observations straight to the usage service (TRD §1-4 「pickup path」 · ADR-0247) — without piling them up,
 //! it calls [`UsageService::observe`] on the calling thread (the output pump).
 //!
 //! ★Pass every hook through to the wrapped sink as is — usage observation too★. The hook's default implementation is a no-op so if one is missed, even if the inner one
@@ -138,7 +138,7 @@ mod tests {
             rig.service.clone(),
         );
         sink.usage_observed(five(0, 40.0, far_reset()));
-        assert_eq!(log.count(), 1, "쌓지 않고 그 자리에서 발행까지");
+        assert_eq!(log.count(), 1, "emitted on the spot without piling up");
         assert_eq!(last_pct(&log), Some(40.0));
     }
 }

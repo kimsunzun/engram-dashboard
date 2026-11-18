@@ -11,12 +11,12 @@
 //! ## Canonical summary
 //!
 //! ```text
-//! ① 타입은 제네릭, 자원은 dyn.
-//!      제네릭 = Wire(소비자의 패킷 어휘)
-//!      dyn    = Dialer/Listener/Link(전송) · Clock(시간)
-//! ② 순수 층과 구동 층을 파일로 가른다(아래 게이트 3 이 그 벽이다).
-//! ③ 상대는 처음부터 N 개다.
-//! ④ 위로 올라가는 것은 Incoming 하나뿐이다 — 패킷과 사건이 같은 흐름을 타고 옆 채널을 두지 않는다.
+//! ① Types are generic, resources are dyn.
+//!      generic = Wire (the consumer's packet vocabulary)
+//!      dyn     = Dialer/Listener/Link (transport) · Clock (time)
+//! ② The pure layer and the driving layer are split by file (gate 3 below is that wall).
+//! ③ Peers are N from the start.
+//! ④ The only thing going up is Incoming — packets and events ride the same flow, with no side channel.
 //! ```
 //!
 //! ## Entry points
@@ -36,7 +36,7 @@
 //!
 //! ## Receiver-side invariants (TRD 3 §3-0 ① — including what the consumer bears)
 //!
-//! If the receiver falls behind, this crate does not discard but stops that peer's reading (backpressure — the line item under 「알려진 한계」 (known limits) below).
+//! If the receiver falls behind, this crate does not discard but stops that peer's reading (backpressure — the line item under 「known limits」 below).
 //! These are the rules that follow from that choice.
 //!
 //! 1. ★Do not await [`Peer::request`] on the task that drains the [`Inbox`]★ — if backpressure stops that peer's reading,
@@ -47,10 +47,10 @@
 //!    was waiting to write, or that started and ended in that time, is held time too. The window may close later than that (it noticed the release
 //!    late · a hold from before the window opened also pushes it back — erring on the side where nothing is lost) but never earlier. ★One exception★ — regardless of holds,
 //!    if the window deadline passes during a write and a replay entered the read-ahead queue in the meantime, the window may close before that replay
-//!    (「알려진 한계」 (known limits) below). Our ping goes out during that time too.
+//!    (「known limits」 below). Our ping goes out during that time too.
 //! 3. Events · messages ride one line per supervisor (that handle's inbox) in the order that supervisor produced them (the supervisor's ordering area —
 //!    `peer.rs` header). If the peer sends and closes right away, the close comes after what preceded it — if the line is full, the close is read only after those
-//!    leave the ordering area (not until the receiver has taken them all out), and if the bytes held are at or above the read share (the line item under 「알려진 한계」 (known limits)),
+//!    leave the ordering area (not until the receiver has taken them all out), and if the bytes held are at or above the read share (the line item under 「known limits」),
 //!    only after they come down below it.
 //! 4. The place where the daemon's write deadline and the shell's backpressure interlock (TRD 3 R7) cannot be measured with the in-memory harness — it has no TCP buffer.
 //!    It is the job of a real-socket test (TRD 3 §6-2 U4).
@@ -75,14 +75,14 @@
 //! **① Cap on direct workspace dependencies** (scope: the resolved dependency graph):
 //! `cargo tree -p engram-dashboard-transport --depth 1 --prefix none -e normal,dev,build --target all`
 //! `--all-features | rg "^engram-dashboard" | sort -u` → **exactly 1 line = itself**.
-//! ★Do not replace this with grep on the manifest text★ — rename · the `[dependencies.<이름>]` table form ·
+//! ★Do not replace this with grep on the manifest text★ — rename · the `[dependencies.<name>]` table form ·
 //! `[build-dependencies]` · an inactive target · `optional` all slip through in normal Cargo syntax. Do not
 //! shrink the flags either (same reason as the `command` · `base` · `messaging` cap gates).
-//! ★Two holes remain★ — because members are identified by the `engram-dashboard` **name prefix** (ADR-0151 「개명 함정」 (the rename trap)).
+//! ★Two holes remain★ — because members are identified by the `engram-dashboard` **name prefix** (ADR-0151 「the rename trap」).
 //! (a) Depending on a workspace member without that prefix passes this gate untouched. (b) If this crate drops that
 //! prefix, this gate turns red (`-p` dies or its own line loses the prefix), but the cap gates and messaging name
 //! regex of **other** crates can no longer see edges going to this crate (the list is in CLAUDE.md
-//! 「빌드·검증 명령」 (build and verification commands) — not copied here).
+//! 「build and verification commands」 — not copied here).
 //!
 //! **② Tauri import 0** (ADR-0003):
 //! `rg "^\s*use tauri" crates/engram-dashboard-transport/src/` → **0 lines**.
@@ -94,14 +94,14 @@
 //! `crates/engram-dashboard-transport/src/pending.rs crates/engram-dashboard-transport/src/stream.rs`
 //! `crates/engram-dashboard-transport/src/machine.rs` → **0 lines**.
 //! ★Anchoring only on `use` lines is pierced by one inline full path★ — if the body uses a full path like `tokio::spawn(…)`,
-//! no import appears. The prefix `(?:[^/]|/[^/])*?` means 「아직 `//` 를 안 만났다」 (have not yet met the comment marker) and so catches **only outside comments**,
+//! no import appears. The prefix `(?:[^/]|/[^/])*?` means 「have not yet met the comment marker」 and so catches **only outside comments**,
 //! which is why this header's self-quotation is not a false positive (precedent = the `replay_flight` purity gate, ADR-0175 decision 3).
 //! ★This gate has no compiler backstop★ — being in the same crate, a single `tokio` line just compiles.
 //! This regex is the **only wall**. ★If a file disappears the match is 0 and reads as a pass★ — after renaming or
 //! moving, first check with `test -f` that the three files exist.
 //! ★Do not strip the `\s*` around `::`★ — it catches the spaced form (`tokio :: spawn`) — the reason is in the comment of the `replay_flight` purity gate in
 //! `.github/workflows/ci.yml`.
-//! ★Known limit = names that are not in the `<이름>::` shape★ — aliases (`use tokio as rt;` · `extern crate tokio as rt;`), final-segment
+//! ★Known limit = names that are not in the `<name>::` shape★ — aliases (`use tokio as rt;` · `extern crate tokio as rt;`), final-segment
 //! imports (`use std::net;`) and multi-item groups (`use std::{net::TcpStream, time::Instant};`) are not seen
 //! (`docs/todo/observed-only.md`).
 //! ★The draft in TRD §9-2 aimed only at `machine.rs`★ — the file table marks all three ★pure★, so it was widened to three.
@@ -117,7 +117,7 @@
 //! it dies at this line while the two above stay green — the first line does not compile the adapter at all, and the second
 //! compiles it with that feature on (measured: put that reference in the lib and the two above are green and only this line
 //! dies with an unresolved import). Since all it measures is that compilation holds, it is `check`, not `test`.
-//! ★Do not read it as 「이 조합에는 돌 테스트가 0개다」 (this combination has 0 tests to run) — that is false★ — `cfg(test)` exposes the harness too, so
+//! ★Do not read it as 「this combination has 0 tests to run」 — that is false★ — `cfg(test)` exposes the harness too, so
 //! `cargo test -p engram-dashboard-transport --features ws` runs the unit tests as usual. The zero is only
 //! the four real-socket suites in `tests/`.
 //!
@@ -149,11 +149,11 @@
 //!   blocked forever, and memory without a cap grows without bound. **Two reviewers split at this point, and leaving the bounded ring in its current
 //!   shape is the user's decision** (2026-09-06) — our real `Tag` is a UUID so a legitimate collision does not
 //!   happen, and the remaining hole needs **a consumer bug + a late reply by one ring's worth** at the same time.
-//!   ★A later session must not misread this as a mistake and 「고치지」 (fix) it★ — details in the [`Pending`] rustdoc.
+//!   ★A later session must not misread this as a mistake and 「fix」 it★ — details in the [`Pending`] rustdoc.
 //! - ★**If live numbers overlap, both sides fail**★ — the old waiter gets [`RequestError::Superseded`] and
 //!   the new request gets [`RequestError::TagRetired`]. Since the correlation key is that one number alone, **the wire has no means to tell a late
 //!   reply to the earlier request from the later request's match**, and rather than misdeliver, it fails both.
-//!   ★This differs from 「새 것이 승계」 (the new one takes over) in TRD §4-1★.
+//!   ★This differs from 「the new one takes over」 in TRD §4-1★.
 //! - ★**The place where a close code reaches the peer is narrow**★ — RFC 6455 §7.4.1 pins `1006` down as a reserved
 //!   value that cannot be sent on the wire. **When we disconnect (exit · reconnect), we push to the end to carry the code**
 //!   (canonical place = `Supervisor::drop_link`), but on a congested socket `Policy::write_deadline` cuts that wait
@@ -169,7 +169,7 @@
 //! - ★**Jitter is deterministic under a manual clock**★ — the random source is the clock's low-order nanoseconds + a per-peer seed, so it is the property the harness
 //!   wants, but in exchange the *variance* of jitter can be observed only on a real socket.
 //! - ★**`oldest_valid` of [`TransportEvent::StreamTruncated`] is an observed value, not a value the peer told us**★ —
-//!   the six fields of [`Wire`] have no entrance to carry 「지금 유효한 가장 오래된 번호」 (the oldest number valid now). After issuing a re-request,
+//!   the six fields of [`Wire`] have no entrance to carry 「the oldest number valid now」. After issuing a re-request,
 //!   while waiting for its answer (fragment `after + 1`), it **holds** out-of-order fragments that arrive, and when the window closes
 //!   (deadline exceeded · [`Policy::resume_buffer`] saturated · held-bytes cap · stream eviction · supervisor cleanup) it raises that number **while releasing
 //!   in order from its first number**. So the value is true — it really delivers from that number. Progress is pushed to
@@ -178,7 +178,7 @@
 //!   every consumer, so it needs the user's approval★.
 //! - ★**While holding, delivery is delayed**★ — to keep order, fragments of that stream are not raised until the window closes.
 //!   Max delay = [`Policy::resume_timeout`] + the time held by backpressure in the meantime (it is delayed further by as much as the receiver is behind —
-//!   「받는 쪽 불변식」 (receiver-side invariants) 2 above), max load = [`Policy::resume_buffer`] per stream · window cap 8 MiB per supervisor (half the byte
+//!   「receiver-side invariants」 2 above), max load = [`Policy::resume_buffer`] per stream · window cap 8 MiB per supervisor (half the byte
 //!   budget of a stream-using supervisor — the line item below · beyond that the window closes as truncated). ★If the fragment that would exceed the window cap is a new hole, the window is not opened at all★ — it reports
 //!   truncation ([`TransportEvent::StreamTruncated`]) at once without a re-request and continues from that fragment. ★The window cap is shared by all
 //!   of a supervisor's streams★ — if one stream's open window is filling the cap, another stream's new hole becomes
@@ -187,14 +187,13 @@
 //!   without backpressure**★ — when the deadline has passed, the operating loop looks at the timer before the frame (`next_turn` in `peer.rs`). The first
 //!   turn after the write ends sees the window deadline passed, closes the window as truncated, and the replay processed after that is discarded as a past number.
 //!   The write does not need to be longer than the window deadline — one write that crosses the open window's deadline is enough. Time held by backpressure
-//!   is subtracted separately from this (「받는 쪽 불변식」 (receiver-side invariants) 2 above).
+//!   is subtracted separately from this (「receiver-side invariants」 2 above).
 //!   TODO(stream-replay-vs-timer): decide the priority of frame versus deadline in that case.
 //! - ★**The stream ledger is cut at [`Policy::max_streams`]**★ — on overflow it forgets starting from the **least recently used** and
 //!   reports with [`TransportEvent::StreamForgotten`] (fragments being held are returned with it).
 //!   ★If a forgotten stream appears again later, the ledger starts from scratch, so **progress rewinds**★ — preventing that
 //!   would require remembering what was forgotten, and then the reason for having a cap disappears.
-//! - ★**The reconnect budget has two axes**★ — 「못 붙는다」 (cannot connect; a successful connection resets it to 0) and 「붙어도 안
-//!   버틴다」 (connects but does not last; the consecutive count that failed to fill [`Policy::live_dwell`]). Whichever runs out, it gives up, and both
+//! - ★**The reconnect budget has two axes**★ — 「cannot connect」 (a successful connection resets it to 0) and 「connects but does not last」 (the consecutive count that failed to fill [`Policy::live_dwell`]). Whichever runs out, it gives up, and both
 //!   use [`ReconnectPolicy::max_attempts`] as the cap.
 //! - ★**The upward line is separate per handle, and when it fills it does not discard — instead it stops that peer's reading**★ —
 //!   every time [`Registry::add`] brings one up it sets up one line and returns its receiving end ([`Inbox`]) (bringing up the same label again
@@ -255,7 +254,7 @@
 //!   came off the registry back on and when [`Registry::add`]ing that label ([`Registry::attach_with_policy`] ·
 //!   [`Registry::add_with_policy`]). It does not arise if each connection uses a new label (TRD 3 §3-1 ① `conn-<ConnId>` — ConnId is monotonic).
 //! - ★**There is only one adapter and its limits are canonical in that file's header**★ — [`ws`] (feature `ws`) is the only
-//!   real transport implementation, and the canonical source is the two sections 「알려진 한계」 (known limits) · 「통로 성질」 (link properties) in the `src/ws.rs` header (**unverified** items are
+//!   real transport implementation, and the canonical source is the two sections 「known limits」 · 「link properties」 in the `src/ws.rs` header (**unverified** items are
 //!   in there too). ★Do not copy any part of that list here★ — a hand-moved list goes stale, and if only four are written
 //!   the next session reads those four as all of them.
 //!
@@ -278,10 +277,12 @@
 //!   closes the TCP · whether the size cap went into the tungstenite settings (both directions) · whether the permit count is right in the real accept order · whether the accepted link
 //!   goes onto the registry and requests flow both ways. The header decision table itself is measured by the `ws.rs` unit tests without a socket. The requirement to measure it on a real socket
 //!   is the TRD 3 §6-0 U7 row (canonical reason = the header of `tests/ws_accept.rs`).
-//! ★Do not read it as 「인메모리 하네스로 옮기면 빨라진다」 (moving them to the in-memory harness makes it faster)★ — the moment you move them, what they measured disappears.
+//! ★Do not read it as 「moving them to the in-memory harness makes it faster」★ — the moment you move them, what they measured disappears.
 //!
 //! ★Do not add `-- --test-threads=4`★ — this crate spawns no child process at all.
-//! It is exactly the decision rule of `.claude/skill-bindings/qa.md` 「모듈별 명령」 (per-module commands), the same situation as `command` · `protocol` · `messaging` · `net`.
+// hangul-ok-begin
+//! It is exactly the decision rule of `.claude/skill-bindings/qa.md` 「모듈별 명령」, the same situation as `command` · `protocol` · `messaging` · `net`.
+// hangul-ok-end
 
 // ADR-0177
 // ADR-0180

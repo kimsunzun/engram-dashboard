@@ -1,7 +1,7 @@
 # ADR-0085: The CLI backend control channel = an in-band output marker (M3) — engram-ctl discarded
 
 - 상태: **폐기 (Superseded by ADR-0086)** — two independent investigations (the main /research fan-out + the user's separate Codex investigation) converged: zero cases that adopted free-text marker stdout scraping as the primary channel + in a follow-up spike compliance was 66% (quoted body broken, nonce misreported). The control channel switches to dual typed entrances (MCP+CLI) + an SQLite mailbox. ~~확정 (2026-07-15, basis: user decision (security, speed) + claude 2.1.170 spike measurement (markers 38/38) + live/replay boundary code check · Supersedes ADR-0080)~~
-- 관련: Supersedes ADR-0080 (engram-ctl ingress discarded) · CLAUDE.md §5(LLM-우선 제어)·아키텍처 「백엔드 확장」(capability matrix) · ADR-0002 (capability = transport ⊕ backend)·ADR-0081 (UI opaque-relay survives)·ADR-0079 (resume seed boundary)·ADR-0003 (core isolation) · decision note `docs/process/S17-llm-control-surface/control-channel-deliberation-m3.md` · step-log S17
+- 관련: Supersedes ADR-0080 (engram-ctl ingress discarded) · CLAUDE.md §5(LLM-first control)·architecture 「백엔드 확장」(capability matrix) · ADR-0002 (capability = transport ⊕ backend)·ADR-0081 (UI opaque-relay survives)·ADR-0079 (resume seed boundary)·ADR-0003 (core isolation) · decision note `docs/process/S17-llm-control-surface/control-channel-deliberation-m3.md` · step-log S17
 
 ## 맥락
 We must decide the **channel** for agent A→B messages (and future UI and observation control). ADR-0080 set the ingress of this channel as `child claude의 Bash 도구 → 컴파일 Rust engram-ctl → 데몬 WS(토큰 auth)` (that is, the child claude's Bash tool → compiled Rust engram-ctl → daemon WS (token auth)) (proposed state, not confirmed). The user raised two points:

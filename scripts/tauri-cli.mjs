@@ -10,9 +10,9 @@
 // ★Why a wrapper is needed (do not go back to `"tauri": "tauri"`)★: a dev build must come up with a **different bundle
 //   identifier** from release — if the same, the single-instance mutex collides and the dev app dies at once while the release app
 //   is running (full reason = the overlay file comment). The official means to separate the identifier on the CLI path is
-//   `--config <오버레이>`, but that flag **belongs to the subcommand** (`tauri dev -c ...`;
+//   `--config <overlay>`, but that flag **belongs to the subcommand** (`tauri dev -c ...`;
 //   there is no `tauri -c ... dev`) so it cannot be hard-coded into the npm script string — npm always appends user arguments
-//   **at the end**, so `npm run tauri dev` becomes `<스크립트> dev`. So this one layer that takes the arguments and
+//   **at the end**, so `npm run tauri dev` becomes `<script> dev`. So this one layer that takes the arguments and
 //   inserts by position is needed. The purpose is that developers need not memorize the flag.
 // ★Subcommands other than dev are not touched★ — the distribution identity (`com.engram.dashboard`) must stay as is.
 //   The CI's build-release.ps1 also goes through this file with `npm run tauri -- build --no-bundle`.
@@ -49,9 +49,9 @@ const hasConfig = preArgs.some((a) => a === '-c' || a === '--config' || a.starts
 //   The reason to **reject** rather than erase = erasing here would hide "why was my overlay ignored".
 if (subIndex !== -1 && preArgs[subIndex] !== 'dev' && (process.env.TAURI_CONFIG ?? '') !== '') {
   process.stderr.write(
-    `tauri-cli: "${preArgs[subIndex]}" 는 TAURI_CONFIG 가 설정된 환경에서 돌 수 없습니다 — 산출물 identifier 가 오염됩니다.\n` +
-      '  이 값은 debug 셸 빌드 전용입니다(scripts/build-client-shell.mjs 가 자식 프로세스에만 넘깁니다).\n' +
-      '  변수를 지운 셸에서 다시 실행하세요.\n',
+    `tauri-cli: "${preArgs[subIndex]}" cannot run in an environment with TAURI_CONFIG set — the artifact identifier would be tainted.\n` +
+      '  This value is only for the debug shell build (scripts/build-client-shell.mjs passes it only to the child process).\n' +
+      '  Run again from a shell with the variable cleared.\n',
   )
   process.exit(1)
 }
@@ -63,7 +63,7 @@ if (injected) {
 } else if (preArgs.includes('dev') && !hasConfig) {
   // If a global option that takes a value appears, a subIndex misjudgment (`tauri --opt val dev` → val mistaken for the subcommand)
   // really blows up. Today no such option exists so it is latent — instead of restructuring we leave only a conspicuous warning.
-  process.stderr.write('tauri-cli: "dev" 토큰이 보이지만 --config 오버레이를 못 끼웠습니다(서브커맨드 판정 확인 요망)\n')
+  process.stderr.write('tauri-cli: the "dev" token is present, but the --config overlay could not be inserted (check the subcommand detection)\n')
 }
 
 cli.run(args, 'npm run tauri').catch((err) => {

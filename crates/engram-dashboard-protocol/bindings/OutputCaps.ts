@@ -2,10 +2,10 @@
 
 export type OutputCaps = { terminal_bytes: boolean, 
 /**
- * 구조화 스트림(NDJSON) 여부(ADR-0044).
- * `#[serde(default)]`(FIX 3): M1 에서 새로 추가된 필드라, 이 필드가 없는 옛 wire(구 데몬/프론트)를
- * 받아도 관용적으로 false 로 역직렬화한다(sibling `output_format` 과 같은 additive·tolerant 접근 —
- * PROTOCOL_VERSION 유지). ts-rs 는 serde(default) 를 optional 로 표기하지 않으므로 TS 는 여전히
- * `structured: boolean`(non-optional) — 프론트는 손댈 필요 없다.
+ * Whether it is a structured stream (NDJSON) (ADR-0044).
+ * `#[serde(default)]` (FIX 3): a field newly added in M1, so even receiving old wire without this field (old daemon/frontend)
+ * it tolerantly deserializes as false (the same additive·tolerant approach as sibling `output_format` —
+ * PROTOCOL_VERSION kept). ts-rs does not mark serde(default) as optional, so the TS is still
+ * `structured: boolean` (non-optional) — the frontend needs no change.
  */
 structured: boolean, markdown: boolean, tool_events: boolean, usage: boolean, };

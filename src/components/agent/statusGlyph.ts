@@ -1,6 +1,5 @@
-// ★Split into a shared module★: the pure mapping functions that originally lived in AgentList.tsx live here. The RichSlot header draws the same
-//   status glyph, and to avoid a transitive dependency on the heavy AgentList module (react-arborist · all the tree logic),
-//   only the pure helpers go in this light module. AgentList re-exports these values so existing importers/tests stay unchanged.
+// Pure status-glyph mapping, kept out of AgentList.tsx so the RichSlot header can draw the same glyph without pulling in the heavy
+//   AgentList module (react-arborist · the tree logic). AgentList re-exports these values.
 //
 // Agent status → icon · color mapping. What ADR-0062 §38 requires is **headless fixing of every branch**, and this file keeps
 //   only that — the mapping can be tested alone without AgentList, which drags in react-arborist.
@@ -9,9 +8,6 @@
 //
 // ★A row has only one symbol (ADR-0173)★: even when axes grow (status · last failure), symbols are not placed side by side but
 //   swapped. That decision is in the one `isFailureBlocked`, and the symbol · color · hover all follow it.
-//   ★Iconization (ADR-0168) does not change this axis★: only the *shape* of the return changed — a set of
-//   {icon · fill · shape token} came in place of the old character `⊘`, and the decision formula · color · hover wording were not touched. The observation surface
-//   also only moved from textContent to the `shape` token and did not disappear (an svg leaves no text).
 
 import { Ban, Circle, Loader, Square, X, type LucideIcon } from 'lucide-react'
 
@@ -41,7 +37,7 @@ export type StatusGlyphIcon = {
  *   a line joining the viewBox corners (22,2 → 2,22), so it sticks out of the circle. Only the direction (↘ vs ↗) differs and the reading of "a circle struck out"
  *   is the same, so `Ban`, the standard form of the prohibition symbol, fits on both meaning (cannot open) and shape.
  * ★Fill is `none`★: filled, the slash inside the circle is buried and the silhouette overlaps Running (filled circle) — when color is
- *   neutralized in e-ink there is nothing left to tell the two apart (ADR-0062 「모양이 1차 신호」 — shape is the primary signal).
+ *   neutralized in e-ink there is nothing left to tell the two apart (ADR-0062 「shape is the primary signal」 — shape is the primary signal).
  */
 const BLOCKED_GLYPH: StatusGlyphIcon = { Icon: Ban, fill: 'none', shape: 'blocked' }
 
@@ -50,7 +46,7 @@ const BLOCKED_GLYPH: StatusGlyphIcon = { Icon: Ban, fill: 'none', shape: 'blocke
  *
  * ★Running wins (ADR-0173)★: even if it holds a last failure, if it is up we draw the original status symbol. A failure display is
  *   the signal "this entry cannot be opened right now", and putting it on a running entry would be a lie.
- * ★`Exiting` is also on the 「도는 중」 (running) side★: it is a **transitional** transition the manager emits, not a state that stays (ADR-0005).
+ * ★`Exiting` is also on the 「running」 side★: it is a **transitional** transition the manager emits, not a state that stays (ADR-0005).
  *   Counting it as a resting state makes the row flicker with the prohibition mark for the few seconds of a normal exit.
  * ★Why swapping loses nothing★: the display appears only for entries that are not up, and then the original symbol (square/empty circle)
  *   has no information to carry.
@@ -66,7 +62,7 @@ export function isFailureBlocked(
  * **Shape**, not color, carries the status, so it is distinguishable in e-ink as well.
  *
  * When `lastFailure` takes the symbol (`isFailureBlocked` above) it **swaps in** the prohibition mark regardless of status —
- * no second symbol is placed beside it (ADR-0173). Omitting the argument gives the old behavior where only the status axis runs —
+ * no second symbol is placed beside it (ADR-0173). Omitting the argument runs the status axis only.
  * ★Why the second argument is optional★: a caller with no notion of last failure (a spot that knows only status, like the RichSlot header)
  * must still compile as is. Making it required would make callers unrelated to this axis carry `null` too.
  *
@@ -110,8 +106,7 @@ export function statusGlyphIcon(
 }
 
 /**
- * ADR-0062 amendment: originally "status = shape (not color)", but
- * when e-ink was split off as a separate mode, color is allowed in other themes. Color does not replace shape but is *added* to it.
+ * ADR-0062 amendment: color is allowed in non-e-ink themes, but it is *added* to shape, never a replacement for it.
  * ★No color literals · variables only★ (ADR-0062 §44):
  * the green value is owned by --status-running in theme.css, and the e-ink block neutralizes it to var(--text-muted) so
  * only shape remains in e-ink (shape is still the primary signal). The warning color (--status-blocked) follows the same rule.
@@ -125,7 +120,7 @@ export function statusGlyphColor(status: string, lastFailure?: AgentFailureKind 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Presentation layer — 「답을 기다리는 중」 (waiting for an answer) · 「방금 거절당했다」 (just rejected)
+// Presentation layer — 「waiting for an answer」 · 「just rejected」
 //
 // ★Do not grow the backend state★: `status` becomes `Running` optimistically the moment a session is created (the core's
 //   OutputCore initial value) and has never meant "connected · usable". So a double-clicked row drew a green filled circle in the span before
@@ -134,7 +129,7 @@ export function statusGlyphColor(status: string, lastFailure?: AgentFailureKind 
 //   +2.4s → green 4.2s → only then the prohibition mark).
 //
 // ★The direction of the fix = use the answer the frontend already holds★: the in-flight/rejection of the activation RPC is known to this screen
-//   first (the moment a rejection raises the 「실패」 (failed) badge). So without touching the status axis we lay
+//   first (the moment a rejection raises the 「failed」 badge). So without touching the status axis we lay
 //   a layer on top — the meaning of `isFailureBlocked` does not change by a single character.
 //
 // ★The property that the three (symbol · color · hover) follow one decision is kept★ (ADR-0173): `rowPhase` below is the place of that
@@ -146,7 +141,7 @@ export function statusGlyphColor(status: string, lastFailure?: AgentFailureKind 
  *
  * - `pending`  : a request made on this row is still running. The answer is unknown, so no status symbol is drawn.
  * - `rejected` : the activation just made was **rejected**. Before the process is observed dead `status` may still be
- *                `Running` and the 「마지막 실패」 (last failure) record also arrives a beat later — we wait for neither.
+ *                `Running` and the 「last failure」 record also arrives a beat later — we wait for neither.
  * - `settled`  : anything else — the status · last failure axes (`statusGlyphIcon` above) as is.
  */
 export type RowPhase = 'settled' | 'pending' | 'rejected'
@@ -188,7 +183,7 @@ export function rowGlyphIcon(
   lastFailure?: AgentFailureKind | null,
 ): StatusGlyphIcon {
   if (phase === 'pending') return PENDING_GLYPH
-  // ★Do not wait for the record★: the rejection is an answer this screen received directly, and the 「마지막 실패」 (last failure) is merely a copy of that fact
+  // ★Do not wait for the record★: the rejection is an answer this screen received directly, and the 「last failure」 is merely a copy of that fact
   //   coming back around through the backend. When the record arrives and it settles down to `settled`, the same prohibition mark comes out.
   if (phase === 'rejected') return BLOCKED_GLYPH
   return statusGlyphIcon(status, lastFailure)

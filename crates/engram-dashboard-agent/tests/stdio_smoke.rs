@@ -165,7 +165,7 @@ fn stdio_stdout_pump_and_finalize_once() {
 
     assert!(
         wait_until(Duration::from_secs(5), || out.contains("OUT-MARKER")),
-        "5s 내 stdout 마커 미수신"
+        "did not receive the stdout marker within 5s"
     );
 
     assert!(
@@ -173,23 +173,23 @@ fn stdio_stdout_pump_and_finalize_once() {
             core.status(),
             AgentStatus::Exited { .. }
         )),
-        "자연 종료가 Exited 로 finish 되지 않음: {:?}",
+        "the natural exit did not finish as Exited: {:?}",
         core.status()
     );
     core.join_pump(Duration::from_secs(5));
 
     let seqs = out.seqs();
-    assert!(!seqs.is_empty(), "출력 청크가 없음");
-    assert_eq!(seqs[0], 0, "첫 seq 는 0");
+    assert!(!seqs.is_empty(), "no output chunks");
+    assert_eq!(seqs[0], 0, "the first seq is 0");
     assert!(
         seqs.windows(2).all(|w| w[1] > w[0]),
-        "seq 가 단조 증가여야 함: {seqs:?}"
+        "seq must increase monotonically: {seqs:?}"
     );
 
     assert_eq!(
         status_sink.terminal_count(),
         1,
-        "finalize 1회 위반 — terminal 전이 {}건: {:?}",
+        "finalize-once violation — {} terminal transitions: {:?}",
         status_sink.terminal_count(),
         status_sink.statuses()
     );
@@ -221,7 +221,7 @@ fn stdio_stderr_not_in_output_stream() {
 
     assert!(
         wait_until(Duration::from_secs(5), || out.contains("OUT-MARKER")),
-        "5s 내 stdout 마커 미수신"
+        "did not receive the stdout marker within 5s"
     );
     // Wait for exit to secure a point at which stderr has also been fully drained.
     assert!(
@@ -229,16 +229,19 @@ fn stdio_stderr_not_in_output_stream() {
             core.status(),
             AgentStatus::Exited { .. }
         )),
-        "종료 미도달"
+        "exit not reached"
     );
     core.join_pump(Duration::from_secs(5));
     // Spare wait (time for the stderr drain thread to finish).
     std::thread::sleep(Duration::from_millis(200));
 
-    assert!(out.contains("OUT-MARKER"), "stdout 마커는 출력에 있어야 함");
+    assert!(
+        out.contains("OUT-MARKER"),
+        "the stdout marker must be in the output"
+    );
     assert!(
         !out.contains("ERR-MARKER"),
-        "stderr 가 출력 스트림에 새어들어옴(NDJSON 오염): {}",
+        "stderr leaked into the output stream (NDJSON pollution): {}",
         String::from_utf8_lossy(&out.concat())
     );
 }
@@ -266,7 +269,7 @@ fn stdio_stdin_reaches_child_then_shutdown_kills() {
         .expect("send_input");
     assert!(
         wait_until(Duration::from_secs(5), || out.contains("engram-echo-back")),
-        "5s 내 echo-back 미수신(stdin 이 자식에 도달 못 함): {}",
+        "did not receive the echo-back within 5s (stdin did not reach the child): {}",
         String::from_utf8_lossy(&out.concat())
     );
 
@@ -275,7 +278,7 @@ fn stdio_stdin_reaches_child_then_shutdown_kills() {
             core.status(),
             AgentStatus::Exited { .. } | AgentStatus::Killed
         ),
-        "echo-back 후에도 살아 있어야 함(장수 자식)"
+        "it must stay alive even after the echo-back (long-lived child)"
     );
 
     let kill_started = Instant::now();
@@ -284,11 +287,11 @@ fn stdio_stdin_reaches_child_then_shutdown_kills() {
     let elapsed = kill_started.elapsed();
     assert!(
         elapsed < Duration::from_secs(5),
-        "shutdown+join 이 5s 내 안 끝남(hang 의심): {elapsed:?}"
+        "shutdown+join did not finish within 5s (suspected hang): {elapsed:?}"
     );
     assert!(
         matches!(core.status(), AgentStatus::Killed),
-        "shutdown 후 status 가 Killed 가 아님: {:?}",
+        "after shutdown the status is not Killed: {:?}",
         core.status()
     );
 }
@@ -346,28 +349,28 @@ fn stdio_decoder_routes_bytes_and_flushes_on_eof() {
             core.status(),
             AgentStatus::Exited { .. }
         )),
-        "종료 미도달: {:?}",
+        "exit not reached: {:?}",
         core.status()
     );
     core.join_pump(Duration::from_secs(5));
 
     assert!(
         *total_bytes.lock().unwrap() > 0,
-        "pump 가 자식 바이트를 decoder.decode 로 라우팅하지 않음"
+        "the pump did not route the child's bytes to decoder.decode"
     );
     let tags = out.event_tags();
     assert!(
         tags.iter().any(|t| t == "structured:fake-chunk"),
-        "decode 산출 구조화 이벤트 미수신: {tags:?}"
+        "did not receive the structured events decode produced: {tags:?}"
     );
     assert_eq!(
         tags.last().map(String::as_str),
         Some("done"),
-        "EOF 후 flush(MessageDone)가 마지막에 와야 함: {tags:?}"
+        "after EOF the flush (MessageDone) must come last: {tags:?}"
     );
     assert!(
         !out.has_bytes(),
-        "decoder 주입 경로에서 콘솔 바이트 프레임이 새면 안 됨"
+        "on the decoder injection path, console byte frames must not leak"
     );
 }
 
@@ -399,21 +402,21 @@ fn stdio_decoder_flush_skipped_on_shutdown_kill() {
         .expect("send_input");
     assert!(
         wait_until(Duration::from_secs(5), || *total_bytes.lock().unwrap() > 0),
-        "stdin echo 주입 후에도 decode 라우팅을 확인 못함"
+        "could not confirm the decode routing even after the stdin echo injection"
     );
 
     transport.shutdown();
     core.join_pump(Duration::from_secs(5));
     assert!(
         matches!(core.status(), AgentStatus::Killed),
-        "shutdown 후 status 가 Killed 가 아님: {:?}",
+        "after shutdown the status is not Killed: {:?}",
         core.status()
     );
 
     let tags = out.event_tags();
     assert!(
         !tags.iter().any(|t| t == "done"),
-        "kill 경로에서 flush(done)가 방출됨 — shutdown 시 flush 스킵 회귀(FIX-2): {tags:?}"
+        "the flush (done) was emitted on the kill path — regression of skipping the flush on shutdown (FIX-2): {tags:?}"
     );
 }
 
@@ -467,7 +470,7 @@ fn stdio_real_claude_decoder_emits_structured_event() {
             core.status(),
             AgentStatus::Exited { .. }
         )),
-        "종료 미도달"
+        "exit not reached"
     );
     core.join_pump(Duration::from_secs(5));
     let _ = std::fs::remove_file(&path);
@@ -475,13 +478,16 @@ fn stdio_real_claude_decoder_emits_structured_event() {
     let tags = out.event_tags();
     assert!(
         tags.iter().any(|t| t == "text"),
-        "실 ClaudeStreamDecoder 가 assistant text 라인을 정제 못함: {tags:?}"
+        "the real ClaudeStreamDecoder did not refine the assistant text line: {tags:?}"
     );
     assert!(
         tags.iter().any(|t| t == "done"),
-        "실 ClaudeStreamDecoder 가 result 라인을 MessageDone 으로 정제 못함: {tags:?}"
+        "the real ClaudeStreamDecoder did not refine the result line into MessageDone: {tags:?}"
     );
-    assert!(!out.has_bytes(), "구조화 경로에 콘솔 바이트 누출");
+    assert!(
+        !out.has_bytes(),
+        "console bytes leaked into the structured path"
+    );
 }
 
 // ── Usage pickup: the pump passes the decoder's observations to the status sink ──────────────
@@ -546,7 +552,7 @@ fn stdio_pump_forwards_usage_after_decode_and_flush() {
             core.status(),
             AgentStatus::Exited { .. }
         )),
-        "종료 미도달: {:?}",
+        "exit not reached: {:?}",
         core.status()
     );
     core.join_pump(Duration::from_secs(5));
@@ -558,12 +564,12 @@ fn stdio_pump_forwards_usage_after_decode_and_flush() {
         .collect();
     assert!(
         pcts.iter().any(|p| *p == Some(10.0)),
-        "decode 뒤 관측이 sink 에 안 닿음: {pcts:?}"
+        "the observation after decode did not reach the sink: {pcts:?}"
     );
     assert_eq!(
         pcts.last(),
         Some(&Some(20.0)),
-        "flush 뒤 관측이 마지막에 와야 함: {pcts:?}"
+        "the observation after flush must come last: {pcts:?}"
     );
 }
 
@@ -613,7 +619,7 @@ fn stdio_real_claude_decoder_reports_rate_limit_usage() {
             core.status(),
             AgentStatus::Exited { .. }
         )),
-        "종료 미도달"
+        "exit not reached"
     );
     core.join_pump(Duration::from_secs(5));
     let _ = std::fs::remove_file(&path);
@@ -631,7 +637,7 @@ fn stdio_real_claude_decoder_reports_rate_limit_usage() {
     assert_eq!(
         tags,
         vec!["done".to_string()],
-        "rate_limit_event 는 출력 이벤트가 되지 않는다"
+        "rate_limit_event does not become an output event"
     );
 }
 
@@ -656,24 +662,24 @@ fn stdio_no_decoder_passes_terminal_bytes_through() {
 
     assert!(
         wait_until(Duration::from_secs(5), || out.contains("PLAIN-BYTES")),
-        "5s 내 바이트 직통 미수신"
+        "did not receive the straight-through bytes within 5s"
     );
     assert!(
         wait_until(Duration::from_secs(5), || matches!(
             core.status(),
             AgentStatus::Exited { .. }
         )),
-        "종료 미도달"
+        "exit not reached"
     );
     core.join_pump(Duration::from_secs(5));
 
     assert!(
         out.has_bytes(),
-        "None 경로는 콘솔 바이트를 그대로 흘려야 함"
+        "the None path must pass console bytes through as is"
     );
     assert!(
         out.event_tags().is_empty(),
-        "None 경로에서 구조화 이벤트가 나오면 안 됨: {:?}",
+        "no structured events must come out on the None path: {:?}",
         out.event_tags()
     );
 }

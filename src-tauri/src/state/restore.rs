@@ -1,13 +1,6 @@
-//! 「복원할까요?」 (Restore?) after an abnormal exit (TRD S21-storage §6-7) — three states (`none` · `awaiting` · `answered`) and a marker for the one answer
-//! being processed, the restore service ([`RestoreService`]) that holds this run's `state.json` read result ([`StateFileStatus`] · §6-5),
-//! and the restore coordinator ([`RestoreCoordinator`]) that executes the answer on top of it.
-//! The state is decided in one place by boot step 6 ([`RestoreService::set_boot`] · I5), and the answer goes through the coordinator's single
-//! [`RestoreCoordinator::answer`] (the same handle for a human · the LLM).
-//!
-//! - ★The service lock is a leaf★ — while holding it, make no notification · log · recorder wait · other lock (`ViewManager`).
-//!   Call the notification ([`RestoreNotifier`]) after releasing the lock.
-//! - ★Dropping the marker without finishing it is the same as `RolledBack`★ (including when released by a panic) — if the in-progress marker stays set,
-//!   every later answer gets `InFlight` and can never answer in that run.
+//! 「Restore?」 after an abnormal exit (TRD S21-storage §6-7): three states (`none` · `awaiting` · `answered`) and a marker for the one answer being processed; the restore service ([`RestoreService`]) holding this run's `state.json` read result ([`StateFileStatus`], §6-5); and the coordinator ([`RestoreCoordinator`]) executing the answer on top of it. The state is decided once by boot step 6 ([`RestoreService::set_boot`], I5); the answer goes through the single [`RestoreCoordinator::answer`] (human and LLM alike).
+//! - The service lock is a leaf: while holding it, no notification · log · recorder wait · other lock (`ViewManager`); call [`RestoreNotifier`] after releasing.
+//! - Dropping the marker unfinished equals `RolledBack` (also on panic release) — a lingering in-progress marker would make every later answer `InFlight` for the whole run.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -26,7 +19,6 @@ use crate::layout::{
 };
 use crate::theme::ThemeControl;
 
-/// The event emitted to the main window when the restore state changes — payload = [`CrashCopyStatus`].
 pub const EVT_RESTORE_CHANGED: &str = "restore:changed";
 
 /// The `crash_copy` field of `restore.status` and the payload of [`EVT_RESTORE_CHANGED`] (TRD §6-7) — the wire spelling is `"none"` ·
@@ -46,8 +38,7 @@ pub enum CrashCopyStatus {
 }
 
 impl CrashCopyStatus {
-    /// The serde spelling as is — `crash_copy` of the bus `restore.status` is a string because the declaration macro cannot carry the enum in
-    /// lowercase spelling.
+    /// The serde spelling as is — the bus `restore.status` carries `crash_copy` as a string because the declaration macro cannot carry the enum in lowercase.
     pub fn as_wire(self) -> &'static str {
         match self {
             CrashCopyStatus::None => "none",
@@ -86,7 +77,6 @@ pub enum StateFileStatus {
 }
 
 impl StateFileStatus {
-    /// The serde spelling as is — the same reason as [`CrashCopyStatus::as_wire`].
     pub fn as_wire(self) -> &'static str {
         match self {
             StateFileStatus::Ok => "ok",
@@ -98,15 +88,11 @@ impl StateFileStatus {
     }
 }
 
-/// The unanswered crash copy that boot step 6 hands over.
 #[derive(Clone)]
 pub struct CrashCopy {
-    /// The original text that acceptance will restore — the copy bytes boot read, or, for guard ii (a copy that should have been made could not be), the original text of `state.json`
-    /// held in memory (TRD §6-5 ⑥ · L2).
+    /// The original text acceptance will restore — the copy bytes boot read, or for guard ii (a copy that should have been made could not be) the original `state.json` text held in memory (TRD §6-5 ⑥ · L2).
     pub text: String,
-    /// `codec::crash_copy_hash(&text)`.
     pub hash: String,
-    /// What was read from `text`.
     pub file: StateFile,
 }
 
@@ -150,14 +136,12 @@ pub struct RestoreStatusView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnswerConflict {
-    /// Not `Awaiting` (no copy · already answered) — carries the current state.
     NotAwaiting(CrashCopyStatus),
-    /// Another answer is being processed (TRD §6-7 「다른 답이 처리 중이면 CONFLICT」).
+    /// Another answer is being processed (TRD §6-7 「CONFLICT if another answer is being processed」).
     InFlight,
 }
 
-/// The marker of the one answer being processed — it cannot be cloned. Finish it with [`RestoreService::finish_answer`] (dropping it rolls it back —
-/// module header).
+/// Marker of the one answer being processed — not cloneable. Finish with [`RestoreService::finish_answer`] (dropping rolls it back — module header).
 pub struct AnswerTicket {
     cell: Arc<Mutex<Cell>>,
     copy: Arc<CrashCopy>,
@@ -187,7 +171,7 @@ impl Drop for AnswerTicket {
             tracing::warn!(
                 module = "state",
                 hash = %self.copy.hash,
-                "복원 답이 끝맺지 않고 사라졌다 — 처리 중 표지를 되돌린다"
+                "the restore answer vanished without finishing — reverting the in-progress marker"
             );
             settle(
                 &self.cell,
@@ -201,15 +185,12 @@ impl Drop for AnswerTicket {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnswerEnd {
-    /// The acceptance was committed or declined — the state becomes `Answered` (a notification goes out).
     Answered,
-    /// The acceptance failed before commit (preparation · window creation) — only the in-progress marker is released and it stays `Awaiting`. It still
-    /// notifies `Awaiting` — a caller rejected with `InFlight` in the meantime must get this notification to know it can answer again.
+    /// The acceptance failed before commit (preparation · window creation) — only the in-progress marker is released and it stays `Awaiting`. It still notifies `Awaiting`: a caller rejected with `InFlight` meanwhile needs it to know it can answer again.
     RolledBack,
 }
 
-/// Called after the boot ⑥ decision · `Answered` · a rollback (still `Awaiting`). ★Called holding no lock★ — the implementation
-/// may call the service again. For the rollback of a dropped marker it is called inside `Drop` (which may be running while released by a panic).
+/// Called after the boot ⑥ decision · `Answered` · a rollback (still `Awaiting`), holding no lock — the implementation may call the service again. For the rollback of a dropped marker it runs inside `Drop` (possibly a panic release).
 pub trait RestoreNotifier: Send + Sync {
     fn changed(&self, status: CrashCopyStatus);
 }
@@ -220,11 +201,9 @@ pub struct RestoreService {
 
 struct Cell {
     phase: Phase,
-    /// Goes up on every [`RestoreService::set_boot`] — so that a marker from an earlier generation cannot change the current state.
     generation: u64,
     notifier: Option<Arc<dyn RestoreNotifier>>,
     state_file: StateFileStatus,
-    /// `durable` while asking also carries this field — leaving no room for the two to diverge.
     saves: bool,
 }
 
@@ -248,7 +227,7 @@ impl Phase {
 }
 
 fn lock(cell: &Mutex<Cell>) -> MutexGuard<'_, Cell> {
-    // Inside the lock only field assignments are made — there is no state half-changed by a panic. The marker rollback must work in `Drop` too.
+    // Inside the lock only field assignments — no state half-changed by a panic; the marker rollback must work in `Drop` too.
     sync::lock(cell)
 }
 
@@ -261,7 +240,6 @@ fn notify(notifier: Option<Arc<dyn RestoreNotifier>>, status: CrashCopyStatus) {
 enum Settled {
     Answered(Option<Arc<dyn RestoreNotifier>>),
     RolledBack(Option<Arc<dyn RestoreNotifier>>),
-    /// The marker does not belong to the current state — nothing was changed.
     Stale,
 }
 
@@ -299,7 +277,7 @@ fn settle(cell: &Mutex<Cell>, generation: u64, hash: &str, end: AnswerEnd) {
             tracing::info!(
                 module = "state",
                 hash = %hash,
-                "복원 답을 되돌렸다 — 다시 답할 수 있다"
+                "reverted the restore answer — it can be answered again"
             );
             notify(notifier, CrashCopyStatus::Awaiting);
         }
@@ -307,7 +285,7 @@ fn settle(cell: &Mutex<Cell>, generation: u64, hash: &str, end: AnswerEnd) {
             module = "state",
             hash = %hash,
             ?end,
-            "지금 상태의 것이 아닌 복원 답 표지 — 무시한다"
+            "a restore answer marker that does not belong to the current state — ignoring it"
         ),
     }
 }
@@ -319,8 +297,7 @@ impl Default for RestoreService {
 }
 
 impl RestoreService {
-    /// State `None` · `state_file` `Ok` · `saves` `true` · no notification — the values before boot step 6 are the side with nothing to notify
-    /// (windows come into being after ⑥ and never see this value — I5).
+    /// State `None` · `state_file` `Ok` · `saves` `true` · no notification — windows come into being after ⑥ and never see this pre-⑥ value (I5).
     pub fn new() -> Self {
         Self {
             cell: Arc::new(Mutex::new(Cell {
@@ -337,8 +314,7 @@ impl RestoreService {
         lock(&self.cell).notifier = Some(notifier);
     }
 
-    /// Called only at boot step 6 (I5) — `copy` is `None` = no copy to ask about · `saves` = whether this run saves screen state
-    /// (not a guard — [`RestoreStatusView::saves`]). A marker that was in progress becomes invalid.
+    /// Called only at boot step 6 (I5). `copy` `None` = no copy to ask about; `saves` = whether this run saves screen state ([`RestoreStatusView::saves`]). An in-progress marker becomes invalid.
     pub fn set_boot(&self, copy: Option<CrashCopy>, state_file: StateFileStatus, saves: bool) {
         let hash = copy.as_ref().map(|copy| copy.hash.clone());
         let (again, status, notifier) = {
@@ -359,7 +335,7 @@ impl RestoreService {
         if again {
             tracing::warn!(
                 module = "state",
-                "복원 상태를 부팅 단계 밖에서 다시 정했다 — 처리 중이던 답은 무효가 된다"
+                "the restore state was set again outside the boot stage — an answer in progress becomes void"
             );
         }
         match hash {
@@ -367,9 +343,9 @@ impl RestoreService {
                 module = "state",
                 hash = %hash,
                 saves,
-                "답하지 않은 크래시 사본이 있다 — 복원할지 묻는다"
+                "there is an unanswered crash copy — asking whether to restore"
             ),
-            None => tracing::info!(module = "state", "물을 크래시 사본이 없다"),
+            None => tracing::info!(module = "state", "no crash copy to ask about"),
         }
         notify(notifier, status);
     }
@@ -413,7 +389,6 @@ impl RestoreService {
         }
     }
 
-    /// Set the in-progress marker and hand over the copy.
     pub fn begin_answer(&self) -> Result<AnswerTicket, AnswerConflict> {
         let mut cell = lock(&self.cell);
         let generation = cell.generation;
@@ -435,7 +410,7 @@ impl RestoreService {
     pub fn finish_answer(&self, mut ticket: AnswerTicket, end: AnswerEnd) {
         debug_assert!(
             Arc::ptr_eq(&self.cell, &ticket.cell),
-            "다른 서비스가 낸 표지"
+            "a marker issued by another service"
         );
         ticket.settled = true;
         settle(&ticket.cell, ticket.generation, &ticket.copy.hash, end);
@@ -456,31 +431,26 @@ pub struct AnswerReply {
     pub restored_windows: u32,
     /// A `state.json` carrying that answer was published within the deadline. `false` = it could not be confirmed that it attached to disk within the deadline —
     /// the next boot may ask again. If there is no recorder (guard) it always asks again, and on a write failure · deadline overrun the recorder may attach it in a later write
-    /// while holding that hash (`saver` header 「해결 칸」).
+    /// while holding that hash (`saver` header 「resolution field」).
     pub durable: bool,
 }
 
 #[derive(Debug)]
 pub enum AnswerError {
-    /// Not `awaiting` · another answer is being processed → bus `CONFLICT`.
     Conflict(AnswerConflict),
-    /// The shell is still starting up and has no window port, so it could not take the acceptance — nothing changed and it is still `awaiting`. When shell setup
-    /// ends the same answer stands → bus `INTERNAL`. Same code as [`Self::Internal`] and only the wording differs (「곧 다시 답하라」, answer again soon).
+    /// The shell is still starting up with no window port, so acceptance was refused — nothing changed, still `awaiting`; the same answer stands once setup ends → bus `INTERNAL` (same code as [`Self::Internal`], different wording: 「answer again soon」).
     NotReady,
-    /// The acceptance failed before commit (preparation · window creation · commit rejection) — nothing changed and it is still `awaiting` → bus
-    /// `INTERNAL`.
+    /// The acceptance failed before commit (preparation · window creation · commit rejection) — nothing changed, still `awaiting` → bus `INTERNAL`.
     Internal(String),
 }
 
-// The `message` of the bus error and the error string of the Tauri wrapper — tell the kind apart by the code (bus) or `restore_status`, not by
-//   this text.
+// The bus error `message` and the Tauri wrapper's error string — tell the kind apart by the code (bus) or `restore_status`, not by this text.
 impl fmt::Display for AnswerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AnswerError::Conflict(AnswerConflict::NotAwaiting(CrashCopyStatus::Answered)) => {
                 f.write_str("the crash copy was already answered in this run (crash_copy is answered)")
             }
-            // `begin_answer` does not carry `Awaiting` — what remains is `None`.
             AnswerError::Conflict(AnswerConflict::NotAwaiting(_)) => {
                 f.write_str("there is no crash copy to answer in this run (crash_copy is none)")
             }
@@ -498,104 +468,69 @@ impl fmt::Display for AnswerError {
     }
 }
 
-/// The OS window port for runtime restore acceptance (TRD §6-7 ② ④) — production = `placement::TauriRestoreWindows`, test = a fake.
-///
-/// ★All of it is called holding no lock★ — window creation · setters wait for the event loop, and the usage-interest notification in `destroy`'s `Destroyed`
-/// handling · `record_placement` · `set_shown` takes the layout lock (the same
-/// discipline as `layout::WindowHost`).
+/// OS window port for runtime restore acceptance (TRD §6-7 ② ④) — production = `placement::TauriRestoreWindows`, test = fake. All of it is called holding no lock: window creation · setters wait for the event loop, and `destroy`'s `Destroyed` handling (usage-interest notification) · `record_placement` · `set_shown` take the layout lock (same discipline as `layout::WindowHost`).
 pub trait RestoreWindows: Send + Sync {
-    /// Does our app have focus now (the foreground window is ours) — `false` if it cannot be read.
     fn app_has_focus(&self) -> bool;
-    /// The current monitors — an empty list if it cannot be read (all saved placements are discarded).
     fn monitors(&self) -> Vec<MonitorArea>;
-    /// Create popout window `label` hidden and place it at `at` (the saved normal placement · the monitor it goes to) — `None` = the label's
-    /// default placement. `Err` = there is no window (the deferral that was set was also withdrawn).
-    ///
-    /// `maximized` = defer the copy's maximize until that window is first shown — maximizing a hidden window shows and then hides it. While deferred,
-    /// that window's placement is not recorded ([`Self::record_placement`] · `Moved` · `Resized`), and the show (`set_shown` `true` ·
-    /// the tray show) applies the maximize and clears it. If the window is destroyed, it is cleared. ★Set the deferral before creating the window★ — if set after,
-    /// and in between the user closes a window the tray 「보이기」 revealed, destruction cleanup passes before the deferral and the deferral
-    /// stays.
+    /// Create popout `label` hidden and place it at `at` (saved normal placement · its monitor; `None` = the label's default). `Err` = no window (any deferral set was withdrawn too).
+    /// `maximized` defers the copy's maximize until the window is first shown — maximizing a hidden window shows then hides it. While deferred the window's placement is not recorded ([`Self::record_placement`] · `Moved` · `Resized`); the show (`set_shown` `true` · the tray show) applies the maximize and clears it, and destruction clears it. Set the deferral before creating the window: if set after, a close of a window the tray 「Show」 revealed in between passes destruction cleanup before the deferral and it stays.
     fn open_hidden(
         &self,
         label: &str,
         at: Option<(WindowBounds, Landing)>,
         maximized: bool,
     ) -> Result<(), String>;
-    /// Is that window visible now — `None` = there is no window. If visibility cannot be read, `Some(true)` (the window exists).
     fn visibility(&self, label: &str) -> Option<bool>;
-    /// Apply the copy's normal placement (`at` — `None` = leave it at the current placement) and maximize to main. Maximize is followed both ways —
-    /// if `false`, unmaximize it and also clear the deferred maximize. The maximize of a hidden main is deferred until it is first shown, but ★set that deferral before applying the
-    /// placement★ — if set after, the `Moved` · `Resized` emitted by applying the placement are recorded in between as 「최대화 아님」 (not maximized).
-    /// A visible main is also applied with the same deferral set and cleared only if applied — ★if it could not be applied, it stays★ and meanwhile main's placement is not recorded
-    /// (including [`Self::record_placement`]), and the next show applies it again.
+    /// Apply the copy's normal placement (`at`; `None` = leave current) and maximize to main; maximize is followed both ways (`false` unmaximizes and clears the deferred maximize). A hidden main's maximize is deferred until first shown — set the deferral before applying the placement, else the `Moved` · `Resized` it emits are recorded as 「not maximized」. A visible main uses the same deferral, cleared only if applied: if it could not be applied it stays, main's placement is not recorded meanwhile (including [`Self::record_placement`]) and the next show applies it again.
     fn place_main(&self, at: Option<(WindowBounds, Landing)>, maximized: bool);
-    /// Show (`true`) or hide, and tell usage interest that visibility — the same order as the tray show · hide (ADR-0229 ·
-    /// `tray::actions::for_each_ui_window`). The show comes after that window's first paint (right away if the notification already came · otherwise at the time limit
-    /// — `first_paint`) — that show applies the deferred maximize. The show activates and puts that window in front
-    /// (`placement::show_placed`). Hiding withdraws the wait for that first paint. If there is no window, it does nothing.
+    /// Show (`true`) or hide, and tell usage interest — same order as the tray show · hide (ADR-0229 · `tray::actions::for_each_ui_window`). The show comes after that window's first paint (at once if already notified, else at the time limit — `first_paint`) and applies the deferred maximize; it activates and fronts the window (`placement::show_placed`). Hiding withdraws the first-paint wait. No window: nothing.
     fn set_shown(&self, label: &str, shown: bool);
-    /// Record that window's current placement in the model — called after the window is in the model (a `Moved` before that is dropped). A window whose maximize
-    /// is deferred is not recorded.
+    /// Record that window's current placement in the model — after the window is in the model (an earlier `Moved` is dropped). A window with a deferred maximize is not recorded.
     fn record_placement(&self, label: &str);
-    /// Give that window focus — it pulls it even if another app is in front. If the window is hidden or minimized, nothing happens (tao 0.35.3
-    /// Windows `set_focus`). If there is no window, it does nothing.
+    /// Give that window focus, pulling it even if another app is in front. A hidden or minimized window stays unchanged (tao 0.35.3 Windows `set_focus`); no window: nothing.
     fn focus(&self, label: &str);
-    /// `Ok` if there is no window.
     fn destroy(&self, label: &str) -> Result<(), String>;
 }
 
-/// Look it up every time the subscription-recompute port is used (before taking the lock) — `None` = there is no daemon client: skip the recompute (there is no way for output
-/// to come). If looked up only once when the port is plugged in, a client registered after that would be silently skipped.
+/// Looked up every time the subscription-recompute port is used (before taking the lock); `None` = no daemon client, skip the recompute. Looked up once at plug-in, a client registered later would be skipped silently.
 pub trait SubscriptionSource: Send + Sync {
     fn current(&self) -> Option<Arc<dyn SubscriptionSync>>;
 }
 
-/// The ports the coordinator receives after the shell is up — the window port · notification · subscription source · theme push all need an `AppHandle` to stand.
 pub struct RestorePorts {
     pub windows: Arc<dyn RestoreWindows>,
     pub events: Arc<dyn LayoutEvents>,
     pub subs: Arc<dyn SubscriptionSource>,
-    /// The one effective theme per shell — it sees the same model as the coordinator.
     pub themes: ThemeControl,
 }
 
-/// The single path of runtime restore accept · decline (TRD §6-7 ①–⑤) — the human (Tauri wrapper) and the LLM (bus `restore.answer`) call the same
-/// instance.
-///
-/// - ★There is one commit point (③ · inside one `ViewManager` lock)★ — a failure before it (① preparation · ② creating hidden windows) withdraws the windows
-///   it created and rolls back to `awaiting`, and a failure after it (④ theme push · notification · placement · show · removing vanished popouts · withdrawing
-///   old popouts) only leaves a log.
-/// - ★Restored popouts follow main's visibility (ADR-0229)★ — so that no popout appears alone next to a hidden main, they are kept hidden and the tray
-///   「보이기」 reveals them together. The copy's maximize is applied when that window is first shown ([`RestoreWindows::open_hidden`]).
-/// - ★Lock order★: the service field · session field are leaves. Window ports · notifications · waiting on the recorder are done holding no lock.
-/// - The ports ([`RestorePorts`]) are made in the builder and received with [`Self::attach`] at the end of shell setup — an acceptance before that is
-///   [`AnswerError::NotReady`] (still `awaiting` · it can answer again) and a decline stands without ports.
+/// The single path of runtime restore accept · decline (TRD §6-7 ①–⑤); the human (Tauri wrapper) and the LLM (bus `restore.answer`) call the same instance.
+/// - One commit point (③, inside one `ViewManager` lock): a failure before it (① preparation · ② hidden window creation) withdraws created windows and rolls back to `awaiting`; a failure after it (④ theme push · notification · placement · show · removing vanished popouts · withdrawing old popouts) only logs.
+/// - Restored popouts follow main's visibility (ADR-0229): kept hidden so none appears alone beside a hidden main, revealed together by the tray 「Show」; the copy's maximize applies at first show ([`RestoreWindows::open_hidden`]).
+/// - Lock order: the service and session fields are leaves; window ports · notifications · recorder waits hold no lock.
+/// - Ports ([`RestorePorts`]) are made in the builder and received with [`Self::attach`] at the end of shell setup; an acceptance before that is [`AnswerError::NotReady`] (still `awaiting`), a decline stands without ports.
 pub struct RestoreCoordinator {
     service: Arc<RestoreService>,
     layout: LayoutState,
     session: Arc<StateSession>,
-    /// The same issuer as runtime popouts — a new label does not collide with a window that is up (§6-3).
+    /// The same issuer as runtime popouts, so a new label does not collide with a window that is up (§6-3).
     labels: Arc<dyn LabelSource>,
     ports: OnceLock<RestorePorts>,
 }
 
-// The result of ① — nothing has been changed yet.
 struct Prepared {
     layout: ViewManager,
     main: WindowAttrs,
-    // The new popouts (in label issue order) — that window's copy attributes.
+    // The new popouts in label issue order — that window's copy attributes.
     popouts: Vec<(WindowLabel, WindowAttrs)>,
 }
 
-// What ③ took inside the lock — ④ uses it outside the lock.
 struct Committed {
     removed: Vec<WindowLabel>,
     layouts: Vec<ViewSnapshot>,
     tabs: Vec<WindowTabsPayload>,
 }
 
-// The OS-side circumstances read before ② — used by ② and ④.
 struct Desktop {
     monitors: Vec<MonitorArea>,
     app_had_focus: bool,
@@ -617,12 +552,11 @@ impl RestoreCoordinator {
         }
     }
 
-    /// Once at the end of shell setup — a second call is dropped.
     pub fn attach(&self, ports: RestorePorts) {
         if self.ports.set(ports).is_err() {
             tracing::warn!(
                 module = "state",
-                "복원 조율자의 포트를 두 번 꽂으려 했다 — 처음 것을 쓴다"
+                "tried to plug in the restore coordinator's port twice — using the first one"
             );
         }
     }
@@ -631,12 +565,8 @@ impl RestoreCoordinator {
         self.service.status()
     }
 
-    /// Answer the crash copy — `accept` replaces the screen with the copy (①–④), and both settle the answer and attach it to the recorder (⑤).
-    ///
-    /// ★It blocks — do not call it from the main (event loop) thread★: while creating · placing · withdrawing windows it waits
-    /// for the event loop, and it waits for the recorder's answer until the deadline ([`saver::REPLY_DEADLINE`](super::saver::REPLY_DEADLINE) — 2 seconds).
-    /// Called from main, window creation waits for itself and hangs. The caller hands it off with an async command + `spawn_blocking`.
-    /// Call it holding no lock.
+    /// Answer the crash copy: `accept` replaces the screen with the copy (①–④); both settle the answer and attach it to the recorder (⑤).
+    /// Blocks — not for the main (event loop) thread: window create · place · withdraw wait for the event loop (called from main it hangs on itself) and the recorder's answer is awaited until the deadline ([`saver::REPLY_DEADLINE`](super::saver::REPLY_DEADLINE), 2 s). The caller hands it off with an async command + `spawn_blocking`. Call it holding no lock.
     pub fn answer(&self, accept: bool) -> Result<AnswerReply, AnswerError> {
         let ticket = self.service.begin_answer().map_err(AnswerError::Conflict)?;
         let hash = ticket.copy().hash.clone();
@@ -645,7 +575,7 @@ impl RestoreCoordinator {
                 tracing::warn!(
                     module = "state",
                     hash = %hash,
-                    "셸이 아직 뜨는 중이라 복원 수락을 받지 못했다 — 화면은 그대로이고 다시 답할 수 있다"
+                    "the shell is still starting, so the restore accept was not taken — the screen is unchanged and it can be answered again"
                 );
                 self.service.finish_answer(ticket, AnswerEnd::RolledBack);
                 return Err(AnswerError::NotReady);
@@ -657,7 +587,7 @@ impl RestoreCoordinator {
                         module = "state",
                         hash = %hash,
                         reason = %reason,
-                        "복원 수락이 커밋 전에 실패했다 — 화면은 그대로이고 다시 답할 수 있다"
+                        "the restore accept failed before the commit — the screen is unchanged and it can be answered again"
                     );
                     self.service.finish_answer(ticket, AnswerEnd::RolledBack);
                     return Err(AnswerError::Internal(reason));
@@ -666,7 +596,6 @@ impl RestoreCoordinator {
         } else {
             0
         };
-        // ⑤ — the service emits the notification (`restore:changed`) outside the lock.
         self.service.finish_answer(ticket, AnswerEnd::Answered);
         let durable = self.session.resolve_crash_copy(hash.clone()) == ResolveResult::Durable;
         tracing::info!(
@@ -675,7 +604,7 @@ impl RestoreCoordinator {
             accept,
             restored_windows,
             durable,
-            "크래시 사본에 답했다"
+            "answered the crash copy"
         );
         Ok(AnswerReply {
             restored_windows,
@@ -683,17 +612,14 @@ impl RestoreCoordinator {
         })
     }
 
-    // ①–④. `Err` = a failure before commit — the windows it created were withdrawn.
     fn accept(&self, ports: &RestorePorts, copy: &CrashCopy) -> Result<u32, String> {
         let prepared = self.prepare(copy)?;
-        // Focus is read before touching even one window (before ②) — if read after a popout built hidden (`focused(true)`) took focus,
-        //   it could miss that another app was in front before the answer (defensive — [unverified — inference]).
+        // Focus is read before touching any window (before ②): read after a hidden-built popout (`focused(true)`) took focus, it could miss that another app was in front before the answer (defensive — [unverified — inference]).
         let desktop = Desktop {
             app_had_focus: ports.windows.app_has_focus(),
             monitors: ports.windows.monitors(),
         };
-        // A new popout is created before it enters the model, so that window's background · first theme · first pull are decided in advance to see the copy's window theme —
-        //   if not decided, it is painted once with the global theme. After commit the model answers, so it is withdrawn regardless of success or failure.
+        // A new popout is created before entering the model so its background · first theme · first pull are decided in advance from the copy's window theme — else it paints once with the global theme. After commit the model answers, so it is withdrawn on success or failure alike.
         // ADR-0265
         for (label, attrs) in &prepared.popouts {
             ports.themes.stage(label, attrs.theme);
@@ -727,8 +653,7 @@ impl RestoreCoordinator {
                 return Err(reason);
             }
         };
-        // The copy's window theme is in the model — push it so the main that is up receives that value. New popouts are already painted with the value decided before ②
-        //   and have pulled it (TRD S21-storage §6-7).
+        // The copy's window theme is in the model — push it so the live main receives it; new popouts already painted with the value decided before ② and pulled it (TRD S21-storage §6-7).
         // ADR-0265
         ports.themes.push();
 
@@ -736,7 +661,6 @@ impl RestoreCoordinator {
         Ok(count(1 + kept))
     }
 
-    // ① — no side effects (it only uses issuer numbers — they are monotonic, so discarding is fine).
     fn prepare(&self, copy: &CrashCopy) -> Result<Prepared, String> {
         let Restored { layout, warnings } =
             ViewManager::from_persisted(copy.file.windows.clone(), self.labels.as_ref());
@@ -745,28 +669,28 @@ impl RestoreCoordinator {
             .iter()
             .find(|w| matches!(w, RestoreWarning::Internal(_)))
         {
-            return Err(format!("복원 모델을 세우지 못했다: {reason}"));
+            return Err(format!("could not build the restore model: {reason}"));
         }
         let main = layout
             .window_attrs(MAIN_WINDOW_LABEL)
-            .map_err(|e| format!("복원 모델에 main 이 없다: {e}"))?;
+            .map_err(|e| format!("the restore model has no main: {e}"))?;
         let mut popouts: Vec<(WindowLabel, WindowAttrs)> = layout
             .windows
             .iter()
             .filter(|(label, _)| label.as_str() != MAIN_WINDOW_LABEL)
             .map(|(label, window)| (label.clone(), window.attrs))
             .collect();
-        // Same prefix · same run marker (one issuer) + a decimal sequence number, so (length, characters) order is issue order.
+        // One issuer: same prefix and run marker + a decimal sequence number, so (length, characters) order is issue order.
         popouts.sort_by_key(|(label, _)| (label.len(), label.clone()));
         {
             let live = self
                 .layout
                 .0
                 .lock()
-                .map_err(|_| "레이아웃 락에 독이 들었다".to_string())?;
+                .map_err(|_| "the layout lock is poisoned".to_string())?;
             if let Some((label, _)) = popouts.iter().find(|(l, _)| live.windows.contains_key(l)) {
                 return Err(format!(
-                    "새 팝아웃 label {label} 이 떠 있는 창과 겹친다 — label 발급기가 런타임 팝아웃과 다르다"
+                    "new popout label {label} overlaps a window that is up — the label issuer differs from the runtime popouts"
                 ));
             }
         }
@@ -777,19 +701,18 @@ impl RestoreCoordinator {
         })
     }
 
-    // ③ — the only commit point. Model replacement · notification material · subscription recompute in one critical section (`layout::apply` 「락 규율」).
     fn commit(&self, ports: &RestorePorts, restored: ViewManager) -> Result<Committed, String> {
         let subs = ports.subs.current();
         let mut mgr = self.layout.0.lock().map_err(|_| {
             tracing::error!(
                 module = "state",
-                "레이아웃 락에 독이 들어 복원한 화면을 들이지 못했다"
+                "the layout lock is poisoned, so the restored screen could not be taken in"
             );
-            "레이아웃 락에 독이 들었다".to_string()
+            "the layout lock is poisoned".to_string()
         })?;
         let removed = mgr
             .adopt_restored(restored)
-            .map_err(|e| format!("복원 모델을 들이지 못했다: {e}"))?;
+            .map_err(|e| format!("could not take in the restore model: {e}"))?;
         let mut labels = mgr.list_windows();
         labels.sort_by_key(|label| {
             (
@@ -821,7 +744,6 @@ impl RestoreCoordinator {
         })
     }
 
-    // ④ — not rolled back. The port implementation leaves failures in the log. What it returns = the number of new popouts left in the model.
     fn after_commit(
         &self,
         ports: &RestorePorts,
@@ -843,37 +765,23 @@ impl RestoreCoordinator {
             land(MAIN_WINDOW_LABEL, bounds, monitors, Fallback::StayPut).map(|at| (bounds, at))
         });
         windows.place_main(main_at, main.maximized);
-        // If the copy's placement was discarded or could not be applied, the model holds a placement the window never went to — align it to the current placement. If main's maximize
-        //   could not be applied, main is not recorded (the deferral stays — `place_main`).
+        // If the copy's placement was discarded or could not be applied, the model holds a placement the window never went to — align it to the current one. If main's maximize could not be applied, main is not recorded (the deferral stays — `place_main`).
         windows.record_placement(MAIN_WINDOW_LABEL);
 
         let main_shown = windows.visibility(MAIN_WINDOW_LABEL) != Some(false);
-        // If, between ② and ③, the user closed a window the tray 「보이기」 revealed, that close request · `Destroyed` cleanup passed with only a tombstone left, because
-        //   the label was not yet in the model (the adoption at ③ does not look at tombstones) — if not removed here, a window without an OS window
-        //   stays in the model.
+        // A window the user closed via the tray 「Show」 between ② and ③ passed its close request · `Destroyed` cleanup with only a tombstone, since the label was not yet in the model (the ③ adoption ignores tombstones) — not removed here, a window without an OS window would stay in the model.
         let (vanished, live): (Vec<_>, Vec<_>) = popouts
             .iter()
             .partition(|(label, _)| windows.visibility(label).is_none());
         let kept = live.len();
-        // Give focus to main first, and the restored popouts are shown at first paint and come above it (user decision 2026-10-20 — main is
-        //   big · TRD S21-storage §6-7 ④). The popout show is activating, so even if its first paint already came, it comes after this, so in whichever
-        //   order they arrive the popouts are on top (`set_shown` → `first_paint::reveal_held`). Since a popout built hidden may have
-        //   taken focus (`focused(true)` — `commands::popout` · defensive — [unverified — inference]), the focus-giving raises main in front of the other app
-        //   and returns it in front of the person who pressed 「복원」 (restore) — the popouts are activated at their first paint after that and appear above main.
-        //   If no popouts remain, it does not pull — if none were built, focus did not move, and if they vanished, the person already touched it.
-        // ★Only when our window had focus before the answer and still has it now★ — if another app is in front, the focus-giving fires a fake
-        //   Alt key at that app and steals its focus (tao 0.35.3 Windows `set_focus` → `force_window_active`). While the LLM answers in the background,
-        //   the person may be working in another app. The sample from before the answer alone misses that the person moved to another app between ②–④ —
-        //   read again right before the call (the earlier sample is still used — if a popout built hidden took focus, this
-        //   value alone would miss that another app was in front before the answer).
+        // Give main focus first so restored popouts, shown at first paint, come above it (user decision 2026-10-20 — main is big; TRD S21-storage §6-7 ④). The popout show activates, so even if its first paint already came it follows this, and popouts end on top in either arrival order (`set_shown` → `first_paint::reveal_held`). A hidden-built popout may have taken focus (`focused(true)` — `commands::popout`, defensive — [unverified — inference]); fronting main returns it before the person who pressed 「Restore」. With no popouts remaining it does not pull (none built: focus did not move; vanished: the person already touched it).
+        // Only when our window had focus before the answer and still has it now: if another app is in front, the focus-giving fires a fake Alt key at it and steals its focus (tao 0.35.3 Windows `set_focus` → `force_window_active`) — the person may be working elsewhere while the LLM answers. Read again right before the call (the earlier sample still matters: a hidden-built popout taking focus would otherwise hide that another app was in front before the answer).
         if desktop.app_had_focus && main_shown && kept > 0 && windows.app_has_focus() {
             windows.focus(MAIN_WINDOW_LABEL);
         }
         for (label, attrs) in live {
             windows.set_shown(label, main_shown);
-            // A maximized popout kept hidden is not recorded — its maximize was deferred by ② until it is shown, and recording the current (normal) placement would
-            //   erase the copy's maximize from the model. A window that will be shown has the maximize applied and its placement recorded by the first-paint show — the recording before that
-            //   is blocked by the deferral (`placement::record`).
+            // A maximized popout kept hidden is not recorded: ② deferred its maximize until shown, and recording the current (normal) placement would erase the copy's maximize from the model. A window that will be shown gets its maximize and placement record at the first-paint show; earlier recording is blocked by the deferral (`placement::record`).
             if main_shown || !attrs.maximized {
                 windows.record_placement(label);
             }
@@ -883,13 +791,11 @@ impl RestoreCoordinator {
             .map(|(label, _)| label.clone())
             .collect();
         self.forget_vanished(ports, &vanished);
-        // That window's `Destroyed` cleanup only does the recompute · tombstone, since the label is already not in the model (`popout::drop_window_in_model`).
         destroy_all(windows, &removed, Leftover::Replaced);
         kept
     }
 
-    // Remove from the model a new popout whose OS window vanished — the same job as window destruction cleanup (removing the window + subscription recompute in one lock —
-    //   `popout::drop_window_in_model`). Like that path, the frontend is not told.
+    // Remove from the model a new popout whose OS window vanished — same job as window destruction cleanup (`popout::drop_window_in_model`: window removal + subscription recompute in one lock); like that path, the frontend is not told.
     fn forget_vanished(&self, ports: &RestorePorts, labels: &[WindowLabel]) {
         if labels.is_empty() {
             return;
@@ -897,20 +803,20 @@ impl RestoreCoordinator {
         tracing::warn!(
             module = "state",
             ?labels,
-            "복원한 팝아웃 창이 화면을 바꾸기 전에 닫혀 모델에서 지운다"
+            "a restored popout window closed before the screen was replaced — removing it from the model"
         );
         let subs = ports.subs.current();
         let Ok(mut mgr) = self.layout.0.lock() else {
             tracing::error!(
                 module = "state",
                 ?labels,
-                "레이아웃 락에 독이 들어 닫힌 복원 팝아웃을 모델에서 지우지 못했다 — 창 없는 창이 모델에 남는다"
+                "the layout lock is poisoned, so the closed restored popout could not be removed from the model — a window without a window remains in the model"
             );
             return;
         };
         for label in labels {
             if let Err(e) = mgr.drop_window_gone(label) {
-                tracing::debug!(module = "state", label = %label, error = %e, "이미 모델에 없는 복원 팝아웃");
+                tracing::debug!(module = "state", label = %label, error = %e, "the restored popout is already gone from the model");
             }
         }
         if let Some(subs) = &subs {
@@ -919,7 +825,6 @@ impl RestoreCoordinator {
     }
 }
 
-// ② — if even one cannot be created, withdraw everything created and return `Err`.
 fn open_hidden_popouts(
     windows: &dyn RestoreWindows,
     popouts: &[(WindowLabel, WindowAttrs)],
@@ -932,29 +837,27 @@ fn open_hidden_popouts(
         });
         if let Err(e) = windows.open_hidden(label, at, attrs.maximized) {
             destroy_all(windows, &created, Leftover::HiddenRestored);
-            return Err(format!("복원할 팝아웃 창 {label} 을 못 만들었다: {e}"));
+            return Err(format!(
+                "could not create popout window {label} to restore: {e}"
+            ));
         }
         created.push(label.clone());
     }
     Ok(created)
 }
 
-// Which window could not be withdrawn — it only distinguishes the wording of the last failure log.
 #[derive(Clone, Copy)]
 enum Leftover {
-    /// A restored popout built hidden, withdrawn in the rollback.
     HiddenRestored,
-    /// An old popout removed from the model while swapping in the copy's screen.
     Replaced,
 }
 
-// Withdraw them one by one, and on failure once more — if it still fails, leave that label at error.
 fn destroy_all(windows: &dyn RestoreWindows, labels: &[WindowLabel], leftover: Leftover) {
     for label in labels {
         let Err(first) = windows.destroy(label) else {
             continue;
         };
-        tracing::warn!(module = "state", label = %label, error = %first, "창을 거두지 못해 한 번 더 거둔다");
+        tracing::warn!(module = "state", label = %label, error = %first, "could not reap the window — reaping once more");
         let Err(e) = windows.destroy(label) else {
             continue;
         };
@@ -963,13 +866,13 @@ fn destroy_all(windows: &dyn RestoreWindows, labels: &[WindowLabel], leftover: L
                 module = "state",
                 label = %label,
                 error = %e,
-                "복원하려고 숨긴 채 만든 창을 거두지 못했다 — 모델에 없는 숨은 창이 남고, 트레이 「보이기」가 그 창을 드러낸다"
+                "could not reap a window created hidden for the restore — a hidden window outside the model remains, and the tray 「Show」 reveals it"
             ),
             Leftover::Replaced => tracing::error!(
                 module = "state",
                 label = %label,
                 error = %e,
-                "사본 화면으로 바꾼 뒤 옛 팝아웃 창을 거두지 못했다 — 모델에 없는 창이 화면에 남는다"
+                "could not reap an old popout window after switching to the copy's screen — a window outside the model remains on the screen"
             ),
         }
     }
@@ -986,7 +889,6 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         seen: Mutex<Vec<CrashCopyStatus>>,
-        /// Was the service lock free at the moment of notification — it also holds the service field.
         probe: Mutex<Option<Arc<Mutex<Cell>>>>,
         lock_was_free: Mutex<Vec<bool>>,
     }
@@ -1012,7 +914,7 @@ mod tests {
     fn tab() -> TabEntry {
         TabEntry {
             id: Uuid::new_v4(),
-            name: "탭".into(),
+            name: "Tab".into(),
             named: Some(true),
             focused_slot_id: None,
             layout: PersistedNode::Slot {
@@ -1043,7 +945,7 @@ mod tests {
 
     fn crash_copy(hash: &str) -> CrashCopy {
         CrashCopy {
-            text: "원문".into(),
+            text: "raw".into(),
             hash: hash.into(),
             file: StateFile {
                 version: STATE_VERSION,
@@ -1130,7 +1032,7 @@ mod tests {
             assert_eq!(
                 service.status().durable,
                 Some(saves),
-                "처리 중에도 awaiting — {saves}"
+                "awaiting even while processing — {saves}"
             );
             service.finish_answer(ticket, AnswerEnd::Answered);
             assert_eq!(service.status().durable, None, "answered — {saves}");
@@ -1148,7 +1050,7 @@ mod tests {
                     saves,
                     ..idle(CrashCopyStatus::None)
                 },
-                "물을 사본이 없어도 선다 — {saves}"
+                "stands even with no copy to ask about — {saves}"
             );
 
             let (service, _recorder) = service();
@@ -1158,13 +1060,13 @@ mod tests {
             assert_eq!(
                 awaiting.durable,
                 Some(awaiting.saves),
-                "묻는 동안 둘은 같다 — {saves}"
+                "the two are the same while asking — {saves}"
             );
 
             let ticket = service.begin_answer().unwrap();
-            assert_eq!(service.status().saves, saves, "처리 중 — {saves}");
+            assert_eq!(service.status().saves, saves, "processing — {saves}");
             service.finish_answer(ticket, AnswerEnd::RolledBack);
-            assert_eq!(service.status().saves, saves, "되돌린 뒤 — {saves}");
+            assert_eq!(service.status().saves, saves, "after reverting — {saves}");
 
             let ticket = service.begin_answer().unwrap();
             service.finish_answer(ticket, AnswerEnd::Answered);
@@ -1174,7 +1076,7 @@ mod tests {
                     saves,
                     ..idle(CrashCopyStatus::Answered)
                 },
-                "답한 뒤에도 그 실행의 값 그대로 — {saves}"
+                "the run's value as is even after answering — {saves}"
             );
         }
     }
@@ -1190,12 +1092,12 @@ mod tests {
                 state_file: StateFileStatus::Unreadable,
                 ..idle(CrashCopyStatus::None)
             },
-            "사본이 없어도 선다"
+            "stands even without a copy"
         );
         assert_eq!(
             recorder.seen(),
             [CrashCopyStatus::None],
-            "알림의 실을 것은 그대로"
+            "what the notice carries stays the same"
         );
 
         // An unusable state.json × an unanswered copy — copy it aside and ask (§6-5 table).
@@ -1217,7 +1119,7 @@ mod tests {
                 state_file: StateFileStatus::CorruptCopiedAside,
                 ..idle(CrashCopyStatus::Answered)
             },
-            "답해도 그 실행의 값 그대로"
+            "the run's value as is even when answered"
         );
     }
 
@@ -1226,9 +1128,9 @@ mod tests {
         let (service, recorder) = service();
         service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, true);
 
-        let ticket = service.begin_answer().expect("답할 수 있다");
+        let ticket = service.begin_answer().expect("can answer");
         assert_eq!(ticket.copy().hash, "h");
-        assert_eq!(ticket.copy().text, "원문");
+        assert_eq!(ticket.copy().text, "raw");
         service.finish_answer(ticket, AnswerEnd::Answered);
 
         assert_eq!(service.status(), idle(CrashCopyStatus::Answered));
@@ -1255,7 +1157,7 @@ mod tests {
         assert_eq!(
             service.status().crash_copy,
             CrashCopyStatus::Awaiting,
-            "처리 중에도 상태는 awaiting"
+            "the status is awaiting even while processing"
         );
     }
 
@@ -1271,7 +1173,7 @@ mod tests {
         assert_eq!(
             recorder.seen(),
             [CrashCopyStatus::Awaiting, CrashCopyStatus::Awaiting],
-            "되돌림도 알린다 — 그 사이 InFlight 로 거절당한 쪽이 다시 답할 수 있음을 안다"
+            "a revert is notified too — so the side refused with InFlight in between knows it can answer again"
         );
         assert!(service.begin_answer().is_ok());
     }
@@ -1288,7 +1190,7 @@ mod tests {
             recorder.seen(),
             [CrashCopyStatus::Awaiting, CrashCopyStatus::Awaiting]
         );
-        assert!(service.begin_answer().is_ok(), "표지가 풀렸다");
+        assert!(service.begin_answer().is_ok(), "the marker was released");
     }
 
     #[test]
@@ -1298,7 +1200,7 @@ mod tests {
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ticket = service.begin_answer().unwrap();
-            panic!("수락 도중 패닉");
+            panic!("panic during the accept");
         }));
 
         assert!(result.is_err());
@@ -1308,20 +1210,22 @@ mod tests {
     #[test]
     fn a_ticket_from_before_a_second_boot_setting_changes_nothing() {
         let (service, recorder) = service();
-        service.set_boot(Some(crash_copy("옛")), StateFileStatus::Ok, true);
+        service.set_boot(Some(crash_copy("old")), StateFileStatus::Ok, true);
         let stale = service.begin_answer().unwrap();
 
-        service.set_boot(Some(crash_copy("새")), StateFileStatus::Ok, true);
+        service.set_boot(Some(crash_copy("new")), StateFileStatus::Ok, true);
         service.finish_answer(stale, AnswerEnd::Answered);
 
         assert_eq!(service.status().crash_copy, CrashCopyStatus::Awaiting);
         assert_eq!(
             recorder.seen(),
             [CrashCopyStatus::Awaiting, CrashCopyStatus::Awaiting],
-            "옛 표지의 답은 알리지 않는다"
+            "an answer of the old marker is not notified"
         );
-        let fresh = service.begin_answer().expect("새 세대는 처리 중이 아니다");
-        assert_eq!(fresh.copy().hash, "새");
+        let fresh = service
+            .begin_answer()
+            .expect("the new generation is not in progress");
+        assert_eq!(fresh.copy().hash, "new");
     }
 
     #[test]
@@ -1337,7 +1241,7 @@ mod tests {
         assert_eq!(
             *recorder.lock_was_free.lock().unwrap(),
             [true, true, true, true],
-            "부팅 · 되돌림 · 버린 표지 · 답"
+            "boot · revert · discarded marker · answer"
         );
     }
 
@@ -1366,7 +1270,7 @@ mod tests {
         assert_eq!(
             notifier.1.lock().unwrap()[0].crash_copy,
             CrashCopyStatus::Awaiting,
-            "알림 안에서 본 상태가 이미 정해진 값이다"
+            "the status seen inside the notice is already the settled value"
         );
         // Break the cycle (service ↔ notification).
         notifier.0.lock().unwrap().take();
@@ -1386,7 +1290,7 @@ mod tests {
             assert_eq!(
                 format!("\"{}\"", status.as_wire()),
                 spell(status),
-                "버스 철자(as_wire)와 Tauri 철자(serde)가 같다"
+                "the bus spelling (as_wire) and the Tauri spelling (serde) are the same"
             );
         }
     }
@@ -1415,7 +1319,7 @@ mod tests {
             assert_eq!(
                 format!("\"{}\"", status.as_wire()),
                 spell(status),
-                "버스 철자(as_wire)와 Tauri 철자(serde)가 같다"
+                "the bus spelling (as_wire) and the Tauri spelling (serde) are the same"
             );
         }
     }
@@ -1494,12 +1398,11 @@ mod tests {
         tree::first_slot_id(&mgr.views[&view].layout)
     }
 
-    /// The previous run's screen — main tab 「지난 탭」 (placement on the monitor · `main_maximized`) · `popouts` popouts (the first = an unknown
-    /// content slot · a placement overlapping no monitor · maximized).
+    /// The previous run's screen — main tab 「Last tab」 (placement on the monitor · `main_maximized`) and `popouts` popouts (the first = unknown content slot · placement overlapping no monitor · maximized).
     fn previous_screen(popouts: usize, main_maximized: bool) -> Vec<WindowEntry> {
         let mut prev = ViewManager::new();
         let main_view = prev.windows[MAIN_WINDOW_LABEL].active;
-        prev.rename_tab(main_view, "지난 탭".into()).unwrap();
+        prev.rename_tab(main_view, "Last tab".into()).unwrap();
         prev.observe_window_placement(
             MAIN_WINDOW_LABEL,
             seen(false, rect(100.0, 80.0, 1200.0, 800.0)),
@@ -1532,7 +1435,7 @@ mod tests {
 
     fn copy_of(windows: Vec<WindowEntry>) -> CrashCopy {
         CrashCopy {
-            text: "원문".into(),
+            text: "raw".into(),
             hash: "h".into(),
             file: StateFile {
                 version: STATE_VERSION,
@@ -1544,28 +1447,19 @@ mod tests {
         }
     }
 
-    /// Fake window port — records the order called, and on each call checks whether the layout lock was free · whether that label was in the model.
     #[derive(Default)]
     struct FakeWindows {
         layout: LayoutState,
         calls: Mutex<Vec<String>>,
         lock_was_free: Mutex<Vec<bool>>,
-        /// Window creation for this label fails.
         fail_open: Mutex<Option<String>>,
-        /// When creating the window for this label, a window with the same label intrudes into the model (triggers the commit rejection of ③).
         squat_on_open: Mutex<Option<String>>,
-        /// A window whose visibility is 「숨음」 (hidden).
         hidden: Mutex<Vec<String>>,
-        /// A window that answers there is no OS window.
         gone: Mutex<Vec<String>>,
-        /// Withdrawing this label always fails.
         fail_destroy: Mutex<Option<String>>,
-        /// A window whose maximize is deferred until it is shown — the show applies and clears it (the production port's contract).
         deferred: Mutex<Vec<String>>,
-        /// Another app is in front (none of our windows has focus). Assuming a popout built hidden takes focus (production builds it with
-        /// `focused(true)`), creation lowers this value — reading focus after ② would be fooled by this value.
+        /// Another app is in front (none of our windows has focus). Creation lowers it, assuming a hidden-built popout takes focus (production builds it with `focused(true)`) — reading focus after ② would be fooled.
         background: Mutex<bool>,
-        /// Decide the answers of the focus read one by one from the front — when used up, answer with `background`.
         focus_samples: Mutex<Vec<bool>>,
         /// The effective theme the production port looks at when choosing the window background · first theme — if present, the answer at creation is written to `opened_with`.
         themes: OnceLock<Arc<EffectiveThemes>>,
@@ -1596,8 +1490,7 @@ mod tests {
             self.calls.lock().unwrap().clone()
         }
 
-        /// A call without the deferred maximize — if there are two or more popouts, which new label receives the copy's maximized popout differs every time
-        /// (the copy's popout order = persistent id order).
+        /// A call without the deferred maximize — with two or more popouts, which new label receives the copy's maximized popout varies (the copy's popout order = persistent id order).
         fn calls_but_deferrals(&self) -> Vec<String> {
             self.calls()
                 .into_iter()
@@ -1657,7 +1550,7 @@ mod tests {
             }
             if self.fail_open.lock().unwrap().as_deref() == Some(label) {
                 self.deferred.lock().unwrap().retain(|l| l != label);
-                return Err("창 생성 실패(시험)".into());
+                return Err("window creation failed (test)".into());
             }
             if self.squat_on_open.lock().unwrap().as_deref() == Some(label) {
                 self.layout.0.lock().unwrap().create_window(label).unwrap();
@@ -1706,13 +1599,12 @@ mod tests {
         fn destroy(&self, label: &str) -> Result<(), String> {
             self.note(format!("destroy {label} in_model={}", self.in_model(label)));
             if self.fail_destroy.lock().unwrap().as_deref() == Some(label) {
-                return Err("창 거두기 실패(시험)".into());
+                return Err("window reap failed (test)".into());
             }
             Ok(())
         }
     }
 
-    /// Notification — records whether the layout lock was free at the first notification moment. `order` = the order the notification came in.
     struct FakeEvents {
         layout: LayoutState,
         layouts: Mutex<Vec<Uuid>>,
@@ -1746,7 +1638,6 @@ mod tests {
         }
     }
 
-    /// Subscription recompute — called inside the layout lock. Records the model number at that moment.
     #[derive(Default)]
     struct FakeSubs {
         seen: Mutex<Vec<u64>>,
@@ -1758,7 +1649,6 @@ mod tests {
         }
     }
 
-    /// The window side of the theme push — live webviews = the model's windows. Records what was sent and whether the layout lock was free when sending.
     struct ThemeScreen {
         layout: LayoutState,
         sent: Mutex<Vec<(String, String)>>,
@@ -1785,7 +1675,6 @@ mod tests {
         }
     }
 
-    /// Subscription source — if empty, it is a shell that has no daemon client yet. Records whether the lock was free when looking up.
     struct SubsSlot {
         layout: LayoutState,
         subs: Mutex<Option<Arc<dyn SubscriptionSync>>>,
@@ -1802,8 +1691,7 @@ mod tests {
         }
     }
 
-    // Issue monotonically in the form without a run marker (`slot-popup-<n>`) — these tests use it to write the expected label literally. The form of the real
-    //   issuer (`PopupCounter`) and that (length, characters) order is issue order even in that form are measured by the `commands::popout` tests.
+    // Issues monotonically in the form without run marker (`slot-popup-<n>`) so tests can write the expected label literally; the real `PopupCounter` form and that (length, characters) order is issue order are measured by the `commands::popout` tests.
     #[derive(Default)]
     struct SeqLabels(std::sync::atomic::AtomicU64);
 
@@ -1830,7 +1718,6 @@ mod tests {
     }
 
     impl Rig {
-        /// `labels` = the coordinator's issuer — if `None`, the same one as runtime popouts (`self.labels`).
         fn new(labels: Option<Arc<SeqLabels>>) -> Self {
             let service = Arc::new(RestoreService::new());
             let notices = Arc::new(Recorder::default());
@@ -1885,7 +1772,6 @@ mod tests {
             }
         }
 
-        /// A shell with a daemon client up — the subscription source yields `self.subs`.
         fn attach(&self) {
             self.register_subs();
             self.attach_without_subs();
@@ -1904,7 +1790,6 @@ mod tests {
             *self.slot.subs.lock().unwrap() = Some(self.subs.clone());
         }
 
-        /// Bring up one runtime popout (the same issuer) — a View holding that label · an unknown content slot.
         fn live_popout(&self) -> (String, Uuid) {
             let label = LabelSource::next_label(self.labels.as_ref());
             let mut mgr = self.layout.0.lock().unwrap();
@@ -1952,7 +1837,7 @@ mod tests {
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
-        let reply = rig.coordinator.answer(true).expect("수락");
+        let reply = rig.coordinator.answer(true).expect("accept");
 
         assert_eq!(
             reply,
@@ -1960,7 +1845,7 @@ mod tests {
                 restored_windows: 2,
                 durable: false,
             },
-            "main + 팝아웃 하나 · 기록기가 없다"
+            "main + one popout · no writer"
         );
         {
             let mgr = rig.layout.0.lock().unwrap();
@@ -1969,17 +1854,17 @@ mod tests {
             assert_eq!(
                 labels,
                 [MAIN_WINDOW_LABEL, "slot-popup-2"],
-                "옛 팝아웃은 지우고 새 팝아웃은 떠 있는 창과 겹치지 않는 label 을 받는다"
+                "the old popout is removed and the new popout gets a label that does not overlap windows that are up"
             );
             assert_eq!(
                 (mgr.version, mgr.attrs_rev()),
                 (version + 1, attrs_rev + 1),
-                "번호는 지금 값에서 하나씩 오른다"
+                "the numbers go up by one from the current value"
             );
             let main = &mgr.windows[MAIN_WINDOW_LABEL];
             assert_eq!(
                 mgr.views[&main.active].name,
-                TabName::Named("지난 탭".into())
+                TabName::Named("Last tab".into())
             );
             assert_eq!(main.attrs.bounds, Some(rect(100.0, 80.0, 1200.0, 800.0)));
             assert!(!mgr.views.contains_key(&live_view));
@@ -1989,7 +1874,7 @@ mod tests {
             assert_eq!(
                 mgr.unknown_content(view, first_slot(&mgr, view)),
                 Some(&foreign()),
-                "모르는 내용 원문이 View 와 함께 온다"
+                "the unknown content raw text comes with the View"
             );
         }
 
@@ -2011,22 +1896,25 @@ mod tests {
                 "record slot-popup-2",
                 "destroy slot-popup-1 in_model=false",
             ],
-            "포커스 읽기 → 숨긴 채 만들고(최대화는 만들기 전에 미룬다 · 모델 밖 · 안 걸치는 자리는 버림) → 커밋 → 자리 → 지금 자리 적기 → 포커스 다시 읽기 → main 에 포커스 → 팝아웃 보이기(미룬 최대화 — main 포커스 뒤라 팝아웃이 위) → 옛 창 거두기"
+            "read focus → create hidden (maximize deferred before creating · outside the model · positions off every monitor discarded) → commit → position → record current position → read focus again → focus main → show popouts (deferred maximize — after the main focus, so the popouts are on top) → reap old windows"
         );
-        assert!(rig.windows.deferred().is_empty(), "보인 창의 미룸은 거뒀다");
+        assert!(
+            rig.windows.deferred().is_empty(),
+            "the deferral of shown windows was withdrawn"
+        );
         assert!(
             rig.ports_called_with_the_lock_free(),
-            "창 포트 · 구독 원천은 락 밖에서 부른다"
+            "the window port · subscription source are called outside the lock"
         );
         assert_eq!(
             *rig.subs.seen.lock().unwrap(),
             [version + 1],
-            "재계산은 커밋과 같은 임계구역"
+            "the recompute is in the same critical section as the commit"
         );
         assert_eq!(
             *rig.events.first_seen.lock().unwrap(),
             Some(true),
-            "알림은 락 밖"
+            "notices are outside the lock"
         );
         let tabs = rig.events.tabs.lock().unwrap().clone();
         assert_eq!(
@@ -2039,12 +1927,12 @@ mod tests {
         assert_eq!(
             rig.events.layouts.lock().unwrap().len(),
             2,
-            "탭마다 레이아웃"
+            "a layout per tab"
         );
         assert_eq!(
             *rig.events.order.lock().unwrap(),
             ["layout", "layout", "tabs", "tabs"],
-            "레이아웃 알림 → 탭 알림"
+            "layout notice → tab notice"
         );
 
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Answered);
@@ -2060,8 +1948,7 @@ mod tests {
         ));
     }
 
-    /// ★Acceptance pushes the copy's window theme★ — main is already up, and a new popout may have pulled its first value before entering the model
-    /// (then the global value). Push it before the show · outside the layout lock.
+    /// Acceptance pushes the copy's window theme: main is up and a new popout may have pulled its first (global) value before entering the model. Pushed before the show, outside the layout lock.
     #[test]
     fn an_accept_pushes_the_copys_window_themes() {
         let rig = Rig::new(None);
@@ -2079,18 +1966,18 @@ mod tests {
             true,
         );
 
-        rig.coordinator.answer(true).expect("수락");
+        rig.coordinator.answer(true).expect("accept");
 
         let mut sent = rig.theme_screen.sent.lock().unwrap().clone();
         sent.sort();
         let mut themes: Vec<String> = sent.iter().map(|(_, theme)| theme.clone()).collect();
         themes.sort();
-        assert_eq!(sent.len(), 3, "main · 새 팝아웃 둘: {sent:?}");
+        assert_eq!(sent.len(), 3, "main · two new popouts: {sent:?}");
         assert!(sent.contains(&(MAIN_WINDOW_LABEL.to_string(), "light".to_string())));
         assert_eq!(
             themes,
             ["dark", "e-ink", "light"],
-            "새 팝아웃 하나는 사본의 테마, 하나는 전역 값: {sent:?}"
+            "one new popout has the copy's theme, one the global value: {sent:?}"
         );
         assert!(
             rig.theme_screen
@@ -2099,14 +1986,17 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|free| *free),
-            "레이아웃 락 밖에서 민다"
+            "pushed outside the layout lock"
         );
 
         // Even if a new popout is created before it enters the model, it is painted with the copy's theme from the start — the answer at creation equals the pushed value.
         let opened = rig.windows.opened_with.lock().unwrap().clone();
         assert_eq!(opened.len(), 2, "{opened:?}");
         for window in &opened {
-            assert!(sent.contains(window), "만들 때 {window:?} · 민 값 {sent:?}");
+            assert!(
+                sent.contains(window),
+                "at creation {window:?} · pushed values {sent:?}"
+            );
         }
     }
 
@@ -2131,7 +2021,7 @@ mod tests {
         assert_eq!(
             *rig.windows.opened_with.lock().unwrap(),
             [("slot-popup-1".to_string(), "e-ink".to_string())],
-            "만들 때는 사본의 테마였다"
+            "at creation it was the copy's theme"
         );
         assert_eq!(rig.effective.effective_for("slot-popup-1"), UiTheme::Dark);
     }
@@ -2164,7 +2054,7 @@ mod tests {
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
-        let reply = rig.coordinator.answer(true).expect("수락");
+        let reply = rig.coordinator.answer(true).expect("accept");
 
         assert_eq!(reply.restored_windows, 3);
         // The copy's popout order is persistent id order, so which new label receives the maximized popout differs every time — read it from the model.
@@ -2172,14 +2062,14 @@ mod tests {
             let mgr = rig.layout.0.lock().unwrap();
             assert!(
                 mgr.windows[MAIN_WINDOW_LABEL].attrs.maximized,
-                "모델은 사본의 main 최대화를 쥔다"
+                "the model holds the copy's main maximize"
             );
             ["slot-popup-1", "slot-popup-2"].map(|label| mgr.windows[label].attrs.maximized)
         };
         assert_eq!(
             maximized.iter().filter(|m| **m).count(),
             1,
-            "숨긴 팝아웃의 최대화도 사본대로"
+            "the hidden popout's maximize follows the copy too"
         );
         let labels = ["slot-popup-1", "slot-popup-2"];
         let mut expected = vec!["focused?".to_string(), "monitors".to_string()];
@@ -2209,7 +2099,7 @@ mod tests {
         assert_eq!(
             rig.windows.calls(),
             expected,
-            "숨은 main 곁에 팝아웃을 띄우지 않는다 — 숨긴 최대화 팝아웃은 최대화를 미루고 기록도 안 한다(보였다 숨지 않게 · 사본의 최대화를 지우지 않게) · 보인 창이 없으니 포커스도 안 옮긴다"
+            "does not raise popouts beside a hidden main — a hidden maximized popout defers its maximize and does not record it either (so it does not show and hide · so the copy's maximize is not erased) · no window was shown, so focus does not move either"
         );
         let pending: Vec<String> = labels
             .iter()
@@ -2220,7 +2110,7 @@ mod tests {
         assert_eq!(
             rig.windows.deferred(),
             pending,
-            "미룬 최대화는 트레이 「보이기」가 입힐 때까지 남는다"
+            "the deferred maximize remains until the tray 「Show」 applies it"
         );
     }
 
@@ -2235,9 +2125,15 @@ mod tests {
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         rig.windows.gone.lock().unwrap().push("slot-popup-2".into());
 
-        let reply = rig.coordinator.answer(true).expect("수락은 커밋됐다");
+        let reply = rig
+            .coordinator
+            .answer(true)
+            .expect("the accept was committed");
 
-        assert_eq!(reply.restored_windows, 1, "사라진 팝아웃은 세지 않는다");
+        assert_eq!(
+            reply.restored_windows, 1,
+            "a vanished popout is not counted"
+        );
         assert_eq!(rig.windows_in_model(), [MAIN_WINDOW_LABEL]);
         let calls = rig.windows.calls();
         assert!(
@@ -2246,17 +2142,16 @@ mod tests {
                 "visible? slot-popup-2".to_string(),
                 "destroy slot-popup-1 in_model=false".to_string(),
             ]),
-            "없는 창은 보이지도 적지도 않는다: {calls:?}"
+            "a missing window is neither shown nor recorded: {calls:?}"
         );
         assert_eq!(
             *rig.subs.seen.lock().unwrap(),
             [version + 1, version + 2],
-            "지운 뒤 같은 락 안에서 다시 재계산한다"
+            "recomputes again in the same lock after removing"
         );
         assert!(rig.ports_called_with_the_lock_free());
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Answered);
-        // The `Destroyed` of the vanished copy window has already passed — release the number right away and the next new window gets it (TRD S26-window-chrome
-        //   §4-1 · §5-6).
+        // The vanished copy window's `Destroyed` already passed — release the number right away so the next new window gets it (TRD S26-window-chrome §4-1 · §5-6).
         let mut mgr = rig.layout.0.lock().unwrap();
         assert!(mgr.closing_numbers().is_empty());
         mgr.create_window("slot-popup-9").unwrap();
@@ -2273,19 +2168,19 @@ mod tests {
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
-        rig.coordinator.answer(true).expect("수락");
+        rig.coordinator.answer(true).expect("accept");
 
         assert_eq!(
             rig.subs.seen.lock().unwrap().len(),
             1,
-            "포트를 꽂을 때가 아니라 커밋 때 찾는다"
+            "looked up at commit, not when the port is plugged in"
         );
         assert!(
             !rig.windows
                 .calls()
                 .iter()
                 .any(|call| call.starts_with("focus ")),
-            "남은 팝아웃이 없으면 main 을 끌어오지 않는다"
+            "does not pull main forward when no popout remains"
         );
     }
 
@@ -2308,30 +2203,30 @@ mod tests {
             rig.service
                 .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
-            rig.coordinator.answer(true).expect("수락");
+            rig.coordinator.answer(true).expect("accept");
 
             let calls = rig.windows.calls();
             let case = format!("background={background} switched_away={switched_away}");
             assert_eq!(
                 calls.first().map(String::as_str),
                 Some("focused?"),
-                "{case} — 창을 만지기 전에 읽는다: {calls:?}"
+                "{case} — read before touching windows: {calls:?}"
             );
             assert!(
                 calls
                     .iter()
                     .any(|call| call == "show slot-popup-1 in_model=true"),
-                "{case} — 보인 팝아웃이 있다: {calls:?}"
+                "{case} — there is a shown popout: {calls:?}"
             );
             assert_eq!(
                 calls.iter().filter(|call| *call == "focused?").count(),
                 samples,
-                "{case} — 답 전의 표본이 거짓이면 다시 읽지 않는다: {calls:?}"
+                "{case} — if the sample before the answer is false, it does not read again: {calls:?}"
             );
             assert_eq!(
                 calls.iter().any(|call| call.starts_with("focus ")),
                 takes_focus,
-                "{case} — 다른 앱이 앞에 있었거나 지금 있으면 main 을 끌어오지 않는다(가짜 Alt 로 그 앱의 포커스를 뺏는다): {calls:?}"
+                "{case} — if another app was or is in front, main is not pulled forward (a fake Alt would steal that app's focus): {calls:?}"
             );
             if takes_focus {
                 let focus = calls.iter().position(|call| call == "focus main").unwrap();
@@ -2342,11 +2237,11 @@ mod tests {
                 assert_eq!(
                     calls[focus - 1],
                     "focused?",
-                    "{case} — 다시 읽기는 포커스 주기 바로 앞이다: {calls:?}"
+                    "{case} — the re-read is right before giving focus: {calls:?}"
                 );
                 assert!(
                     focus < show,
-                    "{case} — main 에 먼저 포커스를 주고 팝아웃을 보인다(팝아웃이 main 위): {calls:?}"
+                    "{case} — focus goes to main first and then the popouts are shown (popouts above main): {calls:?}"
                 );
             }
             assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Answered);
@@ -2376,24 +2271,24 @@ mod tests {
                 "destroy slot-popup-1 in_model=false",
             ]
         );
-        assert_eq!(rig.fingerprint(), before, "모델은 그대로");
+        assert_eq!(rig.fingerprint(), before, "the model unchanged");
         assert!(rig.events.tabs.lock().unwrap().is_empty());
         assert!(
             rig.events.order.lock().unwrap().is_empty(),
-            "알리지 않은 실패는 알림도 없다"
+            "a failure not notified has no notice either"
         );
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Awaiting);
         assert_eq!(
             rig.notices.seen(),
             [CrashCopyStatus::Awaiting, CrashCopyStatus::Awaiting],
-            "되돌림도 awaiting 을 알린다"
+            "a revert also notifies awaiting"
         );
 
         *rig.windows.fail_open.lock().unwrap() = None;
         let reply = rig
             .coordinator
             .answer(true)
-            .expect("표지가 풀려 다시 답할 수 있다");
+            .expect("the marker was released, so it can be answered again");
         assert_eq!(reply.restored_windows, 3);
     }
 
@@ -2416,10 +2311,13 @@ mod tests {
                 "destroy slot-popup-1 in_model=false",
                 "destroy slot-popup-1 in_model=false",
             ],
-            "한 번 더 해 보고 그만둔다"
+            "tries once more and gives up"
         );
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Awaiting);
-        assert!(rig.service.begin_answer().is_ok(), "표지가 풀렸다");
+        assert!(
+            rig.service.begin_answer().is_ok(),
+            "the marker was released"
+        );
     }
 
     #[test]
@@ -2447,30 +2345,36 @@ mod tests {
                 "open_hidden slot-popup-1 at=false in_model=false",
                 "destroy slot-popup-1 in_model=true",
             ],
-            "커밋이 거절되면 만든 창을 거둔다"
+            "when the commit is refused, the created windows are reaped"
         );
         {
             let mgr = rig.layout.0.lock().unwrap();
             assert_eq!(
                 (mgr.version, mgr.views.len()),
                 (version + 1, views + 1),
-                "끼어든 창 하나 말고는 그대로"
+                "unchanged except for the one window that cut in"
             );
             let main = &mgr.windows[MAIN_WINDOW_LABEL];
             assert_ne!(
                 mgr.views[&main.active].name,
-                TabName::Named("지난 탭".into()),
-                "main 은 사본으로 안 바뀌었다"
+                TabName::Named("Last tab".into()),
+                "main did not change to the copy"
             );
         }
-        assert!(rig.subs.seen.lock().unwrap().is_empty(), "커밋 전에 멈췄다");
+        assert!(
+            rig.subs.seen.lock().unwrap().is_empty(),
+            "stopped before the commit"
+        );
         assert!(rig.events.tabs.lock().unwrap().is_empty());
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Awaiting);
         assert_eq!(
             rig.notices.seen(),
             [CrashCopyStatus::Awaiting, CrashCopyStatus::Awaiting]
         );
-        assert!(rig.service.begin_answer().is_ok(), "표지가 풀렸다");
+        assert!(
+            rig.service.begin_answer().is_ok(),
+            "the marker was released"
+        );
     }
 
     #[test]
@@ -2487,10 +2391,13 @@ mod tests {
         let err = rig.coordinator.answer(true).unwrap_err();
 
         assert!(matches!(err, AnswerError::Internal(_)), "{err:?}");
-        assert!(rig.windows.calls().is_empty(), "준비에서 멈춘다");
+        assert!(rig.windows.calls().is_empty(), "stops at preparation");
         assert_eq!(rig.fingerprint(), before);
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Awaiting);
-        assert!(rig.service.begin_answer().is_ok(), "표지가 풀렸다");
+        assert!(
+            rig.service.begin_answer().is_ok(),
+            "the marker was released"
+        );
     }
 
     #[test]
@@ -2509,7 +2416,7 @@ mod tests {
         assert_eq!(rig.fingerprint(), before);
 
         assert_eq!(
-            rig.coordinator.answer(false).expect("거절"),
+            rig.coordinator.answer(false).expect("decline"),
             AnswerReply {
                 restored_windows: 0,
                 durable: false,
@@ -2528,7 +2435,7 @@ mod tests {
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let before = rig.fingerprint();
 
-        let reply = rig.coordinator.answer(false).expect("거절");
+        let reply = rig.coordinator.answer(false).expect("decline");
 
         assert_eq!(
             reply,

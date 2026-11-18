@@ -31,24 +31,24 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('DaemonDaemonControl (daemon 모드)', () => {
+describe('DaemonDaemonControl (daemon mode)', () => {
   // ★R7★: if an explicit start fails, its reason must be carried on the connection state surface — boot · UI ·
   //   window.__ENGRAM_DAEMON__ all go through this single path, so recording it here covers all of them.
-  it('start 실패 → 이유를 연결 상태 표면에 싣고 그대로 throw', async () => {
+  it('start failure → carries the reason on the connection state surface and throws it as is', async () => {
     const report = vi.fn(() => undefined)
     const ctrl = new DaemonDaemonControl(fakeClient('down', { reportConnectionError: report }))
-    invokeMock.mockRejectedValueOnce('데이터 폴더에 쓸 수 없음(C:\\x) — 쓰기 가능한 위치에 압축을 풀어 주세요')
+    invokeMock.mockRejectedValueOnce('cannot write to the data folder (C:\\x): Access is denied. (os error 5) — please extract to a writable location')
     await expect(ctrl.start()).rejects.toBeDefined()
     expect(report).toHaveBeenCalledWith(
-      '데이터 폴더에 쓸 수 없음(C:\\x) — 쓰기 가능한 위치에 압축을 풀어 주세요',
+      'cannot write to the data folder (C:\\x): Access is denied. (os error 5) — please extract to a writable location',
     )
   })
 
-  it('start 성공 → 남아 있던 이유를 지운다', async () => {
+  it('start success → clears the reason left behind', async () => {
     const report = vi.fn((_reason: string | null) => undefined)
     // A cause written while this start was connecting (e.g. a concurrent attempt that failed) — the success clears it.
     const connect = vi.fn(async () => {
-      report('다른 시도의 이유')
+      report('a reason from another attempt')
     })
     const ctrl = new DaemonDaemonControl(fakeClient('down', { connect, reportConnectionError: report }))
     invokeMock.mockResolvedValueOnce({ pid: 1, host: '127.0.0.1', port: 5, protocol_version: 1 })
@@ -56,7 +56,7 @@ describe('DaemonDaemonControl (daemon 모드)', () => {
     expect(report).toHaveBeenLastCalledWith(null)
   })
 
-  it('start → daemon_start invoke(console/timeout 전달) + client.connect(명시 spawn 연결)', async () => {
+  it('start → daemon_start invoke (console/timeout passed) + client.connect (explicit spawn connection)', async () => {
     const connect = vi.fn(async () => undefined)
     const ctrl = new DaemonDaemonControl(fakeClient('down', { connect }))
     invokeMock.mockResolvedValueOnce({ pid: 1, host: '127.0.0.1', port: 5, protocol_version: 1 })
@@ -66,7 +66,7 @@ describe('DaemonDaemonControl (daemon 모드)', () => {
     expect(connect).toHaveBeenCalledTimes(1)
   })
 
-  it('start 기본값 → console=false, timeoutMs=null', async () => {
+  it('start defaults → console=false, timeoutMs=null', async () => {
     const ctrl = new DaemonDaemonControl(fakeClient('down'))
     invokeMock.mockResolvedValueOnce({ pid: 1, host: '127.0.0.1', port: 5, protocol_version: 1 })
     await ctrl.start()
@@ -85,14 +85,14 @@ describe('DaemonDaemonControl (daemon 모드)', () => {
     const ctrl = new DaemonDaemonControl(fakeClient('down', { reportConnectionError: report }))
     invokeMock.mockImplementationOnce(async (cmd: string) => {
       order.push(cmd)
-      if (!ok) throw new Error('새 이유')
+      if (!ok) throw new Error('new reason')
       return { pid: 1, host: '127.0.0.1', port: 5, protocol_version: 1 }
     })
     await ctrl.start().catch(() => undefined)
     expect(order.slice(0, 2)).toEqual(['report:null', 'daemon_start'])
   })
 
-  it('status → daemon_status invoke 결과 반환', async () => {
+  it('status → returns the daemon_status invoke result', async () => {
     const ctrl = new DaemonDaemonControl(fakeClient('connected'))
     invokeMock.mockResolvedValueOnce({ alive: true, pid: 42, port: 9999 })
     const s = await ctrl.status()

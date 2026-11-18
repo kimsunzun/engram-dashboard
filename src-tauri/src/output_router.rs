@@ -1,30 +1,14 @@
-//! OutputRouter — agent_id → window-label routing table (lock-free hot path) + subscription union diff.
-//! **Pure logic — zero Tauri runtime dependency** (headless standalone test possible).
+//! OutputRouter — agent_id → window-label routing table (lock-free hot path) + subscription union diff. Pure logic, zero Tauri runtime dependency (headless test possible).
 //!
-//! ## Role
-//! Provides the routing table for fanning out an output frame from the daemon (`DecodedFrame{agent_id, ...}`) to
-//! **all windows (window label)** where that agent is currently visible on screen. The authoritative source of the table is
-//! `ViewManager` (ADR-0035/0057) — in the split trees of **all tabs of each window** (hidden tabs too, not only the active one) it
-//! finds the Slot where the agent is placed and reverse-indexes into `agent_id → [window_label]`.
+//! Routing table for fanning out a daemon output frame (`DecodedFrame{agent_id, ...}`) to all windows (labels) where that agent is currently visible. The authoritative source is `ViewManager` (ADR-0035/0057): across the split trees of all tabs of each window (hidden tabs too) it finds the Slot holding the agent and reverse-indexes `agent_id → [window_label]`.
 //!
-//! ## ★Routing reversal (ADR-0057/0056 keep-alive)★
-//! Walks **all tabs of each window** (hidden tabs too, receive ·
-//! switch lossless, ADR-0056). The `active_view_id` · `MAIN_WINDOW_LABEL` routing branch is **removed entirely** —
-//! the active flag no longer enters `by_agent`. With unique ownership (ADR-0057 invariant 2) a View is in only one window
-//! → no "one View in two windows" double counting.
+//! Routing reversal (ADR-0057/0056 keep-alive): all tabs of each window are walked (hidden tabs receive too, switch lossless — ADR-0056); the `active_view_id` · `MAIN_WINDOW_LABEL` routing branch is gone — the active flag no longer enters `by_agent`. With unique ownership (ADR-0057 invariant 2) a View is in one window only, so no double counting.
 //!
-//! ## Core invariants
-//! - **Hot path (`targets`) lock 0** (ADR-0006): `ArcSwap::load()` only — called per frame, so no Mutex.
-//!   Allocation · recomputation are all done by the low-frequency path (`rebuild`).
-//! - **rebuild-always** (D2): layout changes are low-frequency, so on every change the whole snapshot is recomputed and
-//!   swapped atomically with `ArcSwap::store`. The version-cache branch is not adopted (no gain against complexity).
-//! - **AgentKey = `AgentId` (= `uuid::Uuid`)**: the frame's `agent_id` is already an `AgentId`, so zero conversion on the hot path.
-//!   A Slot stores `SlotContent::Agent{agent_id: String}` (ADR-0060), so **String→Uuid parsing happens at rebuild (low-frequency)**
-//!   and is normalized at the boundary. A slot that fails to parse can never match a real frame anyway, so it is ignored. This choice is
-//!   also consistent with the existing `HashMap<AgentId, SubState>` key of `protocol_state` (the connection task dedups by the same key).
-//! - **F-B subscription union = layout-derived** (ADR-0035, spike §8 F-B): with no separate ref-count map, the snapshot's
-//!   agent set itself is "the set that should be subscribed now". On rebuild it diffs against the previous set and produces the 0→1 (Subscribe) ·
-//!   1→0 (Unsubscribe) deltas **piggybacking on the same tree walk** (single pass).
+//! Invariants:
+//! - Hot path (`targets`) takes no lock (ADR-0006): `ArcSwap::load()` only — called per frame. Allocation · recomputation belong to the low-frequency `rebuild`.
+//! - rebuild-always (D2): layout changes are rare, so every change recomputes the whole snapshot and swaps it atomically with `ArcSwap::store`; no version-cache branch (no gain against complexity).
+//! - AgentKey = `AgentId` (`uuid::Uuid`): the frame's `agent_id` is already one, so zero conversion on the hot path. A Slot stores `SlotContent::Agent{agent_id: String}` (ADR-0060), so String→Uuid parsing happens at rebuild (low-frequency); an unparseable slot can never match a real frame and is ignored. Consistent with `protocol_state`'s `HashMap<AgentId, SubState>` key.
+//! - F-B subscription union = layout-derived (ADR-0035, spike §8 F-B): with no separate ref-count map, the snapshot's agent set is "the set that should be subscribed now"; rebuild diffs it against the previous set and produces the 0→1 (Subscribe) · 1→0 (Unsubscribe) deltas in the same tree walk.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
@@ -34,34 +18,24 @@ use arc_swap::ArcSwap;
 use crate::layout::manager::ViewManager;
 use crate::layout::types::{LayoutNode, SlotContent};
 
-// Cached empty routing result (returned on a miss). `Arc::from(Vec::new())` allocates an Arc header (refcount block) on the
-// heap every time — if misses are frequent on the hot path, that is the accumulated cost. Build it once and return it via `Arc::clone` (refcount
-// +1, zero allocation) to make the miss path truly zero-alloc (FIX-2).
+// Cached empty routing result (returned on a miss): `Arc::from(Vec::new())` allocates an Arc header on every call, so frequent hot-path misses would accumulate cost. Built once and returned via `Arc::clone` (refcount +1, zero allocation) — a truly zero-alloc miss path (FIX-2).
 static EMPTY_TARGETS: LazyLock<Arc<[WindowLabel]>> = LazyLock::new(|| Arc::from(Vec::new()));
 
 pub type AgentKey = uuid::Uuid;
 
-// Tauri window label (e.g. "main", "slot-popup-0a1b2c3d-3"). Same type as the `ViewManager.windows` key → no separate
-// numeric registry needed (spike §8 D1).
+// Tauri window label (e.g. "main", "slot-popup-0a1b2c3d-3"); same type as the `ViewManager.windows` key, so no separate numeric registry (spike §8 D1).
 pub type WindowLabel = String;
 
-// Values are shared as `Arc<[WindowLabel]>` — cloning on the hot path is only a pointer copy (no element copy).
-//
-// An agent not in `by_agent` = currently visible in no window → `targets` returns an empty slice (send targets 0).
+// Values are shared as `Arc<[WindowLabel]>` — cloning on the hot path is a pointer copy. An agent not in `by_agent` is visible in no window → `targets` returns an empty slice.
 #[derive(Debug, Default)]
 pub struct RoutingSnapshot {
     pub by_agent: HashMap<AgentKey, Arc<[WindowLabel]>>,
 }
 
-// Subscription delta of one rebuild (F-B). Produces the agent-union diff against the previous snapshot in a single tree walk.
-//
-// ## Per-agent diff
-// - `to_subscribe`: newly started to be visible this time (0→1 agent). ★ADR-0046: layout does **not send** a wire Subscribe with this★.
-//   The delta is still produced and used for the diff-preservation invariant test / future diagnostics.
-// - `to_unsubscribe`: no longer visible in any window (1→0 agent) → the router emits a wire `Unsubscribe` (cleanup).
-//
-// ★ADR-0046 — axis B removed★: the old slot=(window,agent) unit cursor deltas (`slots_to_replay`/`slots_to_drop`)
-//   were deleted together with the mirror buffer (cursor). Remount/new window is replaced by a full re-replay of the daemon ring (view-driven).
+// Subscription delta of one rebuild (F-B): the agent-union diff against the previous snapshot in a single tree walk.
+// - `to_subscribe`: newly visible this time (0→1). ADR-0046: layout does not send a wire Subscribe with this; it is still produced for the diff-preservation invariant test / future diagnostics.
+// - `to_unsubscribe`: no longer visible in any window (1→0) → the router emits a wire `Unsubscribe` (cleanup).
+// ADR-0046 axis B removed: the old slot=(window,agent) cursor deltas (`slots_to_replay`/`slots_to_drop`) went with the mirror buffer; remount/new window is a full re-replay of the daemon ring (view-driven).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionDelta {
     pub to_subscribe: Vec<AgentKey>,
@@ -74,7 +48,6 @@ impl SubscriptionDelta {
     }
 }
 
-// App-level shared (lives beyond the lifetime of the reconnect task) → manage/inject it as `Arc<OutputRouter>`.
 pub struct OutputRouter {
     table: ArcSwap<RoutingSnapshot>,
 }
@@ -92,11 +65,7 @@ impl OutputRouter {
         }
     }
 
-    // ★Hot path★ All window labels where the agent is currently visible.
-    //
-    // ★Caution (spike §7 Pitfall)★: iterate and consume the returned Arc
-    // immediately. (Carrying a `load()` Guard across an `.await` exhausts slots — here the Guard is used only inside the function and
-    // only the Arc is returned, so it is safe.)
+    // Hot path: all window labels where the agent is currently visible. Consume the returned Arc immediately (carrying a `load()` Guard across an `.await` exhausts slots — here the Guard lives only inside the function and only the Arc is returned; spike §7 Pitfall).
     pub fn targets(&self, agent_id: AgentKey) -> Arc<[WindowLabel]> {
         let snap = self.table.load();
         match snap.by_agent.get(&agent_id) {
@@ -105,9 +74,7 @@ impl OutputRouter {
         }
     }
 
-    // Being `pub(crate)` it can be called from other test modules in the crate (the daemon_client tests) too.
-    // ★ADR-0046★: the old eager resubscribe (iterating current_agents) was deleted — the helper is kept because the routing (targets) tests
-    //   can reuse it (currently unused → allow).
+    // `pub(crate)` so other test modules in the crate (daemon_client tests) can call it. ADR-0046: the old eager resubscribe (iterating current_agents) was deleted; the helper stays because routing (targets) tests can reuse it (currently unused → allow).
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn set_visible_agents_for_test(&self, agents: &[AgentKey]) {
@@ -118,19 +85,9 @@ impl OutputRouter {
         self.table.store(Arc::new(RoutingSnapshot { by_agent }));
     }
 
-    // ★Low-frequency★ Recomputes the whole routing table from a ViewManager snapshot and swaps it atomically.
-    //
-    // ★Call contract (serialization — FIX-1)★: this function must be called **while holding the ViewManager lock (inside the same
-    //  critical section as the layout mutation)**. Its inside is the RMW of `load(prev) → delta 계산 → store(new)`,
-    //  so if called concurrently outside the lock (Tauri thread pool) the deltas diverge — duplicate Subscribe · missing
-    //  Unsubscribe · ABA (a stale store overwrites a new store). The lock serializes the RMW and guarantees that `&mgr` is the
-    //  current state.
-    //
-    // ★ADR-0006★: calling inside the lock is not a violation — the body is only **pure computation + lock-free `ArcSwap::store`**, and
-    //  external calls this function makes while holding the lock (emit / DaemonClient / network I/O) are 0. The enqueue of the returned delta is also
-    //  **inside the same lock** (wiring = the `layout::apply::SubscriptionSync::resync` implementation +
-    //  the two cleanup paths of `commands::popout` — no exceptions). If deferred outside the lock, a re-add between compute and fire lets a stale
-    //  unsubscribe kill a live subscription.
+    // Low-frequency: recompute the whole routing table from a ViewManager snapshot and swap it atomically.
+    // Call contract (serialization — FIX-1): call it while holding the ViewManager lock (inside the same critical section as the layout mutation). Inside is the RMW `load(prev) → delta computation → store(new)`; called concurrently outside the lock (Tauri thread pool) the deltas diverge — duplicate Subscribe · missing Unsubscribe · ABA (a stale store overwriting a new one). The lock serializes the RMW and guarantees `&mgr` is the current state.
+    // ADR-0006: calling inside the lock is not a violation — the body is pure computation + lock-free `ArcSwap::store` with no external calls (emit / DaemonClient / network I/O). Enqueueing the returned delta is also inside the same lock (wiring = the `layout::apply::SubscriptionSync::resync` implementation + the two cleanup paths of `commands::popout` — no exceptions); deferred outside, a re-add between compute and fire lets a stale unsubscribe kill a live subscription.
     pub fn rebuild(&self, mgr: &ViewManager) -> SubscriptionDelta {
         let mut by_agent: HashMap<AgentKey, Vec<WindowLabel>> = HashMap::new();
 
@@ -159,8 +116,7 @@ impl OutputRouter {
         // Diff against the previous snapshot (F-B). Read the old set before the store.
         let prev = self.table.load();
         let prev_set: HashSet<AgentKey> = prev.by_agent.keys().copied().collect();
-        // `HashSet::difference` order is nondeterministic — sort with the same determinism policy as labels.sort() to fix the delta order
-        // (test reproducibility + stable send order, FIX-4).
+        // `HashSet::difference` order is nondeterministic — sort like `labels.sort()` to fix delta order (test reproducibility + stable send order, FIX-4).
         let mut to_subscribe: Vec<AgentKey> = new_set.difference(&prev_set).copied().collect();
         let mut to_unsubscribe: Vec<AgentKey> = prev_set.difference(&new_set).copied().collect();
         to_subscribe.sort();
@@ -176,21 +132,11 @@ impl OutputRouter {
     }
 }
 
-// ★Window cleanup core (Tauri-free — G1 headless required, TRD §8 stage 1)★. **Drops all tab Views** of window `label`
-// (views + view_owner + windows entry) and then runs `rebuild` once → returns that delta. The returned
-// `to_unsubscribe` (agents that remain in no window) is fired to the daemon **by the caller inside the lock** (F1).
-//
-// ★This function knows nothing of Tauri · DaemonClient · registry★ — it takes only `ViewManager` (model) + `OutputRouter` (routing)
-//   and purely updates only the model · routing table (headless standalone test possible). `commands::popout::drop_window_in_model`
-//   (called by the close request · `Destroyed` cleanup) calls this core inside the ViewManager lock and handles firing the delta · releasing the closing window's number
-//   in the same lock. Detaching the registry (the Tauri part) is the job of `cleanup_popup_window`.
-//
-// - `label == MAIN_WINDOW_LABEL`: not a cleanup target (invariant 4) — no-op, empty delta (defensive, the caller also blocks it first).
-// - `label` not in `windows` (the normal path where close_tab · window close (`apply::close_window`) or a popout close request deleted the model first):
-//   skip close, only `rebuild` once (recompute the table by contract). Destroyed is an OS event after that, so it is already not in the model.
-// - `label` in `windows` (a popout close request · a `Destroyed` that came without a close request — multi-tab residual risk, G1):
-//   drop all tabs by iterating and then `rebuild`. The window number is decided by `cause` — for a close request the OS window still exists, so it is held until its `Destroyed`
-//   (`close_window`), and for `Destroyed` it is released at once (`drop_window_gone` — TRD S26-window-chrome §4-1).
+// Window cleanup core (Tauri-free — G1 headless required, TRD §8 stage 1): drops all tab Views of window `label` (views + view_owner + windows entry), runs `rebuild` once and returns that delta. The caller fires the returned `to_unsubscribe` (agents remaining in no window) to the daemon inside the lock (F1).
+// Knows nothing of Tauri · DaemonClient · registry — only `ViewManager` (model) + `OutputRouter` (routing). `commands::popout::drop_window_in_model` (close request · `Destroyed` cleanup) calls it inside the ViewManager lock and handles firing the delta · releasing the closing window's number in the same lock; detaching the registry (the Tauri part) is `cleanup_popup_window`'s job.
+// - `label == MAIN_WINDOW_LABEL`: not a cleanup target (invariant 4) — no-op, empty delta (defensive; the caller blocks it too).
+// - `label` not in `windows` (the normal path: close_tab · window close (`apply::close_window`) or a popout close request deleted the model first): skip close, `rebuild` once (the table is recomputed by contract); Destroyed is an OS event after that.
+// - `label` in `windows` (a popout close request · a `Destroyed` without a close request — multi-tab residual risk, G1): drop all tabs then `rebuild`. The window number is decided by `cause` — on a close request the OS window still exists so it is held until its `Destroyed` (`close_window`); on `Destroyed` it is released at once (`drop_window_gone` — TRD S26-window-chrome §4-1).
 pub fn cleanup_window_core(
     mgr: &mut ViewManager,
     router: &OutputRouter,
@@ -211,18 +157,14 @@ pub fn cleanup_window_core(
     router.rebuild(mgr)
 }
 
-/// The OS event that called the popout window cleanup — tells apart whether that OS window still exists (TRD S26-window-chrome §4-1).
+/// TRD S26-window-chrome §4-1
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropCause {
-    /// Close request — the OS window will emit `Destroyed` soon.
     CloseRequested,
-    /// Destroyed — the OS window is already gone.
     Destroyed,
 }
 
-// ★Load-bearing routing invariant (ADR-0041/0042/0046 · ADR-0060)★: **only an assigned slot (SlotContent::Agent)**
-// is a routing target — `SlotContent::Empty` is explicitly ignored (no output is sent to an empty slot). The content
-// kind (SlotContent) and byte routing cross only at this point, and here only the Agent's binding (agent_id) is extracted.
+// Load-bearing routing invariant (ADR-0041/0042/0046 · ADR-0060): only an assigned slot (`SlotContent::Agent`) is a routing target — `SlotContent::Empty` is explicitly ignored. Content kind (SlotContent) and byte routing cross only here, extracting only the Agent's binding (agent_id).
 fn collect_agents(
     node: &LayoutNode,
     windows: &[&str],
@@ -238,10 +180,9 @@ fn collect_agents(
                             entry.push((*w).to_string());
                         }
                     }
-                    // If dropped silently, debugging clues vanish (ADR-0038). rebuild is low-frequency, so the debug log
-                    // costs the hot path 0 (logging-conventions).
+                    // Dropped silently, debugging clues vanish (ADR-0038); rebuild is low-frequency so the debug log costs the hot path 0 (logging-conventions).
                     Err(_) => {
-                        tracing::debug!(agent_id = %agent_id, "rebuild: 슬롯 agent_id 가 UUID 아님 — 라우팅 스킵");
+                        tracing::debug!(agent_id = %agent_id, "rebuild: slot agent_id is not a UUID — skipping routing");
                     }
                 }
             }
@@ -312,7 +253,7 @@ mod tests {
         let (aid, _) = agent();
         assert!(
             router.targets(aid).is_empty(),
-            "배정 안 된 agent 는 빈 결과"
+            "an unassigned agent gives an empty result"
         );
     }
 
@@ -330,7 +271,7 @@ mod tests {
         assert_eq!(
             targets_set(&router, aid),
             vec!["main".to_string()],
-            "숨은 탭의 agent 도 라우팅(keep-alive)"
+            "an agent in a hidden tab is routed too (keep-alive)"
         );
     }
 
@@ -361,7 +302,7 @@ mod tests {
         assert_eq!(
             targets_set(&router, aid),
             vec!["main".to_string(), "slot-popup-1".to_string()],
-            "같은 agent 가 두 창에 보이면 둘 다 라우팅"
+            "an agent visible in two windows is routed to both"
         );
     }
 
@@ -388,22 +329,20 @@ mod tests {
         assign_to_main(&mut mgr, "not-a-uuid");
         let router = OutputRouter::new();
         let delta = router.rebuild(&mgr);
-        assert!(delta.is_empty(), "파싱 불가 slot 은 구독 대상도 아님");
+        assert!(
+            delta.is_empty(),
+            "an unparsable slot is not a subscription target either"
+        );
         let (probe, _) = agent();
         assert!(router.targets(probe).is_empty());
     }
 
     // ── lock-free reads (structural): no Mutex in OutputRouter ─────────────────
-    //
-    // ★Caution (FIX-1)★: the tests below verify only the safety of concurrent *reads* (targets/load) and store. Concurrent *rebuild*
-    // (two writers doing load→delta→store with no lock) is a **contract violation** — rebuild must be called only inside the ViewManager-lock-holding
-    // critical section (serialization guaranteed), so there is no concurrent-writer test
-    // (it would be testing misuse, so meaningless). The serialized-sequence invariant is covered by delta_conservation_over_sequence.
+    // These tests verify only the safety of concurrent reads (targets/load) and store. Concurrent rebuild (two writers doing load→delta→store with no lock) is a contract violation (FIX-1: rebuild must be called only inside the ViewManager-lock critical section), so there is no concurrent-writer test; the serialized-sequence invariant is covered by `delta_conservation_over_sequence`.
 
     #[test]
     fn targets_is_lock_free_concurrent_reads() {
-        // Structural assertion: targets takes no lock, so many threads read concurrently without blocking.
-        // (The only field of OutputRouter is one ArcSwap — no Mutex/RwLock. Confirmed by compiling + concurrent reads.)
+        // Structural assertion: targets takes no lock, so many threads read concurrently without blocking (the only field of OutputRouter is one ArcSwap — no Mutex/RwLock).
         use std::sync::Arc as StdArc;
         use std::thread;
 
@@ -430,8 +369,7 @@ mod tests {
 
     #[test]
     fn rebuild_concurrent_with_reads_is_safe() {
-        // While rebuild (store) is in progress, another thread doing targets (load) always sees only a consistent
-        // snapshot (the old or the new one) with no data race — ArcSwap semantics. Either an empty result or ["main"] (no torn value).
+        // While rebuild (store) runs, another thread's targets (load) always sees a consistent snapshot (old or new), no data race — ArcSwap semantics: either empty or ["main"], no torn value.
         use std::sync::Arc as StdArc;
         use std::thread;
 
@@ -499,7 +437,7 @@ mod tests {
         let delta = router.rebuild(&mgr);
         assert!(
             delta.is_empty(),
-            "레이아웃 불변이면 구독 델타 0(중복 Subscribe 방지)"
+            "an unchanged layout gives subscription delta 0 (prevents duplicate Subscribe)"
         );
     }
 
@@ -514,13 +452,13 @@ mod tests {
 
         let router = OutputRouter::new();
         let d1 = router.rebuild(&mgr);
-        assert_eq!(d1.to_subscribe, vec![aid], "처음 0→1 Subscribe 한 번");
+        assert_eq!(d1.to_subscribe, vec![aid], "first 0→1 Subscribe, once");
 
         mgr.close_window("slot-popup-1").unwrap();
         let d2 = router.rebuild(&mgr);
         assert!(
             d2.is_empty(),
-            "한 창 닫혀도 main 에 남아 1→1 — Unsubscribe 금지(아직 보임)"
+            "even if one window closes, it stays in main, 1→1 — no Unsubscribe (still visible)"
         );
         assert_eq!(targets_set(&router, aid), vec!["main".to_string()]);
     }
@@ -549,7 +487,10 @@ mod tests {
 
         mgr.switch_tab(MAIN_WINDOW_LABEL, v1).unwrap();
         let d1 = router.rebuild(&mgr);
-        assert!(d1.is_empty(), "switch_tab 은 keep-alive 라 델타 no-op");
+        assert!(
+            d1.is_empty(),
+            "switch_tab is keep-alive, so the delta is a no-op"
+        );
         assert_eq!(targets_set(&router, a1), vec!["main".to_string()]);
         assert_eq!(targets_set(&router, b1), vec!["main".to_string()]);
     }
@@ -572,7 +513,11 @@ mod tests {
 
         mgr.close_tab(MAIN_WINDOW_LABEL, v2).unwrap();
         let d = router.rebuild(&mgr);
-        assert_eq!(d.to_unsubscribe, vec![b1], "닫힌 탭 agent Unsubscribe");
+        assert_eq!(
+            d.to_unsubscribe,
+            vec![b1],
+            "Unsubscribe the closed tab's agent"
+        );
         assert!(d.to_subscribe.is_empty());
         assert!(router.targets(b1).is_empty());
         assert_eq!(targets_set(&router, a1), vec!["main".to_string()]);
@@ -596,8 +541,7 @@ mod tests {
         assert_eq!(d2.to_unsubscribe, vec![aid]);
     }
 
-    // ★non-vacuity guard★: if the diff logic is a no-op (always returns an empty delta), this test fails.
-    // It asserts the exact set difference in a sequence where two different agents come and go — it cannot pass with an empty delta.
+    // Non-vacuity guard: a no-op diff (always an empty delta) fails this; it asserts the exact set difference in a sequence where two different agents come and go.
     #[test]
     fn diff_non_vacuous_distinct_deltas() {
         let mut mgr = ViewManager::new();
@@ -614,17 +558,13 @@ mod tests {
         let (b, bs) = agent();
         mgr.assign_agent(view_id, slot, bs).unwrap();
         let d2 = router.rebuild(&mgr);
-        assert_eq!(d2.to_subscribe, vec![b], "B 새로 보임");
-        assert_eq!(d2.to_unsubscribe, vec![a], "A 교체돼 사라짐");
+        assert_eq!(d2.to_subscribe, vec![b], "B newly visible");
+        assert_eq!(d2.to_unsubscribe, vec![a], "A was replaced and vanished");
     }
 
-    // ★ADR-0046: axis B (slot=(window,agent) cursor delta) test deleted★ — the rust check is the single-flight
-    //   state machine = the daemon_client::replay_flight unit tests. The axis A (per-agent) diff · preservation invariants below remain.
+    // ADR-0046: the axis B (slot=(window,agent) cursor delta) test was deleted — the rust check is the single-flight state machine = `daemon_client::replay_flight` unit tests. The axis A (per-agent) diff · preservation invariants below remain.
 
-    // ★Delta preservation invariant guard★: over the whole **serialized** rebuild sequence (= calls holding the ViewManager lock, FIX-1),
-    // `(모든 to_subscribe 합집합) \ (모든 to_unsubscribe 합집합)` must exactly match the agent set of the final table — that is, every agent visible at the end is
-    // net-subscribed (none missing), and none was net-unsubscribed. A regression net that catches leaks (subscribed but not in the table) ·
-    // losses (in the table but not subscribed) at once.
+    // Delta preservation invariant guard: over a whole serialized rebuild sequence (calls holding the ViewManager lock, FIX-1), `(union of all to_subscribe) \ (union of all to_unsubscribe)` must exactly equal the agent set of the final table — every agent visible at the end net-subscribed (none missing), none net-unsubscribed. Catches leaks (subscribed but not in the table) and losses (in the table but not subscribed) at once.
     #[test]
     fn delta_conservation_over_sequence() {
         let mut mgr = ViewManager::new();
@@ -672,17 +612,15 @@ mod tests {
         let final_set: HashSet<Uuid> = router.table.load().by_agent.keys().copied().collect();
         assert_eq!(
             net, final_set,
-            "직렬화 rebuild 시퀀스의 net-구독 집합 = 최종 테이블 agent 집합(누수·유실 0)"
+            "net subscription set of the serialized rebuild sequence = the final table's agent set (no leak or loss)"
         );
-        assert_eq!(final_set, HashSet::from([c]), "최종 테이블엔 C 만");
+        assert_eq!(final_set, HashSet::from([c]), "only C in the final table");
         assert!(net.contains(&c) && !net.contains(&a) && !net.contains(&b));
     }
 
-    // ★ADR-0046: resync_filter_*(slots_for_window_agent) tests deleted★ — that method was for the old per-slot mount
-    //   replay filter. resync_output is now absorbed into per-agent request_replay (view-driven full re-replay), so
-    //   no window · slot filter is needed (targets() handles routing, single-flight handles marker order).
+    // ADR-0046: the resync_filter_*(slots_for_window_agent) tests were deleted — that method served the old per-slot mount replay filter; resync_output is now absorbed into per-agent request_replay (view-driven full re-replay), so no window · slot filter is needed (`targets()` handles routing, single-flight handles marker order).
 
-    // ── cleanup_window_core (G1 multi-tab cleanup headless required, TRD §8 stage 1) ────────────────────
+    // TRD §8
 
     fn assign_to_window(mgr: &mut ViewManager, label: &str, agent_str: &str) -> Uuid {
         let view_id = mgr.windows.get(label).unwrap().active;
@@ -712,20 +650,23 @@ mod tests {
         let delta = cleanup_window_core(&mut mgr, &router, "slot-popup-1", DropCause::Destroyed);
 
         for v in [p0, p1] {
-            assert!(!mgr.views.contains_key(&v), "View 잔류 0");
-            assert!(!mgr.view_owner.contains_key(&v), "view_owner 잔류 0");
+            assert!(!mgr.views.contains_key(&v), "no View left");
+            assert!(!mgr.view_owner.contains_key(&v), "no view_owner left");
         }
-        assert!(!mgr.windows.contains_key("slot-popup-1"), "창 엔트리 제거");
+        assert!(
+            !mgr.windows.contains_key("slot-popup-1"),
+            "window entry removed"
+        );
         assert!(
             mgr.closing_numbers().is_empty(),
-            "Destroyed 는 번호를 곧바로 푼다"
+            "Destroyed releases the number right away"
         );
         mgr.assert_number_invariants();
         let unsub: HashSet<_> = delta.to_unsubscribe.iter().copied().collect();
         assert_eq!(
             unsub,
             HashSet::from([a_id, b_id]),
-            "창 전용 agent 전부 Unsubscribe"
+            "Unsubscribe all window-only agents"
         );
         assert!(router.targets(a_id).is_empty());
         assert!(router.targets(b_id).is_empty());
@@ -741,7 +682,11 @@ mod tests {
         cleanup_window_core(&mut mgr, &router, "slot-popup-1", DropCause::CloseRequested);
 
         assert!(!mgr.windows.contains_key("slot-popup-1"));
-        assert_eq!(mgr.closing_numbers(), [2], "OS 창이 남아 번호를 쥔다");
+        assert_eq!(
+            mgr.closing_numbers(),
+            [2],
+            "the OS window remains and holds the number"
+        );
         mgr.assert_number_invariants();
     }
 
@@ -759,7 +704,7 @@ mod tests {
         let delta = cleanup_window_core(&mut mgr, &router, "slot-popup-1", DropCause::Destroyed);
         assert!(
             delta.to_unsubscribe.is_empty(),
-            "main 에 남은 shared agent 는 Unsubscribe 금지"
+            "no Unsubscribe for a shared agent that remains in main"
         );
         assert_eq!(targets_set(&router, shared), vec!["main".to_string()]);
     }
@@ -774,16 +719,21 @@ mod tests {
 
         let before_views = mgr.views.len();
         let delta = cleanup_window_core(&mut mgr, &router, MAIN_WINDOW_LABEL, DropCause::Destroyed);
-        assert!(delta.is_empty(), "main 정리 요청은 빈 델타(no-op)");
-        assert_eq!(mgr.views.len(), before_views, "main View 불변");
-        assert!(mgr.windows.contains_key(MAIN_WINDOW_LABEL), "main 창 유지");
+        assert!(
+            delta.is_empty(),
+            "a main cleanup request gives an empty delta (no-op)"
+        );
+        assert_eq!(mgr.views.len(), before_views, "main View unchanged");
+        assert!(
+            mgr.windows.contains_key(MAIN_WINDOW_LABEL),
+            "main window kept"
+        );
         assert_eq!(targets_set(&router, aid), vec!["main".to_string()]);
     }
 
     #[test]
     fn cleanup_core_already_removed_window_only_rebuilds() {
-        // Normal path: window close (`apply::close_window`) deletes the model first and then the OS Destroyed arrives late →
-        //   label not in windows → close skipped, only rebuild (empty delta — since it already left routing).
+        // Normal path: window close (`apply::close_window`) deletes the model first and the OS Destroyed arrives late → label not in windows → close skipped, only rebuild (empty delta — it already left routing).
         let mut mgr = ViewManager::new();
         let (aid, astr) = agent();
         mgr.create_window("slot-popup-1").unwrap();
@@ -796,15 +746,17 @@ mod tests {
         assert_eq!(d_cmd.to_unsubscribe, vec![aid]);
 
         let d_late = cleanup_window_core(&mut mgr, &router, "slot-popup-1", DropCause::Destroyed);
-        assert!(d_late.is_empty(), "이미 정리된 창 재정리는 빈 델타");
+        assert!(
+            d_late.is_empty(),
+            "re-cleaning an already cleaned window gives an empty delta"
+        );
     }
 
     // ── move_slot_to_window phase-C model level (F4 edge + target vanished) ────────────────────────────
 
     #[test]
     fn move_phase_c_target_vanished_drops_detached_and_keeps_source() {
-        // move phase-C: the existing-window target vanished during phase B (unlocked) → insert_tab_into Err → drop_detached_view,
-        //   source slot kept (the user does not lose a slot). Routing is source only.
+        // Move phase C: the existing-window target vanished during phase B (unlocked) → `insert_tab_into` Err → `drop_detached_view`, source slot kept (the user does not lose a slot). Routing is source only.
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
         let slot = first_slot(&mgr, src);
@@ -825,16 +777,12 @@ mod tests {
         router.rebuild(&mgr);
         assert_eq!(mgr.slot_agent(src, slot).unwrap(), Some(aid.to_string()));
         assert_eq!(targets_set(&router, aid), vec!["main".to_string()]);
-        assert!(!mgr.views.contains_key(&tmp), "임시 View 제거");
+        assert!(!mgr.views.contains_key(&tmp), "temporary View removed");
     }
 
     #[test]
     fn move_phase_c_source_reassigned_becomes_copy_invariant5_benign() {
-        // ★F4 edge★: if during MOVE the source slot is **reassigned to other content** during phase B (unlocked), the phase C
-        //   still_ours guard (model level: whether slot_content(src,slot) == the moved content, ADR-0064) fails → source
-        //   close skipped. Result: the moved content is only at the target, and the source has unrelated new content — that is, "preventing deletion of unrelated content" takes
-        //   priority (load-bearing). From the original content's view it remains only at the target, so data loss 0. Below, in contrast with "if the source is unchanged
-        //   then MOVE (delete source)", verify at model level that close is skipped on reassignment.
+        // F4 edge: if during MOVE the source slot is reassigned to other content in phase B (unlocked), phase C's `still_ours` guard (model level: `slot_content(src,slot) == the moved content`, ADR-0064) fails → source close skipped. The moved content is only at the target and the source holds unrelated new content — "preventing deletion of unrelated content" takes priority (load-bearing); the original content remains at the target, so no data loss. Contrasts with "source unchanged → MOVE (delete source)" below; verified at model level.
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
         let slot = first_slot(&mgr, src);
@@ -856,7 +804,10 @@ mod tests {
             mgr.slot_content(src, slot),
             Ok(ref c) if *c == src_content
         );
-        assert!(!still_ours, "재배정됐으니 still_ours=false → close 스킵");
+        assert!(
+            !still_ours,
+            "reassigned, so still_ours=false → close skipped"
+        );
         assert_eq!(mgr.slot_agent(src, slot).unwrap(), Some(other.to_string()));
 
         let router = OutputRouter::new();
@@ -884,7 +835,7 @@ mod tests {
             mgr.slot_content(src, slot),
             Ok(ref c) if *c == src_content
         );
-        assert!(still_ours, "소스 그대로면 still_ours=true");
+        assert!(still_ours, "if the source is unchanged, still_ours=true");
         mgr.close_slot(src, slot).unwrap(); // MOVE close
 
         let router = OutputRouter::new();
@@ -897,10 +848,7 @@ mod tests {
 
     #[test]
     fn move_non_agent_content_produces_no_subscription_delta() {
-        // ★ADR-0064★: over the whole process of moving an agent_list slot to a popup the subscription delta must be 0 —
-        //   non-agent content has no backend output subscription (collect_agents routes only Agent), so rebuild produces
-        //   no Subscribe/Unsubscribe at all. That is, the fact that "the subscription delta is meaningful only for Agent content" is
-        //   structurally guaranteed is pinned as a regression (the agent case logic is covered as is by the tests above = no regression).
+        // ADR-0064: over the whole process of moving an agent_list slot to a popup the subscription delta must be 0 — non-agent content has no backend output subscription (`collect_agents` routes only Agent), so rebuild produces no Subscribe/Unsubscribe. Pins that the delta is meaningful only for Agent content (the agent case logic is covered by the tests above).
         use crate::layout::types::SlotContent;
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
@@ -911,7 +859,7 @@ mod tests {
         let router = OutputRouter::new();
         assert!(
             router.rebuild(&mgr).is_empty(),
-            "agent_list 배치는 구독 델타 0"
+            "an agent_list placement gives subscription delta 0"
         );
 
         // phase A: take agent_list content out as a temporary View.
@@ -919,7 +867,7 @@ mod tests {
         assert_eq!(src_content, SlotContent::AgentList);
         assert!(
             router.rebuild(&mgr).is_empty(),
-            "phase A rebuild 도 델타 0(비-에이전트)"
+            "phase A rebuild gives delta 0 too (non-agent)"
         );
 
         // phase C: new window insertion + source close (a true MOVE — still_ours=true).
@@ -932,8 +880,8 @@ mod tests {
         mgr.close_slot(src, slot).unwrap();
         assert!(
             router.rebuild(&mgr).is_empty(),
-            "phase C rebuild 도 델타 0(비-에이전트 이동 전체가 구독 무관)"
+            "phase C rebuild gives delta 0 too (the whole non-agent move is subscription-neutral)"
         );
-        assert!(router.table.load().by_agent.is_empty(), "agent 라우팅 0");
+        assert!(router.table.load().by_agent.is_empty(), "no agent routing");
     }
 }

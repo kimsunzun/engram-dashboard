@@ -4,7 +4,7 @@
 //! The observation period · the per-agent observer registry · the change callback · the lifetime of the single polling thread. That is all.
 //!
 //! ★**Which program writes the session id where and in what shape is not known to this file**★ (ADR-0004): all that knowledge
-//! is behind [`SessionIdSource`] implementations, and implementations are built only inside `backend/<이름>/`
+//! is behind [`SessionIdSource`] implementations, and implementations are built only inside `backend/<name>/`
 //! ([`crate::backend::session_id_source`]). This module only takes observers and knocks on them every period.
 //!
 //! ## Why track
@@ -36,7 +36,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A port that repeatedly observes one incarnation's session id. It is the **only** backend touchpoint this runner knows.
 ///
-/// Implementations live inside `backend/<이름>/` — where to read (file · socket · process) and its format are all the implementation's
+/// Implementations live inside `backend/<name>/` — where to read (file · socket · process) and its format are all the implementation's
 /// job, and this module holds only the period · registry · callback. The only place that builds implementations is
 /// [`crate::backend::session_id_source`].
 ///
@@ -137,7 +137,7 @@ impl SessionTracker {
 
     pub fn start(&self) {
         if !self.enabled {
-            tracing::info!("session_tracker 비활성(토글 off) — 추적 안 함");
+            tracing::info!("session_tracker disabled (toggle off) — not tracking");
             return;
         }
         let mut handle_guard = self.handle.lock().expect("handle poisoned");
@@ -153,7 +153,7 @@ impl SessionTracker {
         let handle = std::thread::Builder::new()
             .name("session-tracker".into())
             .spawn(move || {
-                tracing::info!("session_tracker 스레드 시작");
+                tracing::info!("session_tracker thread started");
                 while !stop.load(Ordering::Relaxed) {
                     // Collect changes inside the lock, and call the callback after releasing the lock
                     // (so there is no deadlock even if the callback touches the tracker again).
@@ -177,9 +177,9 @@ impl SessionTracker {
                     }
                     std::thread::sleep(interval);
                 }
-                tracing::info!("session_tracker 스레드 종료");
+                tracing::info!("session_tracker thread exited");
             })
-            .expect("session-tracker 스레드 생성 실패");
+            .expect("failed to create the session-tracker thread");
 
         *handle_guard = Some(handle);
     }
@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(
             *seen.lock().unwrap(),
             vec![(agent, new_sid)],
-            "Changed 는 콜백으로 정확히 1회 올라와야 한다"
+            "Changed must come up through the callback exactly once"
         );
     }
 
@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(
             *polls.lock().unwrap(),
             1,
-            "Degraded 신고 뒤에는 다시 두드리지 않아야 한다(주기가 10ms 라 계속 돌았다면 여러 번이다)"
+            "after reporting Degraded it must not poll again (with a 10ms period, continuing would mean several times)"
         );
     }
 }

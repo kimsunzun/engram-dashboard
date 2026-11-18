@@ -1,22 +1,14 @@
-//! The daemon's accepting side on the transport — the `conn_port` contract (`FrameSink` · `FrameFanout` ·
-//! `ConnectionHandler` calls) implemented over accepted transport peers (TRD S21 trd-3 §6-3 U4 · D11 ②′).
+//! The daemon's accepting side on the transport — the `conn_port` contract (`FrameSink` · `FrameFanout` · `ConnectionHandler` calls) implemented over accepted transport peers (TRD S21 trd-3 §6-3 U4 · D11 2').
 //!
-//! The transport owns the socket: WS upgrade + Origin · Host check ([`accept_policy`]), the auth deadline, the single
-//! writer, keepalive (active ping · idle decision) and the close frame. This file owns what sits above that: per
-//! connection one read task (it reads that peer's lossless inbox), the arrival-order lane + byte budget + saturation
-//! disposition, the single `dispatch_task`, the overlapping `bypass_task`, and the teardown order.
+//! The transport owns the socket: WS upgrade + Origin · Host check ([`accept_policy`]), the auth deadline, the single writer, keepalive (active ping · idle decision) and the close frame. This file owns what sits above: per connection one read task (reads that peer's lossless inbox),
+//! the arrival-order lane + byte budget + saturation disposition, the single `dispatch_task`, the overlapping `bypass_task`, and the teardown order.
 //!
-//! ★Connection lifetime★ — three ends:
-//! - dispatch finished (`ConnFlow::Close` · the lane closed after the read side stopped) → stop feeding · drain the
-//!   priority lane · close the peer after flushing what is queued (`Peer::close_after_flush`).
-//! - the link ended on the write side (write failure · write deadline · idle · our own close) or a send through the
-//!   [`FrameSink`] failed → stop feeding · drain the priority lane · abort dispatch.
-//! - the link ended on the read side (the peer closed · a read error) → the lanes close and dispatch drains what it
-//!   holds; it is aborted at the first failed send or after one ping interval, so the last command of a client that
-//!   sends and closes at once still runs, but a dispatch stuck in a handler does not hold the connection forever.
+//! Connection lifetime — three ends:
+//! - dispatch finished (`ConnFlow::Close` · the lane closed after the read side stopped) → stop feeding · drain the priority lane · close the peer after flushing what is queued (`Peer::close_after_flush`).
+//! - the link ended on the write side (write failure · write deadline · idle · our own close) or a [`FrameSink`] send failed → stop feeding · drain the priority lane · abort dispatch.
+//! - the link ended on the read side (peer closed · read error) → the lanes close and dispatch drains what it holds; aborted at the first failed send or after one ping interval, so the last command of a client that sends and closes at once still runs, but a dispatch stuck in a handler does not hold the connection forever.
 //!
-//! In every branch `on_disconnect` runs before the fan-out list drops the connection, and the read task keeps draining
-//! the inbox to its end (`Closed` · `None`) after it stops feeding the lanes (transport receiver invariant 5).
+//! In every branch `on_disconnect` runs before the fan-out list drops the connection, and the read task keeps draining the inbox to its end (`Closed` · `None`) after it stops feeding the lanes (transport receiver invariant 5).
 // ADR-0206
 // ADR-0310
 
@@ -46,110 +38,67 @@ use crate::conn_port::{
     FrameSink, Saturated,
 };
 
-/// Per-connection outbound queue capacity. ReplayBuffer.max_events(4096) + control_slack(512) = 4608.
-/// Leaves control headroom even when the whole replay fits (consistent with the output_core.rs invariant).
+/// Per-connection outbound queue capacity: ReplayBuffer.max_events(4096) + control_slack(512) = 4608 — control headroom even when the whole replay fits (consistent with the output_core.rs invariant).
 const CONN_TX_CAP: usize = 4608;
 
-/// **Number of entries** in the per-connection **inbound** arrival-order lane — headroom that lets the read loop read the next frame without waiting for the handler's work.
-/// The memory axis is carried not by this value but by [`CONN_RX_MAX_BYTES`] (that doc is the source of truth for the accounting).
+/// Number of entries in the per-connection inbound arrival-order lane — headroom so the read loop reads the next frame without waiting for the handler. The memory axis is [`CONN_RX_MAX_BYTES`] (accounting source of truth).
 ///
-/// ★This queue is a **burst absorber**, not a backlog store★: what the consumer (`dispatch_task`) holds at a time
-///   is only **one** frame whose arrival order carries meaning, and long work is peeled off this lane by the upper layer
-///   (the 「도착 순서」 (arrival order) contract of `conn_port::ConnectionHandler`). So unlike [`CONN_TX_CAP`], which must hold
-///   the entire replay, no large value is needed — do not compare the two values on the same axis.
-/// ★★Even when full, **the read loop does not stop** — it asks the upper layer how to dispose of that one frame and keeps reading★★
-///   ([`ConnectionHandler::on_inbound_saturated`]). ★The 「가득 차면 읽기 루프가
-///   기다린다」 (when full, the read loop waits) that was once written here **was a wrong design**★: the inbox is a stream, so while waiting **the frames behind it
-///   are not even taken out**. Then a frame the upper layer chose as 「굶으면 안 된다」 (must not starve) ([`Saturated::Bypass`])
-///   starves behind the blocked lane, and the very symptom this arrangement was meant to eliminate comes back by another path.
-///   ㆍ**Even so it does not drop silently**: asking the upper layer for the disposition and getting [`Saturated::Refused`] means
-///     **the upper layer has already sent a reply** (obligation 2 of the port contract). The disposition for when even that reply could not be sent is
-///     held separately by [`Saturated::Unanswered`] — only there is the connection ended.
-///   ㆍ**Otherwise it does not disconnect either**: the outbound queue ([`ConnFrameSink`]) disconnects on saturation
-///     because its caller is a synchronous path that **cannot produce a reply** (the source of truth for the asymmetry =
-///     `conn_port::FrameSink`). Here the upper layer can state the refusal in words, so there is no reason to kill the connection.
-/// ★So what this value measures★ = 「소비자가 막힌 동안 **손실 없이** 받아 둘 프레임 **개수**」 (the **number** of frames to hold **without loss** while the consumer is blocked). Whichever of the two
-///   is hit first is the saturation — the entries all fill, or the byte budget all fills.
-/// ★When the consumer is healthy this value is not even seen★: what remains in the lane is only short frames with no await point
-///   (long ones are peeled off by the upper layer), so in normal operation the 64 entries never fill. Being full is a signal that **the consumer
-///   is blocked**, and the right answer in that state is not to wait but to let through what should be skipped.
+/// A burst absorber, not a backlog store: the consumer (`dispatch_task`) holds only one order-bearing frame at a time and long work is peeled off this lane by the upper layer (the "arrival order" contract of `conn_port::ConnectionHandler`). Unlike [`CONN_TX_CAP`], which must hold the entire replay, no large value is needed — do not compare them on one axis.
+/// Even when full, the read loop does not stop — it asks the upper layer how to dispose of that frame and keeps reading ([`ConnectionHandler::on_inbound_saturated`]). The earlier "when full, the read loop waits" was a wrong design: the inbox is a stream, so the frames behind are not even taken out, and a frame chosen as "must not starve"
+/// ([`Saturated::Bypass`]) would starve behind the blocked lane — the very symptom this arrangement exists to eliminate.
+///  · It does not drop silently: [`Saturated::Refused`] means the upper layer already sent a reply (port contract obligation 2); the disposition when even that reply could not be sent is [`Saturated::Unanswered`] — only there is the connection ended.
+///  · Otherwise it does not disconnect: the outbound queue ([`ConnFrameSink`]) disconnects on saturation because its caller is a synchronous path that cannot produce a reply (asymmetry source: `conn_port::FrameSink`); here the upper layer can state the refusal in words.
+/// This value measures how many frames to hold without loss while the consumer is blocked; whichever of entries or byte budget fills first is saturation. With a healthy consumer it is never seen (only short frames with no await point remain), so being full signals a blocked consumer, where the answer is not to wait but to let through what should be skipped.
 // ADR-0206
 const CONN_RX_CAP: usize = 64;
 
-/// Budget of **payload bytes** the arrival-order lane may hold — decides saturation **together with** [`CONN_RX_CAP`].
+/// Budget of payload bytes the arrival-order lane may hold — decides saturation together with [`CONN_RX_CAP`].
 ///
-/// ★Why the entry count alone is not enough★: each entry holds one whole frame, so **each entry differs in size**. Counting only
-///   entries makes this lane's real ceiling `CONN_RX_CAP × (한 프레임의 상한)` = 64 × [`MAX_MESSAGE_BYTES`].
-/// ★The decision uses **the fill level before adding**★: if the bytes already held are at or above this value, it counts as saturated. So a frame arriving at an empty lane
-///   **is always accepted, whatever its size** — a legitimate command is never refused merely for being large.
-///   The price is that the ceiling becomes 「예산 + 프레임 하나」 (budget + one frame) (= 16 MiB + [`MAX_MESSAGE_BYTES`]).
-///   The transport's own byte budget below this lane (read-ahead · inbox) is separate and counted by the transport.
-/// ★Basis of the value★: what stands in this lane is short control frames, and a large one is an occasional single frame — 16 MiB leaves room even if that
-///   「어쩌다 한 장」 (an occasional single frame) overlaps several times, and a normal burst never sees this value.
+/// The entry count alone is not enough: each entry holds one whole frame of varying size, making the real ceiling `CONN_RX_CAP × (cap of one frame)` = 64 × [`MAX_MESSAGE_BYTES`].
+/// The decision uses the fill level before adding (bytes held ≥ this value = saturated), so a frame arriving at an empty lane is always accepted whatever its size — a legitimate large command is never refused for size. The ceiling is "budget + one frame" (16 MiB + [`MAX_MESSAGE_BYTES`]). The transport's own byte budget below this lane (read-ahead · inbox) is counted by the transport.
+/// Basis: this lane holds short control frames and a large one is an occasional single frame; 16 MiB leaves room even if several overlap, and a normal burst never sees it.
 const CONN_RX_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 /// Capacity of the lane where a frame that skipped the arrival-order lane ([`Saturated::Bypass`]) stands.
 ///
-/// ★Why it is small★: what enters this lane is only 「막힌 줄을 풀려는 것」 (things that try to unblock the blocked lane), so in normal operation it **uses not a single entry**.
-///   8 entries being full means eight were sent and not one finished — that path itself is blocked,
-///   and accepting more then only lines up the same thing eight more times.
-/// ★Here it waits (unlike the lane above)★: if reading stops when this lane is full, what starves is **the frames bound for the arrival-order lane**,
-///   and those were about to be refused anyway. That is, waiting here does not starve anything that must be protected. The wait
-///   stops only this connection's inbox, and the transport turns that into backpressure on this peer's socket alone.
-/// ★The byte budget is **not applied** here★: refusing by budget a frame the upper layer chose as 「굶으면 안 된다」 (must not starve)
-///   removes the reason this lane exists. So this lane's ceiling is the entry count as is, and its value is
-///   8 × [`MAX_MESSAGE_BYTES`]. The property that this lane is empty in normal operation makes that ceiling effectively 0 — it is an
-///   observation, not a guarantee, so it is written as is.
+/// Small: only things that try to unblock the blocked lane enter it, so in normal operation it uses no entry; 8 full means eight were sent and none finished — that path itself is blocked, and accepting more only lines up the same thing.
+/// Here it waits (unlike the lane above): reading stopped by a full lane starves only the frames bound for the arrival-order lane, which were about to be refused anyway; nothing to protect starves. The wait stops only this connection's inbox, which the transport turns into backpressure on this peer's socket alone.
+/// The byte budget is not applied: refusing by budget a frame the upper layer chose as "must not starve" removes this lane's reason. The ceiling is the entry count, 8 × [`MAX_MESSAGE_BYTES`]; that this lane is empty in normal operation (effective ceiling 0) is an observation, not a guarantee.
 const CONN_BYPASS_CAP: usize = 8;
 
-/// Grace period in connection cleanup, waiting until the priority lane **empties what it has accepted** ([`finish_bypass_lane`]).
+/// Grace period in connection cleanup waiting until the priority lane empties what it accepted ([`finish_bypass_lane`]).
 ///
-/// ★This value does **not** bear correctness★ — correctness is borne by 「기다린다」 (waiting) itself, and this value is only the upper bound that keeps that wait
-///   from becoming infinite. Past the grace period it falls back to abort, so even if this constant
-///   is wrong it **cannot be worse than aborting at once**.
-/// ★Basis of the size★: one item in this lane is an action in the upper layer that 「막힌 것을 끝내는」 (finishes something blocked), and such actions have a section
-///   that synchronously waits for the target to die (today the upper bound of that section is the upper layer's 5-second join). With 10 seconds the one in progress
-///   + the next one finish, and if more is backed up than that, that path itself is blocked, and waiting longer only
-///   lines up the same thing (the same judgment as 「8칸이 차 있다는 것은」 (8 entries being full means) in [`CONN_BYPASS_CAP`]).
-/// ★What is held during this grace period★ = only **the cleanup of that one connection**. Neither the accept loop nor
-///   other connections are caught by this wait.
+/// It does not bear correctness — the waiting itself does; this is only the upper bound keeping the wait finite. Past it, it falls back to abort, so a wrong constant cannot be worse than aborting at once.
+/// Size basis: an item here is an upper-layer action that "finishes something blocked", which has a section synchronously waiting for the target to die (today bounded by the upper layer's 5-second join); 10 s lets the one in progress + the next finish, and more backed up means that path itself is blocked (the same judgment as in [`CONN_BYPASS_CAP`]).
+/// Held during the grace period: only that one connection's cleanup — not the accept loop or other connections.
 const BYPASS_DRAIN_GRACE: Duration = Duration::from_secs(10);
 
-/// How long a new connection may stay open without its first (auth) frame before it is closed — the transport's auth
-/// deadline for accepted peers (`Policy::connect_timeout`, measured from the end of the WS upgrade). 15 s — the open-source
-/// defaults read are 3–60 s, mostly 5–15 s (SignalR `HandshakeTimeout` 15 s, EMQX `idle_timeout` 15 s —
-/// `docs/research/first-auth-frame-timeout-2026-11-06.md`). A short window turns a briefly stalled shell into a refusal.
+/// How long a new connection may stay open without its first (auth) frame before it is closed — the transport's auth deadline for accepted peers (`Policy::connect_timeout`, from the end of the WS upgrade). 15 s: the open-source defaults read are 3–60 s, mostly 5–15 s (SignalR `HandshakeTimeout` 15 s, EMQX `idle_timeout` 15 s —
+/// `docs/research/first-auth-frame-timeout-2026-11-06.md`); a short window turns a briefly stalled shell into a refusal.
 // ADR-0347
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(20);
-/// 2.5x ping_interval (the connection drops only after several Pings are missed — prevents false positives from a transient delay).
+/// 2.5x ping_interval (the connection drops only after several missed Pings — avoids false positives from a transient delay).
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(50);
 
-/// The transport requires a write deadline below the ping interval (`Policy::check`). The deadline
-/// is set as late as the transport allows — one millisecond under the ping interval — so this cut fires as rarely as it can.
+/// The transport requires a write deadline below the ping interval (`Policy::check`); it is set as late as allowed — one millisecond under — so this cut fires as rarely as possible.
 const WRITE_DEADLINE_MARGIN: Duration = Duration::from_millis(1);
 
-/// The byte cap of one WS message and one frame, both directions — the shell dialer's value (`DAEMON_MESSAGE_MAX_BYTES`).
-/// Tighter than tungstenite's defaults (64 MiB message · 16 MiB frame) only for fragmented messages — a client that does
-/// not fragment, like the shell, is bounded by the 16 MiB frame cap either way.
+/// The byte cap of one WS message and one frame, both directions — the shell dialer's value (`DAEMON_MESSAGE_MAX_BYTES`). Tighter than tungstenite's defaults (64 MiB message · 16 MiB frame) only for fragmented messages; a non-fragmenting client like the shell is bounded by the 16 MiB frame cap either way.
 const MAX_MESSAGE_BYTES: usize = 16 << 20;
 
-/// Upgrade permits — links from TCP accept until they go live (upgrade · ready queue · auth wait). Set far above any
-/// legitimate count of clients so it never refuses one.
+/// Upgrade permits — links from TCP accept until live (upgrade · ready queue · auth wait). Set far above any legitimate client count so it never refuses one.
 const MAX_PENDING_UPGRADES: usize = 1024;
 
 /// Refusal reports the listener may hold before the accept loop logs them — past it they are counted, not kept.
 const REFUSAL_QUEUE: usize = 64;
 
-/// Inbox length per accepted peer (TRD trd-3 §7 「수신 큐」 — daemon accepted peer 16 entries). The read task drains it at once
-/// except while it waits on a full priority lane; then the transport stops reading that peer's socket.
+/// Inbox length per accepted peer (TRD trd-3 §7 "inbound queue" — 16 entries). The read task drains it at once except while waiting on a full priority lane; then the transport stops reading that peer's socket.
 const ACCEPTED_INBOX: usize = 16;
 
 /// Allowed Origin allowlist. No Origin (native/harness) is allowed — the token is the main defense.
-/// ★Unmeasured — known unverified★: the four strings below are **design values**. The Origins actually sent by Tauri WebView2 · mobile
-///   have never been measured and confirmed. A mismatch = 403. When growing the client surface (packaging variants · mobile tunnels, etc.), do not treat this list
-///   as verified — a 403 may be this list's fault, not a client bug.
+/// Unmeasured — known unverified: the four strings below are design values; the Origins Tauri WebView2 · mobile actually send were never measured. A mismatch = 403. When growing the client surface (packaging variants · mobile tunnels), do not treat the list as verified — a 403 may be this list's fault, not a client bug.
 const ALLOWED_ORIGINS: &[&str] = &[
     "http://localhost:1420",
     "http://127.0.0.1:1420",
@@ -157,14 +106,12 @@ const ALLOWED_ORIGINS: &[&str] = &[
     "https://tauri.localhost",
 ];
 
-/// Host names a WS upgrade may carry (the port must be the bound one). The transport accepts
-/// only listed names (an upgrade without Host passes), so the list is the names a loopback client dials by.
+/// Host names a WS upgrade may carry (the port must be the bound one). The transport accepts only listed names (an upgrade without Host passes), so the list is the names a loopback client dials by.
 const ALLOWED_HOST_NAMES: &[&str] = &["127.0.0.1", "localhost"];
 
 /// WS application-level keepalive settings — the transport's ping interval and idle timeout for accepted peers.
 ///
-/// ★Test injection★: hard-coding constants would make tests take tens of seconds, so short values (e.g. 200ms/600ms)
-/// are made configurable for injection. The production path stays `default()` (20s/50s) as is.
+/// Test injection: hard-coded constants would make tests take tens of seconds, so short values (e.g. 200ms/600ms) are injectable; the production path stays `default()` (20s/50s).
 #[derive(Clone, Copy, Debug)]
 pub struct KeepaliveConfig {
     pub ping_interval: Duration,
@@ -193,9 +140,7 @@ fn accept_policy() -> AcceptPolicy {
     }
 }
 
-/// The transport policy of one accepted peer. The daemon sets the auth window · keepalive · outbound queue; the rest are
-/// the transport's defaults. ★Outbound saturation is not a transport disconnect★ — the per-connection sink closes on it
-/// ([`ConnFrameSink`]) and the fan-out skips it ([`ConnRegistry`]), the asymmetry of `conn_port::FrameFanout`.
+/// The transport policy of one accepted peer: the daemon sets the auth window · keepalive · outbound queue; the rest are transport defaults. Outbound saturation is not a transport disconnect — the per-connection sink closes on it ([`ConnFrameSink`]) and the fan-out skips it ([`ConnRegistry`]), the asymmetry of `conn_port::FrameFanout`.
 fn accepted_policy(keepalive: KeepaliveConfig) -> Policy {
     Policy {
         connect_timeout: AUTH_TIMEOUT,
@@ -250,7 +195,7 @@ fn log_refusal(refusal: &AcceptRefusal) {
         remote = ?refusal.remote,
         origin = ?refusal.origin,
         host = ?refusal.host,
-        "WS 업그레이드 실패(또는 Origin 거부)"
+        "WS upgrade failed (or Origin refused)"
     );
 }
 
@@ -281,8 +226,7 @@ struct ConnOutlet {
 
 /// Every authenticated connection, for the all-connection fan-out ([`FrameFanout`]), and the connection id issuer.
 ///
-/// ★Connection ids start at 1 and only go up★ — unregistering never returns an id. The command bus relies on that
-///   (`command_delivery::Pending::origin` · `CommandBus::open_caller`).
+/// Connection ids start at 1 and only go up — unregistering never returns an id; the command bus relies on that (`command_delivery::Pending::origin` · `CommandBus::open_caller`).
 #[derive(Clone)]
 pub(crate) struct ConnRegistry {
     inner: Arc<Mutex<BTreeMap<ConnId, ConnOutlet>>>,
@@ -335,9 +279,8 @@ impl ConnRegistry {
 }
 
 impl FrameFanout for ConnRegistry {
-    /// ★Do not send while holding the map locked (ADR-0006 lock order)★: take a snapshot, release the lock, and send with that copy.
-    /// ★One saturated connection is skipped, not closed★ (`conn_port::FrameFanout` duties 2 · 3) — the transport also counts
-    ///   it on that peer's inbox (`TransportEvent::Dropped`).
+    /// Do not send while holding the map locked (ADR-0006 lock order): take a snapshot, release the lock, send with the copy.
+    /// One saturated connection is skipped, not closed (`conn_port::FrameFanout` duties 2 · 3) — the transport also counts it on that peer's inbox (`TransportEvent::Dropped`).
     fn broadcast_text(&self, text: String) {
         let conns: Vec<(ConnId, ConnOutlet)> = {
             let guard = self.inner.lock().expect("conn registry poisoned");
@@ -348,7 +291,10 @@ impl FrameFanout for ConnRegistry {
                 .peer
                 .notify_in(outlet.generation, RawOut::Text(text.clone()))
             {
-                tracing::warn!(conn = id, "전-연결 팬아웃 try_send 실패(느린 소비자): {e}");
+                tracing::warn!(
+                    conn = id,
+                    "all-connection fanout try_send failed (slow consumer): {e}"
+                );
             }
         }
     }
@@ -364,13 +310,9 @@ impl Default for ConnRegistry {
 
 /// The per-connection [`FrameSink`] — puts frames on the peer's outbound queue without waiting.
 ///
-/// ★Saturation closes the connection★ (`conn_port::FrameSink::try_send`) — the peer is closed at once and the connection
-///   task is woken through `write_end`. ★`send` does not wait for room★ — the
-///   transport has no waiting send (a waiting sender on the read side would form a cycle with the supervisor — TRD trd-3
-///   §3-0 ①), so `send` behaves as `try_send`. A send on a link that is no longer live also wakes `write_end` — a failed
-///   send ends the connection.
-/// ★`Frame::Close` = drain then close★ — frames put in earlier go out first (`Peer::close_after_flush`); the reason is
-///   logged and not sent.
+/// Saturation closes the connection (`conn_port::FrameSink::try_send`): the peer is closed at once and the connection task woken through `write_end`. `send` does not wait for room — the transport has no waiting send (a waiting sender on the read side would form a cycle with the supervisor — TRD trd-3 §3-0 1), so it behaves as `try_send`.
+/// A send on a link no longer live also wakes `write_end`; a failed send ends the connection.
+/// `Frame::Close` = drain then close: earlier frames go out first (`Peer::close_after_flush`); the reason is logged, not sent.
 pub(crate) struct ConnFrameSink {
     outlet: ConnOutlet,
     write_end: Arc<Notify>,
@@ -386,7 +328,7 @@ impl ConnFrameSink {
             Frame::Text(text) => RawOut::Text(text),
             Frame::Binary(bytes) => RawOut::Binary(bytes),
             Frame::Close(reason) => {
-                tracing::info!(%reason, "close 신호 — 보낸 것을 비운 뒤 닫는다");
+                tracing::info!(%reason, "close signal — closing after flushing what was sent");
                 let _closing = self
                     .outlet
                     .peer
@@ -493,7 +435,7 @@ impl Server {
                 () = &mut stop => break,
                 accepted = listener.accept(), if accepting => match accepted {
                     Ok(accepted) => {
-                        tracing::debug!(remote = ?accepted.info().remote, "연결 수락 — WS 핸들러로 넘김");
+                        tracing::debug!(remote = ?accepted.info().remote, "connection accepted — handing to the WS handler");
                         tokio::spawn(self.serve(accepted));
                     }
                     // Terminal — the listener's accept task is gone (`Listener::accept` contract).
@@ -556,22 +498,20 @@ impl Server {
             generation,
         };
         self.conns.register(conn_id, outlet.clone());
-        tracing::info!(peer = %remote, conn = conn_id, "연결 인증 완료 — 등록");
+        tracing::info!(peer = %remote, conn = conn_id, "connection authenticated — registering");
 
         let write_end = Arc::new(Notify::new());
         let frames: Arc<dyn FrameSink> = Arc::new(ConnFrameSink::new(outlet, write_end.clone()));
         let handler = self.handlers.handler_for(conn_id);
 
-        // In order, this must come before spawning the tasks so that command dispatch cannot get ahead of the greeting.
+        // This must come before spawning the tasks so command dispatch cannot get ahead of the greeting.
         handler.on_connect(conn_id, &frames).await;
 
-        // ★Inbound queue = the boundary between the read layer and the processing layer★: reading only takes from the inbox and puts here, and handler calls
-        //   are borne by [`dispatch_task`] in arrival order. The basis of capacity and saturation disposition is [`CONN_RX_CAP`].
+        // Inbound queue = the boundary between the read layer and the processing layer: reading only takes from the inbox and puts here; handler calls are borne by [`dispatch_task`] in arrival order. Capacity and saturation basis: [`CONN_RX_CAP`].
         let (inbound_tx, inbound_rx) = mpsc::channel::<Inbound>(CONN_RX_CAP);
-        // ★The fill level of the byte budget that decides saturation **together with** the entry count★ — source of truth for the basis = [`CONN_RX_MAX_BYTES`].
+        // The byte budget fill level, deciding saturation together with the entry count — basis: [`CONN_RX_MAX_BYTES`].
         let rx_bytes: RxBytes = Arc::new(AtomicUsize::new(0));
-        // ★The second lane for frames that must not starve behind a blocked lane★ — why it must have separate capacity · a separate consumer
-        //   is held by [`CONN_BYPASS_CAP`] and [`bypass_task`] respectively.
+        // The second lane for frames that must not starve behind a blocked lane — why separate capacity and consumer: [`CONN_BYPASS_CAP`] · [`bypass_task`].
         let (bypass_tx, bypass_rx) = mpsc::channel::<Inbound>(CONN_BYPASS_CAP);
         let (stop_feeding, feeding_stopped) = oneshot::channel::<()>();
 
@@ -601,24 +541,19 @@ impl Server {
             conn_id,
         ));
 
-        // ★Explicitly abort the survivor★ — if a JoinHandle is simply dropped, the task is detached and keeps running. So select on
-        //   &mut so the handle is not consumed, and abort the losing side.
-        // ★The priority lane (bypass_task) is not a select target★ — its ending only means feeding stopped (its own sender is in read),
-        //   and is not a reason to cut the connection.
-        //   ★★The priority lane is **not aborted — it is drained**★★: the frames in that lane are ones the upper layer chose as 「굶으면 안 된다」 (must not starve) and
-        //   **accepted**. So stop feeding first to release **that lane's only sender**, and [`finish_bypass_lane`] waits for that draining.
-        // ★A read end does not abort at once★: the last command of a client that 「명령 한 장 보내고 곧바로 소켓을 닫는」 (sends one command and closes the socket right away)
-        //   still runs — dispatch drains the lane, and only a failed send or one ping interval ends the wait.
+        // Explicitly abort the survivor: a dropped JoinHandle detaches the task, so select on `&mut` (handle not consumed) and abort the losing side.
+        // The priority lane (bypass_task) is not a select target: its ending only means feeding stopped (its sender is in read), not a reason to cut the connection. It is not aborted but drained: its frames were accepted as "must not starve", so stop feeding first to release that lane's only sender, and [`finish_bypass_lane`] waits for the drain.
+        // A read end does not abort at once: the last command of a client that sends one command and closes right away still runs — dispatch drains the lane, and only a failed send or one ping interval ends the wait.
         let mut link_ended = false;
         tokio::select! {
             _ = &mut dispatch_handle => {
-                tracing::debug!(conn = conn_id, "dispatch_task 종료 → read 중단 · bypass 비움 · 비운 뒤 close + cleanup");
+                tracing::debug!(conn = conn_id, "dispatch_task ended → stop read · drain bypass · close + cleanup after draining");
                 let _ = stop_feeding.send(());
                 finish_bypass_lane(bypass_handle, conn_id).await;
                 let _closing = peer.close_after_flush(CloseCode::GOING_AWAY, "");
             }
             () = write_end.notified() => {
-                tracing::debug!(conn = conn_id, "송신 실패 → read 중단 · bypass 비움 · dispatch abort + cleanup");
+                tracing::debug!(conn = conn_id, "send failed → stop read · drain bypass · dispatch abort + cleanup");
                 let _ = stop_feeding.send(());
                 finish_bypass_lane(bypass_handle, conn_id).await;
                 dispatch_handle.abort();
@@ -629,7 +564,7 @@ impl Server {
                 // A panicked read task leaves no cause — treated as a write end (abort).
                 let end = end.unwrap_or_default();
                 if end.read_side() {
-                    tracing::debug!(conn = conn_id, cause = ?end.cause, "읽기 끝 → dispatch 가 남은 것을 비운다");
+                    tracing::debug!(conn = conn_id, cause = ?end.cause, "read ended → dispatch drains what is left");
                     tokio::select! {
                         _ = &mut dispatch_handle => {
                             finish_bypass_lane(bypass_handle, conn_id).await;
@@ -639,13 +574,13 @@ impl Server {
                             dispatch_handle.abort();
                         }
                         () = tokio::time::sleep(self.ping_interval) => {
-                            tracing::debug!(conn = conn_id, "읽기 끝 뒤 한 ping 주기 — dispatch abort");
+                            tracing::debug!(conn = conn_id, "one ping period after the read end — dispatch abort");
                             finish_bypass_lane(bypass_handle, conn_id).await;
                             dispatch_handle.abort();
                         }
                     }
                 } else {
-                    tracing::debug!(conn = conn_id, cause = ?end.cause, "쓰기 끝 → bypass 비움 · dispatch abort + cleanup");
+                    tracing::debug!(conn = conn_id, cause = ?end.cause, "write ended → drain bypass · dispatch abort + cleanup");
                     finish_bypass_lane(bypass_handle, conn_id).await;
                     dispatch_handle.abort();
                 }
@@ -655,7 +590,7 @@ impl Server {
         // ── cleanup (leak prevention — review required) ──────────────────────────────────────────
         handler.on_disconnect(conn_id);
         self.conns.unregister(conn_id);
-        tracing::info!(peer = %remote, conn = conn_id, "연결 종료 — cleanup 완료");
+        tracing::info!(peer = %remote, conn = conn_id, "connection ended — cleanup done");
         // The read task keeps draining the inbox to its end — every branch above has closed the peer or seen it end.
         if !link_ended {
             let _ = read_handle.await;
@@ -663,8 +598,7 @@ impl Server {
     }
 }
 
-/// Drains the inbox until the handshake ends: `Some` = the link went live on that generation. `None` = it ended before
-/// auth (refused · deadline · the peer left) — the inbox is drained to its end.
+/// Drains the inbox until the handshake ends: `Some` = the link went live on that generation; `None` = it ended before auth (refused · deadline · peer left), the inbox drained to its end.
 async fn wait_live<S>(incoming: &mut S, peer: &str) -> Option<Generation>
 where
     S: Stream<Item = Incoming<DaemonWire>> + Unpin,
@@ -693,8 +627,8 @@ fn log_handshake_end(peer: &str, cause: DisconnectCause) {
             timeout_ms = AUTH_TIMEOUT.as_millis() as u64,
             "no auth frame in time — closing"
         ),
-        DisconnectCause::PeerClosed => tracing::warn!(%peer, "auth 전에 연결 종료"),
-        DisconnectCause::ReadFailed => tracing::warn!(%peer, "첫 frame 수신 오류 — close"),
+        DisconnectCause::PeerClosed => tracing::warn!(%peer, "connection ended before auth"),
+        DisconnectCause::ReadFailed => tracing::warn!(%peer, "first frame receive error — close"),
         // Our refusal — `AuthCheck` logged why — or the daemon shutting down.
         DisconnectCause::Explicit => tracing::debug!(%peer, "handshake ended by the daemon"),
         other => tracing::warn!(%peer, cause = ?other, "handshake ended — close"),
@@ -705,9 +639,7 @@ fn log_handshake_end(peer: &str, cause: DisconnectCause) {
 
 /// The unit the read loop hands to the inbound queue.
 ///
-/// ★Unlike the outgoing [`Frame`], there is no Close★: an outgoing Close is a marker the upper layer puts in the queue, but on the incoming
-///   side the close decision is made not by frame **content** but by the handler's answer (`ConnFlow::Close`) — so this
-///   vocabulary has no such shape.
+/// Unlike the outgoing [`Frame`], there is no Close: an outgoing Close is a marker the upper layer puts in the queue, but incoming the close decision is made by the handler's answer (`ConnFlow::Close`), not frame content.
 enum Inbound {
     Text(String),
     Binary(Vec<u8>),
@@ -732,11 +664,9 @@ impl Inbound {
     }
 }
 
-/// The payload bytes the arrival-order lane currently holds — the producer (`read_task`) adds and the consumer
-/// (`dispatch_task`) subtracts. One per connection.
+/// The payload bytes the arrival-order lane currently holds — the producer (`read_task`) adds, the consumer (`dispatch_task`) subtracts. One per connection.
 ///
-/// ★That the subtraction happens **after the handler call** is intended★: subtracting right on taking it out would count a frame that is 「꺼냈지만 아직 처리 중인」 (taken out but still being processed) as
-///   0, so the budget would actually double (the same-axis mistake = the in-flight accounting of `input_queue`).
+/// Subtracting after the handler call is intended: subtracting on take-out would count a taken-but-still-processing frame as 0 and double the budget (the same-axis mistake: the in-flight accounting of `input_queue`).
 type RxBytes = Arc<AtomicUsize>;
 
 /// How the link ended, as the read task saw it — the cause of the transport's `Disconnected` · `Closed`.
@@ -778,8 +708,7 @@ impl LinkEnd {
         }
     }
 
-    /// The input ended (the peer closed · a read error). Every other end is the write
-    /// side's (write failure · write deadline · idle · our own close).
+    /// The input ended (peer closed · read error). Every other end is the write side's (write failure · write deadline · idle · our own close).
     fn read_side(&self) -> bool {
         matches!(
             self.cause,
@@ -788,15 +717,10 @@ impl LinkEnd {
     }
 }
 
-/// ★Why the source is generic★: to have an isolation harness that runs this loop on a synthetic item sequence without a socket
-/// (ADR-0129). The production path is the peer's inbox.
+/// The source is generic so an isolation harness can run this loop on a synthetic item sequence without a socket (ADR-0129); production uses the peer's inbox.
 ///
-/// ★It does **not wait for the handler's work**★: it hands each frame to the inbound queue and immediately takes the next one.
-/// Processing is borne by [`dispatch_task`] in arrival order.
-///
-/// ★Two phases★ — it feeds the lanes until the link ends, the disposition gives up (`Unanswered` · a lane consumer is gone) or `stop`
-/// resolves, which drops both lane senders; then it keeps taking items and **discards** them until the inbox ends, so the transport's
-/// cleanup is never held by an undrained inbox. Returns how the link ended.
+/// It does not wait for the handler's work: it hands each frame to the inbound queue and takes the next; processing is [`dispatch_task`]'s, in arrival order.
+/// Two phases: it feeds the lanes until the link ends, the disposition gives up (`Unanswered` · a lane consumer gone) or `stop` resolves, which drops both lane senders; then it keeps taking items and discards them until the inbox ends, so the transport's cleanup is never held by an undrained inbox. Returns how the link ended.
 // ADR-0206
 #[allow(clippy::too_many_arguments)]
 async fn read_task<S, F>(
@@ -827,7 +751,7 @@ where
         );
         tokio::select! {
             () = feed => {}
-            () = stop => tracing::debug!(conn = conn_id, "read_task: 연결 정리 — 줄에 더 넣지 않는다"),
+            () = stop => tracing::debug!(conn = conn_id, "read_task: connection cleanup — no more pushes to the queue"),
         }
     }
     while !end.over {
@@ -839,7 +763,7 @@ where
             None => end.over = true,
         }
     }
-    tracing::debug!(conn = conn_id, "read_task 루프 종료");
+    tracing::debug!(conn = conn_id, "read_task loop ended");
     end
 }
 
@@ -862,17 +786,15 @@ async fn feed_lanes<S>(
             Incoming::Message(arrival) => Inbound::from(arrival.msg),
             Incoming::Event(event) => {
                 if end.observe(event, conn_id) {
-                    tracing::debug!(conn = conn_id, cause = ?end.cause, "연결 끝 — read_task 가 줄을 닫는다");
+                    tracing::debug!(conn = conn_id, cause = ?end.cause, "connection ended — read_task closes the queue");
                     return;
                 }
                 continue;
             }
         };
-        // ★The **byte budget can be hit before the entries**★ — the decision uses the fill level before adding (an empty lane
-        //   accepts one frame regardless of size). Source of truth for the basis = [`CONN_RX_MAX_BYTES`].
+        // The byte budget can be hit before the entries — the decision uses the fill level before adding (an empty lane accepts one frame regardless of size); basis: [`CONN_RX_MAX_BYTES`].
         let over_budget = rx_bytes.load(Ordering::Acquire) >= CONN_RX_MAX_BYTES;
-        // ★It is `try_send` — waiting here would mean **not even taking the frames behind it out of the inbox**★ (source of truth for the basis =
-        //   [`CONN_RX_CAP`]). If there is room, this is all (normal path cost 0), and only when there is none does it go below.
+        // `try_send`: waiting here would leave the frames behind it in the inbox (basis: [`CONN_RX_CAP`]). With room this is all (normal path cost 0); only without room does it go below.
         let full = if over_budget {
             queued
         } else {
@@ -883,43 +805,45 @@ async fn feed_lanes<S>(
                     continue;
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!(conn = conn_id, "수신 큐 소비자 없음 — read_task 종료");
+                    tracing::debug!(
+                        conn = conn_id,
+                        "inbound queue has no consumer — read_task ended"
+                    );
                     return;
                 }
-                // **Gets back** the frame that could not be put in — only with this can a disposition be chosen without silent loss.
+                // Gets back the frame that could not be put in — only then can a disposition be chosen without silent loss.
                 Err(mpsc::error::TrySendError::Full(item)) => item,
             }
         };
 
-        // ★The lane is full — the disposition of this one frame is decided by the upper layer★ (only the upper layer knows the vocabulary).
-        //   Binary is not asked: in this protocol a client→daemon binary is itself a violation and the upper layer closes
-        //   the connection anyway, and lane order is not at stake in that decision.
+        // The lane is full — the disposition of this frame is the upper layer's (only it knows the vocabulary). Binary is not asked: a client→daemon binary is itself a violation the upper layer closes anyway, and lane order is not at stake.
         let disposition = match &full {
             Inbound::Text(text) => handler.on_inbound_saturated(conn_id, text.as_str(), &frames),
             Inbound::Binary(_) => Saturated::Bypass,
         };
         match disposition {
             Saturated::Refused => {
-                // The upper layer sent a reply — discard it and keep reading. 「계속 읽는다」 (keep reading) is the reason this branch exists.
+                // The upper layer sent a reply — discard and keep reading ("keep reading" is this branch's reason).
                 tracing::debug!(
                     conn = conn_id,
-                    "수신 줄 포화 — 위층이 거절했다(계속 읽는다)"
+                    "receiving queue saturated — the upper layer refused (keep reading)"
                 );
             }
-            // ★It could not even send a refusal — the basis of 「버리고 계속 읽는다」 (discard and keep reading) is gone, so end★ (source of truth for the basis =
-            //   [`Saturated::Unanswered`]). If only feeding ends, the arrival-order lane finishes processing what it already accepted and
-            //   ends by itself, and the connection task catches that end and cleans up.
+            // It could not even send a refusal — the basis of "discard and keep reading" is gone, so end (basis: [`Saturated::Unanswered`]). If only feeding ends, the arrival-order lane finishes what it already accepted and ends by itself, and the connection task catches that end.
             Saturated::Unanswered => {
                 tracing::warn!(
                     conn = conn_id,
-                    "수신 줄 포화 — 거절 답장조차 큐에 못 넣었다(송신 큐도 포화) — 읽기를 끝낸다"
+                    "receiving queue saturated — could not even queue the refusal reply (the send queue is saturated too) — ending the read"
                 );
                 return;
             }
-            // ★Waiting is fine here★ — the basis is [`CONN_BYPASS_CAP`].
+            // Waiting is fine here — basis [`CONN_BYPASS_CAP`].
             Saturated::Bypass => {
                 if bypass_tx.send(full).await.is_err() {
-                    tracing::debug!(conn = conn_id, "우선 줄 소비자 없음 — read_task 종료");
+                    tracing::debug!(
+                        conn = conn_id,
+                        "priority lane has no consumer — read_task ended"
+                    );
                     return;
                 }
             }
@@ -928,13 +852,10 @@ async fn feed_lanes<S>(
     end.over = true;
 }
 
-/// The **single** consumer of the inbound queue — raises one connection's frames to the handler in arrival order, without overlapping.
+/// The single consumer of the inbound queue — raises one connection's frames to the handler in arrival order, without overlapping.
 ///
-/// ★This serialization is the **real thing** behind the upper layer's order invariants★: 「같은 에이전트로 가는 입력끼리」 (inputs bound for the same agent) · 「입력 lease
-/// 획득과 그 뒤 입력」 (input lease acquisition and the input after it) · 「같은 연결의 구독/해지」 (subscribe/unsubscribe on the same connection) · 「명령 명부 등록과 그 차분」 (command registry registration and its diff) all
-/// hang on arrival order, and what keeps it is only the property that this task is one and awaits only one at a time
-/// (source of truth for the contract = `conn_port::ConnectionHandler`). **Starting a second consumer or scattering here with spawn
-/// breaks all four at once** — the decision to peel a long-running command off the lane is the upper layer's job.
+/// This serialization is the real thing behind the upper layer's order invariants: inputs to the same agent · input lease acquisition and the input after it · subscribe/unsubscribe on one connection · command registry registration and its diff all hang on arrival order, kept only by this task being one and awaiting one at a time
+/// (contract: `conn_port::ConnectionHandler`). A second consumer or scattering with spawn breaks all four at once — peeling a long-running command off the lane is the upper layer's job.
 async fn dispatch_task(
     mut inbound_rx: mpsc::Receiver<Inbound>,
     rx_bytes: RxBytes,
@@ -946,35 +867,27 @@ async fn dispatch_task(
         let len = item.payload_len();
         let flow = match item {
             Inbound::Text(text) => handler.on_text(conn_id, text.as_str(), &frames).await,
-            // The payload is **lent** — the rejection path is the only consumer, so no copy is made.
+            // The payload is lent — the rejection path is the only consumer, so no copy is made.
             Inbound::Binary(payload) => handler.on_binary(conn_id, &payload, &frames).await,
         };
-        // ★Subtract **after** the handler returns★ — counting the one being processed as 0 doubles the budget
-        //   ([`RxBytes`]). If the handler panics it never reaches this line, but the production daemon ends the whole process in the hook
-        //   (ADR-0292), and in a hookless test build this task itself dies and the connection is cleaned up wholesale, so there is nowhere
-        //   for a leaked budget to remain.
+        // Subtract after the handler returns — counting the one being processed as 0 doubles the budget ([`RxBytes`]). A handler panic never reaches this line, but the production daemon ends the process in the hook (ADR-0292), and in a hookless test build this task dies and the connection is cleaned up wholesale, so no leaked budget remains.
         rx_bytes.fetch_sub(len, Ordering::AcqRel);
         if flow == ConnFlow::Close {
-            tracing::debug!(conn = conn_id, "핸들러가 Close — dispatch_task 종료");
+            tracing::debug!(
+                conn = conn_id,
+                "handler returned Close — dispatch_task ended"
+            );
             break;
         }
     }
-    tracing::debug!(conn = conn_id, "dispatch_task 루프 종료");
+    tracing::debug!(conn = conn_id, "dispatch_task loop ended");
 }
 
 /// The consumer of frames that skipped the arrival-order lane ([`Saturated::Bypass`]).
 ///
-/// ★★It must be a **separate task from** [`dispatch_task`] — it cannot be merged by `select!` in the same task★★: the situation in which this lane
-/// exists is precisely one where **that side's consumer is blocked**. A blocked task cannot poll anything, so
-/// with a priority arrangement inside one task, this frame would never run.
-///
-/// ★So the two lanes **run overlapped**★ — the only exception to the port contract's 「겹치지 않는다」 (they do not overlap), and the one who
-/// chose that exception is the upper layer itself (`on_inbound_saturated`). It means that what runs here and what is blocked there may
-/// touch the same target, so the responsibility of choosing only frames that are allowed to do so also lies with the upper layer.
-///
-/// ★Route `Close` as an in-queue marker★: this task is **not** a select target of the connection task (if it were,
-/// the moment feeding stops and this lane closes, teardown would start, and the arrival-order lane would lose the chance to drain what is left).
-/// So the intent to end is sent on the write lane as `Frame::Close` — it closes after the frames put in earlier go out first.
+/// It must be a separate task from [`dispatch_task`], not merged by `select!`: this lane exists precisely when that side's consumer is blocked, and a blocked task cannot poll anything, so a priority arrangement inside one task would never run this frame.
+/// So the two lanes run overlapped — the only exception to the port contract's "they do not overlap", chosen by the upper layer itself (`on_inbound_saturated`); what runs here and what is blocked there may touch the same target, so choosing only frames allowed to do so is also the upper layer's responsibility.
+/// `Close` is routed as an in-queue marker: this task is not a select target of the connection task (else once feeding stops and this lane closes, teardown would start and the arrival-order lane would lose the chance to drain). The intent to end goes on the write lane as `Frame::Close`, closing after earlier frames go out.
 async fn bypass_task(
     mut bypass_rx: mpsc::Receiver<Inbound>,
     frames: Arc<dyn FrameSink>,
@@ -989,28 +902,21 @@ async fn bypass_task(
         if flow == ConnFlow::Close {
             tracing::debug!(
                 conn = conn_id,
-                "우선 줄에서 Close — write 줄로 종료를 넘긴다"
+                "Close on the priority lane — handing the end to the write lane"
             );
             let _ = frames.try_send(Frame::Close("bypass lane requested close".into()));
             break;
         }
     }
-    tracing::debug!(conn = conn_id, "bypass_task 루프 종료");
+    tracing::debug!(conn = conn_id, "bypass_task loop ended");
 }
 
-/// **Reap** the priority lane — not with `abort()`, but by draining what is left and waiting for it to end by itself.
+/// Reaps the priority lane — not with `abort()`, but by draining what is left and waiting for it to end by itself.
 ///
-/// ★Why abort was a defect★: a frame that entered the priority lane is one the upper layer decided 「이건 굶으면 안 된다」 (this must not starve) and
-///   **accepted** (`on_inbound_saturated` → [`Saturated::Bypass`]). But when the arrival-order lane ended first
-///   (the common shape where a peer sends one command and closes right away), this task was aborted on the spot, and
-///   **a frame that was accepted and never polled simply vanished.** This is the branch where the reason this lane was made collapses entirely —
-///   the arrival-order lane does not have the same hole (when its sender is dropped it drains what is left and ends).
-///
-/// ★The caller's obligation = **stop the read task's feeding first**★: this lane's only sender is there, and if it is
-///   not dropped, `recv()` never gets `None` and this wait uses up the whole grace period.
-/// ★Past the grace period it falls back to abort★ — so this function has **no downside**: if it goes well it finishes
-///   what was accepted, and if not it aborts. ★Lending the handle to `timeout` **instead of passing it
-///   is intended**★: passing it would drop the handle on timeout, so the task would be **detached** rather than aborted.
+/// Abort was a defect: a frame in the priority lane was accepted as "must not starve" (`on_inbound_saturated` → [`Saturated::Bypass`]), but when the arrival-order lane ended first (a peer sends one command and closes right away) the task was aborted and an accepted, never-polled frame vanished — collapsing this lane's reason
+/// (the arrival-order lane has no such hole: when its sender drops it drains what is left).
+/// Caller's obligation: stop the read task's feeding first — this lane's only sender is there, and undropped `recv()` never gets `None` and the wait uses the whole grace period.
+/// Past the grace period it falls back to abort, so there is no downside. Lending the handle to `timeout` instead of passing it is intended: passing would drop the handle on timeout and detach rather than abort the task.
 async fn finish_bypass_lane(mut handle: tokio::task::JoinHandle<()>, conn_id: ConnId) {
     match tokio::time::timeout(BYPASS_DRAIN_GRACE, &mut handle).await {
         Ok(_) => {}
@@ -1018,7 +924,7 @@ async fn finish_bypass_lane(mut handle: tokio::task::JoinHandle<()>, conn_id: Co
             tracing::warn!(
                 conn = conn_id,
                 grace_ms = BYPASS_DRAIN_GRACE.as_millis() as u64,
-                "우선 줄이 유예 안에 안 비워졌다 — abort(받아 둔 것이 남아 있으면 유실된다)"
+                "the priority lane was not drained within the grace period — abort (anything held is lost)"
             );
             handle.abort();
         }

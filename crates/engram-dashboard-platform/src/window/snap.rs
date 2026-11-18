@@ -23,7 +23,7 @@
 //! removed, a running callback runs to the end) but that pattern was not tested, and leave (`WM_NCMOUSELEAVE`) is passed to the previous procedure after the callback, so
 //! removing inside the callback passes it to a destroyed window.
 //!
-//! Outside Windows = [`WindowError::Unsupported`] (this crate's 「들이는 규칙」 3 — placeholder). The behavior of the build with it on (scaling · per window ·
+//! Outside Windows = [`WindowError::Unsupported`] (this crate's 「Rules for taking things in」 3 — placeholder). The behavior of the build with it on (scaling · per window ·
 //! focus) is measured again on the day it is turned on (TRD §14 W8).
 
 // ADR-0266
@@ -126,7 +126,7 @@ mod win {
         }
     }
 
-    /// Parent-window thread guard (header 「스레드」) — if it is not the thread that created `parent`, it refuses before touching anything. This guard also backs that the later
+    /// Parent-window thread guard (header 「Threads」) — if it is not the thread that created `parent`, it refuses before touching anything. This guard also backs that the later
     /// state reads and writes and the window procedure are on the same thread and so do not overlap.
     fn on_parent_thread(parent: HWND) -> Result<(), WindowError> {
         // SAFETY: two queries that only read values — if the window vanished it is 0, which does not match, so it is refused.
@@ -136,7 +136,7 @@ mod win {
             Ok(())
         } else {
             Err(WindowError::Os(io::Error::other(format!(
-                "오버레이는 부모 창 스레드에서만 다룬다: 부모 창 스레드 {owner} · 부른 스레드 {caller}"
+                "the overlay is handled only on the parent window thread: parent window thread {owner} · calling thread {caller}"
             ))))
         }
     }
@@ -148,7 +148,7 @@ mod win {
     ) -> Result<(), WindowError> {
         if r.width < 1 || r.height < 1 {
             return Err(WindowError::Os(io::Error::other(format!(
-                "오버레이 크기가 비었다: {}x{}",
+                "the overlay size is empty: {}x{}",
                 r.width, r.height
             ))));
         }
@@ -277,7 +277,7 @@ mod win {
             }
             // Do only our share (hover field · callback) and pass on to the previous procedure — the spike did so and the menu appeared in that build (TRD §1-3
             //   S6 — user observation). The variant that swallows the message (not passing it on) has never been tested on screen. `prev` was already copied above so the state is not read again
-            //   — but if the callback removes the overlay it would pass to a destroyed window, so do not remove inside the callback (header 「스레드」).
+            //   — but if the callback removes the overlay it would pass to a destroyed window, so do not remove inside the callback (header 「Threads」).
             WM_NCMOUSELEAVE => {
                 if let Some(f) = flip(state, false) {
                     f(false);
@@ -344,7 +344,7 @@ mod tests {
     fn rect_of(hwnd: HWND) -> PhysRect {
         let mut r = RECT::default();
         // SAFETY: fills it in if the window is live, otherwise fails.
-        unsafe { GetWindowRect(hwnd, &mut r) }.expect("창 사각형");
+        unsafe { GetWindowRect(hwnd, &mut r) }.expect("window rectangle");
         PhysRect {
             x: r.left,
             y: r.top,
@@ -378,20 +378,20 @@ mod tests {
     #[test]
     fn place_moves_the_same_child_and_remove_destroys_it() {
         let parent = TestWindow::new(true);
-        place_overlay(&parent, RECT_A, Box::new(|_| {})).expect("놓기");
-        let child = find(parent.hwnd()).expect("오버레이가 있다");
+        place_overlay(&parent, RECT_A, Box::new(|_| {})).expect("place");
+        let child = find(parent.hwnd()).expect("there is an overlay");
         assert_eq!(placed(&parent, child), RECT_A);
 
         let moved = PhysRect { x: 64, ..RECT_A };
-        place_overlay(&parent, moved, Box::new(|_| {})).expect("옮기기");
-        assert_eq!(find(parent.hwnd()), Some(child), "같은 자식을 옮긴다");
+        place_overlay(&parent, moved, Box::new(|_| {})).expect("move");
+        assert_eq!(find(parent.hwnd()), Some(child), "moves the same child");
         assert_eq!(placed(&parent, child), moved);
 
-        remove_overlay(&parent).expect("걷기");
+        remove_overlay(&parent).expect("remove");
         // SAFETY: a query that only reads a value.
         assert!(!unsafe { IsWindow(child) }.as_bool());
         assert_eq!(find(parent.hwnd()), None);
-        remove_overlay(&parent).expect("없을 때 걷기 = 무동작");
+        remove_overlay(&parent).expect("removing when absent = no-op");
     }
 
     #[test]
@@ -409,12 +409,12 @@ mod tests {
     fn hit_test_answers_max_button_and_reports_hover_once_per_change() {
         let parent = TestWindow::new(true);
         let (log, on_hover) = recorder();
-        place_overlay(&parent, RECT_A, on_hover).expect("놓기");
-        let child = find(parent.hwnd()).expect("오버레이");
+        place_overlay(&parent, RECT_A, on_hover).expect("place");
+        let child = find(parent.hwnd()).expect("overlay");
 
         assert_eq!(send(child, WM_NCHITTEST, 0), HTMAXBUTTON as isize);
         assert_eq!(send(child, WM_NCHITTEST, 0), HTMAXBUTTON as isize);
-        assert_eq!(*log.borrow(), [true], "들어옴은 바뀔 때 한 번");
+        assert_eq!(*log.borrow(), [true], "enter fires once on change");
         send(child, WM_NCMOUSELEAVE, 0);
         assert_eq!(*log.borrow(), [true, false]);
     }
@@ -424,9 +424,9 @@ mod tests {
         let parent = TestWindow::new(true);
         let (first, a) = recorder();
         let (second, b) = recorder();
-        place_overlay(&parent, RECT_A, a).expect("놓기");
-        place_overlay(&parent, RECT_A, b).expect("다시 놓기");
-        let child = find(parent.hwnd()).expect("오버레이");
+        place_overlay(&parent, RECT_A, a).expect("place");
+        place_overlay(&parent, RECT_A, b).expect("place again");
+        let child = find(parent.hwnd()).expect("overlay");
         send(child, WM_NCHITTEST, 0);
         assert!(first.borrow().is_empty());
         assert_eq!(*second.borrow(), [true]);
@@ -435,8 +435,8 @@ mod tests {
     #[test]
     fn release_posts_maximize_to_the_parent_and_press_does_not() {
         let parent = TestWindow::new(true);
-        place_overlay(&parent, RECT_A, Box::new(|_| {})).expect("놓기");
-        let child = find(parent.hwnd()).expect("오버레이");
+        place_overlay(&parent, RECT_A, Box::new(|_| {})).expect("place");
+        let child = find(parent.hwnd()).expect("overlay");
         let take = || {
             let mut msg = MSG::default();
             // SAFETY: takes out only the system command that came to the parent in this thread's queue — it is not dispatched, so the window does not grow.
@@ -454,20 +454,20 @@ mod tests {
         };
 
         assert_eq!(send(child, WM_NCLBUTTONDOWN, HTMAXBUTTON as usize), 0);
-        assert_eq!(take(), None, "누름은 아무것도 보내지 않는다");
+        assert_eq!(take(), None, "a press sends nothing");
         assert_eq!(send(child, WM_NCLBUTTONUP, HTMAXBUTTON as usize), 0);
         assert_eq!(
             take(),
             Some(SC_MAXIMIZE as usize),
-            "최대화 아닌 부모 = 최대화"
+            "a parent that is not maximized = maximize"
         );
     }
 
     #[test]
     fn other_thread_is_refused_and_leaves_the_overlay_as_is() {
         let parent = TestWindow::new(true);
-        place_overlay(&parent, RECT_A, Box::new(|_| {})).expect("놓기");
-        let child = find(parent.hwnd()).expect("오버레이");
+        place_overlay(&parent, RECT_A, Box::new(|_| {})).expect("place");
+        let child = find(parent.hwnd()).expect("overlay");
         let handle = parent.handle_only();
         let worker = std::thread::spawn(move || {
             let moved = PhysRect { x: 64, ..RECT_A };
@@ -480,30 +480,30 @@ mod tests {
         //   deadlock, it ends in the failure of the assertion below (`PeekMessageW` handles messages sent in while it peeks).
         let deadline = Instant::now() + Duration::from_secs(5);
         while !worker.is_finished() {
-            assert!(Instant::now() < deadline, "남의 스레드가 끝나지 않았다");
+            assert!(Instant::now() < deadline, "the other thread did not end");
             let mut msg = MSG::default();
             // SAFETY: only peeks at this thread's queue (does not take anything out).
             let _ = unsafe { PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_NOREMOVE) };
             std::thread::sleep(Duration::from_millis(1));
         }
-        let (place, remove) = worker.join().expect("남의 스레드");
-        assert!(matches!(place, Err(WindowError::Os(_))), "놓기 거절");
-        assert!(matches!(remove, Err(WindowError::Os(_))), "걷기 거절");
-        assert_eq!(find(parent.hwnd()), Some(child), "오버레이가 그대로 있다");
-        assert_eq!(placed(&parent, child), RECT_A, "옮기지 않았다");
+        let (place, remove) = worker.join().expect("other thread");
+        assert!(matches!(place, Err(WindowError::Os(_))), "place refused");
+        assert!(matches!(remove, Err(WindowError::Os(_))), "remove refused");
+        assert_eq!(find(parent.hwnd()), Some(child), "the overlay stays as is");
+        assert_eq!(placed(&parent, child), RECT_A, "did not move it");
     }
 
     #[test]
     fn destroying_the_parent_frees_the_overlay_state() {
         let (log, on_hover) = recorder();
         let parent = TestWindow::new(true);
-        place_overlay(&parent, RECT_A, on_hover).expect("놓기");
-        assert_eq!(Rc::strong_count(&log), 2, "상태가 콜백을 쥐고 있다");
+        place_overlay(&parent, RECT_A, on_hover).expect("place");
+        assert_eq!(Rc::strong_count(&log), 2, "the state holds the callback");
         drop(parent);
         assert_eq!(
             Rc::strong_count(&log),
             1,
-            "부모와 함께 부서진 자식이 상태를 풀었다"
+            "the child destroyed together with the parent released the state"
         );
     }
 }

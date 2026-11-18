@@ -23,13 +23,13 @@ In fact ADR-0188 had already found the same defect on the permission axis — th
 
 ## 거부한 대안
 
-- **Each backend picks the value natural for its tool** — within one product the policy splits per agent and **the user has no way to know it from the screen** (the measurement in the ADR-0188 맥락 = the two backends' policies already differed).
+- **Each backend picks the value natural for its tool** — within one product the policy splits per agent and **the user has no way to know it from the screen** (the measurement in the ADR-0188 Context = the two backends' policies already differed).
 - **Ask the user per axis** — the questions double every time a backend is added. **This ADR itself came into being to end that repetition.**
 - **Attach reconnect only to codex** — it would have to touch 「끝났다는 신호는 정확히 한 번」 (ADR-0005) and 「끝난 세션을 걷어가는 단일 소비자」 (ADR-0019), and then the behavior would split from claude. Each of the two reviewers pointed at this conflict at BLOCK level.
 
 ## 근거
 
-- **Precedent = ADR-0188.** The result that came from not having this rule on the permission axis remains as a measurement in the 맥락 of that ADR — the two backends hard-coded their policies as strings on their own and they differed from each other, and the frontend had 0 lines of permission concept.
+- **Precedent = ADR-0188.** The result that came from not having this rule on the permission axis remains as a measurement in the Context of that ADR — the two backends hard-coded their policies as strings on their own and they differed from each other, and the frontend had 0 lines of permission concept.
 - **The measured ground of the provisional permission value** = `.claude/handoff/attachments/codex-measurements-2026-09-09.md` §2-4. There is **no ground in the help text** for pairing value names, and the only thing a correspondence stands on is the one pair of the 「전부 무시」 family. So we matched not 「글자 그대로 동일」 (literally the same) but a **value one notch narrower**.
 
 ## 영향 / 불변식

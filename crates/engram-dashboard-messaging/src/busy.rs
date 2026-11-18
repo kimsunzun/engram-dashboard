@@ -9,7 +9,7 @@
 //!
 //! ★Busy = a user-waiting list exists ∨ stopped after an error ∨ (mid-turn ∧ within the limit) (ADR-0231)★: the first two facts have no
 //!   limit — user input comes first (N6·N8), and mail is not pushed in after a real error (N11). It is an intended exception to
-//!   ADR-0104 「늦게 가는 것 < 안 가는 것」 (going late is better than not going).
+//!   ADR-0104 「going late is better than not going」.
 //!
 //! ★positive-knowledge-only (load-bearing — spec §5 capability fallback)★: an (id, epoch) with **no** observation is entirely
 //!   **treated as idle** (= inject at once). Reading "unknown" as busy would make delivery **wait forever** for backends that cannot be observed or in the window before
@@ -125,7 +125,7 @@ pub trait TurnFacts: Send + Sync {
     /// The observed value of this (id, epoch). `None` = unobserved (no fact at all).
     fn turn_fact(&self, id: PeerId, epoch: u32) -> Option<TurnFact>;
 
-    /// Everyone currently observed as mid-turn `(id, epoch, 마지막 신호 시각)` — the entry of the limit sweep.
+    /// Everyone currently observed as mid-turn `(id, epoch, last signal time)` — the entry of the limit sweep.
     fn in_turn_snapshot(&self) -> Vec<(PeerId, u32, Instant)>;
 }
 
@@ -202,7 +202,7 @@ impl BusyPolicy {
             tracing::warn!(
                 agent = %id,
                 max_secs = BUSY_MAX_TURN.as_secs(),
-                "busy 상한 초과 — 턴 종료 관측 없이 늙은 턴을 idle 로 판정하고 flush 도어벨(fail-open 안전 밸브)"
+                "busy cap exceeded — deciding an old turn as idle without observing the turn end and ringing the flush doorbell (fail-open safety valve)"
             );
             self.notifier.notify_idle(*id);
         }
@@ -354,7 +354,7 @@ mod tests {
         let (p, _f, _n) = policy();
         assert!(
             !p.is_busy(PeerId::new_v4(), 0),
-            "미관측 대상은 idle 취급(관측 불가 백엔드 즉시 주입 폴백)"
+            "an unobserved target is treated as idle (immediate inject fallback for backends that cannot be observed)"
         );
     }
 
@@ -366,7 +366,7 @@ mod tests {
         f.set_in_turn(id, 0, t0);
         assert!(p.is_busy(id, 0));
         f.set_idle(id, 0, t0);
-        assert!(!p.is_busy(id, 0), "턴 종료 관측 → idle");
+        assert!(!p.is_busy(id, 0), "turn end observed → idle");
     }
 
     #[test]
@@ -376,7 +376,7 @@ mod tests {
         let id = PeerId::new_v4();
         f.set_in_turn(id, 0, Instant::now());
         assert!(p.is_busy(id, 0));
-        assert!(!p.is_busy(id, 1), "다른 epoch 은 미관측 → idle");
+        assert!(!p.is_busy(id, 1), "another epoch is unobserved → idle");
     }
 
     #[test]
@@ -388,10 +388,13 @@ mod tests {
         p.sweep_stale_busy(t0 + BUSY_MAX_TURN - Duration::from_secs(1));
         assert!(
             p.is_busy(id, 0),
-            "상한 안쪽은 여전히 busy(정상 장기 턴을 자르면 턴 중 주입이 된다)"
+            "inside the cap it is still busy (cutting a normal long turn would inject mid-turn)"
         );
         p.sweep_stale_busy(t0 + BUSY_MAX_TURN);
-        assert!(!p.is_busy(id, 0), "상한 초과는 잔해로 보고 idle");
+        assert!(
+            !p.is_busy(id, 0),
+            "past the cap it is seen as leftover and idle"
+        );
         assert_eq!(
             f.turn_fact(id, 0),
             Some(TurnFact {
@@ -400,7 +403,7 @@ mod tests {
                 inputs_pending: false,
                 last_end_failed: false,
             }),
-            "사실은 그대로 — 우편의 판정이 공용 표를 바꾸지 않는다"
+            "the facts stay as they are — the mail's decision does not change the shared table"
         );
     }
 
@@ -413,7 +416,7 @@ mod tests {
         p.sweep_stale_busy(t0 + BUSY_MAX_TURN);
         assert!(!p.is_busy(id, 0));
         f.set_in_turn(id, 0, t0 + Duration::from_secs(31 * 60));
-        assert!(p.is_busy(id, 0), "새 신호가 오면 잔해 판정이 무효화된다");
+        assert!(p.is_busy(id, 0), "a new signal voids the leftover decision");
     }
 
     #[test]
@@ -429,7 +432,10 @@ mod tests {
             1
         );
         assert_eq!(n.seen(), vec![stale]);
-        assert!(p.is_busy(fresh, 0), "신선한 턴 판정은 보존");
+        assert!(
+            p.is_busy(fresh, 0),
+            "the decision of a fresh turn is preserved"
+        );
     }
 
     #[test]
@@ -441,7 +447,7 @@ mod tests {
         assert_eq!(
             p.sweep_stale_busy(t0 + BUSY_MAX_TURN - Duration::from_secs(1)),
             0,
-            "상한 미달은 잔해가 아니다"
+            "below the cap it is not leftover"
         );
         assert!(n.seen().is_empty());
     }
@@ -455,7 +461,7 @@ mod tests {
         let late = t0 + BUSY_MAX_TURN + Duration::from_secs(1);
         assert_eq!(p.sweep_stale_busy(late), 1);
         assert_eq!(p.sweep_stale_busy(late + Duration::from_secs(60)), 0);
-        assert_eq!(n.seen(), vec![id], "도어벨 1회");
+        assert_eq!(n.seen(), vec![id], "1 doorbell");
 
         let t1 = late + Duration::from_secs(120);
         f.set_in_turn(id, 0, t1);
@@ -494,9 +500,12 @@ mod tests {
         f.set_idle(quiet, 0, t0);
         assert!(
             p.is_busy(pending, 0),
-            "사용자 목록이 있으면 우편이 기다린다"
+            "if there is a user list, the mail waits"
         );
-        assert!(p.is_busy(halted, 0), "오류 뒤 멈춤 동안 우편이 기다린다");
+        assert!(
+            p.is_busy(halted, 0),
+            "the mail waits while stopped after an error"
+        );
         assert!(p.is_busy(turning, 0));
         assert!(!p.is_busy(quiet, 0));
     }
@@ -517,14 +526,20 @@ mod tests {
         assert_eq!(
             p.sweep_stale_busy(late),
             1,
-            "상한은 턴 관측만 훑는다 — 목록·멈춤만 선 화신은 잔해 후보가 아니다"
+            "the cap sweeps only turn observations — an incarnation with only the list·stop set is not a leftover candidate"
         );
         assert_eq!(n.seen(), vec![both]);
-        assert!(p.is_busy(pending, 0), "30 분이 지나도 목록은 바쁨(N8)");
-        assert!(p.is_busy(halted, 0), "30 분이 지나도 멈춤은 바쁨(N11)");
+        assert!(
+            p.is_busy(pending, 0),
+            "the list is busy even after 30 minutes (N8)"
+        );
+        assert!(
+            p.is_busy(halted, 0),
+            "the stop is busy even after 30 minutes (N11)"
+        );
         assert!(
             p.is_busy(both, 0),
-            "늙은 턴이 잔해로 판정돼도 목록이 남았으면 바쁨"
+            "even if an old turn is decided as leftover, it is busy while the list remains"
         );
     }
 
@@ -536,7 +551,7 @@ mod tests {
         f.set_inputs_pending(id, 0, true, t0);
         f.set_last_end_failed(id, 0, true, t0);
         f.set_inputs_pending(id, 0, false, t0);
-        assert!(p.is_busy(id, 0), "멈춤이 남았다");
+        assert!(p.is_busy(id, 0), "the stop remains");
         f.set_last_end_failed(id, 0, false, t0);
         assert!(!p.is_busy(id, 0));
     }
@@ -561,6 +576,6 @@ mod tests {
         assert_eq!(p.busy_reason(id, 0), Some(BusyReason::InputsPending));
         f.set_inputs_pending(id, 0, false, t0);
         assert_eq!(p.busy_reason(id, 0), None);
-        assert!(!p.is_busy(id, 0), "사유 없음 = 바쁘지 않음");
+        assert!(!p.is_busy(id, 0), "no reason = not busy");
     }
 }

@@ -1,17 +1,6 @@
-//! The shell side of the daemon handshake as a transport [`Handshake`] (TRD S21 trd-3 §6-2 U2 · §3-0 ⑤ · D20 ①).
-//!
-//! Two steps: `start` sends the Auth frame, the daemon's `Hello` ends the handshake. ★An `Error` frame before `Hello`
-//! ends the handshake as a terminal refusal★ (`HANDSHAKE_REJECTED` — no retry, no budget): a net-era daemon closed without
-//! a close code after it (the current one sends a code), which the transport would read as "could not connect" and
-//! retry without limit — the Error frame ends the handshake either way, and no refusal is retried on the local path
-//! (ADR-0346). Which refusal it was (token · version · anything else) is never read from the daemon's text — the text is only logged, masked. Anything else that
-//! arrives before `Hello` is dropped.
-//!
-//! The credential comes from a [`CredentialSlot`] that the dialer of the same registration fills on every dial
-//! (`link::dialer`) — the dial and the handshake of one attempt run in that order on one supervisor task, so the
-//! credential read for an attempt reaches its Auth frame.
-// ADR-0310
-// ADR-0346
+//! The shell side of the daemon handshake as a transport [`Handshake`] (TRD S21 trd-3 §6-2 U2 · §3-0 ⑤ · D20 ①). Two steps: `start` sends the Auth frame, the daemon's `Hello` ends the handshake. An `Error` frame before `Hello` ends the handshake as a terminal refusal (`HANDSHAKE_REJECTED` — no retry, no budget): a net-era daemon closed without a close code after it (the current one sends a code), which the transport would read as "could not connect" and retry without limit — the Error frame ends the handshake either way, and no refusal is retried on the local path (ADR-0346). Which refusal it was (token · version · other) is never read from the daemon's text — the text is only logged, masked. Anything else arriving before `Hello` is dropped.
+//! The credential comes from a [`CredentialSlot`] that the same registration's dialer fills on every dial (`link::dialer`) — one attempt's dial and handshake run in that order on one supervisor task, so the credential read for an attempt reaches its Auth frame.
+// ADR-0310 · ADR-0346
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -19,8 +8,7 @@ use engram_dashboard_protocol::handshake::AuthFrame;
 use engram_dashboard_protocol::{AgentEvent, Secret, PROTOCOL_VERSION};
 use engram_dashboard_transport::{mask_reason, Frame, Handshake, HandshakeStep, RejectKind};
 
-/// The credential the next handshake of one registration sends — shared by that registration's dial (writer) and
-/// handshake (reader). Empty until the first dial resolved a live endpoint. `Debug` shows no value ([`Secret`]).
+/// The credential the next handshake of one registration sends — shared by that registration's dial (writer) and handshake (reader). Empty until the first dial resolved a live endpoint. `Debug` shows no value ([`Secret`]).
 #[derive(Debug, Default)]
 pub struct CredentialSlot(Mutex<Option<Secret>>);
 
@@ -37,7 +25,6 @@ impl CredentialSlot {
     }
 }
 
-/// See the module doc. Built by `LocalDaemonDialer::register` together with the slot it reads.
 #[derive(Debug)]
 pub struct ShellHandshake {
     slot: Arc<CredentialSlot>,
@@ -53,10 +40,7 @@ impl ShellHandshake {
     }
 }
 
-/// The daemon's text as it may be logged — masked (`mask_reason`), or `None` when it carries `token` (the one we sent),
-/// as it is or once the hidden characters masking drops are gone (they can split a token that masking then joins).
-/// ★Both checks run before masking truncates★ — a token past the cut would survive in part. The stop handshake
-/// (`link::stop`) logs its refusals through this too.
+/// The daemon's text as it may be logged — masked (`mask_reason`), or `None` when it carries `token` (the one we sent), as it is or once the hidden characters masking drops are gone (they can split a token that masking then joins). Both checks run before masking truncates — a token past the cut would survive in part. The stop handshake (`link::stop`) logs its refusals through this too.
 pub(super) fn loggable(token: Option<&Secret>, message: &str) -> Option<String> {
     if let Some(token) = token.filter(|t| !t.expose().is_empty()) {
         let token = token.expose();
@@ -67,10 +51,7 @@ pub(super) fn loggable(token: Option<&Secret>, message: &str) -> Option<String> 
     Some(mask_reason(message))
 }
 
-/// `text` without the characters [`mask_reason`] drops. ★`mask_reason` stays the one source of what is hidden★ (the
-/// transport does not export its predicate): a non-ASCII character is asked by masking it alone — it masks to nothing
-/// when hidden, and one character is never truncated. ASCII takes a fast path that allocates nothing: the only ASCII
-/// characters masking drops are the controls (`char::is_control`; its other hidden ranges are all non-ASCII).
+/// `text` without the characters [`mask_reason`] drops. `mask_reason` stays the one source of what is hidden (the transport does not export its predicate): a non-ASCII character is asked by masking it alone — it masks to nothing when hidden, and one character is never truncated. ASCII takes an allocation-free fast path: the only ASCII characters masking drops are controls (`char::is_control`; its other hidden ranges are all non-ASCII).
 fn without_hidden(text: &str) -> String {
     let mut buf = [0u8; 4];
     let mut out = String::with_capacity(text.len());
@@ -89,9 +70,7 @@ fn without_hidden(text: &str) -> String {
 
 impl Handshake for ShellHandshake {
     fn start(&self) -> HandshakeStep {
-        // The dialer only hands out a link after it wrote a credential (a live endpoint, or the last-known one that
-        //   came with one), so an empty slot means a dialer that is not this handshake's pair. Terminal: no refusal is
-        //   retried on the local path (ADR-0346).
+        // The dialer hands out a link only after writing a credential (a live endpoint, or the last-known one that came with one), so an empty slot means a dialer that is not this handshake's pair. Terminal: no refusal is retried on the local path (ADR-0346).
         let Some(token) = self.slot.get() else {
             return HandshakeStep::Reject {
                 kind: RejectKind::Terminal,
@@ -99,13 +78,11 @@ impl Handshake for ShellHandshake {
                 reason: "no credential for this daemon".into(),
             };
         };
-        // Fix C: our compiled version, never the one daemon.json reported — echoing it would pass every
-        //   version check on the daemon side.
+        // Fix C: our compiled version, never the one daemon.json reported — echoing it would pass every version check on the daemon side.
         let auth = AuthFrame::Auth {
             token,
             protocol_version: PROTOCOL_VERSION,
         };
-        // Serializing a two-field struct of a string and an integer cannot fail.
         let text = serde_json::to_string(&auth).expect("AuthFrame serializes");
         HandshakeStep::Send(Frame::Text(text))
     }
@@ -276,7 +253,7 @@ mod tests {
 
     #[test]
     fn without_hidden_drops_exactly_what_masking_drops() {
-        let text = "a\u{1b}[31mb\r\nc\td\u{7f}e\u{9b}f ok\u{202e}g\u{200b}h\u{e0041}i 버전";
+        let text = "a\u{1b}[31mb\r\nc\td\u{7f}e\u{9b}f ok\u{202e}g\u{200b}h\u{e0041}i version";
         assert_eq!(without_hidden(text), mask_reason(text));
         for byte in 0u8..0x80 {
             let c = char::from(byte);

@@ -1,11 +1,6 @@
-// ADR-0227: the sending side of the window canvas size report. Observation and debounce are done by the hook in `WindowLayout.tsx`; here it
-//   decides what to send as `report_window_canvas` (sending rules = `util/latestValueReporter.ts`) and exposes the value the shell
-//   last accepted (`subscribeCanvasReport` — the divider drag's allowed range reads it as the same input as the shell).
-// Why state is module-scoped: hook instances change even within one webview (RootErrorBoundary re-render, HMR remount).
-//   With per-instance state, a new instance would not know about the old instance's in-flight invoke and would send one more.
-// Why it is kept apart from the component file: HMR re-runs only the edited module, so this state survives edits to `WindowLayout.tsx`. If a
-//   component file exports a non-component (the test reset below), the Fast Refresh boundary breaks too.
-//   Limit: editing this file itself creates fresh state (during development only).
+// ADR-0227: the sending side of the window canvas size report. Observation and debounce are in the hook in `WindowLayout.tsx`; here it decides what to send as `report_window_canvas` (sending rules = `util/latestValueReporter.ts`) and exposes the value the shell last accepted (`subscribeCanvasReport` — the divider drag's allowed range reads it as the same input as the shell).
+// State is module-scoped: hook instances change even within one webview (RootErrorBoundary re-render, HMR remount); per-instance state would not know an old instance's in-flight invoke and would send one more.
+// Kept apart from the component file: HMR re-runs only the edited module, so this state survives edits to `WindowLayout.tsx`, and a component file exporting a non-component (the test reset below) would break the Fast Refresh boundary. Limit: editing this file itself creates fresh state (development only).
 
 import { invoke } from '@tauri-apps/api/core'
 
@@ -48,9 +43,7 @@ export function getCanvasReport(): CanvasReportState {
 }
 
 /**
- * Called with the new value whenever `getCanvasReport().lastSent` changes — when the shell answers successfully with a size different from now, and
- * when a test reset clears the value (null). Not called on failure or on a repeat success with the same value.
- * Returns the unsubscribe function (safe to call several times). If a subscriber throws, reporting carries on (only an error log is left).
+ * Called with the new value whenever `getCanvasReport().lastSent` changes — the shell answered successfully with a different size, or a test reset cleared it (null). Not called on failure or a repeat success with the same value. Returns the unsubscribe function (safe to call several times). A throwing subscriber does not stop reporting (only an error log).
  */
 export function subscribeCanvasReport(cb: (size: CanvasPx | null) => void): () => void {
   const entry = { cb }
@@ -66,7 +59,7 @@ function notifyCanvas(size: CanvasPx | null): void {
     try {
       cb(size)
     } catch (err) {
-      console.error('[windowCanvasReport] 캔버스 구독자 오류:', err)
+      console.error('[windowCanvasReport] canvas subscriber error:', err)
     }
   }
 }

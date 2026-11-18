@@ -41,8 +41,8 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('physicalRect — CSS px × 배율 → 물리 px(바깥으로 맞춤)', () => {
-  it('100 % = 그대로 · 150 % 는 소수 끝을 바깥으로 · 비면 null(걷기)', () => {
+describe('physicalRect — CSS px × scale → physical px (fitted outward)', () => {
+  it('100 % = as is · 150 % rounds the fractional end outward · null if empty (withdraw)', () => {
     expect(physicalRect({ left: 900, top: 0, right: 946, bottom: 34 }, 1)).toEqual({ x: 900, y: 0, width: 46, height: 34 })
     // 900.5 × 1.5 = 1350.75 → 1350 · 946.2 × 1.5 = 1419.3 → 1420 · 34 × 1.5 = 51
     expect(physicalRect({ left: 900.5, top: 0, right: 946.2, bottom: 34 }, 1.5)).toEqual({ x: 1350, y: 0, width: 70, height: 51 })
@@ -52,7 +52,7 @@ describe('physicalRect — CSS px × 배율 → 물리 px(바깥으로 맞춤)',
 })
 
 describe('useSnapOverlay', () => {
-  it('꺼져 있으면 보고도 듣기도 하지 않고 늘 거짓', async () => {
+  it('if off it neither reports nor listens and is always false', async () => {
     const f = fakeIpc()
     const b = button({ x: 900, y: 0, width: 46, height: 34 })
     const { result, unmount } = renderHook(() => useSnapOverlay(false, b.ref, f.ipc))
@@ -61,7 +61,7 @@ describe('useSnapOverlay', () => {
     expect([f.invoke.mock.calls.length, f.listen.mock.calls.length, result.current]).toEqual([0, 0, false])
   })
 
-  it('켜면 사각형을 한 번 보고 · 창 크기가 바뀌면 다시 재되 같은 값은 보내지 않는다 · 배율을 곱한다', async () => {
+  it('if on it reports the rectangle once · when the window size changes it re-measures but does not send the same value · multiplies by the scale', async () => {
     vi.stubGlobal('devicePixelRatio', 1.25)
     const f = fakeIpc()
     const b = button({ x: 800, y: 0, width: 46, height: 34 })
@@ -75,7 +75,7 @@ describe('useSnapOverlay', () => {
     expect(f.rects().slice(-1)[0]).toEqual({ x: 1200, y: 0, width: 58, height: 43 })
   })
 
-  it('맴돎 사건(이 창 몫) = 참 / 거짓을 그대로 돌려준다 · bool 이 아니면 거짓', async () => {
+  it('hover event (this window\'s share) = returns true / false as is · false if not a bool', async () => {
     const f = fakeIpc()
     const b = button({ x: 900, y: 0, width: 46, height: 34 })
     const { result } = renderHook(() => useSnapOverlay(true, b.ref, f.ipc))
@@ -89,7 +89,7 @@ describe('useSnapOverlay', () => {
     expect(result.current).toBe(false)
   })
 
-  it('꺼지거나 떼면 오버레이를 걷고(rect null) 듣기를 푼다 · 맴돎은 거짓으로', async () => {
+  it('if turned off or detached it withdraws the overlay (rect null) and releases listening · hover goes false', async () => {
     const f = fakeIpc()
     const b = button({ x: 900, y: 0, width: 46, height: 34 })
     const { result, rerender, unmount } = renderHook(({ on }) => useSnapOverlay(on, b.ref, f.ipc), { initialProps: { on: true } })
@@ -104,7 +104,7 @@ describe('useSnapOverlay', () => {
     expect(f.invoke.mock.calls.length).toBe(before)
   })
 
-  it('듣기 등록이 떼기 뒤에 끝나면 그 자리에서 푼다', async () => {
+  it('if listening registration ends after detach it releases on the spot', async () => {
     const f = fakeIpc()
     const b = button({ x: 900, y: 0, width: 46, height: 34 })
     const { unmount } = renderHook(() => useSnapOverlay(true, b.ref, f.ipc))
@@ -113,7 +113,7 @@ describe('useSnapOverlay', () => {
     expect(f.unlisten).toHaveBeenCalledTimes(1)
   })
 
-  it('보이지 않는 단추(크기 0)는 처음부터 걷기만 보내고, 떼어도 다시 보내지 않는다', async () => {
+  it('a button that is not visible (size 0) sends only a withdraw from the start, and does not send again even when detached', async () => {
     const f = fakeIpc()
     const b = button({ x: 0, y: 0, width: 0, height: 0 })
     const { unmount } = renderHook(() => useSnapOverlay(true, b.ref, f.ipc))

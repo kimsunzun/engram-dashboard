@@ -1,6 +1,6 @@
-// alloc-stdlib 0.2.2 의 crates.io 패키지에는 라이선스 본문 파일이 없다 — 상류 저장소의 파일을 손대지 않고 옮겼다.
-// 출처: https://github.com/dropbox/rust-alloc-no-stdlib/blob/6032b6a9b20e03737135c55a0270ccffcc1438ef/LICENSE
-//   커밋 = 그 버전 .cargo_vcs_info.json 의 sha1 (저장소 루트 — crate 는 alloc-stdlib/ 하위 폴더)
+// The crates.io package of alloc-stdlib 0.2.2 has no license text file — the file from the upstream repository was moved over unchanged.
+// Source: https://github.com/dropbox/rust-alloc-no-stdlib/blob/6032b6a9b20e03737135c55a0270ccffcc1438ef/LICENSE
+//   commit = the sha1 in that version's .cargo_vcs_info.json (the repository root — the crate is in the alloc-stdlib/ subfolder)
 // crate: alloc-stdlib 0.2.2
 Copyright (c) 2016 Dropbox, Inc.
 All rights reserved.

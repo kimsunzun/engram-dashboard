@@ -11,7 +11,7 @@
 //!   also splits the same value into two copies (the observation map and the "once per name" guard diverge). **One parse is cheaper than that.**
 //!
 //! ★The translation (notification → event) itself is pure★ — no I/O and no clock, and the same notification always
-//!   yields the same event (the only global state is the usage interpretation's 「로그 한 번」 (log once) marker, and it does not touch the output). ★But **framing
+//!   yields the same event (the only global state is the usage interpretation's 「log once」 marker, and it does not touch the output). ★But **framing
 //!   depends on call history**★: the state an instance holds is the partial-line buffer · the resync flag · three diagnostic counters ·
 //!   the usage observation the pump clears line by line, and the first two change the output (even for the same chunk, depending on earlier calls
 //!   an event may or may not come out). So goldens are applied to a **new instance**.
@@ -36,11 +36,11 @@
 //!   ★**Live** translation does not emit [`OutputEvent::MessageDone`]★ — that one means "one message closed"
 //!   and what is needed here is "one turn closed **with this outcome**". A turn has several completed items, so the two
 //!   are not the same event (measured).
-//!   ★But **history restore uses that vocabulary — do not read this as 「이 번역기는 MessageDone 을 안 낸다」 (this translator never emits MessageDone)**★:
+//!   ★But **history restore uses that vocabulary — do not read this as 「this translator never emits MessageDone」**★:
 //!   a page carries no outcome, so there is no value to fill into `TurnEnd` ([`history_turn_boundary`] is the source of truth for that
 //!   choice). The two vocabularies split by origin, and the consumer's render path is one.
-//!   ★But **whether to raise that boundary to the screen is not decided here**★ — this translator has no material to answer 「이 종료가 우리 턴의
-//!   것인가」 (is this end that of our turn): our thread · turn id. That decision is carried by the path that classifies envelopes, so
+//!   ★But **whether to raise that boundary to the screen is not decided here**★ — this translator has no material to answer 「is this end that of our
+//!   turn」: our thread · turn id. That decision is carried by the path that classifies envelopes, so
 //!   the `TurnEnd` emitted here may be blocked or deferred (source of truth = `note_turn` in this folder's `transport`).
 //!
 //! ★Known overlap — the decoder of `backend/claude/mod.rs` also does NDJSON line reassembly★. ★But it is not the same
@@ -105,7 +105,7 @@ pub(super) const MAX_ID_BYTES: usize = 128;
 
 /// The maximum bytes `args_json` of [`OutputEvent::ToolCall`] may use.
 ///
-/// ★The contract of this field is 「backend 스키마 그대로」 (the backend schema as is), and that contract holds **only within this cap**★ — if exceeded,
+/// ★The contract of this field is 「the backend schema as is」, and that contract holds **only within this cap**★ — if exceeded,
 /// an abbreviated version keeping only the item's `type` · `id` is carried instead (truncated JSON cannot even be parsed, so it is not truncated).
 /// The reason for the cap is the same as [`MAX_TRANSCRIPT_CHARS`] — one big patch item wipes out the replay.
 const MAX_TOOL_ARGS_BYTES: usize = 256 * 1024;
@@ -247,7 +247,7 @@ const KNOWN_ITEM_TYPES: &[&str] = &[
 /// The `ThreadItem` variant by which codex **echoes our input back**.
 ///
 /// ★Not dropping this is the decision★ — an echoed user item is **the material that revives the screen on reattach**
-/// (TRD §10-A row 2, user decision). The translator marks it 「우리가 보낸 것」 (what we sent) and lets it through, and the frontend reads only that
+/// (TRD §10-A row 2, user decision). The translator marks it 「what we sent」 and lets it through, and the frontend reads only that
 /// marker — the backend name never reaches the screen (ADR-0004).
 const USER_MESSAGE_ITEM_TYPE: &str = "userMessage";
 
@@ -264,7 +264,7 @@ const AGENT_MESSAGE_ITEM_TYPE: &str = "agentMessage";
 ///
 /// ★Widening the axis from `bool` to this enum is all that history restore added★ — the vocabulary tables ([`KNOWN_ITEM_TYPES`]
 ///   ·[`TOOL_ITEM_TYPES`]) and the per-variant translators ([`tool_call`]·[`user_message_event`]) are still one set,
-///   and what differs is only 「이 출처에서 이 변형을 내나」 (does this origin emit this variant) (ADR-0203: no second vocabulary table is made).
+///   and what differs is only 「does this origin emit this variant」 (ADR-0203: no second vocabulary table is made).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ItemOrigin {
     /// `item/started` — live. The emit point of a tool call.
@@ -310,7 +310,7 @@ mod tool_status {
     pub(super) const INTERRUPTED: &str = "interrupted";
 
     /// That variant's schema vocabulary. `webSearch`, which has no status field, and variants outside [`super::TOOL_ITEM_TYPES`] give an empty list — ★empty list =
-    /// 「이 변형엔 status 칸이 없다」 (this variant has no status field)★, and the reader of the end status uses it to tell whether the field's absence is routine or a defect.
+    /// 「this variant has no status field」★, and the reader of the end status uses it to tell whether the field's absence is routine or a defect.
     pub(super) fn of(kind: &str) -> &'static [&'static str] {
         match kind {
             "commandExecution" | "fileChange" => &[IN_PROGRESS, COMPLETED, FAILED, DECLINED],
@@ -327,7 +327,7 @@ struct ToolEnd {
     /// The outcome to carry. `None` = nothing to carry (still running · interrupted · no field · anomalous).
     outcome: Option<ToolOutcome>,
     /// The end status was already recorded as drift · defect — ★if set, the caller does not add the `item:` routine count★. If one observation is
-    /// counted at two grades, the drift is caught once more in the 「아는 변형, 번역 안 함」 (known variant, not translated) field too.
+    /// counted at two grades, the drift is caught once more in the 「known variant, not translated」 field too.
     noted: bool,
 }
 
@@ -465,7 +465,7 @@ impl CodexAppServerDecoder {
                 if self.untranslated_dropped == 1 {
                     tracing::warn!(
                         cap = MAX_UNTRANSLATED_KEYS,
-                        "codex app-server: 관측 이름이 몫을 넘었다 — 이후는 개수만 센다"
+                        "codex app-server: observed names exceeded their share — only the count is kept from now on"
                     );
                 }
                 return;
@@ -475,22 +475,22 @@ impl CodexAppServerDecoder {
         // `key` already went through masking · truncation above. Only `detail` is filtered here.
         match what {
             Observed::Routine => {
-                tracing::debug!(observed = %key, "codex app-server: 아는 이름인데 번역하지 않는다 — 버린다")
+                tracing::debug!(observed = %key, "codex app-server: a known name that we do not translate — dropping it")
             }
             Observed::Drift => tracing::warn!(
                 observed = %key,
                 reason = %sanitize(detail, LOG_STRING_LIMIT),
-                "codex app-server: 상류 드리프트 신호 — 버린다"
+                "codex app-server: upstream drift signal — dropping it"
             ),
             Observed::DriftTranslated => tracing::warn!(
                 observed = %key,
                 reason = %sanitize(detail, LOG_STRING_LIMIT),
-                "codex app-server: 상류 드리프트 신호 — 아는 낱말이라 뜻대로 옮겼다"
+                "codex app-server: upstream drift signal — a known word, so it was carried over as meant"
             ),
             Observed::Malformed => tracing::warn!(
                 observed = %key,
                 reason = %sanitize(detail, LOG_STRING_LIMIT),
-                "codex app-server: 읽을 수 없는 줄 — 버린다"
+                "codex app-server: unreadable line — dropping it"
             ),
         }
     }
@@ -511,7 +511,7 @@ impl CodexAppServerDecoder {
             self.observe(
                 format!("params:{method_name}"),
                 Observed::Malformed,
-                "params 가 없다",
+                "params is missing",
             );
             return None;
         };
@@ -565,7 +565,7 @@ impl CodexAppServerDecoder {
                 self.observe(
                     format!("method:{other}"),
                     what,
-                    "스키마(0.154.0) 선언에 없는 알림 이름",
+                    "notification name not in the schema (0.154.0) declaration",
                 );
                 Vec::new()
             }
@@ -600,13 +600,13 @@ impl CodexAppServerDecoder {
     /// and any other end is left only in the `item:` routine count.
     ///
     /// ★Only the echoed user message does not follow that rule — **whichever comes first** raises it★: for that one, if we hang it on one side,
-    /// what is lost is 「유저 자신이 친 말」 (what the user typed themselves), so the cost differs, and both directions have failure cases — whether `started` comes for
+    /// what is lost is 「what the user typed themselves」, so the cost differs, and both directions have failure cases — whether `started` comes for
     /// this kind is unmeasured, and `completed` is measured not to come at all for an interrupted item
     /// (TRD §2 L10). The second notification is caught by [`Self::emitted_user_items`] and quietly dropped.
     ///
     /// ★The branch table itself is carried by [`Self::item_core`]★ — this door only unwraps the envelope. The history-side door
-    /// ([`Self::history_item`]) uses the same table, and that sharing is the real thing behind the ADR-0203 rule 「두 번째 어휘표를 만들지
-    /// 않는다」 (do not make a second vocabulary table).
+    /// ([`Self::history_item`]) uses the same table, and that sharing is the real thing behind the ADR-0203 rule 「do not make a second
+    /// vocabulary table」.
     fn item(
         &mut self,
         params: Option<&Value>,
@@ -649,7 +649,7 @@ impl CodexAppServerDecoder {
             self.observe(
                 format!("item-type:{method_name}"),
                 Observed::Malformed,
-                "item 에 `type` 문자열이 없다",
+                "item has no `type` string",
             );
             return Vec::new();
         };
@@ -659,7 +659,7 @@ impl CodexAppServerDecoder {
             self.observe(
                 format!("item-type:{method_name}"),
                 Observed::Malformed,
-                "item `type` 이 상한을 넘었다",
+                "item `type` exceeded the cap",
             );
             return Vec::new();
         }
@@ -675,7 +675,7 @@ impl CodexAppServerDecoder {
                 self.observe(
                     format!("item-text:{method_name}#{kind}"),
                     Observed::Malformed,
-                    "어시스턴트 메시지 item 에 required `text` 가 없다",
+                    "assistant message item has no required `text`",
                 );
                 return Vec::new();
             };
@@ -717,7 +717,7 @@ impl CodexAppServerDecoder {
     /// - `History` = `[ToolCall, ToolResult?]` in this order — the history page has no start notification, so one finished item carries both.
     ///
     /// ★Normal completion is not emitted — only failure · refusal are carried★: the screen uses only error · refusal counts and the badge, so emitting at every end
-    ///   just adds one event per call and gains nothing (the old shell leaves a 「표시할 수 없는 신호」 (a signal that cannot be displayed) line for each such event).
+    ///   just adds one event per call and gains nothing (the old shell leaves a 「signal that cannot be displayed」 line for each such event).
     /// ★The result's `id` passes the same filter as the call ([`bounded_id`])★ — if it was filtered out there is no row to point at, so no result is emitted
     ///   and it is counted as a defect.
     // ADR-0241
@@ -739,7 +739,7 @@ impl CodexAppServerDecoder {
                     self.observe(
                         format!("tool:{method_name}#{kind}"),
                         Observed::Malformed,
-                        "도구 item 에 `tool` 문자열이 없다",
+                        "tool item has no `tool` string",
                     );
                     return events;
                 }
@@ -756,7 +756,7 @@ impl CodexAppServerDecoder {
                     None => self.observe(
                         format!("item-id:{method_name}#{kind}"),
                         Observed::Malformed,
-                        "끝 결과를 붙일 도구 item 의 `id` 가 없거나 상한을 넘었다",
+                        "the tool item to attach the end result to has no `id`, or it exceeded the cap",
                     ),
                 }
             }
@@ -770,8 +770,8 @@ impl CodexAppServerDecoder {
         events
     }
 
-    /// A tool item's vendor end status (`status`) → neutral outcome. Shared by the two doors `Completed` · `History` (ADR-0203 「두 번째
-    /// 어휘표를 만들지 않는다」 (do not make a second vocabulary table)).
+    /// A tool item's vendor end status (`status`) → neutral outcome. Shared by the two doors `Completed` · `History` (ADR-0203 「do not make a second
+    /// vocabulary table」).
     ///
     /// Outcome `None` = no outcome to carry — still running (`inProgress` · a running item on a history page) · interrupted (`interrupted` · that turn's
     ///   outcome row already shows the interruption) · no field (`webSearch` has no status field) · anomalous (below).
@@ -794,20 +794,20 @@ impl CodexAppServerDecoder {
                 return ToolEnd::quiet(None); // `webSearch` — a variant with no field.
             }
             self.observe(
-                format!("tool-status:{kind}#<없음>"),
+                format!("tool-status:{kind}#<none>"),
                 Observed::Malformed,
-                "도구 item 에 required `status` 가 없다",
+                "tool item has no required `status`",
             );
             return ToolEnd::noted(None);
         };
         // ★A peer string is used as a key only when it is a known value★ (reason = the same spot in `turn_completed`) — unknown values are
         //   squashed into one entry per variant, and the actual value goes out in the log body.
-        let unknown_key = || format!("tool-status:{kind}#<모르는 값>");
+        let unknown_key = || format!("tool-status:{kind}#<unknown value>");
         let Some(word) = status.as_str() else {
             self.observe(
                 unknown_key(),
                 Observed::Drift,
-                &format!("문자열이 아닌 도구 끝 상태: {status}"),
+                &format!("tool end status that is not a string: {status}"),
             );
             return ToolEnd::noted(None);
         };
@@ -820,7 +820,7 @@ impl CodexAppServerDecoder {
                 self.observe(
                     unknown_key(),
                     Observed::Drift,
-                    &format!("모르는 도구 끝 상태: {other}"),
+                    &format!("unknown tool end status: {other}"),
                 );
                 return ToolEnd::noted(None);
             }
@@ -829,14 +829,14 @@ impl CodexAppServerDecoder {
             self.observe(
                 format!("tool-status:{kind}#{word}"),
                 Observed::DriftTranslated,
-                "이 도구 변형의 스키마 어휘에 없는 끝 상태",
+                "end status not in the schema vocabulary of this tool variant",
             );
             return ToolEnd::noted(outcome);
         }
         ToolEnd::quiet(outcome)
     }
 
-    /// One echoed user message item → 0 to 1 「우리가 보낸 것」 (what we sent) marker events.
+    /// One echoed user message item → 0 to 1 「what we sent」 marker events.
     ///
     /// ★Whichever of `item/started` or `item/completed` comes **first** raises it★ (reason = [`Self::item`] doc).
     ///   The second notification is dropped by the item id comparison, and that comparison is an **exact match** — the schema marks that `id` as required
@@ -844,11 +844,11 @@ impl CodexAppServerDecoder {
     /// ★If there is no id, only the `item/started` side raises it★ — with no key to compare, raising both would leave the same words on the screen
     ///   twice, and the frontend's dedup key is also that id, so it does not catch there either. It means a required field is empty, so it is
     ///   counted as a defect.
-    /// ★The second notification dropped as the same one is not counted as an 「옮기지 못한 관측」 (observation that could not be carried over)★ — that map means **what was dropped**,
+    /// ★The second notification dropped as the same one is not counted as an 「observation that could not be carried over」★ — that map means **what was dropped**,
     ///   and this was already raised. Mixing it in would make that map stop being a drift detector.
     /// ★If `clientId` (the id we carried as `clientUserMessageId`) exists, we emit
     ///   `QueuedInput(Delivered{clientId})` **right before** the bubble — in the two live doors only★. The moment the vendor put that text into the
-    ///   history is the receipt (TRD §5-5 「소비 에코」 (consumption echo)). The history door does not emit it: past records are not receipt events,
+    ///   history is the receipt (TRD §5-5 「consumption echo」). The history door does not emit it: past records are not receipt events,
     ///   and the core door that carries history chunks does not accept list events.
     // ADR-0231
     fn user_message(
@@ -880,7 +880,7 @@ impl CodexAppServerDecoder {
             self.observe(
                 format!("item-id:{method_name}#{USER_MESSAGE_ITEM_TYPE}"),
                 Observed::Malformed,
-                "유저 메시지 item 에 required `id` 가 없다",
+                "user message item has no required `id`",
             );
             if !at_item_start {
                 return Vec::new();
@@ -955,7 +955,7 @@ impl CodexAppServerDecoder {
     ///     one turn is split as many times as there are incidents, and the real boundary that comes after is attached to an already ended turn.
     ///   - [`OutputEvent::TurnEnd`] = **the turn has ended**. How it ended is carried by the outcome field inside it
     ///     (including `Failed` — the boundary of a failed turn also arrives in this vocabulary).
-    /// ★So 「재시도되나」 (is it retried) is not sent out as a separate wire field★ — **the event type** already carries that distinction,
+    /// ★So 「is it retried」 is not sent out as a separate wire field★ — **the event type** already carries that distinction,
     ///   and if one more field is made, the same fact lives in two places and one goes stale (the same decision is made by
     ///   [`error_message`] for that string). And this notification has no `threadId`·`turnId` at all
     ///   (`protocol::ErrorNotification`), so **this layer cannot even attribute which turn the incident belongs to** —
@@ -969,13 +969,13 @@ impl CodexAppServerDecoder {
 
     /// `turn/completed` → [`OutputEvent::TurnEnd`] **exactly once**. The outcome is also carried inside that event.
     ///
-    /// ★Do not split the event in two★ — if the failure reason is put ahead as a separate [`OutputEvent::Error`], the 「턴 경계」 (turn boundary) and
-    ///   「어떻게 끝났나」 (how it ended) split into two events and consumers get one more ordering contract. The reason a type with an outcome field
+    /// ★Do not split the event in two★ — if the failure reason is put ahead as a separate [`OutputEvent::Error`], the 「turn boundary」 and
+    ///   「how it ended」 split into two events and consumers get one more ordering contract. The reason a type with an outcome field
     ///   exists is to avoid that split.
     /// ★Emit the event whatever is carried★ — even if there is no status, even if the value is unknown. This one line is the only
-    ///   「턴이 끝났다」 (the turn has ended) the peer tells us, so if it is quietly dropped, that conversation's waiting indicator spins forever. So
+    ///   「the turn has ended」 the peer tells us, so if it is quietly dropped, that conversation's waiting indicator spins forever. So
     ///   only here we do not use `parse::<T>()` and scan fields one by one — even if one field is off, the boundary must stand.
-    ///   ★「낸다」 (emit) does not mean it reaches the screen★ — attribution is decided by the path, and it may be blocked or deferred there
+    ///   ★「emit」 does not mean it reaches the screen★ — attribution is decided by the path, and it may be blocked or deferred there
     ///   (this file's header). And in the give-up path where the peer **never sends** this line, the path emits its own
     ///   `TurnEnd` — so this spot is not the only emit point of the boundary.
     /// ★Read `status` **as a string — do not receive it as a closed Rust `enum`**★: the day upstream adds a fifth value, the
@@ -986,7 +986,7 @@ impl CodexAppServerDecoder {
     ///   (`TerminalReason::Interrupted` exists separately. The record of that reversal = `backend/claude/mod.rs`'s
     ///   `is_error` spot). The complement also automatically makes any non-error value upstream adds in future a failure.
     /// ★Do not fold `inProgress` into one of the known three★ — we do not know what the combination of that value **arriving on a completion notification**
-    ///   means (TRD §6-1 leaves that field as `[미확인]` (unconfirmed)). If we guess a mapping the screen draws a false
+    ///   means (TRD §6-1 leaves that field as `[unconfirmed]`). If we guess a mapping the screen draws a false
     ///   outcome, so it goes to `Unknown` — the turn still ends.
     // ADR-0004
     fn turn_completed(&mut self, params: Option<&Value>) -> Vec<OutputEvent> {
@@ -1024,12 +1024,14 @@ impl CodexAppServerDecoder {
                 //   peer-originated warning in this file (`observe`).
                 let key = match what {
                     Observed::Routine => format!("turn-status:{other}"),
-                    _ => "turn-status:<모르는 값>".to_string(),
+                    _ => "turn-status:<unknown value>".to_string(),
                 };
                 self.observe(
                     key,
                     what,
-                    &format!("이 알림에서의 뜻을 모르는 TurnStatus 값: {other}"),
+                    &format!(
+                        "TurnStatus value whose meaning in this notification is unknown: {other}"
+                    ),
                 );
                 TurnOutcome::Unknown
             }
@@ -1037,7 +1039,7 @@ impl CodexAppServerDecoder {
                 self.observe(
                     format!("shape:{}", method::TURN_COMPLETED),
                     Observed::Malformed,
-                    "turn.status 문자열이 없다",
+                    "turn.status string is missing",
                 );
                 TurnOutcome::Unknown
             }
@@ -1072,7 +1074,7 @@ impl CodexAppServerDecoder {
             Ok(Inbound::Response { .. }) | Ok(Inbound::Error { .. }) => self.observe(
                 "envelope:response".to_string(),
                 Observed::Malformed,
-                "통로가 응답 봉투를 번역기로 넘겼다",
+                "the path handed a response envelope to the translator",
             ),
             // ★Keys are split per reason★ — with one pool, the first broken line met permanently silences every later
             //   envelope defect. The reason this path exists is that a failure that empties the screen must be recorded in the shipping configuration,
@@ -1160,7 +1162,7 @@ impl OutputDecoder for CodexAppServerDecoder {
         if !self.buffer.is_empty() {
             tracing::warn!(
                 bytes = self.buffer.len(),
-                "codex app-server: 개행 없이 스트림이 끝났다 — 잘린 마지막 줄을 버린다"
+                "codex app-server: the stream ended without a newline — dropping the truncated last line"
             );
             self.buffer = Vec::new();
         }
@@ -1192,7 +1194,7 @@ fn envelope_cause(err: &protocol::ParseError) -> &'static str {
 /// One `TurnError` → the error string that goes to the screen. ★Both callers must produce the same shape★ — the `error`
 /// notification and the `Turn.error` of `turn/completed` are the same type, and if drawn differently the same reason gets two faces.
 ///
-/// ★Do not write 「턴을 끝낸 실패인가」 (is it a failure that ended the turn) into this string as a token★ — **the event type** carries that distinction
+/// ★Do not write 「is it a failure that ended the turn」 into this string as a token★ — **the event type** carries that distinction
 ///   (the outcome field of [`OutputEvent::TurnEnd`] vs [`OutputEvent::Error`]). If it is written into the string too, the same fact lives in two
 ///   places and one goes stale.
 ///
@@ -1259,11 +1261,11 @@ fn overflow_event(seen: usize) -> OutputEvent {
     ))
 }
 
-/// One echoed user message item → a [`OutputEvent::Structured`] marked 「우리가 보낸 것」 (what we sent).
+/// One echoed user message item → a [`OutputEvent::Structured`] marked 「what we sent」.
 ///
 /// `None` = this item has no text piece at all (only images · audio · mention) — the caller sends it off as a count.
 ///
-/// ★The marker = a `kind` of `"user"`, and that alone★ — that is the only marker of 「우리가 보낸 것」 (what we sent), and the consumer
+/// ★The marker = a `kind` of `"user"`, and that alone★ — that is the only marker of 「what we sent」, and the consumer
 ///   reads **only that marker**. No codex vocabulary is carried in the value, so even if another backend uses the same marker the consumer
 ///   does not diverge (ADR-0004).
 /// ★The json shape is a consumer contract★ — `{"type":"text","text":…,"uuid":…}`. Only when `type` is `"text"`
@@ -1294,7 +1296,7 @@ fn user_message_event(item: &Value, uuid: Option<&str>) -> Option<OutputEvent> {
     Some(user_bubble(&text, uuid))
 }
 
-/// One 「우리가 보낸 것」 (what we sent) bubble — the echoed user message and the path's synthetic bubble (Direct) use the same shape.
+/// One 「what we sent」 bubble — the echoed user message and the path's synthetic bubble (Direct) use the same shape.
 ///
 /// ★The json shape is a consumer contract★ (reason = [`user_message_event`] doc). `uuid` is the dedup key, so the caller
 ///   passes a value already filtered by [`MAX_ID_BYTES`].
@@ -1377,7 +1379,7 @@ fn tool_category(item: &Value, kind: &str) -> ToolCategory {
 /// All `read` = Read · all `listFiles` = List · only `read`·`listFiles` mixed = Read · `search` present and the rest only these
 /// three = Search. ★If anything at all is outside the three, it is Command★ — `unknown` is a command codex could not unpack (the `Start-Sleep` of the measured
 /// fixture is that), and an unknown word · a missing `type` are treated the same (if wrongly folded into read, a command with side effects
-/// would be summarized as 「읽기」 (read)). Command too if the array is absent or empty.
+/// would be summarized as 「read」). Command too if the array is absent or empty.
 // ADR-0239
 fn command_category(item: &Value) -> ToolCategory {
     let Some(actions) = item.get("commandActions").and_then(Value::as_array) else {
@@ -1408,9 +1410,9 @@ fn command_category(item: &Value) -> ToolCategory {
 ///
 /// ★Carrying the whole item is the default★ — "what is the argument" differs per variant (command line · patch · query · arguments), so
 /// picking out one field would lose the rest at that moment. The contract of this field is "the backend schema as is".
-/// ★If exceeded, it is not cut but **replaced with an abbreviation**★ — JSON cut in the middle cannot even be parsed and becomes a 「깨진
-/// 값」 (broken value) to the consumer, but an object keeping only `type`·`id` is still a subset of the same schema. So what is lost is
-/// **only the arguments**, and 「이 도구가 불렸다」 (this tool was called) remains.
+/// ★If exceeded, it is not cut but **replaced with an abbreviation**★ — JSON cut in the middle cannot even be parsed and becomes a 「broken
+/// value」 to the consumer, but an object keeping only `type`·`id` is still a subset of the same schema. So what is lost is
+/// **only the arguments**, and 「this tool was called」 remains.
 /// ★The reason for the cap itself is the same as [`MAX_TRANSCRIPT_CHARS`]★ — if one entry exceeds the replay ring's single-event cap
 /// the ring evicts all the rest.
 /// ★This warning is not squashed to once per key★ — that squashing belongs to [`CodexAppServerDecoder::observe`] and this
@@ -1424,7 +1426,7 @@ fn bounded_args_json(item: &Value, kind: &str) -> String {
         bytes = full.len(),
         cap = MAX_TOOL_ARGS_BYTES,
         kind = %sanitize(kind, LOG_STRING_LIMIT),
-        "codex app-server: 도구 item 이 상한을 넘어 인자를 뺀 축약본을 싣는다"
+        "codex app-server: the tool item exceeded the cap, carrying an abbreviation without the arguments"
     );
     let mut reduced = serde_json::Map::new();
     reduced.insert("type".to_string(), Value::String(kind.to_string()));
@@ -1440,7 +1442,7 @@ fn bounded_args_json(item: &Value, kind: &str) -> String {
 ///
 /// ★The decision is that it is **not** the [`OutputEvent::TurnEnd`] that live uses★: that vocabulary requires an outcome ([`TurnOutcome`]),
 ///   and a page response does not carry **how** a past turn ended. Two choices remain,
-///   and both are bad — `Unknown` is honest but the consumer draws a 「모름」 (unknown) marker at every boundary, so something we never asked
+///   and both are bad — `Unknown` is honest but the consumer draws an 「unknown」 marker at every boundary, so something we never asked
 ///   about covers the restored screen with markers. Folding to `Completed` is an **invented outcome**, which the doc of that
 ///   type forbids head-on.
 /// ★[`OutputEvent::MessageDone`] closes the turn without claiming an outcome★ — the consumer draws it as one divider.
@@ -1452,7 +1454,7 @@ fn bounded_args_json(item: &Value, kind: &str) -> String {
 ///   ([`crate::output_core::OutputCore::emit_without_turn_observation`]). So busy/idle is
 ///   not bootstrapped by it.
 /// ★The argument is an `Option` to accept a **caller that has already filtered out a turn id over the cap**★ — that filtering is
-///   exactly the [`MAX_ID_BYTES`] rule (dropped, not truncated), and `None` means 「이 턴의 id 를 실을 수 없다」 (this turn's id cannot be carried).
+///   exactly the [`MAX_ID_BYTES`] rule (dropped, not truncated), and `None` means 「this turn's id cannot be carried」.
 ///   The boundary itself still stands — not closing the turn because the id could not be carried errs toward the waiting indicator spinning.
 // ADR-0203
 pub(crate) fn history_turn_boundary(turn_id: Option<&str>) -> OutputEvent {
@@ -1473,8 +1475,8 @@ fn sanitize(s: &str, limit: usize) -> String {
 ///   so masking is the purpose and length is a bonus. This one is for **conversation records**, so its purpose is length alone — if what the user typed and
 ///   what the agent said were altered by masking, that record would become false (by the same judgment the claude-side user block is also
 ///   carried on the same carrier without masking).
-/// ★So [`truncate`] has two doors, and only those two★ — at the spot where one wants to make a third, one must first answer 「이 문자열은
-///   진단인가 기록인가」 (is this string a diagnostic or a record). The item that measures that property in the source is
+/// ★So [`truncate`] has two doors, and only those two★ — at the spot where one wants to make a third, one must first answer 「is this string
+///   a diagnostic or a record」. The item that measures that property in the source is
 ///   `truncate_is_reachable_only_through_its_two_named_doors`.
 fn clip(s: &str, limit: usize) -> String {
     truncate(s, limit)
@@ -1530,7 +1532,7 @@ mod tests {
             .iter()
             .map(|e| match e {
                 OutputEvent::TextDelta { text, .. } => text.clone(),
-                other => panic!("TextDelta 가 아니다: {other:?}"),
+                other => panic!("not a TextDelta: {other:?}"),
             })
             .collect()
     }
@@ -1541,27 +1543,27 @@ mod tests {
     /// there is no compile error and no failing test, only output that disappears.
     #[test]
     fn one_notification_split_across_two_chunks_still_emits() {
-        let line = format!("{}\n", delta_line("안녕하세요"));
+        let line = format!("{}\n", delta_line("안녕하세요")); // hangul-ok: multi-byte text cut across chunks
         let bytes = line.as_bytes();
         let cut = bytes.len() / 2;
         let mut d = CodexAppServerDecoder::new();
         assert!(
             d.decode(&bytes[..cut]).is_empty(),
-            "줄이 안 끝났는데 이벤트가 났다"
+            "an event was emitted although the line had not ended"
         );
-        assert_eq!(text_of(&d.decode(&bytes[cut..])), vec!["안녕하세요"]);
+        assert_eq!(text_of(&d.decode(&bytes[cut..])), vec!["안녕하세요"]); // hangul-ok: multi-byte text cut across chunks
     }
 
     /// A multibyte character must survive even if cut at a chunk boundary.
     #[test]
     fn a_multibyte_character_split_across_chunks_survives() {
-        let line = format!("{}\n", delta_line("한글"));
+        let line = format!("{}\n", delta_line("한글")); // hangul-ok: multi-byte character fixture
         let bytes = line.as_bytes();
-        // Cut in the middle of the 3 bytes of "한".
-        let cut = line.find("한").expect("payload") + 1;
+        // Cut in the middle of the 3 bytes of "한". hangul-ok
+        let cut = line.find("한").expect("payload") + 1; // hangul-ok: multi-byte character fixture
         let mut d = CodexAppServerDecoder::new();
         assert!(d.decode(&bytes[..cut]).is_empty());
-        assert_eq!(text_of(&d.decode(&bytes[cut..])), vec!["한글"]);
+        assert_eq!(text_of(&d.decode(&bytes[cut..])), vec!["한글"]); // hangul-ok: multi-byte character fixture
     }
 
     #[test]
@@ -1659,25 +1661,25 @@ mod tests {
             let _ = d.decode(&mib);
             assert!(d.buffer.len() <= MAX_LINE_BYTES, "{}", d.buffer.len());
         }
-        assert!(d.discarding, "상한을 넘겼는데 resync 로 들어가지 않았다");
-        assert_eq!(d.buffer.capacity(), 0, "용량이 반납되지 않았다");
+        assert!(d.discarding, "went over the cap but did not enter resync");
+        assert_eq!(d.buffer.capacity(), 0, "the capacity was not returned");
     }
 
     // ── Notifications we translate ────────────────────────────────────────────────
 
     #[test]
     fn agent_message_delta_becomes_a_text_delta_with_both_ids() {
-        match decode_line(&delta_line("안녕")).as_slice() {
+        match decode_line(&delta_line("hello")).as_slice() {
             [OutputEvent::TextDelta {
                 text,
                 turn_id,
                 message_id,
             }] => {
-                assert_eq!(text, "안녕");
+                assert_eq!(text, "hello");
                 assert_eq!(turn_id.as_deref(), Some("u"));
                 assert_eq!(message_id.as_deref(), Some("i"));
             }
-            other => panic!("TextDelta 하나가 아니다: {other:?}"),
+            other => panic!("not a single TextDelta: {other:?}"),
         }
     }
 
@@ -1706,7 +1708,7 @@ mod tests {
                 assert_eq!(*output_tokens, 7);
                 assert_eq!(turn_id.as_deref(), Some("u-1"));
             }
-            other => panic!("Usage 하나가 아니다: {other:?}"),
+            other => panic!("not a single Usage: {other:?}"),
         }
     }
 
@@ -1734,7 +1736,7 @@ mod tests {
                 assert_eq!(*input_tokens, 0);
                 assert_eq!(*output_tokens, 3);
             }
-            other => panic!("Usage 하나가 아니다: {other:?}"),
+            other => panic!("not a single Usage: {other:?}"),
         }
     }
 
@@ -1751,7 +1753,7 @@ mod tests {
             [OutputEvent::Error(message)] => {
                 assert_eq!(message, "upstream busy (serverOverloaded) [willRetry]");
             }
-            other => panic!("Error 하나가 아니다: {other:?}"),
+            other => panic!("not a single Error: {other:?}"),
         }
     }
 
@@ -1765,7 +1767,7 @@ mod tests {
         );
         match events.as_slice() {
             [OutputEvent::Error(message)] => assert_eq!(message, "x [willRetry]"),
-            other => panic!("Error 하나가 아니다: {other:?}"),
+            other => panic!("not a single Error: {other:?}"),
         }
     }
 
@@ -1779,7 +1781,7 @@ mod tests {
                     format!("codex-decoder: lineOverflow seen=7B limit={MAX_LINE_BYTES}B")
                 );
             }
-            other => panic!("Error 가 아니다: {other:?}"),
+            other => panic!("not an Error: {other:?}"),
         }
     }
 
@@ -1792,8 +1794,8 @@ mod tests {
                     "message": "blocked",
                     "misalignment": {
                         "errorType": "policyViolation",
-                        "detailedExplanation": "그 요청은 수행할 수 없습니다",
-                        "steer": {"message": "다르게 물어보세요"}
+                        "detailedExplanation": "that request cannot be carried out",
+                        "steer": {"message": "ask it differently"}
                     }
                 }
             }),
@@ -1802,12 +1804,12 @@ mod tests {
             [OutputEvent::Error(message)] => {
                 assert!(message.contains("policyViolation"), "{message}");
                 assert!(
-                    message.contains("그 요청은 수행할 수 없습니다"),
+                    message.contains("that request cannot be carried out"),
                     "{message}"
                 );
-                assert!(message.contains("steer: 다르게 물어보세요"), "{message}");
+                assert!(message.contains("steer: ask it differently"), "{message}");
             }
-            other => panic!("Error 하나가 아니다: {other:?}"),
+            other => panic!("not a single Error: {other:?}"),
         }
     }
 
@@ -1838,15 +1840,15 @@ mod tests {
                 let bound = ERROR_PART_LIMIT * 6 + 200;
                 assert!(
                     message.chars().count() < bound,
-                    "총량이 유계가 아니다: {} (상한 {bound})",
+                    "the total is not bounded: {} (cap {bound})",
                     message.chars().count()
                 );
                 assert!(
                     message.ends_with("steer: try asking differently"),
-                    "steer 가 잘려 나갔다"
+                    "steer got cut off"
                 );
             }
-            other => panic!("Error 하나가 아니다: {other:?}"),
+            other => panic!("not a single Error: {other:?}"),
         }
     }
 
@@ -1879,7 +1881,7 @@ mod tests {
                 assert_eq!(back["command"], "cargo test");
                 assert_eq!(back["cwd"], "C:/w");
             }
-            other => panic!("ToolCall 하나가 아니다: {other:?}"),
+            other => panic!("not a single ToolCall: {other:?}"),
         }
     }
 
@@ -1899,9 +1901,9 @@ mod tests {
             }] => {
                 assert_eq!(name, "read_file");
                 let back: Value = serde_json::from_str(args_json).unwrap();
-                assert_eq!(back["server"], "fs", "server 는 args_json 에 남아야 한다");
+                assert_eq!(back["server"], "fs", "server must remain in args_json");
             }
-            other => panic!("ToolCall 하나가 아니다: {other:?}"),
+            other => panic!("not a single ToolCall: {other:?}"),
         }
     }
 
@@ -1924,7 +1926,7 @@ mod tests {
             );
             match events.as_slice() {
                 [OutputEvent::ToolCall { name, .. }] => assert_eq!(name, expected),
-                other => panic!("{expected}: ToolCall 하나가 아니다: {other:?}"),
+                other => panic!("{expected}: not a single ToolCall: {other:?}"),
             }
         }
     }
@@ -1936,10 +1938,14 @@ mod tests {
         let (started, _, history) = through_each_door(item);
         let category_of = |events: &[OutputEvent]| match events {
             [OutputEvent::ToolCall { category, .. }] => *category,
-            other => panic!("ToolCall 하나가 아니다: {other:?}"),
+            other => panic!("not a single ToolCall: {other:?}"),
         };
         let live = category_of(&started);
-        assert_eq!(category_of(&history), live, "이력과 라이브의 종류가 갈렸다");
+        assert_eq!(
+            category_of(&history),
+            live,
+            "history and live disagree on the category"
+        );
         live
     }
 
@@ -2041,13 +2047,13 @@ mod tests {
             .lines()
             .filter(|l| l.contains(r#""method":"item/started""#) && l.contains("commandExecution"))
             .collect();
-        assert!(!lines.is_empty(), "fixture 에 도구 시작 줄이 없다");
+        assert!(!lines.is_empty(), "the fixture has no tool start line");
         for line in lines {
             match decode_line(line).as_slice() {
                 [OutputEvent::ToolCall { category, .. }] => {
                     assert_eq!(*category, ToolCategory::Command)
                 }
-                other => panic!("ToolCall 하나가 아니다: {other:?}"),
+                other => panic!("not a single ToolCall: {other:?}"),
             }
             let v: Value = serde_json::from_str(line).unwrap();
             assert_eq!(
@@ -2109,11 +2115,11 @@ mod tests {
                     let back: Value = serde_json::from_str(args_json).unwrap();
                     assert!(
                         back.get("commandActions").is_none(),
-                        "상한을 넘었는데 축약본이 아니다: {args_json:.200}"
+                        "exceeded the cap but is not an abbreviation: {args_json:.200}"
                     );
                     assert_eq!(*category, ToolCategory::Search);
                 }
-                other => panic!("ToolCall 하나가 아니다: {other:?}"),
+                other => panic!("not a single ToolCall: {other:?}"),
             }
         }
     }
@@ -2165,17 +2171,17 @@ mod tests {
             ),
         ] {
             let (events, d) = complete_tool(item.clone());
-            assert_eq!(events.len(), 1, "{item}: 결과 하나가 아니다: {events:?}");
+            assert_eq!(events.len(), 1, "{item}: not a single result: {events:?}");
             match &events[0] {
                 OutputEvent::ToolResult { id, outcome } => {
                     assert_eq!(id, "i-1", "{item}");
                     assert_eq!(*outcome, want, "{item}");
                 }
-                other => panic!("{item}: ToolResult 가 아니다: {other:?}"),
+                other => panic!("{item}: not a ToolResult: {other:?}"),
             }
             assert!(
                 d.untranslated_observations().is_empty(),
-                "{item}: 옮긴 끝이 「번역 안 함」 계수로 새었다: {:?}",
+                "{item}: a carried-over end leaked into the 「not translated」 count: {:?}",
                 d.untranslated_observations()
             );
         }
@@ -2230,17 +2236,17 @@ mod tests {
         }
         let seen = d.untranslated_observations();
         assert_eq!(
-            seen.get("tool-status:commandExecution#<모르는 값>"),
+            seen.get("tool-status:commandExecution#<unknown value>"),
             Some(&4),
             "{seen:?}"
         );
         assert!(
             !seen.keys().any(|k| k.contains("quantumCollapsed")),
-            "상대 문자열이 키가 됐다: {seen:?}"
+            "a peer string became a key: {seen:?}"
         );
         assert!(
             seen.get("item:item/completed#commandExecution").is_none(),
-            "드리프트가 일상 계수로도 한 번 더 잡혔다: {seen:?}"
+            "the drift was caught once more in the routine count: {seen:?}"
         );
     }
 
@@ -2264,7 +2270,7 @@ mod tests {
         assert_eq!(
             d.untranslated_observations(),
             &BTreeMap::from([("tool-status:mcpToolCall#declined".to_string(), 1)]),
-            "드리프트 하나만 — 일상 계수가 겹쳐 붙으면 안 된다"
+            "only one drift — the routine count must not be added on top"
         );
     }
 
@@ -2277,11 +2283,11 @@ mod tests {
             (
                 serde_json::json!({"type": "commandExecution", "id": "i-1", "command": "x",
                                    "status": "quantumCollapsed"}),
-                "tool-status:commandExecution#<모르는 값>",
+                "tool-status:commandExecution#<unknown value>",
             ),
             (
                 serde_json::json!({"type": "commandExecution", "id": "i-1", "command": "x", "status": 7}),
-                "tool-status:commandExecution#<모르는 값>",
+                "tool-status:commandExecution#<unknown value>",
             ),
             (
                 serde_json::json!({"type": "commandExecution", "id": "i-1", "command": "x",
@@ -2321,26 +2327,26 @@ mod tests {
             assert!(events.is_empty(), "{kind}: {events:?}");
             assert_eq!(
                 d.untranslated_observations(),
-                &BTreeMap::from([(format!("tool-status:{kind}#<없음>"), 1)]),
-                "{kind}: 결함 한 칸만 — 일상 계수가 붙거나 조용히 넘어가면 안 된다"
+                &BTreeMap::from([(format!("tool-status:{kind}#<none>"), 1)]),
+                "{kind}: only one defect entry — the routine count must not be added, and it must not pass silently"
             );
 
             let mut h = CodexAppServerDecoder::new();
             let events = h.history_item("tu", &item);
             assert!(
                 matches!(events.as_slice(), [OutputEvent::ToolCall { .. }]),
-                "{kind}: 이력 문은 호출만 낸다: {events:?}"
+                "{kind}: the history door emits only the call: {events:?}"
             );
             assert_eq!(
                 h.untranslated_observations()
-                    .get(&format!("tool-status:{kind}#<없음>")),
+                    .get(&format!("tool-status:{kind}#<none>")),
                 Some(&1),
                 "{kind}"
             );
         }
     }
 
-    /// ★Empty schema vocabulary = 「status 칸이 없는 변형」 (a variant with no status field)★ — the decision that reads a missing status as routine leans on this empty list. In the tool-variant
+    /// ★Empty schema vocabulary = 「a variant with no status field」★ — the decision that reads a missing status as routine leans on this empty list. In the tool-variant
     /// table the empty list must be `webSearch` alone: if a new variant is added to the table without writing its vocabulary, that variant's missing status quietly
     /// becomes routine.
     // ADR-0241
@@ -2352,7 +2358,7 @@ mod tests {
             } else {
                 assert!(
                     !tool_status::of(kind).is_empty(),
-                    "{kind}: 도구 변형인데 스키마 어휘가 비었다"
+                    "{kind}: a tool variant but the schema vocabulary is empty"
                 );
             }
         }
@@ -2379,7 +2385,7 @@ mod tests {
             );
             assert!(
                 seen.get("item:item/completed#commandExecution").is_none(),
-                "결함이 「아는 변형, 번역 안 함」 계수로 새어 들어갔다: {seen:?}"
+                "the defect leaked into the 「known variant, not translated」 count: {seen:?}"
             );
         }
         let long = "i".repeat(MAX_ID_BYTES);
@@ -2388,7 +2394,7 @@ mod tests {
         }));
         assert!(
             matches!(events.as_slice(), [OutputEvent::ToolResult { id, .. }] if *id == long),
-            "상한 안의 id 가 걸러졌다: {events:?}"
+            "an id within the cap was filtered out: {events:?}"
         );
     }
 
@@ -2408,7 +2414,7 @@ mod tests {
             let (started, _, history) = through_each_door(item);
             assert!(
                 matches!(started.as_slice(), [OutputEvent::ToolCall { .. }]),
-                "{status}: 시작 문은 끝 상태를 안 읽는다: {started:?}"
+                "{status}: the start door does not read the end status: {started:?}"
             );
             match (history.as_slice(), want) {
                 (
@@ -2451,7 +2457,7 @@ mod tests {
         fixture
             .lines()
             .filter(|l| {
-                let v: Value = serde_json::from_str(l).expect("fixture 줄이 JSON 이 아니다");
+                let v: Value = serde_json::from_str(l).expect("the fixture line is not JSON");
                 v.get("method").is_some() && v.get("id").is_none()
             })
             .flat_map(|l| d.decode(format!("{l}\n").as_bytes()))
@@ -2481,7 +2487,7 @@ mod tests {
                 assert_eq!(id, call_id);
                 assert_eq!(*outcome, ToolOutcome::Failed);
             }
-            other => panic!("호출 하나 뒤 실패 결과 하나가 아니다: {other:?}"),
+            other => panic!("not one call followed by one failure result: {other:?}"),
         }
     }
 
@@ -2518,17 +2524,23 @@ mod tests {
             "item/started",
             serde_json::json!({"threadId": "t", "turnId": "u", "startedAtMs": 1i64,
                                "item": {"type": "userMessage", "id": "i-7",
-                                        "content": [{"type": "text", "text": "안녕 codex"}]}}),
+                                        "content": [{"type": "text", "text": "hello codex"}]}}),
         );
         match events.as_slice() {
             [OutputEvent::Structured { kind, json }] => {
-                assert_eq!(kind, "user", "소비자가 읽는 표식은 이 한 칸이다");
+                assert_eq!(
+                    kind, "user",
+                    "this one field is the marker the consumer reads"
+                );
                 let v: Value = serde_json::from_str(json).unwrap();
-                assert_eq!(v["type"], "text", "소비자가 이 값으로 dedup 키를 집는다");
-                assert_eq!(v["text"], "안녕 codex");
+                assert_eq!(
+                    v["type"], "text",
+                    "the consumer picks the dedup key by this value"
+                );
+                assert_eq!(v["text"], "hello codex");
                 assert_eq!(v["uuid"], "i-7");
             }
-            other => panic!("Structured{{kind:\"user\"}} 하나가 아니다: {other:?}"),
+            other => panic!("not a single Structured{{kind:\"user\"}}: {other:?}"),
         }
     }
 
@@ -2544,7 +2556,7 @@ mod tests {
     }
 
     /// ★**Whichever comes first** raises it and the second drops out — in either order★. If we pin it to one notification, what is lost is
-    /// 「유저 자신이 친 말」 (what the user typed themselves), and both directions have failure cases: whether `item/started` comes for this kind is
+    /// 「what the user typed themselves」, and both directions have failure cases: whether `item/started` comes for this kind is
     /// unmeasured, and `item/completed` is measured not to come at all for an interrupted item (TRD §2 L10).
     /// ★The point is measuring with the same instance★ — the comparison memory lives inside that instance. If two lines are fed to a new instance,
     /// this item measures nothing.
@@ -2566,18 +2578,21 @@ mod tests {
                     assert_eq!(v["text"], "hi", "{order:?}");
                     assert_eq!(v["uuid"], "i-7", "{order:?}");
                 }
-                other => panic!("{order:?}: 말풍선이 하나가 아니다: {other:?}"),
+                other => panic!("{order:?}: not a single bubble: {other:?}"),
             }
         }
     }
 
-    /// ★A different item id means different words★ — if the comparison is flattened into 「유저 메시지를 이미 한 번 올렸나」 (has a user message already been raised once), from the
+    /// ★A different item id means different words★ — if the comparison is flattened into 「has a user message already been raised once」, from the
     /// second question of a conversation on, nothing appears on the screen.
     #[test]
     fn two_different_user_items_both_land() {
         let mut d = CodexAppServerDecoder::new();
-        let mut events = d.decode(user_item_line("item/started", "i-1", "첫 질문").as_bytes());
-        events.extend(d.decode(user_item_line("item/completed", "i-2", "둘째 질문").as_bytes()));
+        let mut events =
+            d.decode(user_item_line("item/started", "i-1", "first question").as_bytes());
+        events.extend(
+            d.decode(user_item_line("item/completed", "i-2", "second question").as_bytes()),
+        );
         assert_eq!(events.len(), 2, "{events:?}");
     }
 
@@ -2605,7 +2620,7 @@ mod tests {
 
         assert!(
             d.emitted_user_items.is_empty(),
-            "상한 밖 id 가 기억에 남았다: {:?}",
+            "an id outside the cap remained in memory: {:?}",
             d.emitted_user_items
         );
         assert_eq!(started.len(), 1, "{started:?}");
@@ -2624,7 +2639,7 @@ mod tests {
         assert_eq!(started.len(), 1, "{started:?}");
         assert!(
             completed.is_empty(),
-            "둘째 알림이 또 올라갔다: {completed:?}"
+            "the second notification was raised again: {completed:?}"
         );
         assert_eq!(d.emitted_user_items.len(), 1, "{:?}", d.emitted_user_items);
     }
@@ -2657,16 +2672,16 @@ mod tests {
             "item/started",
             serde_json::json!({"threadId": "t", "turnId": "u", "startedAtMs": 1i64,
                                "item": {"type": "userMessage", "id": "i-8",
-                                        "content": [{"type": "text", "text": "첫 줄"},
+                                        "content": [{"type": "text", "text": "first line"},
                                                     {"type": "localImage", "path": "a.png"},
-                                                    {"type": "text", "text": "둘째 줄"}]}}),
+                                                    {"type": "text", "text": "second line"}]}}),
         );
         match events.as_slice() {
             [OutputEvent::Structured { json, .. }] => {
                 let v: Value = serde_json::from_str(json).unwrap();
-                assert_eq!(v["text"], "첫 줄\n둘째 줄");
+                assert_eq!(v["text"], "first line\nsecond line");
             }
-            other => panic!("Structured 하나가 아니다: {other:?}"),
+            other => panic!("not a single Structured: {other:?}"),
         }
     }
 
@@ -2679,7 +2694,7 @@ mod tests {
     #[test]
     fn a_huge_pasted_user_message_is_capped_but_not_masked() {
         let secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        let text = format!("{} {secret}", "가".repeat(MAX_TRANSCRIPT_CHARS * 2));
+        let text = format!("{} {secret}", "가".repeat(MAX_TRANSCRIPT_CHARS * 2)); // hangul-ok: multi-byte chars for the character cap
         let events = decode_notification(
             "item/started",
             serde_json::json!({"threadId": "t", "turnId": "u-1",
@@ -2688,7 +2703,7 @@ mod tests {
         );
         let json = match events.as_slice() {
             [OutputEvent::Structured { kind, json }] if kind == "user" => json.clone(),
-            other => panic!("되울린 유저 메시지가 아니다: {other:?}"),
+            other => panic!("not an echoed user message: {other:?}"),
         };
         let carried = serde_json::from_str::<Value>(&json).expect("json")["text"]
             .as_str()
@@ -2698,7 +2713,7 @@ mod tests {
         assert_eq!(
             carried.chars().count(),
             MAX_TRANSCRIPT_CHARS + 1,
-            "상한 없이 실렸다"
+            "carried without a cap"
         );
 
         // A short credential is within the cap and must remain as it is — if masking is turned on, this assertion breaks.
@@ -2706,12 +2721,12 @@ mod tests {
             "item/started",
             serde_json::json!({"threadId": "t", "turnId": "u-2",
                 "item": {"type": "userMessage", "id": "i-2",
-                         "content": [{"type": "text", "text": format!("내 키는 {secret} 야")}]}}),
+                         "content": [{"type": "text", "text": format!("my key is {secret}")}]}}),
         );
         match short.as_slice() {
             [OutputEvent::Structured { json, .. }] => assert!(
                 json.contains(secret),
-                "전사 본문이 마스킹됐다 — 그 기록이 거짓이 된다: {json}"
+                "the transcript body was masked — that record becomes false: {json}"
             ),
             other => panic!("{other:?}"),
         }
@@ -2751,7 +2766,7 @@ mod tests {
                 let v: Value = serde_json::from_str(json).unwrap();
                 v["uuid"].as_str().map(str::to_string)
             }
-            other => panic!("유저 말풍선이 아니다: {other:?}"),
+            other => panic!("not a user bubble: {other:?}"),
         }
     }
 
@@ -2773,7 +2788,7 @@ mod tests {
                         "{method_name}"
                     );
                 }
-                other => panic!("{method_name}: 받음 + 말풍선이 아니다: {other:?}"),
+                other => panic!("{method_name}: not receipt + bubble: {other:?}"),
             }
         }
     }
@@ -2787,7 +2802,7 @@ mod tests {
         );
         match events.as_slice() {
             [bubble] => assert_eq!(bubble_uuid(bubble).as_deref(), Some("codex-item-1")),
-            other => panic!("말풍선 하나가 아니다: {other:?}"),
+            other => panic!("not a single bubble: {other:?}"),
         }
     }
 
@@ -2809,7 +2824,7 @@ mod tests {
         let (_, _, history) = through_each_door(client_item(Some("ours-1")));
         match history.as_slice() {
             [bubble] => assert_eq!(bubble_uuid(bubble).as_deref(), Some("ours-1")),
-            other => panic!("말풍선 하나가 아니다: {other:?}"),
+            other => panic!("not a single bubble: {other:?}"),
         }
     }
 
@@ -2823,7 +2838,7 @@ mod tests {
         );
         match events.as_slice() {
             [bubble] => assert_eq!(bubble_uuid(bubble).as_deref(), Some("codex-item-1")),
-            other => panic!("말풍선 하나가 아니다: {other:?}"),
+            other => panic!("not a single bubble: {other:?}"),
         }
     }
 
@@ -2852,7 +2867,7 @@ mod tests {
                     assert_eq!(turn_id.as_deref(), Some("u-1"), "status={status}");
                     assert_eq!(outcome, &expected, "status={status}");
                 }
-                other => panic!("status={status}: TurnEnd 하나가 아니다: {other:?}"),
+                other => panic!("status={status}: not a single TurnEnd: {other:?}"),
             }
         }
     }
@@ -2877,7 +2892,7 @@ mod tests {
                 assert_eq!(turn_id.as_deref(), Some("u-1"));
                 assert_eq!(detail.as_deref(), Some("model refused (serverOverloaded)"));
             }
-            other => panic!("Failed 결말을 실은 TurnEnd 하나가 아니다: {other:?}"),
+            other => panic!("not a single TurnEnd carrying a Failed outcome: {other:?}"),
         }
     }
 
@@ -2891,7 +2906,7 @@ mod tests {
         assert_eq!(
             events.len(),
             1,
-            "사유가 없다고 이벤트 수가 달라지면 안 된다: {events:?}"
+            "the event count must not change because the reason is missing: {events:?}"
         );
         assert!(matches!(
             events.as_slice(),
@@ -2903,7 +2918,7 @@ mod tests {
     }
 
     /// ★Do not revive it — this is the very misclassification that actually blew up on the claude side and was reverted★: if the failure decision is
-    /// written as 「완료가 아닌 것 전부」 (everything that is not completed) (the complement), a turn the user normally interrupted with Esc is stamped as a failure.
+    /// written as 「everything that is not completed」 (the complement), a turn the user normally interrupted with Esc is stamped as a failure.
     /// In this repository an interrupt is a first-class normal path.
     #[test]
     fn an_interrupted_turn_is_not_a_failure_allowlist_not_denylist() {
@@ -2923,7 +2938,7 @@ mod tests {
                         ..
                     }
             )),
-            "중단은 실패가 아니다: {events:?}"
+            "an interruption is not a failure: {events:?}"
         );
         assert!(matches!(
             events.as_slice(),
@@ -2965,10 +2980,14 @@ mod tests {
             .as_bytes(),
         );
         let seen = d.untranslated_observations();
-        assert_eq!(seen.get("turn-status:<모르는 값>"), Some(&2), "{seen:?}");
+        assert_eq!(
+            seen.get("turn-status:<unknown value>"),
+            Some(&2),
+            "{seen:?}"
+        );
         assert!(
             !seen.keys().any(|k| k.contains("quantumCollapsed")),
-            "상대 문자열이 키가 됐다: {seen:?}"
+            "a peer string became a key: {seen:?}"
         );
 
         // A value that **is** in the declaration keeps its name as is — that set is bounded, so the budget is not burned.
@@ -2987,7 +3006,7 @@ mod tests {
     }
 
     /// ★Do not guess `inProgress` and fold it into one of the known outcomes★ — we do not know what the combination of that value **arriving on a completion notification**
-    /// means (the `[미확인]` field of TRD §6-1). If folded, the screen draws a false outcome.
+    /// means (the `[unconfirmed]` field of TRD §6-1). If folded, the screen draws a false outcome.
     #[test]
     fn an_in_progress_status_on_a_completion_is_not_guessed() {
         let line = notification_line(
@@ -3005,7 +3024,7 @@ mod tests {
         assert_eq!(
             d.untranslated_observations().get("turn-status:inProgress"),
             Some(&1),
-            "선언에 있는 값이라도 뜻을 모르면 계수는 남아야 한다"
+            "even a declared value must keep its count when its meaning is unknown"
         );
     }
 
@@ -3019,7 +3038,7 @@ mod tests {
                 assert!(turn_id.is_none());
                 assert_eq!(outcome, &TurnOutcome::Unknown);
             }
-            other => panic!("TurnEnd 하나가 아니다: {other:?}"),
+            other => panic!("not a single TurnEnd: {other:?}"),
         }
         assert_eq!(
             d.untranslated_observations().get("shape:turn/completed"),
@@ -3178,7 +3197,11 @@ mod tests {
         }
         let seen = d.untranslated_observations();
         assert_eq!(seen.get("deprecation:notice"), Some(&50));
-        assert_eq!(seen.len(), 1, "키 하나로 모여야 한다(로그는 첫 1 회뿐)");
+        assert_eq!(
+            seen.len(),
+            1,
+            "must gather under one key (the log is only the first time)"
+        );
     }
 
     // ── Defects are recorded as defects (not mixed into routine noise) ────────────────────
@@ -3213,7 +3236,7 @@ mod tests {
             d.untranslated_observations()
                 .get("shape:item/agentMessage/delta"),
             Some(&100),
-            "키 하나로 모여야 한다(로그는 첫 1 회뿐)"
+            "must gather under one key (the log is only the first time)"
         );
         assert_eq!(d.untranslated_observations().len(), 1);
     }
@@ -3246,7 +3269,7 @@ mod tests {
             d.untranslated_observations()
                 .get("item:item/started#mcpToolCall")
                 .is_none(),
-            "결함이 「아는 변형, 번역 안 함」 계수로 새어 들어갔다"
+            "the defect leaked into the 「known variant, not translated」 count"
         );
     }
 
@@ -3322,7 +3345,7 @@ mod tests {
                 .count();
             assert!(
                 routine <= MAX_ROUTINE_KEYS,
-                "일상 키가 자기 몫을 넘겼다: {routine} (drift_first={drift_first})"
+                "a routine key went over its own share: {routine} (drift_first={drift_first})"
             );
 
             // No matter how much is pushed in as routine, the drift entry remains. ★Recorded = that key was seen for the first
@@ -3332,13 +3355,13 @@ mod tests {
             assert_eq!(
                 d.untranslated_observations().get("method:late/drift"),
                 Some(&1),
-                "일상 키가 드리프트 칸을 먹었다 (drift_first={drift_first})"
+                "a routine key ate the drift field (drift_first={drift_first})"
             );
             if drift_first {
                 assert_eq!(
                     d.untranslated_observations().get("method:early/drift"),
                     Some(&1),
-                    "먼저 온 드리프트 키가 밀려났다"
+                    "a drift key that came first was pushed out"
                 );
             }
         }
@@ -3412,7 +3435,10 @@ mod tests {
     fn sanitize_masks_credentials() {
         let secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         let out = sanitize(&format!("token={secret} trailing"), LOG_STRING_LIMIT);
-        assert!(!out.contains(secret), "자격증명이 마스킹되지 않았다: {out}");
+        assert!(
+            !out.contains(secret),
+            "the credential was not masked: {out}"
+        );
         assert!(out.contains("***"), "{out}");
         let bearer = sanitize("Authorization: Bearer abcdefghijklmnop", LOG_STRING_LIMIT);
         assert!(!bearer.contains("abcdefghijklmnop"), "{bearer}");
@@ -3444,11 +3470,11 @@ mod tests {
             }] => {
                 assert!(
                     !detail.contains(secret),
-                    "자격증명이 그대로 실렸다: {detail}"
+                    "the credential was carried as is: {detail}"
                 );
                 assert!(detail.contains("***"), "{detail}");
             }
-            other => panic!("사유를 실은 Failed 결말이 아니다: {other:?}"),
+            other => panic!("not a Failed outcome carrying a reason: {other:?}"),
         }
     }
 
@@ -3465,16 +3491,16 @@ mod tests {
             [OutputEvent::Error(message)] => {
                 assert!(
                     !message.contains(secret),
-                    "자격증명이 그대로 실렸다: {message}"
+                    "the credential was carried as is: {message}"
                 );
                 assert!(message.contains("***"), "{message}");
             }
-            other => panic!("Error 하나가 아니다: {other:?}"),
+            other => panic!("not a single Error: {other:?}"),
         }
     }
 
     /// ★[`truncate`] has **only two named doors**★ — [`sanitize`] (truncate after masking · for diagnostic strings) and
-    /// [`clip`] (truncate only · for transcript body). If called from anywhere else, it means nobody has ever answered 「이 문자열은 진단인가 기록인가」 (is this string a diagnostic or a record),
+    /// [`clip`] (truncate only · for transcript body). If called from anywhere else, it means nobody has ever answered 「is this string a diagnostic or a record」,
     /// and if it was a diagnostic it skips masking and goes out to the screen · log · wire (that actually
     /// happened — the error string maker only truncated and skipped masking).
     ///
@@ -3487,7 +3513,7 @@ mod tests {
         let src = include_str!("decoder.rs");
         // ★Do not split by `#[cfg(test)]`★ — that attribute is also inside the production section, so if cut there this item
         //   scans only the front part and does not see the rest. ★Do not use a marker containing a line break either★ — the checkout may be CRLF.
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let offenders: Vec<&str> = production
             .lines()
             .map(|l| l.trim())
@@ -3503,7 +3529,7 @@ mod tests {
             .collect();
         assert!(
             offenders.is_empty(),
-            "이름 붙은 두 문 밖에서 절단을 부른다: {offenders:?}"
+            "calls truncation outside the two named doors: {offenders:?}"
         );
     }
 
@@ -3583,7 +3609,7 @@ mod tests {
         ];
 
         let src = include_str!("decoder.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let mut arms: Vec<&str> = production
             .lines()
             .map(|l| l.trim())
@@ -3592,20 +3618,23 @@ mod tests {
                 l.trim_start_matches("method::")
                     .split(' ')
                     .next()
-                    .expect("arm 이름")
+                    .expect("arm name")
             })
             .collect();
         arms.sort_unstable();
         let mut covered: Vec<&str> = cases.iter().map(|c| c.0).collect();
         covered.sort_unstable();
-        assert_eq!(arms, covered, "translate 의 arm 과 이 표가 어긋난다");
+        assert_eq!(
+            arms, covered,
+            "the arms of translate and this table disagree"
+        );
 
         for (name, method_name, params) in cases {
             for event in decode_notification(method_name, params) {
                 let weight = event_weight(&event);
                 assert!(
                     weight <= RING_SINGLE_EVENT_LIMIT,
-                    "{name}: 이벤트 하나가 {weight}B — 링 상한({RING_SINGLE_EVENT_LIMIT}B)을 넘어 replay 를 비운다"
+                    "{name}: one event is {weight}B — over the ring cap ({RING_SINGLE_EVENT_LIMIT}B), it empties the replay"
                 );
             }
         }
@@ -3636,10 +3665,13 @@ mod tests {
         // Even if a chunk boundary falls in the middle of a line, it is picked up only from complete lines.
         let (head, tail) = line.as_bytes().split_at(line.len() / 2);
         assert!(d.decode(head).is_empty());
-        assert!(d.take_usage().is_empty(), "줄이 안 끝났는데 주웠다");
+        assert!(
+            d.take_usage().is_empty(),
+            "picked up although the line had not ended"
+        );
         assert!(
             d.decode(tail).is_empty(),
-            "사용량 알림이 화면 이벤트를 냈다"
+            "a usage notification emitted a screen event"
         );
 
         let taken = d.take_usage();
@@ -3648,7 +3680,7 @@ mod tests {
         assert_eq!(obs.vendor, usage::USAGE_VENDOR);
         assert_eq!(obs.five_hour.and_then(|w| w.used_pct), Some(37.0));
         assert_eq!(obs.weekly.and_then(|w| w.used_pct), Some(58.0));
-        assert!(d.take_usage().is_empty(), "take_usage 는 비운다");
+        assert!(d.take_usage().is_empty(), "take_usage empties it");
         assert!(d.flush().is_empty());
         assert!(d.take_usage().is_empty());
     }
@@ -3671,7 +3703,7 @@ mod tests {
         assert_eq!(pcts, vec![Some(10.0), Some(20.0)]);
     }
 
-    /// ★It is no longer counted as a 「알면서 안 옮기는 이름」 (name knowingly not translated)★ — if a notification we translate keeps occupying the routine observation field, that share shrinks.
+    /// ★It is no longer counted as a 「name knowingly not translated」★ — if a notification we translate keeps occupying the routine observation field, that share shrinks.
     #[test]
     fn rate_limits_update_is_no_longer_an_untranslated_observation() {
         let mut d = CodexAppServerDecoder::new();
@@ -3701,7 +3733,7 @@ mod tests {
         }
         assert!(
             d.untranslated_observations().is_empty(),
-            "모양이 맞는 봉투는 결함이 아니다"
+            "an envelope with the right shape is not a defect"
         );
 
         // If `rateLimits` is absent or not an object, it is an envelope defect — left under the same key as the other arms.
@@ -3743,7 +3775,7 @@ mod tests {
             assert!(
                 d.untranslated_observations()
                     .contains_key("shape:account/rateLimits/updated"),
-                "봉투 결함으로 남아야 한다: {params} → {:?}",
+                "must remain an envelope defect: {params} → {:?}",
                 d.untranslated_observations()
             );
         }
@@ -3772,7 +3804,7 @@ mod tests {
         );
         assert!(
             started.is_empty(),
-            "라이브가 델타와 겹쳐 두 벌을 낸다: {started:?}"
+            "live overlaps the delta and emits two copies: {started:?}"
         );
         assert!(completed.is_empty(), "{completed:?}");
         match history.as_slice() {
@@ -3785,11 +3817,11 @@ mod tests {
                 assert_eq!(turn_id.as_deref(), Some("tu"));
                 assert_eq!(message_id.as_deref(), Some("m1"));
             }
-            other => panic!("어시스턴트 본문 하나가 아니다: {other:?}"),
+            other => panic!("not a single assistant body: {other:?}"),
         }
     }
 
-    /// ★Tool calls also come out of history — the emit axis is not `started` alone but 「`completed` 가 아닐 것」 (not being completed)★.
+    /// ★Tool calls also come out of history — the emit axis is not `started` alone but 「not being `completed`」★.
     /// In the measured sample this variant is 44 of 120, so if it were missing the restored screen would be practically empty.
     #[test]
     fn a_tool_item_is_emitted_on_the_history_door_just_like_item_started() {
@@ -3799,30 +3831,30 @@ mod tests {
         assert_eq!(started.len(), 1, "{started:?}");
         assert!(
             completed.is_empty(),
-            "라이브 `completed` 는 여전히 안 낸다: {completed:?}"
+            "live `completed` still does not emit: {completed:?}"
         );
         assert_eq!(history.len(), 1, "{history:?}");
         assert!(
             matches!(history[0], OutputEvent::ToolCall { .. })
                 && matches!(started[0], OutputEvent::ToolCall { .. }),
-            "이력과 `started` 의 산출이 갈렸다: {history:?} / {started:?}"
+            "the output of history and `started` disagree: {history:?} / {started:?}"
         );
     }
 
-    /// The echoed user utterance comes out of all three doors — in history it is the only material for 「누가 무엇을 물었나」 (who asked what).
+    /// The echoed user utterance comes out of all three doors — in history it is the only material for 「who asked what」.
     #[test]
     fn a_user_message_item_comes_through_the_history_door_too() {
         let (_, _, history) = through_each_door(serde_json::json!({
             "type": "userMessage", "id": "u1",
-            "content": [{"type": "text", "text": "안녕"}]
+            "content": [{"type": "text", "text": "hello"}]
         }));
         match history.as_slice() {
             [OutputEvent::Structured { kind, json }] => {
                 assert_eq!(kind, "user");
                 assert!(json.contains("\"uuid\":\"u1\""), "{json}");
-                assert!(json.contains("안녕"), "{json}");
+                assert!(json.contains("hello"), "{json}");
             }
-            other => panic!("유저 말풍선 하나가 아니다: {other:?}"),
+            other => panic!("not a single user bubble: {other:?}"),
         }
     }
 
@@ -3844,7 +3876,7 @@ mod tests {
     /// that item's reach, so it is measured separately here.
     #[test]
     fn no_history_item_can_produce_an_event_that_evicts_the_replay_ring() {
-        let huge = "가".repeat(MAX_LINE_BYTES / 4);
+        let huge = "가".repeat(MAX_LINE_BYTES / 4); // hangul-ok: 3-byte chars size the line
         let long_id = "i".repeat(MAX_ID_BYTES + 1);
         let cases = [
             serde_json::json!({"type": "agentMessage", "id": long_id, "text": huge}),
@@ -3857,14 +3889,14 @@ mod tests {
                 let weight = event_weight(&event);
                 assert!(
                     weight <= RING_SINGLE_EVENT_LIMIT,
-                    "이력 이벤트 하나가 {weight}B — 링 상한({RING_SINGLE_EVENT_LIMIT}B)을 넘어 replay 를 비운다"
+                    "one history event is {weight}B — over the ring cap ({RING_SINGLE_EVENT_LIMIT}B), it empties the replay"
                 );
             }
         }
     }
 
     /// ★★The history turn boundary **does not claim an outcome**★★ — a page does not carry how the past turn ended,
-    /// so there is no value to fill into `TurnEnd`. `Unknown` draws a 「모름」 (unknown) marker at every boundary, and
+    /// so there is no value to fill into `TurnEnd`. `Unknown` draws an 「unknown」 marker at every boundary, and
     /// `Completed` is an invented outcome (that type's doc forbids it).
     #[test]
     fn a_history_turn_boundary_closes_without_claiming_an_outcome() {
@@ -3876,17 +3908,19 @@ mod tests {
                 assert_eq!(turn_id.as_deref(), Some("tu"));
                 assert_eq!(message_id, None);
             }
-            other => panic!("경계가 `MessageDone` 이 아니다 — 결말을 지어내고 있다: {other:?}"),
+            other => {
+                panic!("the boundary is not `MessageDone` — it is inventing an outcome: {other:?}")
+            }
         }
         // It is a comparison token, so over the cap it is filtered, not truncated (the same decision = `bounded_id`).
         match history_turn_boundary(Some(&"t".repeat(MAX_ID_BYTES + 1))) {
             OutputEvent::MessageDone { turn_id, .. } => assert_eq!(turn_id, None),
-            other => panic!("경계가 `MessageDone` 이 아니다: {other:?}"),
+            other => panic!("the boundary is not `MessageDone`: {other:?}"),
         }
         // Even if the id cannot be carried the boundary stands — if it is not closed, the waiting indicator spins forever.
         match history_turn_boundary(None) {
             OutputEvent::MessageDone { turn_id, .. } => assert_eq!(turn_id, None),
-            other => panic!("경계가 `MessageDone` 이 아니다: {other:?}"),
+            other => panic!("the boundary is not `MessageDone`: {other:?}"),
         }
     }
 
@@ -3898,10 +3932,7 @@ mod tests {
         d.translate(&format!("drift/{secret}"), None);
         let seen = d.untranslated_observations();
         let (key, _) = seen.iter().next().unwrap();
-        assert!(
-            !key.contains(secret),
-            "마스킹되지 않은 키가 새어 나갔다: {key}"
-        );
+        assert!(!key.contains(secret), "an unmasked key leaked out: {key}");
     }
 
     /// ★If truncated then masked, a credential straddling the boundary survives★ — the pattern of `mask_secrets` requires
@@ -3922,7 +3953,7 @@ mod tests {
         let (key, _) = seen.iter().next().unwrap();
         assert!(
             !key.contains("sk-proj-"),
-            "경계에 걸친 자격증명이 마스킹을 빠져나갔다: {key}"
+            "a credential spanning the boundary escaped masking: {key}"
         );
         assert!(key.chars().count() <= LOG_STRING_LIMIT + 1, "{}", key.len());
     }
@@ -3935,7 +3966,7 @@ mod tests {
 
     #[test]
     fn truncate_cuts_on_character_boundaries() {
-        assert_eq!(truncate(&"한".repeat(10), 3), "한한한…");
+        assert_eq!(truncate(&"한".repeat(10), 3), "한한한…"); // hangul-ok: character-boundary fixture
     }
 
     // ── Vocabulary of the tool-end trigger (ADR-0231 · ADR-0235) ───────────────────
@@ -3974,13 +4005,13 @@ mod tests {
         for kind in KNOWN_ITEM_TYPES {
             assert!(
                 table.iter().any(|(k, _)| k == kind),
-                "{kind} 가 분류 표에 없다"
+                "{kind} is not in the classification table"
             );
         }
         for kind in TOOL_ITEM_TYPES {
             assert!(
                 KNOWN_ITEM_TYPES.contains(kind),
-                "{kind} 가 스키마 어휘에 없다"
+                "{kind} is not in the schema vocabulary"
             );
         }
     }

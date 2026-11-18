@@ -102,7 +102,7 @@ Key findings (in order of severity):
 
 ## Sources
 
-- [Kubernetes API Concepts](https://kubernetes.io/docs/reference/using-api/api-concepts/) · [KEP-2340](https://github.com/kubernetes/enhancements/blob/master/keps/sig-api-machinery/2340-Consistent-reads-from-cache/README.md) · [k8s#59848](https://github.com/kubernetes/kubernetes/issues/59848) · [API conventions(불투명 쪽)](https://github.com/kubernetes/community/blob/main/contributors/devel/sig-architecture/api-conventions.md)
+- [Kubernetes API Concepts](https://kubernetes.io/docs/reference/using-api/api-concepts/) · [KEP-2340](https://github.com/kubernetes/enhancements/blob/master/keps/sig-api-machinery/2340-Consistent-reads-from-cache/README.md) · [k8s#59848](https://github.com/kubernetes/kubernetes/issues/59848) · [API conventions (opaque side)](https://github.com/kubernetes/community/blob/main/contributors/devel/sig-architecture/api-conventions.md)
 - [Envoy xDS protocol(ADS)](https://www.envoyproxy.io/docs/envoy/latest/api-docs/xds_protocol) · [etcd data model](https://etcd.io/docs/v3.5/learning/data_model/) · [etcd Watch API](https://etcd.io/docs/v3.7/learning/api/)
 - [Erlang — processes / signal ordering](https://www.erlang.org/doc/system/ref_man_processes.html) · [Erlang message passing](https://www.erlang.org/blog/message-passing/)
 - [Kleppmann — distributed locking](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html) · [Thompson — single writer principle](https://mechanical-sympathy.blogspot.com/2011/09/single-writer-principle.html)

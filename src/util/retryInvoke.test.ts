@@ -27,8 +27,8 @@ async function settleResolves<T>(p: Promise<T>): Promise<T> {
   return result
 }
 
-describe('retryAsync — 재시도 성공/실패/취소(ADR-0102)', () => {
-  it('2번 reject 후 resolve → 성공값 반환(재시도가 회수)', async () => {
+describe('retryAsync — retry success/failure/cancel (ADR-0102)', () => {
+  it('rejects twice then resolves → returns the success value (collected by the retry)', async () => {
     let calls = 0
     const fn = vi.fn(async () => {
       calls += 1
@@ -40,7 +40,7 @@ describe('retryAsync — 재시도 성공/실패/취소(ADR-0102)', () => {
     expect(fn).toHaveBeenCalledTimes(3)
   })
 
-  it('모든 시도 실패 → 마지막 에러를 throw(조용히 삼키지 않음)', async () => {
+  it('every attempt fails → throws the last error (not swallowed silently)', async () => {
     let calls = 0
     const fn = vi.fn(async () => {
       calls += 1
@@ -50,7 +50,7 @@ describe('retryAsync — 재시도 성공/실패/취소(ADR-0102)', () => {
     expect(fn).toHaveBeenCalledTimes(4)
   })
 
-  it('attempts=1 → 재시도 없이 즉시 실패 throw', async () => {
+  it('attempts=1 → fails and throws immediately without retries', async () => {
     const fn = vi.fn(async () => {
       throw new Error('once')
     })
@@ -58,14 +58,14 @@ describe('retryAsync — 재시도 성공/실패/취소(ADR-0102)', () => {
     expect(fn).toHaveBeenCalledTimes(1)
   })
 
-  it('첫 시도부터 성공 → 재시도·대기 없음', async () => {
+  it('succeeds from the first attempt → no retries or waits', async () => {
     const fn = vi.fn(async () => 42)
     const result = await settleResolves(retryAsync(fn))
     expect(result).toBe(42)
     expect(fn).toHaveBeenCalledTimes(1)
   })
 
-  it('isCancelled → RetryCancelledError(정상 실패와 구분)', async () => {
+  it('isCancelled → RetryCancelledError (distinguished from a normal failure)', async () => {
     let cancelled = false
     const fn = vi.fn(async () => {
       cancelled = true
@@ -78,7 +78,7 @@ describe('retryAsync — 재시도 성공/실패/취소(ADR-0102)', () => {
     expect(fn).toHaveBeenCalledTimes(1)
   })
 
-  it('마지막 실패 시도 도중 취소 → 소진 throw 대신 RetryCancelledError(FIX-4)', async () => {
+  it('cancelled during the last failing attempt → RetryCancelledError instead of the exhaustion throw (FIX-4)', async () => {
     // The old code looked at isCancelled only at the top of the loop, so it threw the backend error ('fail 2') as is → the call site
     //   logged a pointless final failure. FIX-4 re-checks right before the exhaustion throw and turns it into RetryCancelledError.
     let calls = 0
@@ -95,7 +95,7 @@ describe('retryAsync — 재시도 성공/실패/취소(ADR-0102)', () => {
     expect(fn).toHaveBeenCalledTimes(2)
   })
 
-  it('onRetry 는 실패 시도마다(마지막 제외) 호출된다', async () => {
+  it('onRetry is called on every failed attempt (except the last)', async () => {
     const onRetry = vi.fn()
     const fn = vi.fn(async () => {
       throw new Error('x')

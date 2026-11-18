@@ -2,10 +2,10 @@
 @import './styles/theme.css';
 @import './styles/font.css';
 
-/* ADR-0047: Tailwind v4 색 토큰 ↔ 기존 data-theme CSS 변수 매핑.
-   inline 이 핵심 — Tailwind 가 빌드타임에 값을 굳히지 않고 var(--*) 를 유틸에 그대로 방출한다.
-   덕분에 런타임 data-theme(dark/light/e-ink) 스왑이 bg-background/text-foreground 등 유틸에
-   그대로 전파된다(테마 전환 메커니즘 불변). 실제 존재하는 변수만 매핑(정의처 = styles/theme.css). */
+/* ADR-0047: mapping of Tailwind v4 color tokens ↔ the existing data-theme CSS variables.
+   `inline` is the key — Tailwind does not freeze values at build time and emits var(--*) into utilities as is.
+   Thanks to that, the runtime data-theme (dark/light/e-ink) swap propagates as is to utilities such as bg-background/text-foreground
+   (the theme switching mechanism is unchanged). Only variables that actually exist are mapped (defined in styles/theme.css). */
 @theme inline {
   --color-background: var(--bg);
   --color-surface: var(--bg-secondary);
@@ -16,23 +16,23 @@
   --color-elevated: var(--surface-elevated);
 }
 
-/* html/body/#root 배경을 var(--bg)로 고정.
-   WebView2 기본 흰 배경이 앱 요소가 아직 덮지 않은 자리(콘텐츠가 칠해지기 전 등)로 비치지 않게 한다.
-   폴백 #0a0a0a = 다크 --bg 값. 셸이 만든 창은 페이지 스크립트보다 먼저 그 창의 테마로 data-theme 를 박고
-   (src-tauri/src/webview_env.rs 의 Backdrop::Theme), 그 밖의 창은 main.tsx 가 createRoot 전에 dark 로 박으므로,
-   이 폴백이 쓰이는 구간은 셸이 박지 않은 창에서 그 모듈이 돌기 전(HTML 파싱~스크립트 평가)뿐이다.
-   ★그 선박기를 걷어내지 말 것★ — 색 토큰은 styles/theme.css 의 :root[data-theme='…'] 안에만 있고 폴백이
-   없어서, 속성이 없는 동안엔 --text·--border 가 통째로 미정의다(배경만 어둡고 글자는 UA 기본 검정 = 검은
-   화면). 셸이 정한 테마(`src/theme/uiSettings.ts`)는 IPC 왕복 뒤에 오므로 그 구간이 짧지 않다.
-   var(--bg)가 이미 있으면 폴백은 무시되고 현재 테마 배경이 사용된다(세 테마 모두 --bg 정의). */
+/* Pin the html/body/#root background to var(--bg).
+   Keeps the WebView2 default white background from showing through where no app element covers yet (before content is painted, etc.).
+   Fallback #0a0a0a = the dark --bg value. A shell-created window gets data-theme set to that window's theme before the page script
+   (Backdrop::Theme in src-tauri/src/webview_env.rs), and for other windows main.tsx sets dark before createRoot,
+   so this fallback applies only in the span before that module runs in a window the shell did not set (HTML parsing to script evaluation).
+   ★Do not remove that early setter★ — the color tokens live only inside :root[data-theme='…'] in styles/theme.css with no fallback,
+   so while the attribute is absent --text and --border are entirely undefined (only the background is dark and the text is the UA default black = a black
+   screen). The shell-chosen theme (`src/theme/uiSettings.ts`) arrives after an IPC round trip so that span is not short.
+   If var(--bg) already exists the fallback is ignored and the current theme background is used (all three themes define --bg). */
 html, body, #root {
   background: var(--bg, #0a0a0a);
 }
 
-/* ADR-0227: 칸 틀 위치 = 셸 사각형(정규화 경계 --x0 --y0 --x1 --y1, 잎이 인라인으로 싣는다)을 루트 기준 %로.
-   반올림 형태는 셸의 px 경계식과 같은 모양이다 — 이웃 칸이 같은 경계식을 쓰므로 틈·겹침이 0 이다.
-   ★@supports 로 가르는 이유★: var() 가 섞인 선언은 파싱 때 걸러지지 않고 계산 시점에 unset 이 되므로, 같은
-   속성을 두 번 적는 폴백이 통하지 않는다. round() 미지원이면 반올림 없는 % 로 떨어진다. */
+/* ADR-0227: area frame position = the shell rectangle (normalized bounds --x0 --y0 --x1 --y1, carried inline by the leaf) as % of the root.
+   The rounding form has the same shape as the shell's px boundary formula — neighbouring areas use the same boundary formula so gaps and overlaps are 0.
+   ★Why it is split with @supports★: a declaration mixed with var() is not filtered at parse time and becomes unset at computed-value time, so a fallback
+   that writes the same property twice does not work. Without round() support it falls to the un-rounded %. */
 .engram-slot-frame {
   left: calc(var(--x0) * 100%);
   top: calc(var(--y0) * 100%);
@@ -48,32 +48,32 @@ html, body, #root {
   }
 }
 
-/* ADR-0053: xterm 스크롤바 시각 통일(공용 ScrollArea seam 의 유일 예외).
-   xterm 은 자체 스크롤바를 소유해 React ScrollArea 컴포넌트로 감쌀 수 없다. 대신 여기서 같은 theme.css
-   토큰(--scrollbar-*)으로 스타일해 나머지 오버레이 스크롤바와 룩을 맞춘다(단일 출처 — 색은 theme 마다
-   다른 --scrollbar-thumb, 폭/라운드는 --scrollbar-size/-radius).
+/* ADR-0053: xterm scrollbar visual unification (the sole exception to the shared ScrollArea seam).
+   xterm owns its own scrollbar and cannot be wrapped by the React ScrollArea component. Instead it is styled here with the same theme.css
+   tokens (--scrollbar-*) to match the look of the other overlay scrollbars (single source — color is the per-theme
+   --scrollbar-thumb, width/rounding are --scrollbar-size/-radius).
 
-   ★화면에 보이는 스크롤바는 네이티브가 아니라 xterm 이 그리는 DOM 요소다(실측 2026-08-21,
-     @xterm/xterm 6.0.0)★: v6 는 VS Code 의 ScrollableElement 를 쓴다 —
-     `.xterm-scrollable-element > .scrollbar.vertical > .slider`. 남아 있는 .xterm-viewport 는 스크롤을
-     더 이상 받지 않고(스크롤백이 쌓여도 scrollHeight === clientHeight) 불투명한
-     .xterm-scrollable-element 가 그 위를 덮는다. 그래서 아래 네이티브 규칙은 지금 화면에 한 픽셀도
-     칠하지 않는다 — thumb 색을 빨강으로 강제해도 캡처가 변하지 않는 것으로 확인했다. **보이는 두께·색·
-     가시성을 바꾸려면 .slider 를 건드려야 한다.** 네이티브 규칙을 남겨 두는 이유는 기법이 죽은 게
-     아니라 대상이 덮인 것뿐이기 때문이다(10px 트랙 + 투명 border 2px → 정확히 6px 이 칠해지는 것을
-     격리 하네스에서 확인 — 스크롤바가 다시 드러나면 그대로 동작한다).
+   ★The scrollbar visible on screen is not native but a DOM element xterm draws (measured 2026-08-21,
+     @xterm/xterm 6.0.0)★: v6 uses VS Code's ScrollableElement —
+     `.xterm-scrollable-element > .scrollbar.vertical > .slider`. The remaining .xterm-viewport no longer receives scrolling
+     (even as scrollback accumulates scrollHeight === clientHeight) and the opaque
+     .xterm-scrollable-element covers it. So the native rules below paint not a single pixel on screen now —
+     forcing the thumb color to red did not change the capture. **To change the visible thickness, color and
+     visibility you must touch .slider.** The native rules are kept because the technique is not dead,
+     only its target is covered (confirmed in an isolated harness that a 10px track + 2px transparent border paints exactly 6px —
+     if the scrollbar is exposed again it works as is).
 
-   ★가시성 규칙(2026-08-21 사용자 지적: "터미널은 화면 호버링만 해도 스크롤바가 나온다 — json 쪽으로
-     통일")★: 평소 숨김 → 스크롤 중에만 보임 → 멈춘 뒤 0.5s 후 숨김, hover 무반응(ADR-0053 요구
-     (2)(3)(4)). seam 쪽은 Radix 가 스크롤바 요소를 마운트/언마운트해 이걸 구현하지만, 네이티브
-     스크롤바는 요소가 아니라 붙였다 뗄 수 없다 → **thumb 색을 평소 transparent 로 두고 "스크롤 중"
-     표식([data-scroll-active])이 붙은 동안만 칠한다.** 표식을 붙이는 쪽 =
-     components/ui/nativeScrollActivity.ts(숨김 지연 상수도 seam 과 공유 — 두 룰이 갈리지 않게).
-     ★단 이 규칙이 통제하는 것도 위의 덮인 네이티브 스크롤바다★ — 보이는 .slider 의 show/hide 는
-     ScrollableElement 가 스스로 하고(mouseover 에도 뜬다) 아직 이쪽으로 통일되지 않았다. */
+   ★Visibility rule (2026-08-21 user remark: "the terminal shows a scrollbar just from hovering the screen — unify
+     to the json side")★: hidden normally → visible only while scrolling → hidden 0.5s after it stops, no reaction to hover (ADR-0053 requirements
+     (2)(3)(4)). On the seam side Radix mounts/unmounts the scrollbar element to do this, but a native
+     scrollbar is not an element and cannot be attached and detached → **keep the thumb color transparent normally and paint it only while the "scrolling"
+     marker ([data-scroll-active]) is attached.** The side that attaches the marker =
+     components/ui/nativeScrollActivity.ts (the hide-delay constant is also shared with the seam — so the two rules do not diverge).
+     ★But what this rule controls is also the covered native scrollbar above★ — the show/hide of the visible .slider is done by
+     ScrollableElement itself (it also appears on mouseover) and is not yet unified to this side. */
 .xterm .xterm-viewport {
-  scrollbar-width: thin; /* Firefox 폴백(WebView2 는 -webkit-* 사용) */
-  /* 평소 = 안 보임. 색만 죽이고 폭은 유지한다(위 거터 주석). */
+  scrollbar-width: thin; /* Firefox fallback (WebView2 uses -webkit-*) */
+  /* Normally = invisible. Kill only the color and keep the width (the gutter comment above). */
   scrollbar-color: transparent transparent;
 }
 .xterm .xterm-viewport[data-scroll-active] {
@@ -87,30 +87,30 @@ html, body, #root {
   background: transparent;
 }
 .xterm .xterm-viewport::-webkit-scrollbar-thumb {
-  /* ★평소 = 투명(안 보임)★. hover 로 되살리지 말 것 — 그게 이 통일이 없앤 룰이다. */
+  /* ★Normally = transparent (invisible)★. Do not revive it with hover — that is the rule this unification removed. */
   background-color: transparent;
   border-radius: var(--scrollbar-radius, 9999px);
-  /* 트랙 폭보다 얇게 보이도록 투명 border 로 안쪽 여백(overlay pill 근사). */
+  /* An inner margin via a transparent border so it looks thinner than the track width (approximates an overlay pill). */
   border: 2px solid transparent;
-  /* ★background-color 로 칠하는 이유★: background 단축은 background-clip 을 border-box 로 되돌려
-     위 투명 border 안쪽 여백이 사라진다(thumb 가 트랙 폭 그대로 두꺼워진다). */
+  /* ★Why background-color is used★: the background shorthand resets background-clip to border-box,
+     so the inner margin of the transparent border above disappears (the thumb becomes as thick as the track width). */
   background-clip: padding-box;
 }
-/* 스크롤 중에만 칠한다 — 색 토큰은 테마별(theme.css :root[data-theme=...] --scrollbar-thumb). */
+/* Paint only while scrolling — the color token is per theme (theme.css :root[data-theme=...] --scrollbar-thumb). */
 .xterm .xterm-viewport[data-scroll-active]::-webkit-scrollbar-thumb {
   background-color: var(--scrollbar-thumb, rgba(255, 255, 255, 0.24));
 }
 
-/* 실제로 보이는 thumb(위 헤더의 .slider) 두께를 seam 의 thumb 와 같게 — 기본 14px 은 seam 6px 의
-   2.3 배로 칠해진다(실측: 21 device px / dpr 1.5).
-   ★!important 가 필요하다★: 폭과 left 를 xterm JS 가 인라인 style 로 박는다(verticalScrollbarSize =
+/* Make the thickness of the actually visible thumb (the .slider in the header above) equal to the seam's thumb — the default 14px paints at
+   2.3x the seam's 6px (measured: 21 device px / dpr 1.5).
+   ★!important is needed★: xterm JS writes width and left as inline style (verticalScrollbarSize =
      ViewportConstants.DEFAULT_SCROLL_BAR_WIDTH = 14).
-   폭은 seam 과 같은 산식으로 뽑는다 — 트랙 --scrollbar-size(10px) − .engram-scrollbar 의 padding 2px 양쪽.
-   right: 2px 도 그 padding 을 그대로 옮긴 것이다(트랙 오른쪽 끝에서 2px 띄운 pill).
-   ★트랙(.scrollbar.vertical, 14px)은 건드리지 않는다★ — 다만 그것이 거터라서가 아니다: 트랙은
-     position:absolute 오버레이라 레이아웃 폭을 먹지 않고, 열 수(cols)를 정하는 예약 폭은 FitAddon 이 DOM
-     이 아니라 JS 상수(DEFAULT_SCROLL_BAR_WIDTH — overviewRuler.width 로만 바뀐다)에서 읽는다. 즉 여기서
-     칠하는 폭을 줄여도 PTY 치수는 흔들리지 않고, 흔드는 것은 그 옵션 쪽이다. */
+   The width is derived by the same formula as the seam — track --scrollbar-size (10px) − the .engram-scrollbar padding of 2px on both sides.
+   right: 2px is likewise that padding carried over (a pill set 2px in from the track's right end).
+   ★The track (.scrollbar.vertical, 14px) is not touched★ — but not because it is a gutter: the track is
+     a position:absolute overlay so it takes no layout width, and the reserved width that decides the column count (cols) is read by FitAddon not from the DOM
+     but from a JS constant (DEFAULT_SCROLL_BAR_WIDTH — changed only by overviewRuler.width). So even if the width
+     painted here is reduced the PTY size is not shaken; what shakes it is that option. */
 .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
   width: calc(var(--scrollbar-size, 10px) - 4px) !important;
   left: auto !important;

@@ -2,7 +2,7 @@
 name = "engram-dashboard-daemon"
 version = "0.4.0"
 edition = "2021"
-description = "Engram Dashboard 데몬 — AgentManager 소유(에이전트 호스트) + 제어 평면(MCP·ingress·프라이밍) + 메시징 접합 + 조립실(ADR-0129 슬라이스 1)."
+description = "Engram Dashboard daemon — owns the AgentManager (agent host) + control plane (MCP·ingress·priming) + messaging junction + assembly room (ADR-0129 slice 1)."
 
 # Library surface. The server assembly and accept loop are gathered into the lib so that main (bin) and the
 # isolation harness (tests/ws_e2e.rs) share the same startup flow (run / start_test_server). The underscore in the crate name is the Rust path convention.
@@ -57,7 +57,7 @@ required-features = ["test-harness"]
 
 # ★ADR-0092/0099 A→B→A round-trip (reply round-trip) measurement driver★: spawns two real primed claudes (A·B) and measures whether B calls the sending
 #   half (MCP eg_send) on its own and A accepts the reply. Priming is parameterized with
-#   `--priming <경로>` (e.g. prompts/agent-priming.md) (the old C1~C3 experiment aliases were removed by ADR-0099 ·
+#   `--priming <path>` (e.g. prompts/agent-priming.md) (the old C1~C3 experiment aliases were removed by ADR-0099 ·
 #   `--cli-only`, which forced the CLI false-path, was removed together with the CLI-mirror priming). required-features keeps release builds from
 #   compiling it (experiment/verification only, same family as priming-smoke · saturation-pilot).
 [[bin]]
@@ -137,7 +137,7 @@ uuid = { version = "1", features = ["v4"] }
 # rmcp = the official Rust MCP SDK. Streamable HTTP server role (StreamableHttpService = Tower service, nested in axum).
 #   server/macros(#[tool]/#[tool_router]/#[tool_handler]) + schemars (tool input schema) + streamable-http-server.
 #   ★OAuth metadata is not advertised★: StreamableHttpService does not create a `.well-known` route — this avoids at the root the #59467 condition
-#   where claude ignores a static Bearer (initialization measurement basis: ADR-0086 §근거 [rationale]).
+#   where claude ignores a static Bearer (initialization measurement basis: ADR-0086 §Rationale).
 rmcp = { version = "2.2.0", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
 # axum = MCP router host (rmcp targets axum 0.8). Local plain-text HTTP — no TLS needed.
 #   json = the Json extractor/response of the /control/send handler (ADR-0086 step 2 CLI entrance).
@@ -148,7 +148,7 @@ tower = "0.5"
 #   rmcp StreamableHttpService consumes the raw body directly (bypassing extractors), so that limit has no effect.
 #   This layer wraps the body itself and enforces the limit on all downstream consumers (round-2 F4). limit feature only.
 tower-http = { version = "0.6", default-features = false, features = ["limit"] }
-# CancellationToken(StreamableHttpServerConfig) + graceful shutdown 신호.
+# CancellationToken(StreamableHttpServerConfig) + graceful shutdown signal.
 tokio-util = { version = "0.7", features = ["rt"] }
 # http = direct manipulation of StatusCode/HeaderMap in axum middleware (same 1.x wire types as rmcp).
 http = "1"

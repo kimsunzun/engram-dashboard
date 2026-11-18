@@ -1,13 +1,8 @@
-//! PresetPalette — 프리셋(자주 쓰는 cwd 북마크) 슬롯 콘텐츠(ADR-0060 variant / ADR-0061 저장·리치화).
+//! PresetPalette — preset (frequently used cwd bookmarks) slot content (ADR-0060 variant / ADR-0061 storage and enrichment).
 //!
-//! CRUD 는 agentClient(단일 제어 표면, ADR-0011) 프리셋 메서드만 부르고, 화면 반영은 낙관 갱신 없이
-//! PresetListUpdated broadcast → store 미러 교체로만 이뤄진다(멀티창 동기화 불변식, ADR-0061).
-//!
-//! ★pane 메뉴 없음(ADR-0064)★: 옛 pane 우클릭 "추가" 메뉴 + stopPropagation 은 제거됐다 — 추가는 이제
-//! 통합 슬롯 메뉴의 preset.add command(폴더 다이얼로그 → createPreset, presetCommands.ts)로 기여된다.
-//! pane 우클릭은 상위 LayoutLeaf 의 통합 SlotContextMenu 로 버블한다(공통 슬롯 ops 도 함께 노출).
-//!
-//! ★스타일 = 변수-only(테마 준수)★: 색·폰트는 전부 CSS 변수 참조 — 하드코딩 색 리터럴 0(e-ink 대비).
+//! CRUD calls only the agentClient (single control surface, ADR-0011) preset methods; the screen reflects changes only via the PresetListUpdated broadcast → store mirror replacement, with no optimistic update (multi-window sync invariant, ADR-0061).
+//! ★No pane menu (ADR-0064)★: add is contributed by the unified slot menu's preset.add command (folder dialog → createPreset, presetCommands.ts); a pane right-click bubbles to the parent LayoutLeaf's SlotContextMenu.
+//! ★Style = variables only (theme-compliant)★: colors and fonts are CSS variable references — zero hard-coded color literals (e-ink contrast).
 
 import { useEffect, useRef, useState } from 'react'
 
@@ -20,10 +15,7 @@ import type { Preset } from '../../api/types'
 import { t } from '../../i18n'
 import { useBlurOnDragRegionPress } from '../layout/titleRow/dragRegion'
 
-/**
- * ADR-0061 리치화. 파생은 공용 `basename` 유틸에 위임 — AgentList 행 표시명과 단일 출처를 공유한다
- * (복제하면 win/posix·root 엣지가 갈린다).
- */
+/** ADR-0061 enrichment. Derivation uses the shared `basename` util — one source with the AgentList row display name (duplicating it would diverge on win/posix and root edge cases). */
 export function presetDisplayName(preset: Pick<Preset, 'cwd' | 'name'>): string {
   return preset.name ?? basename(preset.cwd)
 }
@@ -32,36 +24,29 @@ type RowMenu = { x: number; y: number; presetId: string }
 
 export default function PresetPalette() {
   const presets = useAgentStore(s => s.presets)
-  // 받기 전엔 목록 칸을 비워 둔다 — 새 창에서 목록이 오기 전 빈 목록 안내가 잠깐 보이지 않게(AgentList 와 같은 규칙).
+  // Leave the list empty until received so a new window does not flash the empty-list notice (same rule as AgentList).
   const presetsLoaded = useAgentStore(s => s.presetsLoaded)
   const rowMenuRef = useRef<HTMLDivElement>(null)
   const [rowMenu, setRowMenu] = useState<RowMenu | null>(null)
 
-  // in-flight 가드(로컬 컴포넌트 상태 only — store 낙관 갱신 금지, ADR-0061). Ack 전 중복 제출이
-  //   duplicate DeletePreset 을 쏘는 것을 막는다. 성공·실패 무관 완료 시 해제.
-  //
-  // ★ref = 권위적 double-fire 가드, state = 시각(disabled/opacity)★: useState 가드는 re-render commit
-  //   전 두 번째 호출이 stale closure 로 아직 false 를 읽어 둘 다 통과하는 창이 있다. ref 는 동기 mutable 이라
-  //   같은 tick 내 두 번째 호출도 즉시 true 를 읽는다 — ref 가 실제 중복 발화 차단을 담당하고 state 는 시각용.
+  // In-flight guard (local state only — no store optimistic update, ADR-0061): prevents a duplicate DeletePreset before Ack; released on completion either way.
+  // ★ref = authoritative double-fire guard, state = visuals (disabled/opacity)★: a useState guard lets two calls both pass (the second reads a stale closure still false before the re-render commits); a ref mutates synchronously so the same-tick second call reads true.
   const deletingRef = useRef<Set<string>>(new Set())
   const [deleting, setDeleting] = useState<ReadonlySet<string>>(() => new Set())
-  // rename in-flight 가드(delete 가드와 동형 — RenamePreset 중복 제출 차단).
   const renamingRef = useRef<Set<string>>(new Set())
   const [renaming, setRenaming] = useState<ReadonlySet<string>>(() => new Set())
 
-  // ★인라인 편집 로컬 상태(프론트 전용 — 백엔드 권위 이름과 별개의 임시 draft, TabBar 패턴)★
+  // ★Inline-edit local state (frontend-only draft, separate from the backend-authoritative name, TabBar pattern)★
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
-  // ADR-0373: the name the edit started from — the "unchanged" check compares with this, not with a name derived again at
-  //   commit, which can change under the edit (a language switch turns a blank-path name into another language's word).
+  // ADR-0373: the name the edit started from — "unchanged" compares with this, not a name re-derived at commit (a language switch turns a blank-path name into another language's word).
   const [draftStart, setDraftStart] = useState('')
-  // ★안정 ref★: 편집 진입(editingId 변화) 시점에만 정확히 1회 select() — 인라인 콜백 ref 로 select 하면
-  //   매 렌더 재부착돼 타이핑이 깨진다(TabBar FIX 1 동형).
+  // ★Stable ref★: select() once on entering edit (editingId change) — selecting via an inline callback ref re-attaches every render and breaks typing (as TabBar FIX 1).
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if (editingId !== null) inputRef.current?.select()
   }, [editingId])
-  // 창 끌 자리(제목 줄) 누름에도 편집이 끝난다 — 확정은 onBlur 그대로.
+  // Pressing the window-drag area (title row) also ends the edit — commit stays on onBlur.
   useBlurOnDragRegionPress(editingId !== null, inputRef)
 
   useEffect(() => {
@@ -70,7 +55,7 @@ export default function PresetPalette() {
       const target = e.target as Node
       if (rowMenuRef.current && !rowMenuRef.current.contains(target)) setRowMenu(null)
     }
-    // 캡처 단계 — 창 끌 자리 누름은 거품 단계에 닿지 않는다(`layout/titleRow/dragRegion.ts`).
+    // Capture phase — pressing the window-drag area never reaches the bubble phase (`layout/titleRow/dragRegion.ts`).
     document.addEventListener('mousedown', h, true)
     return () => document.removeEventListener('mousedown', h, true)
   }, [rowMenu])
@@ -84,14 +69,12 @@ export default function PresetPalette() {
     return () => document.removeEventListener('keydown', h)
   }, [rowMenu])
 
-  // ★타깃 사라지면 메뉴 닫기★: rowMenu 는 대상 행보다 오래 산다 — 목록이 바뀌어(삭제 등) 대상 preset id 가
-  //   presets 에서 빠져도 rowMenu 는 남는다. 대상이 목록에서 사라지면 즉시 null 로 리셋(AgentList 동형).
+  // ★Close the menu when the target disappears★: rowMenu outlives its row — if the target preset id drops out of presets (delete etc.), reset to null at once (as AgentList).
   useEffect(() => {
     if (rowMenu && !presets.some(p => p.id === rowMenu.presetId)) setRowMenu(null)
   }, [rowMenu, presets])
 
-  // 삭제: id 별 in-flight 추적 → 같은 프리셋의 삭제는 resolve 전까지 1회만 발화(더블클릭 가드).
-  //   deletingRef(동기)가 권위 가드 — 다른 id 는 여전히 동시 삭제, 같은 id 는 1회만.
+  // Delete: in-flight tracked per id — the same preset fires once until resolve (double-click guard); `deletingRef` (sync) is authoritative, different ids still run concurrently.
   const removePreset = (id: string): void => {
     if (deletingRef.current.has(id)) return
     deletingRef.current.add(id)
@@ -102,13 +85,11 @@ export default function PresetPalette() {
     })
     agentClient
       .deletePreset(id)
-      // ★성공 시 refreshPresets() 안전망(AgentList delete/rename 과 대칭)★: 목록 반영은 원칙적으로
-      //   PresetListUpdated broadcast 로 오나, 그걸 놓쳤을 때(재연결 창·이벤트 유실) 이 창만 stale 로 남는다.
-      //   권위 목록을 다시 끌어와 전체 교체(broadcast 정상 도달 시 같은 목록 재적용 — 무해·멱등).
+      // ★refreshPresets() safety net on success (symmetric with AgentList delete/rename)★: the list normally arrives via the PresetListUpdated broadcast, but a missed one (reconnect window, lost event) leaves only this window stale; re-pulling the authoritative list is idempotent.
       .then(() => refreshPresets())
-      .catch(e => console.error('[PresetPalette] deletePreset 실패:', e))
+      .catch(e => console.error('[PresetPalette] deletePreset failed:', e))
       .finally(() => {
-        deletingRef.current.delete(id) // 성공·실패 무관 lock 해제(에러가 UI 영구 잠금 방지)
+      deletingRef.current.delete(id) // release the lock regardless of success or failure (so an error cannot lock the UI forever)
         setDeleting(prev => {
           const next = new Set(prev)
           next.delete(id)
@@ -124,16 +105,13 @@ export default function PresetPalette() {
     setDraftStart(name)
   }
   const cancelEdit = () => setEditingId(null)
-  // ★멱등★: editingId 가 이 preset 이 아니면 즉시 return — Enter 가 setEditingId(null) 로 input 을 언마운트하면
-  //   브라우저가 blur 를 쏴 onBlur→commitEdit 이 한 번 더 돈다. Enter 후 editingId 는 이미 null 이라 blur 의
-  //   commitEdit 은 no-op → renamePreset 이중 호출을 막는다(TabBar 멱등 동형).
+  // ★Idempotent★: return if editingId is not this preset — Enter unmounts the input with setEditingId(null), the browser fires blur, and onBlur→commitEdit would run again; editingId is already null then, so no double renamePreset (as TabBar).
   const commitEdit = (preset: Preset) => {
     if (editingId !== preset.id) return
     const trimmed = draft.trim()
     setEditingId(null)
-    // 미변경·빈 문자열이면 백엔드에 불필요한 RenamePreset 을 안 보낸다.
     if (trimmed.length === 0 || trimmed === draftStart) return
-    if (renamingRef.current.has(preset.id)) return // 동기 권위 가드(rename 중복 제출 차단)
+    if (renamingRef.current.has(preset.id)) return // sync authoritative guard (blocks duplicate rename submits)
     renamingRef.current.add(preset.id)
     setRenaming(prev => {
       const next = new Set(prev)
@@ -142,10 +120,9 @@ export default function PresetPalette() {
     })
     agentClient
       .renamePreset(preset.id, trimmed)
-      // ★성공 시 refreshPresets() 안전망(deletePreset 과 대칭)★: 표시명 반영은 PresetListUpdated broadcast
-      //   로 오나, 놓쳤을 때 이 창만 stale 로 남는다 — 권위 목록 재적용으로 대칭·멱등 보장(위 delete 주석 참조).
+      // ★refreshPresets() safety net on success (symmetric with deletePreset)★: see the delete comment above.
       .then(() => refreshPresets())
-      .catch(e => console.error('[PresetPalette] renamePreset 실패:', e))
+      .catch(e => console.error('[PresetPalette] renamePreset failed:', e))
       .finally(() => {
         renamingRef.current.delete(preset.id)
         setRenaming(prev => {
@@ -172,8 +149,8 @@ export default function PresetPalette() {
         overflow: 'hidden',
       }}
     >
-      {/* 공용 슬롯 헤더가 아니라 PresetPalette·AgentList 이 2개 variant 컴포넌트에만 각자 넣는다
-          (터미널 등 다른 슬롯 무영향). */}
+      {/* Each placed only in the two variant components PresetPalette and AgentList, not the shared slot header
+          (other slots such as the terminal are unaffected). */}
       <div
         data-slot-label="preset"
         style={{
@@ -190,7 +167,7 @@ export default function PresetPalette() {
         {t('preset.label')}
       </div>
 
-      {/* 공용 ScrollArea seam(ADR-0053)으로 스크롤. 평면 목록(가상화 없음)이라 Viewport 로 감싸도 무해. */}
+      {/* Scroll via the shared ScrollArea seam (ADR-0053). It is a flat list (no virtualization) so wrapping in a Viewport is harmless. */}
       <ScrollArea style={{ flex: 1, minHeight: 0 }}>
         {presets.length === 0 ? (
           presetsLoaded && (
@@ -213,10 +190,10 @@ export default function PresetPalette() {
                 padding: '6px 8px',
                 borderBottom: '1px solid var(--border)',
                 cursor: isBusy ? 'wait' : 'default',
-                opacity: isBusy ? 0.6 : 1, // in-flight 시각 표시(색 리터럴 없이 opacity 만)
+                opacity: isBusy ? 0.6 : 1, // in-flight visual indicator (opacity only, no color literals)
                 userSelect: 'none',
               }}
-              // ★행 우클릭 = 행 메뉴(이름변경·삭제)★: 상위 통합 슬롯 메뉴로 새지 않게 stopPropagation(ADR-0064).
+              // ★Row right-click = row menu (rename, delete)★: stopPropagation so it does not leak to the parent unified slot menu (ADR-0064).
               onContextMenu={e => {
                 e.preventDefault()
                 e.stopPropagation()
@@ -232,7 +209,7 @@ export default function PresetPalette() {
                     ref={inputRef}
                     onChange={e => setDraft(e.target.value)}
                     onKeyDown={e => {
-                      // ★버블 차단★: 편집 중 키가 전역 키바인딩으로 새면 안 된다(TabBar 동형).
+                      // ★Block bubbling★: keys during editing must not leak to global keybindings (same as TabBar).
                       e.stopPropagation()
                       if (e.key === 'Enter') commitEdit(preset)
                       else if (e.key === 'Escape') cancelEdit()
@@ -278,11 +255,11 @@ export default function PresetPalette() {
           })
         )}
 
-        {/* ── 행 우클릭 메뉴(이름변경 · 삭제) ─────────────────────────────────── */}
+        {/* ── Row right-click menu (rename · delete) ─────────────────────────── */}
         {rowMenu && (
           <div
             ref={rowMenuRef}
-            // ADR-0237: 이 Esc 는 메뉴를 닫는 키다 — 열린 동안 채팅 칸의 Esc 가 턴을 끊지 않게 하는 표지(`interruptKey.ts`).
+            // ADR-0237: this Esc closes the menu — while open, a marker so the chat area's Esc does not interrupt the turn (`interruptKey.ts`).
             data-engram-overlay="1"
             style={MENU_STYLE(rowMenu.x, rowMenu.y)}
           >
@@ -328,12 +305,12 @@ function rowMenuItems(
   const busy = ctx.deleting.has(preset.id) || ctx.renaming.has(preset.id)
   return [
     { id: 'rename', label: t('preset.rename'), disabled: busy, action: () => ctx.beginEdit(preset) },
-    // 메뉴 라벨은 짧은 '삭제'(preset.deleteBtn) — command 제목 '프리셋 삭제'(preset.delete)와 구분.
+    // The menu label is the short 'delete' (preset.deleteBtn) — distinct from the command title 'delete preset' (preset.delete).
     { id: 'delete', label: t('preset.deleteBtn'), disabled: busy, action: () => ctx.removePreset(preset.id) },
   ]
 }
 
-// 메뉴 공통 스타일(AgentList 인라인 메뉴와 동형 — 변수-only).
+// Menu common style (same as the AgentList inline menu — variables only).
 function MENU_STYLE(x: number, y: number): React.CSSProperties {
   return {
     position: 'fixed',

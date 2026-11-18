@@ -1,8 +1,5 @@
-// ★역할★: 사람 클릭·팔레트·키바인딩·LLM 이 같은 command·같은 id 를 지난다(§5 단일 제어 표면, ADR-0055).
-//   메뉴 자신은 store 를 직접 부르지 않는다(ADR-0064 불변식 — 옛 하드코딩 9항목의 viewStore 직접 호출).
-//
-// ★한 메뉴 컴포넌트★(ADR-0064 §5): 콘텐츠(PresetPalette/AgentList)가 자기 pane 메뉴를 소유하던 옛 구조를
-//   제거하고 이 하나로 통합했다.
+// ★Role★: human click, palette, keybinding and LLM all pass through the same command and id (§5 single control surface, ADR-0055); the menu never calls the store directly (ADR-0064 invariant).
+// ★One menu component★ (ADR-0064 §5): content (PresetPalette/AgentList) no longer owns its own pane menu.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, SyntheticEvent } from 'react'
@@ -12,25 +9,17 @@ import type { CommandArgs } from '../../commands/registry'
 import type { ResolvedSlotMenuItem, SlotMenuCtx } from '../../commands/slotMenu'
 import { useLanguage } from '../../i18n/react'
 
-/** 메뉴가 창 테두리에 딱 붙지 않게. */
+/** Keeps the menu from sitting flush against the window edge. */
 const MENU_MARGIN = 4
 
 /**
- * 앵커(여는 지점)와 메뉴 사각형 사이 간격 — ★더블클릭 인식 반경보다 크게★(ADR-0143 결정 4).
- *
- * 유도: Windows 는 첫 클릭 주위 사각형 안에 둘째 클릭이 떨어지면 더블클릭으로 본다. 그 사각형의 *폭·높이*가
- * `SM_CXDOUBLECLK`/`SM_CYDOUBLECLK`(기본 4px)이므로 첫 클릭에서의 허용 *반경*은 그 절반 = 2px. 여기서 4배를
- * 잡아 사용자가 허용치를 두 배로 키워도(레지스트리 `DoubleClickWidth`) 둘째 클릭이 메뉴에 닿지 않게 한다.
- *
- * 이 간격이 0 이 되면 앵커가 메뉴 모서리에 딱 붙어, 빈 슬롯을 더블클릭하면 둘째 클릭이 항목 위에 떨어져
- * 실행된다 — 아래쪽 슬롯에선 메뉴가 위로 뒤집혀 맨 아래 `닫기`가 커서 밑에 오고, 레이아웃은 디스크에 없어
- * 되돌릴 수단이 없다.
+ * Gap between the anchor (opening point) and the menu rectangle — ★larger than the double-click recognition radius★ (ADR-0143 decision 4). Windows treats a second click inside a rectangle around the first as a double-click; its width/height are `SM_CXDOUBLECLK`/`SM_CYDOUBLECLK` (default 4px), so the radius is 2px — 4x here covers a user-doubled tolerance (registry `DoubleClickWidth`).
+ * With gap 0 the anchor would sit flush against the menu corner, and double-clicking an empty slot would land the second click on an item and run it — in a lower slot the menu flips upward so `Close` ends up under the cursor, and the layout is not on disk so it cannot be undone.
  */
 export const ANCHOR_GAP = 8
 
 /**
- * 창 가장자리에서 메뉴가 잘려 클릭 못 하던 버그(Bug1) 방지. 앵커(여는 지점)는 어느 방향으로 배치되든 메뉴
- * 바깥 `ANCHOR_GAP` 만큼 떨어진 자리에 남는다.
+ * Prevents the menu being cut off at the window edge (Bug1). The anchor stays `ANCHOR_GAP` outside the menu whichever way it is placed.
  */
 export function clampMenuPosition(
   x: number,
@@ -43,13 +32,9 @@ export function clampMenuPosition(
   return { top: placeAlongAxis(y, h, vh), left: placeAlongAxis(x, w, vw) }
 }
 
-// ★밀지 말고 뒤집는다★: 밀어 넣으면 앵커(여는 지점)가 메뉴 *안*으로 들어가 커서 밑에 항목이 놓인다.
-//   빈 슬롯이 좌클릭으로 같은 메뉴를 열게 된 뒤로는(ADR-0141·0142) 그 상태에서 더블클릭 한 번이 커서 밑
-//   항목을 실행해 버린다 — 닫기가 걸리면 슬롯이 사라진다. 뒤집으면 앵커는 어느 방향이든 메뉴 밖에 남는다.
-//   ★두 방향 모두 ANCHOR_GAP 을 얹는다(ADR-0143 결정 4)★: 모서리에 붙기만 해서는 더블클릭 둘째 클릭이
-//   항목에 떨어진다 — 간격을 한 곳(이 helper)에서 주므로 두 축·두 방향이 같은 규칙을 받는다.
-//   뒤집어도 화면을 벗어나는 퇴화 케이스(메뉴가 뷰포트보다 큼)에서만 밀기로 떨어진다 — 그때는
-//   "화면 안에 있다"가 앵커 규칙(간격 포함)보다 우선이다.
+// ★Flip, do not push★: pushing moves the anchor *inside* the menu and puts an item under the cursor; an empty slot opens the same menu on left-click (ADR-0141·0142), so one double-click would run the item under the cursor (Close removes the slot). Flipping keeps the anchor outside in any direction.
+// ★ANCHOR_GAP is added in both directions (ADR-0143 decision 4)★: merely touching the corner lets a double-click's second click land on an item — the gap is applied in this one helper so both axes and directions share the rule.
+// Only when it still leaves the screen after flipping (menu larger than the viewport) does it fall back to pushing — "stays on screen" then beats the anchor rule.
 function placeAlongAxis(anchor: number, size: number, viewport: number): number {
   const forward = anchor + ANCHOR_GAP
   if (forward + size <= viewport) return forward
@@ -70,7 +55,7 @@ export function flyoutPosition(
   const overflowRight = anchorRight + fw > vw
   const fitsLeft = anchorLeft - fw >= MENU_MARGIN
   const left = overflowRight && fitsLeft ? anchorLeft - fw : anchorRight
-  // 뒤집어도 여전히 넘칠 극단 방어.
+  // Extreme-case defense for when it still overflows after flipping.
   const clampedLeft = Math.max(MENU_MARGIN, Math.min(left, Math.max(MENU_MARGIN, vw - fw - MENU_MARGIN)))
   const top =
     anchorTop + fh > vh ? Math.max(MENU_MARGIN, Math.min(anchorTop, vh - fh - MENU_MARGIN)) : anchorTop
@@ -80,7 +65,7 @@ export function flyoutPosition(
 interface SlotContextMenuProps {
   x: number
   y: number
-  /** 이미 group·order 로 정렬되고 registry resolve 된 항목들(buildSlotMenu 산출). */
+  /** Items already sorted by group·order and registry-resolved (buildSlotMenu output). */
   items: ResolvedSlotMenuItem[]
   ctx: SlotMenuCtx
   onClose: () => void
@@ -92,33 +77,29 @@ export default function SlotContextMenu({ x, y, items, ctx, onClose }: SlotConte
   // ADR-0373: a language switch changes the titles and so the menu size — measure again.
   const lang = useLanguage()
 
-  // ★페인트 전 위치 보정(Bug1)★: useLayoutEffect 라 브라우저 페인트 전에 반영돼 시각적 점프를 최소화한다
-  //   (측정엔 마운트가 필요하므로 최대 1프레임 재배치는 감수 — 지시서 허용 범위).
+  // ★Position correction before paint (Bug1)★: useLayoutEffect avoids a visual jump (measuring needs the mount, so up to one frame of re-layout is accepted).
   useLayoutEffect(() => {
     if (!ref.current) return
     const rect = ref.current.getBoundingClientRect()
     setPos(clampMenuPosition(x, y, rect.width, rect.height, window.innerWidth, window.innerHeight))
-    // deps 에 items.length 포함(Codex 리뷰 LOW): 메뉴가 같은 x/y 로 열린 채 항목 수가 바뀌면(외부 콘텐츠
-    //   변경) 높이가 달라져 재측정이 필요하다. items 는 매 렌더 새 배열 참조라 length 로 안정 트리거(내용만
-    //   바뀌고 개수 동일하면 높이 거의 불변 → 무시 가능).
+    // items.length is in deps: if the item count changes while the menu stays open at the same x/y, the height changes and needs re-measuring (`items` is a new array every render, so length is a stable trigger).
   }, [x, y, items.length, lang])
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose()
     }
-    // 캡처 단계 — 창 끌 자리 누름은 거품 단계에 닿지 않는다(`layout/titleRow/dragRegion.ts`).
+    // Capture phase — pressing the window-drag area never reaches the bubble phase (`layout/titleRow/dragRegion.ts`).
     document.addEventListener('mousedown', handler, true)
     return () => document.removeEventListener('mousedown', handler, true)
   }, [onClose])
 
-  // ★역할은 그리기만이다 — 키보드 이동(화살표·Home/End·타입어헤드)은 없다★(알려진 갭 · 이 메뉴 전부).
+  // ★Its role is drawing only — there is no keyboard navigation (arrows, Home/End, type-ahead)★ (known gap · this whole menu).
   return (
     <div
       ref={ref}
       role="menu"
-      // ADR-0237: 열린 동안 채팅 칸의 Esc 는 턴을 끊지 않는다(`interruptKey.ts` 의 표지) — 이 메뉴는 Esc 로 닫히지
-      //   않지만 메뉴를 띄운 채 누른 Esc 가 뒤의 턴을 끊으면 안 된다.
+      // ADR-0237: while open, the chat area's Esc does not interrupt the turn (marker of `interruptKey.ts`) — this menu does not close on Esc, but an Esc pressed with the menu up must not interrupt the turn behind it.
       data-engram-overlay="1"
       style={{
         position: 'fixed',
@@ -156,32 +137,28 @@ function highlightOff(e: SyntheticEvent<HTMLElement>) {
 
 const DISABLED_ROW_STYLE: CSSProperties = { ...ROW_STYLE, cursor: 'default', opacity: 0.4 }
 
-// ★실행 가방 = 슬롯 좌표 + 슬롯 내용뿐이다★ — ctx 에 메뉴 상태 판정용 칸이 더해져도 넘기지 않게 칸을 골라 싣는다. 호출자가 누구인지도
-//   싣지 않는다: 같은 가방을 `__engramCmd` 가 얼마든지 지어 보낼 수 있어서 인자 값은 호출자 판정이 못 된다
-//   (`registry.ts` `humanOnly` doc — 닫는 축은 인자 값이 아니라 호출자다).
+// ★The execution bag = slot coordinates + slot content only★ — pick fields so that fields added to ctx for menu-state verdicts are not passed on. The caller's identity is not carried either: `__engramCmd` can build the same bag, so the argument value cannot be the caller verdict (`registry.ts` `humanOnly` doc — the closing axis is the caller).
 function commandArgs(ctx: SlotMenuCtx): CommandArgs {
   return { viewId: ctx.viewId, slotId: ctx.slotId, agentId: ctx.agentId, content: ctx.content }
 }
 
 function runItem(id: string, ctx: SlotMenuCtx, onClose: () => void) {
-  // ADR-0064/0055: 팔레트·키바인딩·LLM 소비자와 동일 helper 재사용 — sync throw·async reject·thenable 삼킴
-  //   안전망을 재구현하지 않는다.
+  // ADR-0064/0055: reuse the palette/keybinding/LLM helper — do not re-implement the sync throw, async reject and thenable-swallow safety net.
   fireAndForget(id, commandArgs(ctx))
   onClose()
 }
 
-// ★렌더 중에 부르므로 throw 를 흘리지 않는다★(slotMenu FIX-1 과 같은 fail-loud but crash-free) — error boundary 가
-//   없으면 기여 하나의 throw 가 화면을 통째로 비운다. 판정 실패 = 끔 · 비활성.
+// ★Called during render, so a throw must not escape★ (fail-loud but crash-free, as slotMenu FIX-1) — without an error boundary one contribution's throw blanks the screen. Verdict failure = off · disabled.
 function evaluate(item: ResolvedSlotMenuItem, what: 'checked' | 'enabled', fn: () => boolean): boolean {
   try {
     return fn()
   } catch (err) {
-    console.error(`[SlotContextMenu] ${what} 판정 실패 — "${item.id}" 를 ${what === 'checked' ? '끔' : '비활성'}으로 그린다:`, err)
+    console.error(`[SlotContextMenu] ${what} verdict failed — drawing "${item.id}" as ${what === 'checked' ? 'off' : 'disabled'}:`, err)
     return false
   }
 }
 
-/** 실행 항목 한 줄 — 최상위와 서브메뉴 자식이 같은 것을 그린다. */
+/** One action row — top level and submenu children draw the same thing. */
 function LeafRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: SlotMenuCtx; onClose: () => void }) {
   const checkedFn = item.checked
   const enabledFn = item.enabled
@@ -210,9 +187,7 @@ function LeafRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
   )
 }
 
-/**
- * 자식은 leaf 와 동일한 공유 dispatch 경로로 실행한다(§5 불변 — 서브메뉴는 presentation 일 뿐).
- */
+/** Children run through the same dispatch path as a leaf (§5 — a submenu is presentation only). */
 function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: SlotMenuCtx; onClose: () => void }) {
   const isContainer = !!item.children && item.children.length > 0
   const rowRef = useRef<HTMLDivElement>(null)
@@ -236,7 +211,7 @@ function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
   return (
     <div
       ref={rowRef}
-      // data-attr 로 cdp/테스트가 컨테이너를 식별.
+      // cdp/tests identify the container by data-attr.
       data-slot-menu-container={item.id}
       role="none"
       style={{ position: 'relative' }}
@@ -268,7 +243,7 @@ function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
             position: 'fixed',
             top: flyoutPos?.top ?? 0,
             left: flyoutPos?.left ?? 0,
-            // 측정 전(flyoutPos=null)엔 숨겨 점프를 감춘다(clamp 완료 후 노출).
+            // Hidden before measuring (flyoutPos=null) to hide the jump (shown after clamping).
             visibility: flyoutPos ? 'visible' : 'hidden',
             background: 'var(--bg-secondary)',
             border: '1px solid var(--border)',

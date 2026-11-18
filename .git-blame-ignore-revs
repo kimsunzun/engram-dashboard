@@ -68,7 +68,7 @@ b7757646d9e53cdeef956b06e9f7e5c3b8afea91 # S33: docs(i18n): translate daemon mcp
 ea329f44374e56f30964fbd7a6b0f70106e61cbe # S33: docs(i18n): translate transport crate code comments to English (batch t2c2: budget, event, frame, lib, link, machine, mask)
 51f422014c959f96ec923b687502e8cf585929b1 # S33: docs(i18n): translate net, protocol, base, cli and transport manifest code comments to English (batch t2c1)
 9a0e73a66316f30d4eb28d0f458b78ec80e2c850 # S33: docs(i18n): translate transport tests, scripts and shell daemon-client code comments to English (batch t2c4)
-274dd68f38667e507dcec364881ef81c878f3e6f # S33: docs(i18n): translate transport peer, pending, policy, registry and stream code comments to English (batch t2c3); 앞잡이 줄 = read-ahead queue
+274dd68f38667e507dcec364881ef81c878f3e6f # S33: docs(i18n): translate transport peer, pending, policy, registry and stream code comments to English (batch t2c3); 앞잡이 줄 = read-ahead queue  # hangul-ok
 c22aab42901bfd7f538db81354580dab50f90522 # S33: docs(i18n): translate shell daemon-client, discovery, state, frontend and config code comments to English (batch t2c5)
 dc9eb33fc0ab5235858b8cab6afc0b583e18adc6 # S33: docs(i18n): translate ADR-0129, 0177, 0178, 0180, 0181, 0272, 0310 to English; glossary - transport queue terms
 f613b0f8ecfc733d25433d6716e47497c2c0c931 # S33: docs(i18n): translate S21 crate-boundaries trd-3-transport to English; glossary - ordering area, sent field
@@ -80,3 +80,14 @@ b698b836b86162f3d62bd65f136532580ea2ee85 # S33: docs(i18n): translate S21 crate-
 431e3254aa7e50f1c9ebed26a5e02d78874d8706 # S33: docs(i18n): translate testing-strategy, reference architecture and logging conventions, tracking-archive and 3 research reports to English
 dda75dfac66545595eecbdcc10c93ecc803e7f3d # S33: docs(i18n): translate S21 crate-boundaries trd-2-2-discovery-split to English
 73a4b27fdeb2d00ca1a3219b376f399870432c1b # S33: docs(i18n): translate S21 crate-boundaries trd-2-1-shell-agent-cut and architecture-discussion-2026-09-26 to English
+
+# Commits that only changed comments, strings and docs to English (S38).
+3bc191b49f3e0e890fed79956ea8516fd8e3edf0 # S38: docs(i18n): translate leftover Korean in S21 codex-backend and crate-boundaries docs (W2a)
+8c92d152604f1562c9a31e825be6b8d44b1e13cd # S38: docs(i18n): translate leftover Korean in research, decisions, reference and other docs (W3)
+e5ec7235e7151b0121dbe4fb5d97044a28237e42 # S38: docs(adr): regenerate the ADR index after the W3 translation
+9ef4d6b982be93e05a241be41ba6eb9f8954ba0c # S38: docs(i18n): translate leftover Korean in the remaining process docs (W2b)
+bac8a3c9dcd7cbb9fbec0971d81293b02e4e99a1 # S38: docs(i18n): translate the step-log, tracking and todo docs (W1)
+b0143c5a86058a0b1a5598777766e95d7f6b0342 # S38: chore(i18n): daemon crate internal text to English, comments pruned (U3)
+41ae501007844b8974c2ef64181a41d1164bef4e # S38: chore(i18n): frontend internal text to English, comments pruned (U5)
+83491c7fdd9bd42d3a6b034af6e70ac90eae3d0f # S38: chore(i18n): shell (src-tauri) internal text to English, comments pruned (U4)
+c936bfa745d7c4ce7315486e57fa34a72e3a45b4 # S38: chore(i18n): glossary rows, doc fixes and rustdoc markers (U9)

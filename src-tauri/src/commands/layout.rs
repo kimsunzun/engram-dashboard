@@ -1,13 +1,5 @@
-//! Layout invoke shell + the Tauri adapters of its ports — §5 LLM control surface (ADR-0035/0057).
-//!
-//! ★There is no logic in this file★: all of `#[tauri::command]` are thin shells that call the transport-neutral apply service (`crate::layout::apply`),
-//! and lock discipline · order · validation are all there (ADR-0081 decision 3 — a human click and a relayed LLM
-//! call land on the same function). What remains here is only 4 kinds of translation into the Tauri world (notification emit (+ OS window title — `crate::chrome`) · subscription resync ·
-//! OS window · daemon spawn), the window label of measurement reports (taken from the `Window` that Tauri injects), and unpacking the window argument (the same
-//! resolver as the bus — [`resolve_window`]).
-//!
-//! ## ★Event: per-window `window:tabs-updated` (ADR-0057)★
-//! `view:closed` is retired end to end (no longer emitted — §5-2/G2). `layout:updated` (view snapshot) is kept.
+//! Layout invoke shell + the Tauri adapters of its ports — §5 LLM control surface (ADR-0035/0057). No logic in this file: every `#[tauri::command]` is a thin shell calling the transport-neutral apply service (`crate::layout::apply`), where lock discipline · order · validation live (ADR-0081 decision 3 — a human click and a relayed LLM call land on the same function). What remains is 4 kinds of translation into the Tauri world (notification emit (+ OS window title — `crate::chrome`) · subscription resync · OS window · daemon spawn), the window label of measurement reports (from the injected `Window`), and unpacking the window argument (same resolver as the bus — [`resolve_window`]).
+//! Event: per-window `window:tabs-updated` (ADR-0057); `view:closed` is retired end to end (§5-2/G2); `layout:updated` (view snapshot) is kept.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -39,33 +31,27 @@ const EVT_LAYOUT_UPDATED: &str = "layout:updated";
 // The frontend reacts only when `label` matches its own window (§7-1).
 const EVT_WINDOW_TABS_UPDATED: &str = "window:tabs-updated";
 
-// ★Called holding the ViewManager lock — queues the subscription cleanup delta on the DaemonClient (fire-and-forget)★.
-// Called **inside the same critical section** as the rebuild so the queue order is the rebuild order (no interleaving
-// of concurrent invokes). The method only sends to the connection driver's actor (no await, no network, no other
-// lock), so calling it under the lock keeps ADR-0006. With no open connection the client does nothing.
+// Called holding the ViewManager lock — queues the subscription cleanup delta on the DaemonClient (fire-and-forget), inside the same critical section as the rebuild so queue order = rebuild order (no interleaving of concurrent invokes). The method only sends to the connection driver's actor (no await, no network, no other lock), so calling it under the lock keeps ADR-0006. With no open connection the client does nothing.
 pub(crate) fn send_subscription_delta(client: &DaemonClient, delta: SubscriptionDelta) {
     for agent_id in delta.to_unsubscribe {
         client.unsubscribe(agent_id);
     }
 }
 
-/// Resolve the window argument into the label of a window currently in the model — the same resolver as the bus verbs (TRD S26-window-chrome §4-5). The web passes
-/// its own window label, so it passes through as is. The layout lock is held only while resolving.
+/// Resolve the window argument into the label of a window currently in the model — the same resolver as the bus verbs (TRD S26-window-chrome §4-5). The web passes its own window label, so it passes through as is. The layout lock is held only while resolving.
 pub(crate) fn resolve_window(state: &LayoutState, window: &str) -> Result<String, String> {
     let mgr = state.0.lock().map_err(|e| e.to_string())?;
     window_arg::resolve(&mgr, window).map_err(|e| e.to_string())
 }
 
-// ★Emitted without holding the lock★.
 pub(crate) fn emit_window_tabs(app: &AppHandle, tabs: &WindowTabsPayload) {
     if let Err(e) = app.emit(EVT_WINDOW_TABS_UPDATED, tabs) {
-        tracing::warn!("[layout] {EVT_WINDOW_TABS_UPDATED} emit 실패: {e}");
+        tracing::warn!("[layout] {EVT_WINDOW_TABS_UPDATED} emit failed: {e}");
     }
 }
 
 // ── Tauri adapters of the apply service's ports ──────────────────────────────────────────
 
-// The popout shell borrows the same adapter too — if emit logic is written twice, the human path and the LLM path diverge.
 pub(crate) struct TauriEvents<'a> {
     pub app: &'a AppHandle,
 }
@@ -73,7 +59,7 @@ pub(crate) struct TauriEvents<'a> {
 impl LayoutEvents for TauriEvents<'_> {
     fn layout_updated(&self, snapshot: &ViewSnapshot) {
         if let Err(e) = self.app.emit(EVT_LAYOUT_UPDATED, snapshot) {
-            tracing::warn!("[layout] {EVT_LAYOUT_UPDATED} emit 실패: {e}");
+            tracing::warn!("[layout] {EVT_LAYOUT_UPDATED} emit failed: {e}");
         }
     }
 
@@ -96,9 +82,7 @@ impl SubscriptionSync for RouterSubs<'_> {
     }
 }
 
-// Interpreting the spawn response (which frame is success) is a transport contract, so it is the adapter's job.
-//
-// backend puts the chosen word on the wire as is — if empty, the daemon rejects it (there is no default on either side).
+// Interpreting the spawn response (which frame is success) is a transport contract, so the adapter's job. The backend puts the chosen word on the wire as is — if empty the daemon rejects it (no default on either side).
 struct DaemonSpawner<'a> {
     client: &'a DaemonClient,
 }
@@ -120,21 +104,18 @@ impl AgentSpawner for DaemonSpawner<'_> {
                 .await?;
             match reply {
                 AgentEvent::Spawned { agent, .. } => Ok(agent.id.to_string()),
-                // ADR-0279: daemon rejection messages (including policy rejections) go through without a prefix. Today `send_command`
-                //   folds `Error` first into `Err(message)` (the message text verbatim — the sibling that preserves the origin =
-                //   `send_command_with_origin` · ADR-0281) so it does not reach this arm, but if that folding changes it will arrive here.
+                // ADR-0279: daemon rejection messages (policy rejections included) go through without a prefix. Today `send_command` folds `Error` first into `Err(message)` (verbatim — the origin-preserving sibling is `send_command_with_origin`, ADR-0281) so it does not reach this arm; if that folding changes it arrives here.
                 AgentEvent::Error { message, .. } => Err(message),
-                other => Err(format!("spawn 응답 예상 밖(Spawned 기대): {other:?}")),
+                other => Err(format!(
+                    "unexpected spawn response (expected Spawned): {other:?}"
+                )),
             }
         })
     }
 }
 
 // ── Owning adapters held by the command table ──────────────────────────────────────────────
-//
-// ★**Reuses the same implementation** as the four adapters above★: the table's handlers must be `'static`, so they cannot
-// hold borrowed references, and yet if the emit · window build · spawn logic is written twice the human path and the LLM path diverge again (the very 2 code paths
-// that ADR-0081 decision 3 meant to eliminate). So the owning type lends its own to the implementation above and passes it through — the logic is one copy.
+// Reuses the same implementation as the four adapters above: the table's handlers must be `'static`, so they cannot hold borrowed references, yet writing the emit · window build · spawn logic twice would diverge the human path and the LLM path again (the very 2 code paths ADR-0081 decision 3 meant to eliminate). So the owning type lends its own to the implementation above — one copy of the logic.
 
 pub(crate) struct OwnedEvents {
     pub(crate) app: AppHandle,
@@ -166,8 +147,7 @@ impl SubscriptionSync for OwnedSubs {
     }
 }
 
-// The subscription source of the restore coordinator — each time it is used it finds the router · daemon client from the `AppHandle` (same as window-destroy cleanup
-//   finding them on every event). The coordinator port is plugged in once at shell setup, so finding and holding them then would miss a client registered later.
+// The subscription source of the restore coordinator — finds the router · daemon client from the `AppHandle` each time (as window-destroy cleanup does on every event); the coordinator port is plugged in once at shell setup, so finding and holding them then would miss a client registered later.
 pub(crate) struct AppSubscriptions {
     pub(crate) app: AppHandle,
 }
@@ -246,12 +226,7 @@ impl AgentSpawner for OwnedSpawner {
     }
 }
 
-/// The bundle of ports the layout command table holds — the assembly part (`lib.rs` setup) makes it once.
-///
-/// ★It receives **the same state · the same router · the same issuer** as the human click path★: if a different instance is given, a window made by the LLM
-/// is not in the list the human sees and labels collide (the concrete form of there being a single ADR-0035 layout authority). The settings service and
-/// the effective theme · restore coordinator are the same — they take the very instance managed in the builder (otherwise the two paths see different values · different push
-/// orders · different in-progress markers).
+/// The bundle of ports the layout command table holds — made once by the assembly part (`lib.rs` setup). It receives the same state · router · issuer as the human click path: a different instance would leave an LLM-made window out of the list the human sees and collide labels (the concrete form of the single ADR-0035 layout authority). The settings service and the effective theme · restore coordinator likewise take the very instance managed in the builder (else the two paths see different values · push orders · in-progress markers).
 #[allow(clippy::too_many_arguments)]
 pub fn command_ports(
     app: AppHandle,
@@ -274,7 +249,6 @@ pub fn command_ports(
         labels,
         spawner: Arc::new(OwnedSpawner { client }),
         control: Arc::new(TauriWindowControl::new(app.clone())),
-        // The four below are not layout ports — they are carried here together because there is one table (`layout::commands` header).
         themes: themes.clone(),
         settings,
         settings_events: Arc::new(TauriSettingsEvents::new(app, themes)),
@@ -282,9 +256,8 @@ pub fn command_ports(
     }
 }
 
-// ── tab command (per window — ADR-0057) ─────────────────────────────────────────────
+// ADR-0057
 
-// Add and activate a new empty-slot tab in window `window`. Returns the new View id. (Tab bar `+`.)
 #[tauri::command]
 pub fn create_tab(
     app: AppHandle,
@@ -307,8 +280,7 @@ pub fn create_tab(
     )
 }
 
-// Create an empty new window (1 empty tab) + build the webview (D-6). On success the new window's label · persistent id · number ([`NewWindow`]).
-// ★async fn required★: avoids a WebviewWindowBuilder deadlock (build outside the lock).
+// Create an empty new window (1 empty tab) + build the webview (D-6); on success the new window's label · persistent id · number ([`NewWindow`]). `async fn` required: avoids a WebviewWindowBuilder deadlock (build outside the lock).
 #[tauri::command]
 pub async fn create_window(
     app: AppHandle,
@@ -329,7 +301,6 @@ pub async fn create_window(
     )
 }
 
-// Replace the active tab of window `window` with `view` (that window only, other windows unchanged).
 #[tauri::command]
 pub fn switch_tab(
     app: AppHandle,
@@ -401,7 +372,6 @@ pub async fn close_tab(
     )
 }
 
-// Returns the new slot id.
 #[tauri::command]
 pub fn split_slot(
     app: AppHandle,
@@ -425,8 +395,7 @@ pub fn split_slot(
     )
 }
 
-// JS: `invoke('set_split_ratio', { viewId, splitId, ratio })` — ratio = the share of the a-side (left/top) area. The outcome · meaning of the returned
-// version is in the `SplitRatioApplied` docs (carried in the bindings).
+// JS: `invoke('set_split_ratio', { viewId, splitId, ratio })` — ratio = the share of the a-side (left/top) area. The outcome · meaning of the returned version is in the `SplitRatioApplied` docs (carried in the bindings).
 // ADR-0227
 #[tauri::command]
 pub fn set_split_ratio(
@@ -527,12 +496,8 @@ pub fn set_slot_content(
     )
 }
 
-/// Write the display fields of a usage slot field by field — only the fields given change, and a `None` field keeps that slot's current value. A slot that was not usage
-/// becomes usage and its `None` fields are `true` (the same apply function as Usage in bus `layout.setSlotContent`).
-///
-/// ★Do not substitute by sending a whole content through `set_slot_content`★ — the content the webview holds is stale until the broadcast arrives,
-/// so it would revert other fields to old values (a Claude off right after Codex on turns Codex back off). Reading and writing being in one lock is
-/// the apply service's responsibility. A nonexistent view·slot is `Err`.
+/// Write the display fields of a usage slot field by field — only given fields change, a `None` field keeps the slot's current value; a slot that was not usage becomes usage with `None` fields `true` (the same apply function as Usage in bus `layout.setSlotContent`).
+/// Do not substitute by sending a whole content through `set_slot_content`: the content the webview holds is stale until the broadcast arrives and would revert other fields to old values (a Claude off right after Codex on turns Codex back off). Reading and writing in one lock is the apply service's responsibility. A nonexistent view·slot is `Err`.
 // ADR-0258
 #[tauri::command]
 pub fn set_usage_slot(
@@ -561,8 +526,7 @@ pub fn set_usage_slot(
 
 // ── composite command: spawn_into (D-7 placement-directed spawn) ──────────────────────────────
 
-// Spawn an agent on the daemon and assign that agent to a tab slot of `window`. On success returns the new AgentId (String).
-// Order · slot policy · failure visibility are owned by the apply service.
+// Spawn an agent on the daemon and assign it to a tab slot of `window`; on success returns the new AgentId (String). Order · slot policy · failure visibility are owned by the apply service.
 #[tauri::command]
 pub async fn spawn_into(
     app: AppHandle,
@@ -594,18 +558,11 @@ pub async fn spawn_into(
 }
 
 // ── measurement reports (webview → shell) ─────────────────────────────────────────────────────
-//
 // Neither is a bus command — on the bus the LLM could forge the canvas · metrics. They neither raise nor announce the version.
 // ADR-0227
-//
-// For a window of the spare window pool (outside the model), both are recorded in the pool instead of the model (TRD S21-slot-docking §3-9 「풀」) — the model rejects an unknown
-//   label, and if not recorded there would be no measurement to move over when it is taken in.
+// For a window of the spare window pool (outside the model) both are recorded in the pool instead of the model (TRD S21-slot-docking §3-9 「pool」) — the model rejects an unknown label, and unrecorded there would be no measurement to move over when it is taken in.
 
-/// The window webview tells the size of its own tab content area (integer CSS px) — `invoke('report_window_canvas', { w, h })`.
-///
-/// ★It does not take the window label as an argument★ — one wrongly written label would overwrite another window's canvas. The [`Window`] that
-/// Tauri injects is the sole authority for that value (the same rule as `report_view_commands`).
-/// If `w` or `h` is 0 it is ignored and the previous value is kept (`Ok`). If the window is in neither the tab model nor the spare window pool, `Err`.
+/// The window webview tells the size of its own tab content area (integer CSS px) — `invoke('report_window_canvas', { w, h })`. It does not take the window label as an argument: one wrongly written label would overwrite another window's canvas; the injected [`Window`] is the sole authority (same rule as `report_view_commands`). `w` or `h` 0 is ignored and the previous value kept (`Ok`). A window in neither the tab model nor the spare window pool is `Err`.
 #[tauri::command]
 pub fn report_window_canvas(
     window: Window,
@@ -617,9 +574,7 @@ pub fn report_window_canvas(
     spare.report_canvas(&state, window.label(), w, h)
 }
 
-/// The window webview tells the basic metrics of the area frame — `invoke('report_ui_metrics', { metrics })`. The contract (units · range) is
-/// canonical in the [`UiMetrics`] docs. If out of range it is `Err` and the previous value is kept. The window label is taken, like
-/// `report_window_canvas`, from the [`Window`] that Tauri injects.
+/// The window webview tells the basic metrics of the area frame — `invoke('report_ui_metrics', { metrics })`. The contract (units · range) is canonical in the [`UiMetrics`] docs; out of range is `Err` with the previous value kept. The window label comes, as in `report_window_canvas`, from the injected [`Window`].
 #[tauri::command]
 pub fn report_ui_metrics(
     window: Window,
@@ -637,7 +592,6 @@ pub fn get_view(state: State<'_, LayoutState>, view_id: Uuid) -> Result<ViewSnap
     apply::get_view(&state, view_id)
 }
 
-// Query window `window`'s tab list + active + version (= isomorphic to the window:tabs-updated payload).
 #[tauri::command]
 pub fn list_tabs(
     state: State<'_, LayoutState>,
@@ -646,7 +600,6 @@ pub fn list_tabs(
     apply::list_tabs(&state, &resolve_window(&state, &window)?)
 }
 
-// Query the window label list (for boot · diagnostics).
 #[tauri::command]
 pub fn list_windows(state: State<'_, LayoutState>) -> Result<Vec<String>, String> {
     apply::list_windows(&state)

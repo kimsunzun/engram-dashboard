@@ -17,7 +17,7 @@ This is a self-awareness guard (it cannot be enforced by a hook) — it is caugh
 
 ## When it triggers
 
-Stop, research how OSS (mature libraries, primary documentation) solves this class of problem, and **turn the root-cause solutions into options** (if it is big, present it to the user · write an ADR). Carry out the research under the **existing research-delegation rule** (global-rules "위임 우선", formerly "컨텍스트 위생" — subagent / `/engram-research`). Even if the result is "the current approach is right" — it is *confirmed*, so it differs from a solo guess.
+Stop, research how OSS (mature libraries, primary documentation) solves this class of problem, and **turn the root-cause solutions into options** (if it is big, present it to the user · write an ADR). Carry out the research under the **existing research-delegation rule** (global-rules "delegate first", formerly "context hygiene" — subagent / `/engram-research`). Even if the result is "the current approach is right" — it is *confirmed*, so it differs from a solo guess.
 
 ---
 Discovery = one line under 「설계」 in the code-conventions binding (`.claude/skill-bindings/code-conventions.md`) (it is carried in coder and reviewer briefs) → this document. **Firing** = the point where `/engram-qa` catches a flaky, timing or perf failure (qa binding 「Rust 테스트 판정」). The canonical anti-pattern case (S14 flaky `5ms→50ms` solo tuning ↔ `/research` root-cause fix) is in ADR-0038 + the research report above.

@@ -47,18 +47,17 @@ impl LayoutState {
     }
 }
 
-/// Releasing the number for the `Destroyed` part of a popout OS window `label` — a stand-in for when there is no state to call the
-/// destroy cleanup (`commands::popout::cleanup_popup_window`) (TRD S26-window-chrome §4-1). If the window is closing, it releases that number; if the window was
-/// still in the model, it removes the whole entry and releases at once. It does not recompute the routing table, clean up subscriptions or leave a tombstone — so
-/// when the cleanup can be called, do not call this (the cleanup releases the number in the same lock as those three). For main · an unknown label · a second call it does nothing,
-/// and if the lock is poisoned it does nothing at all.
-// ADR-0300 — window number
+/// Releasing the number for the `Destroyed` part of a popout OS window `label` — a stand-in for when there is no state to call the destroy cleanup (`commands::popout::cleanup_popup_window`) (TRD S26-window-chrome §4-1). A closing window releases that number; a window still in the model has its whole entry removed and the number released at once. It does not recompute the routing table, clean up subscriptions or leave a tombstone — so when the cleanup can be called, do not call this (the cleanup releases the number in the same lock as those three). For main · an unknown label · a second call it does nothing, and a poisoned lock does nothing at all.
+// ADR-0300
 pub fn release_window_number(state: &LayoutState, label: &str) {
     if label == MAIN_WINDOW_LABEL {
         return;
     }
     let Ok(mut mgr) = state.0.lock() else {
-        tracing::warn!(label, "창 번호 풀기: lock poisoned — 건너뛴다");
+        tracing::warn!(
+            label,
+            "releasing the window number: lock poisoned — skipping"
+        );
         return;
     };
     mgr.release_closing(label);
@@ -67,7 +66,4 @@ pub fn release_window_number(state: &LayoutState, label: &str) {
     }
 }
 
-// For the ts-rs binding export, the `export_bindings_<type>` test that the `#[ts(export)]` derive of each type
-// generates automatically writes the .ts into `src-tauri/bindings/` (single source).
-// The manual export_all_to mirror was removed as a double source with the derive (FIX-2, to prevent rot). Kept separate from the
-// bindings/ of the protocol crate = UI-agnostic (ADR-0035) is preserved.
+// For the ts-rs binding export, the `export_bindings_<type>` test that each type's `#[ts(export)]` derive generates writes the .ts into `src-tauri/bindings/` (single source). The manual export_all_to mirror was removed as a double source with the derive (FIX-2); bindings/ stays separate from the protocol crate's, preserving UI-agnostic (ADR-0035).

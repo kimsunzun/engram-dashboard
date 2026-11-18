@@ -1,13 +1,5 @@
-//! Shell run lock `<셸 run 폴더>\state.lock` (TRD S21-storage §6-5 ① · §6-6 · I1) — the boot stage takes it before reading the state
-//! files and releases it after the normal shutdown write (`Final`).
-//!
-//! The single-instance gate alone is not enough — that plugin releases the mutex at `RunEvent::Exit` before our `Final`,
-//! so while the previous instance writes its normal shutdown, a new instance passes the gate (§6-5 fact ②). This lock puts that new instance
-//! behind the previous instance's last write.
-//!
-//! ★The app comes up even if it cannot take it★ — if the folder · file cannot be opened or it cannot be taken within [`LOCK_WAIT`], it logs and proceeds without the lock
-//! (D8 spirit · §12 R11). The only remaining risk on that path is crossing with the previous instance's `Final`, and whichever wins, the file is
-//! intact.
+//! Shell run lock `<shell run folder>\state.lock` (TRD S21-storage §6-5 ① · §6-6 · I1) — the boot stage takes it before reading the state files and releases it after the normal shutdown write (`Final`). The single-instance gate alone is not enough: that plugin releases the mutex at `RunEvent::Exit` before our `Final`, so a new instance passes the gate while the previous one writes its shutdown (§6-5 fact ②); this lock puts it behind that last write.
+//! The app comes up even if it cannot take it: if the folder · file cannot be opened or the lock cannot be taken within [`LOCK_WAIT`], it logs and proceeds without it (D8 spirit · §12 R11). The only remaining risk is crossing with the previous instance's `Final`, and whichever wins, the file is intact.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -32,22 +24,20 @@ pub struct StateLock {
 }
 
 impl Drop for StateLock {
-    // Release explicitly before closing the handle — Windows `LockFileEx` docs: the OS releases the lock of a closed handle, but the timing depends on system
-    //   resources, so a new instance waiting right after could be blocked that much longer.
+    // Release explicitly before closing the handle — Windows `LockFileEx` docs: the OS releases a closed handle's lock, but the timing depends on system resources, so a new instance waiting right after could be blocked that much longer.
     fn drop(&mut self) {
         if let Err(e) = self.file.unlock() {
             tracing::warn!(
                 module = "state",
                 path = %self.path.display(),
                 error = %e,
-                "셸 실행 잠금을 명시적으로 풀지 못했다 — 핸들을 닫으면 OS 가 푼다"
+                "could not release the shell run lock explicitly — the OS releases it when the handle closes"
             );
         }
     }
 }
 
-/// Creates `run_dir` (if missing) and takes the [`LOCK_FILE`] inside it exclusively — if held, retries
-/// until [`LOCK_WAIT`]. `None` = proceeds without the lock (the reason was already logged).
+/// Creates `run_dir` (if missing) and takes the [`LOCK_FILE`] inside it exclusively, retrying while held until [`LOCK_WAIT`]. `None` = proceeds without the lock (the reason was already logged).
 pub fn acquire(run_dir: &Path) -> Option<StateLock> {
     acquire_with(run_dir, LOCK_WAIT, Instant::now, std::thread::sleep)
 }
@@ -64,11 +54,11 @@ fn acquire_with(
             module = "state",
             path = %path.display(),
             error = %error,
-            "셸 실행 잠금 — {what} — 잠금 없이 진행한다(앞 인스턴스의 정상 종료 쓰기와 엇갈릴 수 있다)"
+            "shell run lock — {what} — proceeding without the lock (may cross with the previous instance's normal exit write)"
         );
     };
     if let Err(e) = std::fs::create_dir_all(run_dir) {
-        proceed_without("폴더를 못 만든다", &e);
+        proceed_without("cannot create the folder", &e);
         return None;
     }
     // The content is neither written nor read — `truncate(false)` so it is not emptied.
@@ -80,12 +70,12 @@ fn acquire_with(
     {
         Ok(file) => file,
         Err(e) => {
-            proceed_without("파일을 못 연다", &e);
+            proceed_without("cannot open the file", &e);
             return None;
         }
     };
     let start = now();
-    // Writes 「기다려 잡았다」 (took it after waiting) only when it was blocked at least once — the difference of the two times is almost never 0.
+    // Writes 「took it after waiting」 only when it was blocked at least once — the difference of the two times is almost never 0.
     let mut contended = false;
     loop {
         match file.try_lock() {
@@ -95,7 +85,7 @@ fn acquire_with(
                     tracing::info!(
                         module = "state",
                         waited_ms = waited.as_millis() as u64,
-                        "앞 인스턴스가 셸 실행 잠금을 놓아 잡았다"
+                        "the previous instance released the shell run lock and it was taken"
                     );
                 }
                 return Some(StateLock { file, path });
@@ -108,14 +98,14 @@ fn acquire_with(
                         module = "state",
                         path = %path.display(),
                         waited_ms = waited.as_millis() as u64,
-                        "셸 실행 잠금 — 다른 인스턴스가 쥐고 놓지 않는다 — 잠금 없이 진행한다(앞 인스턴스의 정상 종료 쓰기와 엇갈릴 수 있다)"
+                        "shell run lock — another instance holds it and does not release it — proceeding without the lock (may cross with the previous instance's normal exit write)"
                     );
                     return None;
                 }
                 sleep(RETRY_PAUSE.min(wait - waited));
             }
             Err(TryLockError::Error(e)) => {
-                proceed_without("잠그지 못한다", &e);
+                proceed_without("cannot lock", &e);
                 return None;
             }
         }
@@ -124,10 +114,7 @@ fn acquire_with(
 
 #[cfg(test)]
 mod tests {
-    //! ★Creates the contention with two handles of the same process instead of another process★ — the std lock is `LockFileEx` on Windows (per handle) and `flock` on Unix
-    //! (per open file description), so even two handles opened separately block each other. So this test measures 「다른
-    //! 핸들이 쥐었을 때의 대기 · 포기 · 잡기」 (waiting · giving up · taking it when another handle holds it) and does not measure real contention between processes (a boot overlapping the previous
-    //! instance's shutdown) — that is the P3b3 GUI measurement (§12 R11).
+    //! Creates the contention with two handles of the same process instead of another process: the std lock is `LockFileEx` on Windows (per handle) and `flock` on Unix (per open file description), so even two separately opened handles block each other. So this measures "waiting · giving up · taking it when another handle holds it", not real contention between processes (a boot overlapping the previous instance's shutdown) — that is the P3b3 GUI measurement (§12 R11).
 
     use std::cell::Cell;
 
@@ -139,7 +126,7 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("시계")
+                .expect("clock")
                 .as_nanos()
         ))
     }
@@ -189,12 +176,15 @@ mod tests {
     #[test]
     fn a_held_lock_is_retried_for_the_wait_and_then_given_up() {
         let run_dir = temp_dir("held");
-        let holder = acquire(&run_dir).expect("첫 핸들은 잡는다");
+        let holder = acquire(&run_dir).expect("the first handle takes it");
         let time = FakeTime::new();
 
         let second = acquire_with(&run_dir, LOCK_WAIT, || time.now.get(), |d| time.sleep(d));
 
-        assert!(second.is_none(), "기다려도 안 놓이면 잠금 없이 진행한다");
+        assert!(
+            second.is_none(),
+            "if it is not released even after waiting, proceeds without the lock"
+        );
         assert_eq!(time.elapsed(), LOCK_WAIT);
         assert_eq!(
             time.sleeps.get(),
@@ -207,7 +197,7 @@ mod tests {
     #[test]
     fn a_lock_released_while_waiting_is_taken_on_the_next_try() {
         let run_dir = temp_dir("released");
-        let mut holder = Some(acquire(&run_dir).expect("첫 핸들은 잡는다"));
+        let mut holder = Some(acquire(&run_dir).expect("the first handle takes it"));
         let time = FakeTime::new();
 
         let second = acquire_with(
@@ -222,7 +212,10 @@ mod tests {
             },
         );
 
-        assert!(second.is_some(), "놓인 뒤 첫 시도에 잡는다");
+        assert!(
+            second.is_some(),
+            "takes it on the first try after it is released"
+        );
         assert_eq!(time.sleeps.get(), 3);
         assert_eq!(time.elapsed(), RETRY_PAUSE * 3);
         drop(second);
@@ -232,14 +225,14 @@ mod tests {
     #[test]
     fn dropping_the_held_lock_releases_it() {
         let run_dir = temp_dir("drop");
-        let first = acquire(&run_dir).expect("첫 핸들은 잡는다");
+        let first = acquire(&run_dir).expect("the first handle takes it");
         drop(first);
 
         let time = FakeTime::new();
         let second = acquire_with(&run_dir, LOCK_WAIT, || time.now.get(), |d| time.sleep(d));
 
         assert!(second.is_some());
-        assert_eq!(time.sleeps.get(), 0, "기다리지 않고 바로 잡는다");
+        assert_eq!(time.sleeps.get(), 0, "takes it right away without waiting");
         drop(second);
         std::fs::remove_dir_all(&run_dir).ok();
     }

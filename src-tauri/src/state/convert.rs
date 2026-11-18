@@ -1,10 +1,5 @@
-//! 화면 상태의 메모리 모양(`ViewManager`) ↔ 영속 모양(`schema::WindowEntry`) — TRD S21-storage §6-2 ·
-//! §6-3. 진입점 = [`to_persisted`](기록기 · 부팅 실행 표식) · [`ViewManager::from_persisted`](부팅 · 런타임 수락) ·
-//! [`StateRevision`](기록기의 변경 번호).
-//!
-//! ★두 방향 모두 칸을 이름으로 풀어 쓴다 — `..` 도 와일드카드 갈래도 쓰지 않는다★. `View` · `LayoutNode` ·
-//! `SlotContent` · `WindowTabs` · `WindowAttrs` 나 영속 쪽에 칸 · 변형이 늘면 여기서 컴파일이 깨진다. `..` 로 넘기면
-//! 새 칸이 조용히 영속에서 빠진다(§9-2 「P3a 가 넘긴 것」).
+//! The memory shape of the screen state (`ViewManager`) ↔ the persisted shape (`schema::WindowEntry`) — TRD S21-storage §6-2 · §6-3. Entry points: [`to_persisted`] (writer · boot run marker) · [`ViewManager::from_persisted`] (boot · runtime accept) · [`StateRevision`] (the writer's change number).
+//! Both directions spell out fields by name — no `..` or wildcard branches, so growing fields · variants of `View` · `LayoutNode` · `SlotContent` · `WindowTabs` · `WindowAttrs` or of the persisted side breaks compilation here; passing with `..` would let a new field silently drop out of persistence (§9-2 「what P3a passed over」).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -23,8 +18,7 @@ use crate::layout::{
 };
 use crate::theme::UiTheme;
 
-/// 기록기의 변경 번호 — 레이아웃 `version` · 창 속성 `attrs_rev`. 기록기는 같은지만 본다(§6-4). 레이아웃 락 안에서
-/// 읽는다.
+/// The writer's change numbers — the layout `version` · window attribute `attrs_rev`; the writer only checks equality (§6-4). Read inside the layout lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateRevision {
     pub layout: u64,
@@ -40,15 +34,12 @@ impl StateRevision {
     }
 }
 
-// ── 메모리 → 영속 ───────────────────────────────────────────────────────────
+// ── memory → persisted ───────────────────────────────────────────────────────────
 
-/// 창 전부 — main · 팝아웃(영속 id 순) 순서. 부르는 쪽은 `ViewManager` 락 안에서 부른다.
-///
-/// - 모르는 내용 슬롯(곁표 항목이 있고 메모리 내용이 `Empty`)은 원문으로 적는다 — 새 판이 쓴 슬롯이 이 판의 저장으로
-///   지워지지 않는다(ADR-0060).
-/// - 화면 실측값(`canvas` · `metrics`)은 싣지 않는다(§6-1).
-/// - 자리를 본 적 없는 창(만들 때부터 최대화 · 첫 `Moved` 전)도 `bounds: null` 로 적는다 — ★자리 때문에 창을 빼지
-///   않는다★: main 이면 그 탭이 다음 부팅에 사라진다.
+/// All windows, in main · popouts (persisted id order) order; the caller calls it inside the `ViewManager` lock.
+/// - Unknown content slots (a side table entry exists and the memory content is `Empty`) are written as raw text, so a slot written by a newer version is not erased by this version's save (ADR-0060).
+/// - Measured screen values (`canvas` · `metrics`) are not included (§6-1).
+/// - A window whose position was never seen (maximized from creation · before the first `Moved`) is written with `bounds: null` — a window is not dropped over its position: for main its tabs would vanish at the next boot.
 pub fn to_persisted(layout: &ViewManager) -> Vec<WindowEntry> {
     let mut entries = Vec::new();
     if let Some(main) = layout.windows.get(MAIN_WINDOW_LABEL) {
@@ -60,7 +51,7 @@ pub fn to_persisted(layout: &ViewManager) -> Vec<WindowEntry> {
         .filter(|(label, _)| label.as_str() != MAIN_WINDOW_LABEL)
         .map(|(_, window)| window)
         .collect();
-    // 표 순회 순서(HashMap)를 파일에 새지 않게 — 같은 화면이면 같은 글이 나온다.
+    // Keep the table iteration order (HashMap) from leaking into the file — the same screen yields the same text.
     popouts.sort_by(|a, b| a.window_id.cmp(&b.window_id));
     for popout in popouts {
         entries.push(tabbed_entry(layout, popout, WindowKind::Popout));
@@ -120,7 +111,7 @@ fn window_entry(id: String, number: u32, kind: WindowKind, attrs: WindowAttrs) -
     }
 }
 
-// 이름 = 그 순간의 보이는 이름 + 정했나(TRD S26-window-chrome §3-3). 자동 탭의 글자는 다음 부팅이 이름으로 쓰지 않는다.
+// Name = the visible name at that moment + whether it was set (TRD S26-window-chrome §3-3). The text of an auto tab is not used as a name by the next boot.
 fn tab_entry(layout: &ViewManager, view: &View) -> TabEntry {
     let View {
         id,
@@ -159,8 +150,7 @@ fn persisted_node(layout: &ViewManager, view: ViewId, node: &LayoutNode) -> Pers
     }
 }
 
-// 원문은 메모리 내용이 아직 `Empty` 일 때만 되돌려 쓴다 — 그 슬롯에 무엇이든 쓰면 곁표 항목이 지워지지만, 어긋나도
-// 사용자가 놓은 내용이 이긴다.
+// The raw text is written back only while the memory content is still `Empty` — writing anything to that slot removes the side table entry, but even if they diverge the content the user placed wins.
 fn persisted_content(
     content: &SlotContent,
     unknown: Option<&Map<String, Value>>,
@@ -185,9 +175,9 @@ fn persisted_content(
     })
 }
 
-// ── 영속 → 메모리 ───────────────────────────────────────────────────────────
+// ── persisted → memory ───────────────────────────────────────────────────────────
 
-// 정한 이름만 되살린다 — 칸이 없거나(옛 파일) 거짓이면 자동이다(D16). 정한 이름이 빈 글자면 자동으로 접는다(AC36).
+// Only set names are revived — if the field is absent (old file) or false it is auto (D16). A set name that is empty text folds to auto (AC36).
 fn restored_name(name: String, named: Option<bool>) -> TabName {
     match named {
         Some(true) => TabName::named(name).unwrap_or(TabName::Auto),
@@ -195,18 +185,14 @@ fn restored_name(name: String, named: Option<bool>) -> TabName {
     }
 }
 
-/// [`ViewManager::from_persisted`] 의 결과.
 pub struct Restored {
     pub layout: ViewManager,
-    /// 고치거나 건너뛴 것 — 로그는 부르는 쪽이 낸다.
     pub warnings: Vec<RestoreWarning>,
 }
 
-/// 영속 창 묶음을 메모리 모델로 옮기며 고치거나 건너뛴 것 하나. 같은 id 가 겹치면 언제나 뒤엣것을 버린다 — 단
-/// 건너뛴 창은 아무 id 도(창 · 탭 · 노드) 쥐지 않고, 건너뛴 이유만 남긴다(자리 · 비율 · 모르는 내용은 알리지 않는다).
+/// One thing fixed or skipped while moving a persisted window set into the memory model. When the same id repeats the later one is always discarded; a skipped window holds no id (window · tab · node) and leaves only the reason (position · ratio · unknown content are not reported).
 #[derive(Debug, Clone, PartialEq)]
 pub enum RestoreWarning {
-    /// id 가 그 종류의 것이 아니다 — main = `main`, 팝아웃 = UUID.
     IdKindMismatch {
         id: String,
         kind: &'static str,
@@ -218,53 +204,46 @@ pub enum RestoreWarning {
         window_id: String,
         view: Uuid,
     },
-    /// 슬롯 · 분할 id 가 이 탭 안이나 앞선 탭과 겹친다 — 그 탭을 건너뛴다.
     DuplicateNode {
         window_id: String,
         view: Uuid,
         node: Uuid,
     },
-    /// `ratio` = 받은 값. 범위로 자르고, 유한하지 않으면 기본 비율로 둔다.
     RatioRepaired {
         window_id: String,
         view: Uuid,
         split: Uuid,
         ratio: f64,
     },
-    /// 활성 탭이 남은 탭에 없다 — 첫 탭을 활성으로 둔다.
     ActiveRepaired {
         window_id: String,
         missing: Uuid,
     },
-    /// main 항목이 없거나 탭이 하나도 안 남았다 — 빈 탭 하나로 시작한다(불변식 4).
+    /// The main entry is absent or no tab remained — starts with one empty tab (invariant 4).
     MainWithoutTabs,
     PopoutWithoutTabs {
         id: String,
     },
-    /// 발급기가 준 label 이 이미 쓰였다 — 그 팝아웃을 건너뛴다.
     LabelTaken {
         id: String,
         label: String,
     },
-    /// 쓸 수 없는 자리(`WindowBounds::new` 가 거절) — 기본 자리로 연다.
     BoundsDropped {
         window_id: String,
     },
-    /// 이 판이 모르는 슬롯 내용 — 원문을 곁표에 쥔 채 빈 칸으로 선다. `kind` = 원문의 `type` 문자열.
+    /// Slot content this version does not know — stands as an empty field holding the raw text in the side table. `kind` = the raw `type` string.
     UnknownContent {
         window_id: String,
         view: Uuid,
         slot: Uuid,
         kind: Option<String>,
     },
-    /// 팝아웃이 저장 번호를 못 받았다 — 없거나 못 쓰는 값(`saved` = `None`) · main 의 1 · 앞 창과 겹침. 빈 가장 작은
-    /// 번호 `given` 을 준다(TRD S26-window-chrome §3-4 · D3).
+    /// A popout did not get a saved number — absent or unusable value (`saved` = `None`) · main's 1 · overlap with an earlier window. Gives the smallest free number `given` (TRD S26-window-chrome §3-4 · D3).
     NumberReassigned {
         window_id: String,
         saved: Option<u32>,
         given: u32,
     },
-    /// 고친 입력으로도 모델을 못 세웠다 — 이 모듈의 결함이다. 기본 화면으로 시작한다.
     Internal(String),
 }
 
@@ -272,13 +251,13 @@ impl fmt::Display for RestoreWarning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RestoreWarning::IdKindMismatch { id, kind } => {
-                write!(f, "창 {id} 은 {kind} 창의 id 가 아니다 — 건너뛴다")
+                write!(f, "window {id} is not an id of a {kind} window — skipping")
             }
             RestoreWarning::DuplicateWindow { id } => {
-                write!(f, "창 {id} 이 겹친다 — 뒤엣것을 건너뛴다")
+                write!(f, "window {id} is duplicated — skipping the later one")
             }
             RestoreWarning::DuplicateTab { window_id, view } => {
-                write!(f, "창 {window_id} 의 탭 {view} 가 겹친다 — 건너뛴다")
+                write!(f, "tab {view} of window {window_id} is duplicated — skipping")
             }
             RestoreWarning::DuplicateNode {
                 window_id,
@@ -286,7 +265,7 @@ impl fmt::Display for RestoreWarning {
                 node,
             } => write!(
                 f,
-                "창 {window_id} 의 탭 {view} 에서 노드 {node} 가 겹친다 — 그 탭을 건너뛴다"
+                "node {node} in tab {view} of window {window_id} is duplicated — skipping that tab"
             ),
             RestoreWarning::RatioRepaired {
                 window_id,
@@ -295,26 +274,26 @@ impl fmt::Display for RestoreWarning {
                 ratio,
             } => write!(
                 f,
-                "창 {window_id} 의 탭 {view} 분할 {split} 의 비율 {ratio} 을 범위 안으로 고친다"
+                "fixing ratio {ratio} of split {split} in tab {view} of window {window_id} into the range"
             ),
             RestoreWarning::ActiveRepaired { window_id, missing } => write!(
                 f,
-                "창 {window_id} 의 활성 탭 {missing} 이 없다 — 첫 탭을 활성으로 둔다"
+                "active tab {missing} of window {window_id} is missing — making the first tab active"
             ),
             RestoreWarning::MainWithoutTabs => {
-                write!(f, "main 창의 탭이 없다 — 빈 탭 하나로 시작한다")
+                write!(f, "the main window has no tabs — starting with one empty tab")
             }
             RestoreWarning::PopoutWithoutTabs { id } => {
-                write!(f, "팝아웃 {id} 에 탭이 없다 — 건너뛴다")
+                write!(f, "popout {id} has no tabs — skipping")
             }
             RestoreWarning::LabelTaken { id, label } => {
                 write!(
                     f,
-                    "팝아웃 {id} 에 줄 label {label} 이 이미 쓰였다 — 건너뛴다"
+                    "label {label} to give popout {id} is already used — skipping"
                 )
             }
             RestoreWarning::BoundsDropped { window_id } => {
-                write!(f, "창 {window_id} 의 자리를 쓸 수 없다 — 기본 자리로 연다")
+                write!(f, "the position of window {window_id} is unusable — opening at the default position")
             }
             RestoreWarning::UnknownContent {
                 window_id,
@@ -323,8 +302,8 @@ impl fmt::Display for RestoreWarning {
                 kind,
             } => write!(
                 f,
-                "창 {window_id} 의 탭 {view} 슬롯 {slot} — 이 판이 모르는 내용({}) 을 그대로 쥔다",
-                kind.as_deref().unwrap_or("종류 없음")
+                "window {window_id} tab {view} slot {slot} — holding content this version does not know ({}) as is",
+                kind.as_deref().unwrap_or("no kind")
             ),
             RestoreWarning::NumberReassigned {
                 window_id,
@@ -333,14 +312,14 @@ impl fmt::Display for RestoreWarning {
             } => match saved {
                 Some(saved) => write!(
                     f,
-                    "팝아웃 {window_id} 의 번호 {saved} 를 쓸 수 없다 — {given} 을 준다"
+                    "number {saved} of popout {window_id} is unusable — giving {given}"
                 ),
-                None => write!(f, "팝아웃 {window_id} 에 번호가 없다 — {given} 을 준다"),
+                None => write!(f, "popout {window_id} has no number — giving {given}"),
             },
             RestoreWarning::Internal(reason) => {
                 write!(
                     f,
-                    "복원 모델을 세우지 못했다 — 기본 화면으로 시작한다: {reason}"
+                    "could not build the restore model — starting with the default screen: {reason}"
                 )
             }
         }
@@ -348,20 +327,12 @@ impl fmt::Display for RestoreWarning {
 }
 
 impl ViewManager {
-    /// 영속 창 묶음(`codec::decode` 결과의 `windows`)으로 새 모델을 세운다 — 순수하다(파일 · 창 · 락 0 ·
-    /// 실패 없음). 코덱은 모양 검사를 하지 않으므로 불변식 1–4 와 창 묶음의 모양을 여기서 다시 세운다(고치는 규칙 =
-    /// [`RestoreWarning`]). 팝아웃마다 `labels` 에서 새 label 을 받는다 — 영속 id 는 그대로, label 은 이 부팅만의
-    /// 것이다(§6-3).
-    ///
-    /// ★결과의 `version` · `attrs_rev` 는 의미가 없다★ — 부팅은 기록기를 실행 표식 쓰기 때의 번호로 시작하므로 그대로
-    /// 쓰면 된다. ★런타임 수락(P3c1 · §6-7 ③)은 이 결과를 살아 있는 모델과 바꿔치지 않는다★:
-    /// - `version = 지금 version + 1` · `attrs_rev = 지금 attrs_rev + 1` 을 직접 세운다. 이 결과의 번호(0 근처)를 쓰면
-    ///   번호가 되돌아가고, 기록기는 같은지만 보므로 마지막으로 본 값과 다시 같아지는 순간 그 사이의 변경을 놓친다.
-    /// - 곁표(모르는 내용)를 View 와 함께 옮긴다 — View 만 옮기면 그 슬롯이 빈 칸으로 저장돼 원문이 사라진다. 옛
-    ///   View 는 `remove_view` 로 지운다(그 곁표 항목을 함께 거둔다).
-    /// - main 항목은 탭 · 속성만 바꾼다 — 통째로 바꾸면 측정값(`canvas` · `metrics`)을 웹뷰가 다시 보고할 때까지 잃는다.
-    /// - 결과의 에이전트 이름 장부는 저장 파일에서 뜬 시드뿐이다(`agent_name_seed`) — 수락은 지금 장부의 빈 칸에만
-    ///   더한다(`adopt_restored`).
+    /// Builds a new model from a persisted window set (the `windows` of the `codec::decode` result) — pure (0 files · windows · locks, no failure). The codec does no shape check, so invariants 1–4 and the window set's shape are re-established here (fix rules = [`RestoreWarning`]). Each popout gets a new label from `labels` — the persisted id stays, the label belongs to this boot only (§6-3).
+    /// The result's `version` · `attrs_rev` mean nothing: boot starts the writer with the numbers at the run marker write, so they are used as is. A runtime accept (P3c1 · §6-7 ③) does not swap this result in for the live model:
+    /// - It sets `version = current + 1` · `attrs_rev = current + 1` directly — this result's numbers (near 0) would move the numbers back, and since the writer only checks equality it would miss changes in between once it equals the last seen value again.
+    /// - It moves the side table (unknown content) with the View — moving only the View would save that slot as an empty field and lose the raw text. The old View is removed with `remove_view` (reaping its side table entries).
+    /// - The main entry changes only tabs · attributes — replacing it wholesale would lose the measurements (`canvas` · `metrics`) until the webview reports again.
+    /// - The result's agent name ledger is only the seed captured from the saved file (`agent_name_seed`); the accept adds only to the empty entries of the current ledger (`adopt_restored`).
     pub(crate) fn from_persisted(windows: Vec<WindowEntry>, labels: &dyn LabelSource) -> Restored {
         let mut restorer = Restorer::default();
         for entry in windows {
@@ -379,7 +350,7 @@ struct Restorer {
     popout_ids: HashSet<Uuid>,
     views: HashSet<Uuid>,
     nodes: HashSet<Uuid>,
-    // 남긴 탭에서 뜬 에이전트 이름 시드(에이전트 id, 이름 — `agent_name_seed`) · 저장 순서.
+    // Agent name seeds captured from the kept tabs (agent id, name — `agent_name_seed`) · in saved order.
     names: Vec<(String, String)>,
 }
 
@@ -388,8 +359,7 @@ struct Pending {
     unknown: Vec<(ViewId, Uuid, Map<String, Value>)>,
 }
 
-/// 한 창의 탭 묶음 — 아직 `Restorer` 에 싣지 않았다(id 를 쥐지도 경고를 내지도 않았다). 창을 남기기로 정한 뒤
-/// [`Restorer::commit`] 이 싣는다.
+/// One window's tab set — not yet loaded into the `Restorer` (it holds no id and has raised no warning); [`Restorer::commit`] loads it after deciding to keep the window.
 #[derive(Default)]
 struct Staged {
     tabs: Vec<View>,
@@ -426,16 +396,15 @@ impl Restorer {
                 let Ok(uuid) = Uuid::parse_str(&id) else {
                     return self.mismatch(id, "popout");
                 };
-                // 같은 UUID 의 다른 철자(대문자 · 중괄호)도 같은 창이다 — 정규 철자로 적고 견준다.
+                // Other spellings of the same UUID (uppercase · braces) are the same window — written and compared in the canonical spelling.
                 let id = uuid.to_string();
                 if self.popout_ids.contains(&uuid) {
                     return self.warn(RestoreWarning::DuplicateWindow { id });
                 }
-                // 버릴지를 다 정한 뒤에만 싣는다(id · 경고 · 자리) — 버린 창이 쥔 id 에 뒤 창(main 포함)의 탭이
-                // 겹친다고 밀려나면 살릴 수 있던 내용을 잃는다.
+                // Loaded only after all discards (ids · warnings · positions) are decided — a later window's (main included) tabs overlapping ids held by a discarded window would be pushed out, losing content that could have been saved.
                 let staged = self.stage(&id, strip);
                 if staged.tabs.is_empty() {
-                    // 탭이 겹쳐서 다 빠졌으면 그 경고가 곧 버린 이유다.
+                    // If all tabs dropped out by overlapping, that warning is the reason for discarding.
                     self.warnings.extend(staged.warnings);
                     return self.warn(RestoreWarning::PopoutWithoutTabs { id });
                 }
@@ -652,14 +621,8 @@ impl Restorer {
     }
 }
 
-/// 자동 이름 탭이 저장한 이름에서 에이전트 이름 장부의 시드를 뜬다(TRD S26-window-chrome §4-3 · 메인 결정 M16) — 그
-/// 이름은 저장 순간 포커스 슬롯의 [`slot_label`](crate::layout::tab_name::slot_label) 이라, 그 슬롯이 에이전트면 그
-/// 에이전트의 표시 이름이다. 데몬 목록이 오기 전에도 탭 이름 · OS 제목이 「에이전트」로 한 번 깜빡이지 않게 한다.
-///
-/// 시드가 아닌 것 — `named` 가 `Some(false)` 가 아님(정한 이름 · 칸이 없는 옛 파일: 그 글자는 「View 3」 같은 옛
-/// 기본값일 수 있다) · 빈 글자 · 낱말 표의 글자(장부에 없던 에이전트의 「에이전트」 — 이름이 아니다) · 포커스 슬롯이
-/// 에이전트가 아님(이 판이 모르는 내용 슬롯은 메모리 내용이 `Empty` 라 여기 든다). 포커스가 없거나 트리 밖이면 트리 첫
-/// 슬롯을 본다 — 복원 모델이 포커스를 고치는 규칙과 같다.
+/// Captures the agent name ledger seed from the name an auto-named tab saved (TRD S26-window-chrome §4-3 · main decision M16): that name is the [`slot_label`](crate::layout::tab_name::slot_label) of the focused slot at save time, so if that slot is an agent it is the agent's display name — keeping the tab name · OS title from blinking once as 「Agent」 before the daemon list arrives.
+/// Not a seed: `named` is not `Some(false)` (a set name, or an old file without the field whose text may be an old default like 「View 3」) · empty text · text of the word table (「Agent」 of an agent not in the ledger — not a name) · the focused slot is not an agent (an unknown content slot of this version has memory content `Empty`, so it falls here). With no focus or focus outside the tree, the tree's first slot is used — the rule by which the restore model fixes focus.
 fn agent_name_seed(
     name: &str,
     named: Option<bool>,
@@ -676,7 +639,6 @@ fn agent_name_seed(
     Some((agent_id.to_string(), name.to_string()))
 }
 
-/// 한 탭의 트리를 내려가며 모은 것 — 노드 id(전위 순) · 모르는 내용 · 고친 비율(분할 id, 받은 값).
 #[derive(Default)]
 struct Found {
     nodes: Vec<Uuid>,
@@ -705,7 +667,7 @@ fn restore_node(node: PersistedNode, found: &mut Found) -> LayoutNode {
             b,
         } => {
             found.nodes.push(id);
-            // 범위 밖 비율은 칸 폭을 0 이나 음수로 만든다 — 쓰기 경로(`set_split_ratio`)와 같은 범위로 자른다.
+            // An out-of-range ratio makes an area width 0 or negative — clamped to the same range as the write path (`set_split_ratio`).
             let fixed = if ratio.is_finite() {
                 tree::clamp_ratio(ratio)
             } else {
@@ -725,8 +687,7 @@ fn restore_node(node: PersistedNode, found: &mut Found) -> LayoutNode {
     }
 }
 
-// 그대로 옮긴다 — 칸 · 변형이 늘면 여기서 깨져, 복원 쪽에서 그 값을 어떻게 다룰지(못 쓸 값 버리기 등 — §6-0 ⑤)를
-// 정하게 한다.
+// Moved as is — if fields · variants grow it breaks here, making the restore side decide how to handle that value (discarding unusable values etc. — §6-0 ⑤).
 fn known_content(content: SlotContent) -> SlotContent {
     match content {
         SlotContent::Empty => SlotContent::Empty,
@@ -771,7 +732,6 @@ mod tests {
         }
     }
 
-    /// 늘 같은 label 을 준다.
     struct Fixed(&'static str);
 
     impl LabelSource for Fixed {
@@ -816,7 +776,6 @@ mod tests {
         tree::first_slot_id(&mgr.views[&view].layout)
     }
 
-    /// main 두 탭(분할 · 모든 내용 종류 · 모르는 내용 · 바꾼 비율 · 이름) + 팝아웃 둘 + 창 속성 전부.
     fn rich() -> ViewManager {
         let mut mgr = ViewManager::new();
         let first = main_active(&mgr);
@@ -838,9 +797,9 @@ mod tests {
         let split = tree::list_splits(&mgr.views[&first].layout)[0].id;
         mgr.set_split_ratio(first, split, 0.3).unwrap();
         mgr.set_focused_slot(first, root).unwrap();
-        mgr.rename_tab(first, "작업".into()).unwrap();
+        mgr.rename_tab(first, "Work".into()).unwrap();
         let second = mgr
-            .create_tab(MAIN_WINDOW_LABEL, Some("둘".into()))
+            .create_tab(MAIN_WINDOW_LABEL, Some("Two".into()))
             .unwrap();
         let s = first_slot(&mgr, second);
         mgr.set_slot_content(second, s, SlotContent::AgentList)
@@ -878,11 +837,11 @@ mod tests {
     fn main_strip(entries: &[WindowEntry]) -> &TabStrip {
         match &entries[0].kind {
             WindowKind::Main(strip) => strip,
-            other => panic!("main 이 먼저여야 한다: {other:?}"),
+            other => panic!("main must come first: {other:?}"),
         }
     }
 
-    // ── 왕복 ──
+    // ── round trip ──
 
     #[test]
     fn memory_to_disk_to_memory_round_trips() {
@@ -929,7 +888,7 @@ mod tests {
                 .windows
                 .iter()
                 .find(|(_, w)| w.window_id == original.window_id)
-                .expect("같은 영속 id 의 창");
+                .expect("the window with the same persisted id");
             assert_eq!(
                 (&again.tabs, again.active, again.attrs),
                 (&original.tabs, original.active, original.attrs)
@@ -943,7 +902,7 @@ mod tests {
         assert_eq!(labels, ["main", "slot-popup-1", "slot-popup-2"]);
     }
 
-    // ── 메모리 → 영속 ──
+    // ── memory → persisted ──
 
     #[test]
     fn windows_are_written_main_then_popouts_by_id() {
@@ -972,15 +931,15 @@ mod tests {
                 w: 800.0,
                 h: 600.0
             }),
-            "최대화 전 보통 자리"
+            "normal position before maximizing"
         );
         let strip = main_strip(&written);
         assert_eq!(strip.active_tab, main_active(&mgr));
         let names: Vec<&str> = strip.tabs.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, ["작업", "둘"]);
+        assert_eq!(names, ["Work", "Two"]);
     }
 
-    // TRD S26-window-chrome §3-3 — 이름 칸은 그 순간의 보이는 이름 + 정했나다(자동 탭도 글자로 적는다).
+    // TRD S26-window-chrome §3-3 — the name field is the visible name at that moment + whether it was set (auto tabs are written as text too).
     #[test]
     fn a_tab_is_written_with_its_visible_name_and_whether_it_was_named() {
         let mut mgr = ViewManager::new();
@@ -989,7 +948,7 @@ mod tests {
         mgr.set_slot_content(auto, slot, SlotContent::AgentList)
             .unwrap();
         let named = mgr
-            .create_tab(MAIN_WINDOW_LABEL, Some("작업".into()))
+            .create_tab(MAIN_WINDOW_LABEL, Some("Work".into()))
             .unwrap();
         let foreign = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let slot = first_slot(&mgr, foreign);
@@ -1006,13 +965,13 @@ mod tests {
             tabs,
             [
                 (auto, "Agent tree", Some(false)),
-                (named, "작업", Some(true)),
+                (named, "Work", Some(true)),
                 (foreign, "Unknown content", Some(false)),
             ]
         );
     }
 
-    // D16 · AC36 — `named` 가 참인 탭만 이름을 되살린다. 옛 파일(칸 없음)의 글자는 「View 3」 같은 옛 기본값일 수 있다.
+    // D16 · AC36 — only tabs whose `named` is true revive the name. The text of an old file (no field) may be an old default like 「View 3」.
     #[test]
     fn only_a_tab_marked_named_restores_its_name() {
         let tab = |name: &str, named: Option<bool>| {
@@ -1022,7 +981,7 @@ mod tests {
             tab
         };
         let back = restore(vec![main_entry(vec![
-            tab("작업", Some(true)),
+            tab("Work", Some(true)),
             tab("myproj", Some(false)),
             tab("View 3", None),
             tab("  ", Some(true)),
@@ -1035,7 +994,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                TabName::Named("작업".into()),
+                TabName::Named("Work".into()),
                 TabName::Auto,
                 TabName::Auto,
                 TabName::Auto,
@@ -1043,7 +1002,7 @@ mod tests {
         );
     }
 
-    // ── 에이전트 이름 시드(TRD S26-window-chrome §4-3) ──
+    // ── Agent name seeds (TRD S26-window-chrome §4-3) ──
 
     fn agent_tab(agent: &str, name: &str, named: Option<bool>) -> TabEntry {
         let (mut tab, _) = slot_tab(PersistedContent::Known(SlotContent::Agent {
@@ -1064,21 +1023,20 @@ mod tests {
             .collect()
     }
 
-    // 자동 이름 탭(`named: false`)의 저장 이름만 시드다 — 정한 이름 · 칸이 없는 옛 파일의 글자 · 낱말 표의 글자는 심지
-    //   않는다. 심었으면 같은 에이전트를 보는 자동 탭이 그 글자를 보인다.
+    // Only the saved name of an auto-named tab (`named: false`) is a seed — a set name · the text of an old file without the field · word-table text are not planted, or auto tabs watching the same agent would show that text.
     #[test]
     fn only_an_auto_tabs_saved_agent_name_seeds_the_name_book() {
         let back = restore(vec![main_entry(vec![
             agent_tab("a1", "myproj", Some(false)),
-            agent_tab("a2", "정함", Some(true)),
-            agent_tab("a2", "에이전트", Some(false)),
+            agent_tab("a2", "chosen", Some(true)),
+            agent_tab("a2", "에이전트", Some(false)), // hangul-ok: the Korean word-table entry
             agent_tab("a3", "View 3", None),
             agent_tab("a4", "Agent", Some(false)),
         ])]);
         assert_eq!(back.warnings, vec![]);
         assert_eq!(
             listed_names(&back.layout),
-            ["myproj", "정함", "Agent", "Agent", "Agent"],
+            ["myproj", "chosen", "Agent", "Agent", "Agent"],
             "neither language's agent word is seeded as a name"
         );
     }
@@ -1114,12 +1072,12 @@ mod tests {
         assert_eq!(
             agent_name_seed("myproj", Some(false), &split, Some(other)),
             None,
-            "포커스 칸이 에이전트가 아니다"
+            "the focused field is not an agent"
         );
         assert_eq!(agent_name_seed("myproj", Some(false), &split, None), seed);
     }
 
-    // 낱말 표의 글자는 이름이 아니다 — 장부에 없던 에이전트의 탭은 「에이전트」로 저장된다(메인 결정 · U3a 리뷰).
+    // Text of the word table is not a name — the tab of an agent not in the ledger is saved as 「Agent」 (main decision · U3a review).
     #[test]
     fn no_word_of_the_table_and_no_blank_is_a_seed() {
         let slot = Uuid::new_v4();
@@ -1130,12 +1088,14 @@ mod tests {
             },
         };
         for text in [
-            "빈 칸",
-            "에이전트",
-            "에이전트 트리",
-            "프리셋",
-            "사용량",
-            "알 수 없는 내용",
+            // hangul-ok-begin: the Korean word-table entries
+            "빈 칸",           // hangul-ok: the Korean word-table entry
+            "에이전트",        // hangul-ok: the Korean word-table entry
+            "에이전트 트리",   // hangul-ok: the Korean word-table entry
+            "프리셋",          // hangul-ok: the Korean word-table entry
+            "사용량",          // hangul-ok: the Korean word-table entry
+            "알 수 없는 내용", // hangul-ok: the Korean word-table entry
+            // hangul-ok-end
             "Empty slot",
             "Agent",
             "Agent tree",
@@ -1153,12 +1113,12 @@ mod tests {
         }
     }
 
-    // 자리채움 글자를 심었다면 그 칸이 차서, 뒤에 받아들인 사본의 진짜 이름이 빈 칸에만 드는 시드로 들어가지 못한다.
+    // If the placeholder text were planted, that entry would be filled, and the real name of a copy accepted later could not enter as a seed that only fills empty entries.
     #[test]
     fn a_placeholder_saved_at_boot_does_not_keep_a_restored_copys_name_out() {
         let mut live = restore(vec![main_entry(vec![agent_tab(
             "a1",
-            "에이전트",
+            "에이전트", // hangul-ok: the Korean word-table entry
             Some(false),
         )])])
         .layout;
@@ -1176,7 +1136,7 @@ mod tests {
 
     #[test]
     fn a_skipped_tab_seeds_nothing() {
-        let kept = agent_tab("a1", "에이전트", Some(false));
+        let kept = agent_tab("a1", "에이전트", Some(false)); // hangul-ok: the Korean word-table entry
         let mut twin = agent_tab("a1", "myproj", Some(false));
         twin.id = kept.id;
         let back = restore(vec![main_entry(vec![kept, twin])]);
@@ -1220,7 +1180,7 @@ mod tests {
         assert_eq!(
             content(&mgr, root),
             PersistedContent::Known(SlotContent::Empty),
-            "빈 내용을 명시적으로 놓으면 원문은 사라진다"
+            "explicitly placing empty content makes the raw text vanish"
         );
     }
 
@@ -1230,7 +1190,7 @@ mod tests {
         let v = main_active(&mgr);
         let s = first_slot(&mgr, v);
         mgr.assign_agent(v, s, "a-1".into()).unwrap();
-        mgr.create_tab(MAIN_WINDOW_LABEL, Some("둘".into()))
+        mgr.create_tab(MAIN_WINDOW_LABEL, Some("Two".into()))
             .unwrap();
         mgr.create_window("slot-popup-1").unwrap();
         mgr.observe_window_placement(
@@ -1245,7 +1205,7 @@ mod tests {
         let written = to_persisted(&mgr);
         assert_eq!(written.len(), 2);
         assert!(written.iter().all(|w| w.bounds.is_none()));
-        assert!(written[0].maximized, "최대화만 본 main");
+        assert!(written[0].maximized, "main that only saw maximized");
 
         let text = codec::encode(&StateFile {
             version: STATE_VERSION,
@@ -1262,13 +1222,13 @@ mod tests {
         assert_eq!(
             main_tab_ids(&back.layout),
             mgr.windows[MAIN_WINDOW_LABEL].tabs,
-            "자리를 몰라도 main 의 탭을 잃지 않는다"
+            "main's tabs are not lost even if the position is unknown"
         );
         assert_eq!(back.layout.views[&v], mgr.views[&v]);
         assert_eq!(to_persisted(&back.layout), written);
     }
 
-    // ── 영속 → 메모리: 고치기 ──
+    // ── persisted → memory: fixes ──
 
     fn dto_bounds() -> Bounds {
         Bounds {
@@ -1302,7 +1262,7 @@ mod tests {
         }
     }
 
-    // 부를 때마다 겹치지 않는 저장 번호 — 번호 고치기 경고가 번호를 재지 않는 시험의 경고 목록에 끼지 않게.
+    // A saved number that never overlaps per call — so the number-fix warning does not slip into the warning lists of tests that do not measure numbers.
     fn fresh_number() -> u32 {
         static NEXT: AtomicU32 = AtomicU32::new(2);
         NEXT.fetch_add(1, Ordering::Relaxed)
@@ -1353,7 +1313,7 @@ mod tests {
             .iter()
             .map(|w| match w {
                 RestoreWarning::IdKindMismatch { id, kind } => (id.as_str(), *kind),
-                other => panic!("id · 종류 어긋남만 있어야 한다: {other}"),
+                other => panic!("only id · kind mismatches expected: {other}"),
             })
             .collect();
         assert_eq!(
@@ -1476,13 +1436,13 @@ mod tests {
 
     #[test]
     fn a_main_without_tabs_gets_one_blank_tab() {
-        // 항목이 없다.
+        // No entry.
         let back = restore(vec![]);
         assert_eq!(back.warnings, vec![RestoreWarning::MainWithoutTabs]);
         assert_eq!(main_tab_ids(&back.layout).len(), 1);
         assert_eq!(back.layout.windows[MAIN_WINDOW_LABEL].window_id, "main");
 
-        // 항목은 있으나 탭이 하나도 안 남았다 — 속성은 살린다.
+        // The entry exists but no tab remained — the attributes are kept.
         let mut main = main_entry(vec![]);
         main.theme = Some(UiTheme::Light);
         main.maximized = true;
@@ -1559,7 +1519,7 @@ mod tests {
 
     #[test]
     fn a_dropped_popout_holds_no_ids_against_the_windows_after_it() {
-        // main 보다 먼저 적힌 팝아웃이 main 과 탭 id · 슬롯 id 를 나눠 쓰다가 label 때문에 버려진다.
+        // A popout written before main shares tab ids · slot ids with main and is discarded because of the label.
         let (shared_view, view_slot) = slot_tab(PersistedContent::Known(SlotContent::AgentList));
         let (shared_node, node_slot) =
             slot_tab(PersistedContent::Known(SlotContent::PresetPalette));
@@ -1597,7 +1557,7 @@ mod tests {
         );
         assert_eq!(layout.windows.len(), 1);
 
-        // 탭이 다 겹쳐 버려진 팝아웃은 자기 창 id 도 쥐지 않는다 — 같은 id 의 뒤 항목이 산다.
+        // A popout discarded because all its tabs overlapped does not hold its own window id either — the later entry with the same id lives.
         let main_tab = empty_tab();
         let mut dup = empty_tab();
         dup.id = main_tab.id;
@@ -1638,7 +1598,7 @@ mod tests {
             ..dto_bounds()
         });
 
-        // 남았다면 자리 · 비율 · 모르는 내용 · 활성 탭을 알렸을 팝아웃.
+        // A popout that, had it remained, would have reported position · ratio · unknown content · active tab.
         let mut bad_ratio = empty_tab();
         bad_ratio.layout = PersistedNode::Split {
             id: Uuid::new_v4(),
@@ -1731,7 +1691,7 @@ mod tests {
                 },
                 RestoreWarning::BoundsDropped { window_id: flat_id },
             ],
-            "자리가 없는 것은 경고가 아니다"
+            "having no position is not a warning"
         );
         assert_eq!(
             back.layout.window_attrs("slot-popup-1").unwrap().bounds,
@@ -1791,7 +1751,7 @@ mod tests {
         assert_eq!(ratio_after(&back, &tab, id), Some(0.3));
     }
 
-    // ── 창 번호(TRD S26-window-chrome §3-3 · §3-4) ──
+    // ── Window numbers (TRD S26-window-chrome §3-3 · §3-4) ──
 
     fn numbers_by_id(layout: &ViewManager) -> Vec<(String, u32)> {
         let mut numbers: Vec<(String, u32)> = layout
@@ -1813,7 +1773,7 @@ mod tests {
         assert_eq!(mgr.closing_numbers(), [3]);
 
         let written = to_persisted(&mgr);
-        assert_eq!(written[0].number, Some(1), "main 도 1 을 적는다");
+        assert_eq!(written[0].number, Some(1), "main writes 1 too");
         let text = codec::encode(&StateFile {
             version: STATE_VERSION,
             saved_at_ms: 1,
@@ -1876,12 +1836,12 @@ mod tests {
                     given: 5,
                 },
             ],
-            "main 의 번호 없음은 알리지 않는다"
+            "main's missing number is not reported"
         );
         back.layout.assert_number_invariants();
     }
 
-    // ── 변경 번호 ──
+    // ── change numbers ──
 
     #[test]
     fn the_revision_moves_with_each_of_its_parts() {

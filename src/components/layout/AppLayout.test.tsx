@@ -6,7 +6,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // Real tab/canvas wiring coverage belongs to WindowLayout.test, so stub it here with a sentinel. The notice layer is received as `notices` and drawn inside it
-//   — the area below the title bar belongs to WindowLayout.test 「알림 층의 자리」.
+//   — the area below the title bar belongs to WindowLayout.test 「place of the notice layer」.
 vi.mock('./WindowLayout', () => ({
   default: ({ label, notices }: { label: string; notices?: ReactNode }) => (
     <div data-testid="window-layout" data-label={label}>
@@ -66,15 +66,15 @@ afterEach(() => {
   connection.connectionBand = null
 })
 
-describe('AppLayout — 슬롯화된 셸(ADR-0063)', () => {
-  it('main 창 WindowLayout 을 label="main" 으로 마운트한다', () => {
+describe('AppLayout — slotted shell (ADR-0063)', () => {
+  it('mounts the main window WindowLayout with label="main"', () => {
     render(<AppLayout restore={idleRestore()} />)
     const wl = screen.getByTestId('window-layout')
     expect(wl).toBeTruthy()
     expect(wl.getAttribute('data-label')).toBe(MAIN_WINDOW_LABEL)
   })
 
-  it('옛 고정 크롬(Sidebar/DiffPanel/StatusBar) 잔재가 없다', () => {
+  it('no remnants of the old fixed chrome (Sidebar/DiffPanel/StatusBar)', () => {
     render(<AppLayout restore={idleRestore()} />)
     expect(screen.queryByText('Agent Tree')).toBeNull() // The old Sidebar header
     expect(screen.queryByText('Ready')).toBeNull() // The old StatusBar
@@ -83,12 +83,12 @@ describe('AppLayout — 슬롯화된 셸(ADR-0063)', () => {
   })
 })
 
-// jsdom cannot measure size — assert 「밀지 않는다」 (does not push) by the computed position and structure. The layer itself (as many rows as there are · scroll · stacking) belongs to
+// jsdom cannot measure size — assert 「does not push」 by the computed position and structure. The layer itself (as many rows as there are · scroll · stacking) belongs to
 // NoticeOverlay.test.
-describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277)', () => {
+describe('AppLayout — notices cover the layout (ADR-0276 · ADR-0277)', () => {
   // Where it covers is decided by WindowLayout — the canvas area below the title bar (user decision 2026-10-26 · T-66). Here we only check that the layer is
   //   passed as `notices` and that it is a covering layer (absolute).
-  it('알림 층은 main WindowLayout 의 notices 로 넘어가고, 계산된 위치가 absolute 로 기준 칸의 맨 위에 붙는다', async () => {
+  it('the notice layer goes to main WindowLayout\'s notices, and the computed position is absolute attached at the very top of the reference area', async () => {
     const { overlay } = await mount(view('none', { state_file: 'unreadable', saves: false }))
     const style = getComputedStyle(overlay)
     expect(style.position).toBe('absolute')
@@ -102,8 +102,8 @@ describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277
     expect(getComputedStyle(windowLayout.parentElement as HTMLElement).position).toBe('relative')
   })
 
-  it('두 알림이 한 층 안에 연결 띠 → 상태 파일 알림 차례로 쌓인다', async () => {
-    const { overlay } = await mount(view('answered', { saves: false }), '폴더 문제')
+  it('two notices stack in one layer in the order connection band → state file notice', async () => {
+    const { overlay } = await mount(view('answered', { saves: false }), 'folder problem')
     const alert = screen.getByRole('alert')
     const status = screen.getByRole('status')
     expect(overlay.contains(alert)).toBe(true)
@@ -111,8 +111,8 @@ describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277
     expect(alert.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('알림이 둘 다 떠도 레이아웃 칸은 그대로다 — 세로 스택의 나머지를 다 쓰고, 흐름 안의 자식은 WindowLayout 뿐이다', async () => {
-    const { overlay, layer } = await mount(view('answered', { saves: false }), '폴더 문제')
+  it('even with both notices up the layout area is as is — it uses the rest of the vertical stack, and the only child in flow is WindowLayout', async () => {
+    const { overlay, layer } = await mount(view('answered', { saves: false }), 'folder problem')
     expect(screen.getByRole('alert')).toBeTruthy()
     expect(screen.getByRole('status')).toBeTruthy()
     expect(layer.style.height).toBe('100%')
@@ -129,7 +129,7 @@ describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277
     expect(windowLayout.contains(overlay)).toBe(true)
   })
 
-  it('알림이 없어도 층은 레이아웃 칸 안에 있고 비어 있다', async () => {
+  it('even with no notices the layer is inside the layout area and empty', async () => {
     const { overlay } = await mount(view('none'))
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.queryByRole('status')).toBeNull()
@@ -137,16 +137,16 @@ describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277
     expect(overlay.contains(screen.getByTestId('notice-stack'))).toBe(true)
   })
 
-  it('층은 묻는 동안 잠기는 층 안이다 — 두 알림의 ✕ 도 함께 잠긴다', async () => {
-    const { overlay, layer } = await mount(view('awaiting', { saves: false }), '폴더 문제')
+  it('the layer is inside the layer locked while asking — the ✕ of both notices are locked too', async () => {
+    const { overlay, layer } = await mount(view('awaiting', { saves: false }), 'folder problem')
     expect(layer.hasAttribute('inert')).toBe(true)
     expect(layer.contains(overlay)).toBe(true)
     expect(overlay.contains(screen.getByLabelText('알림 닫기'))).toBe(true)
     expect(overlay.contains(screen.getByLabelText(t('restore.dismissNotice')))).toBe(true)
   })
 
-  it('층 안에서 각 알림이 따로 ✕ 로 닫힌다', async () => {
-    await mount(view('answered', { saves: false }), '폴더 문제')
+  it('inside the layer each notice closes separately with ✕', async () => {
+    await mount(view('answered', { saves: false }), 'folder problem')
     fireEvent.click(screen.getByLabelText('알림 닫기'))
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.getByRole('status')).toBeTruthy()
@@ -156,9 +156,9 @@ describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277
   })
 })
 
-describe('AppLayout — the main window band carries 「다시 연결」 (TRD S36 §3-4)', () => {
-  it('shows 「다시 연결」 on band ①', async () => {
-    await mount(view('none'), '폴더 문제')
+describe('AppLayout — the main window band carries 「reconnect」 (TRD S36 §3-4)', () => {
+  it('shows 「reconnect」 on band ①', async () => {
+    await mount(view('none'), 'folder problem')
     expect(screen.getByRole('button', { name: '다시 연결' })).toBeTruthy()
   })
 })

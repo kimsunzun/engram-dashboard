@@ -1,29 +1,29 @@
-//! # engram-dashboard-protocol — 경계 계약 (linchpin)
+//! # engram-dashboard-protocol — boundary contract (linchpin)
 //!
-//! UI(프론트) ↔ daemon 사이 wire 프로토콜(daemon-only 단일 경로 — ADR-0029 embedded 모드 제거,
-//! ADR-0036 창↔데몬 직결 없이 src-tauri 가 단일 데몬 클라이언트로 중계).
-//! 두 구간이 이 타입을 실어 나른다:
-//!   - 프론트 ↔ src-tauri(로컬 IPC): Tauri invoke(명령) · 이벤트(브로드캐스트) · Channel(출력 frame, raw byte).
+//! The wire protocol between the UI (frontend) ↔ daemon (daemon-only single path — ADR-0029 removed embedded mode,
+//! ADR-0036 src-tauri relays as the single daemon client without a direct window↔daemon link).
+//! Two segments carry these types:
+//!   - frontend ↔ src-tauri (local IPC): Tauri invoke (commands) · events (broadcast) · Channel (output frames, raw bytes).
 //!   - src-tauri(DaemonClient) ↔ daemon: 127.0.0.1 WS.
 //!
-//! ## 설계 근거 (daemon-design.md)
-//! - §1-1 단일 WS 연결·단일 수신루프(lane 분리 금지) — control 과 output 이 같은 연결.
-//! - §1-2 wire codec: **output hot path = 커스텀 고정헤더 binary frame**(`codec`), control = JSON.
+//! ## Design rationale (daemon-design.md)
+//! - §1-1 single WS connection·single receive loop (no lane split) — control and output on the same connection.
+//! - §1-2 wire codec: **output hot path = custom fixed-header binary frame** (`codec`), control = JSON.
 //!
-//! ## Tauri import 금지. 도메인 로직 금지(순수 타입·serde·codec 만).
+//! ## No Tauri imports. No domain logic (pure types·serde·codec only).
 //!
-//! ## No workspace crate dependencies (ADR-0272 「영향」)
+//! ## No workspace crate dependencies (ADR-0272 「Impact」)
 //! Gate = the `ci.yml` step `protocol gate 1` (direct workspace deps = exactly self).
 //!
-//! ## ★ 이름 충돌 메모:
-//! 이 crate 의 [`AgentCommand`] = **클→데몬 요청 envelope**(설계 §3 명칭).
-//! 기존 `agent(profile.rs)::AgentCommand` = **spawn 종류**(Claude/Shell) — 그쪽의 wire 미러는 이 enum 이
-//! 아니라 [`AgentSpawnCommand`] 다. crate 를 빼고 "AgentCommand" 라 부르면 뜻이 안 정해진다.
+//! ## ★ Name collision note:
+//! This crate's [`AgentCommand`] = **client→daemon request envelope** (design §3 naming).
+//! The existing `agent(profile.rs)::AgentCommand` = **spawn kind** (Claude/Shell) — its wire mirror is not this enum
+//! but [`AgentSpawnCommand`]. Calling it "AgentCommand" without the crate leaves the meaning undetermined.
 //!
-//! ## seq 의 TS 매핑
-//! u64 seq 는 ts-rs 기본 매핑이 `bigint` 이지만, 기존 프론트(`PtyEvent.seq: number`)와
-//! 정합 + JSON number 한계(2^53) 내 현실 안전(초당 수만 청크라도 수천년)으로 `#[ts(type="number")]`
-//! 고정. binary frame 의 seq 는 JS `DataView.getBigUint64` 로 받으므로 무관(JSON 경로만 number).
+//! ## TS mapping of seq
+//! ts-rs maps u64 seq to `bigint` by default, but for consistency with the existing frontend (`PtyEvent.seq: number`)
+//! + practical safety within the JSON number limit (2^53) (thousands of years even at tens of thousands of chunks per second), it is pinned to `#[ts(type="number")]`.
+//! The binary frame's seq is received with JS `DataView.getBigUint64`, so it is unaffected (only the JSON path is number).
 
 mod codec;
 mod discovery;
@@ -31,7 +31,7 @@ mod domain;
 pub mod handshake;
 mod ids;
 mod messages;
-// ADR-0231: 싣지 못한 출력 사건의 seq 를 비우지 않는 자리채움 — 데몬 sink 와 셸 중계가 한 벌을 쓴다.
+// ADR-0231: the placeholder that does not leave empty the seq of an output event that could not be carried — the daemon sink and the shell relay share one set.
 mod placeholder;
 mod secret;
 
@@ -57,83 +57,82 @@ pub use messages::{
 pub use placeholder::{placeholder_error_frame, PLACEHOLDER_ERROR_MESSAGE};
 pub use secret::Secret;
 
-/// 깨지는 변경(필드 의미 변경·제거)에서만 +1(설계 결정 #6: 버전 처리 deferred,
-/// 지금은 상수만 두고 Hello 에 실어 보냄 — 불일치 시 팝업 가이드는 나중).
+/// +1 only on breaking changes (field meaning change·removal) (design decision #6: version handling deferred,
+/// for now only the constant exists and is carried in Hello — the mismatch popup guide comes later).
 ///
-/// v2: ListAgents/ListProfiles 조회 응답을 broadcast(AgentListUpdated/ProfileListUpdated) 편승
-/// 매칭에서 request_id 동봉 전용 reply(AgentList/ProfileList)로 전환 + Snapshot 에 request_id 추가.
-/// ListAgents/ListProfiles 커맨드도 unit→request_id 동봉으로 변경(reply 계약 변경). 구데몬(v1)은
-/// 구 응답만 보내 신클라가 무한 대기할 수 있으므로 version mismatch 로 거부한다(자동재기동 정책은 별건).
+/// v2: ListAgents/ListProfiles query responses switched from piggyback matching on the broadcast (AgentListUpdated/ProfileListUpdated)
+/// to a dedicated reply (AgentList/ProfileList) with request_id attached + request_id added to Snapshot.
+/// The ListAgents/ListProfiles commands also changed from unit→with request_id attached (reply contract change). An old daemon (v1)
+/// sends only the old response, so a new client could wait forever, hence it is refused by version mismatch (the auto-restart policy is a separate matter).
 ///
-/// v3: `AgentCommand::SetEnvelopeFormat`(UI→daemon 봉투 포맷 스위치, ADR-0096) 추가. 이 커맨드는
-/// **비관용 additive** — 같은 v2 데몬이라도 이 variant 를 디코드할 수 없어(unknown externally-tagged
-/// 키) deserialize 에서 막힌다. 그러면 신클라가 Ack 를 기다리며 무한 대기할 수 있으므로(v2 bump 사유와
-/// 동일한 시나리오), auth 의 version check(ws.rs) + discovery 의 version-mismatch 거부가 구 데몬을
-/// **재사용하지 않고 거부/재기동**하게 강제한다.
+/// v3: added `AgentCommand::SetEnvelopeFormat` (UI→daemon envelope format switch, ADR-0096). This command is
+/// **non-tolerant additive** — even the same v2 daemon cannot decode this variant (unknown externally-tagged
+/// key) and it is blocked at deserialize. Then a new client could wait forever for the Ack (the same scenario as the v2 bump
+/// reason), so auth's version check (ws.rs) + discovery's version-mismatch refusal force the old daemon to be
+/// **refused/restarted instead of reused**.
 ///
-/// v4: codex 배선 — [`AgentSpawnCommand::Codex`] **변형 추가** + `SpawnByCwd`·`CreateProfile` 에
-/// `backend`([`AgentBackendKind`]) 칸 신설.
-/// ★변형을 더한 것이라 v3 과 같은 **비관용** 축이다★ — `AgentSpawnCommand` 는 `#[serde(tag = "kind")]`
-/// 라 모르는 `kind` 는 관용되는 미지 **필드**가 아니라 역직렬화 **실패**다. 「기존 변형 안에
-/// `#[serde(default)]` 칸을 더하면 버전 유지」(v2·v3 사이에 여러 번 그렇게 지나갔다)는 이 변경에
-/// 해당하지 않는다. 두 방향이 각각 조용히 깨진다:
-///   - **신데몬 + 구셸**: codex 프로필이 하나라도 명부에 있으면 `ProfileList` 의
-///     `AgentProfile.command` 에서 디코드가 실패하고, 실패 단위가 **응답 전체**라 구셸은 그 한 행이
-///     아니라 **명부를 통째로** 잃는다.
-///   - **구데몬 + 신셸**: 새 `backend` 칸은 `#[serde(default)]` 라 구데몬이 그것을 **버리고** 옛
-///     하드코딩(claude·StreamJson)을 띄운다 — 사람이 codex 터미널 생성 항목(`agent.createCodex`)을 골랐는데 codex 라벨이 붙은
-///     노드 뒤에서 claude 가 돈다. [`AgentBackendKind`] 가 기본값을 안 두기로 한 결정이 막으려던 바로
-///     그 실패인데, 그 결정을 모르는 데몬에는 그 결정이 닿지 않는다.
-/// ★출시 뒤가 아니라 로컬 개발에서 먼저 온다★ — 데몬은 설계상 셸 재빌드보다 오래 산다(셸을 다시 지어도
-/// 떠 있던 데몬에 그대로 붙는다). 그래서 위 두 조합은 개발 중에 일상적으로 만들어진다. 「출시 전이라
-/// 지켜 줄 상대가 없다」로 이 bump 를 건너뛰려던 판단이 틀렸던 지점이 여기다.
-/// bump 가 둘 다 시끄럽게 만든다: auth 의 version check(데몬 `link/auth.rs`) + discovery 의
-/// version-mismatch 거부(셸 `discovery` 모듈의 `check_acceptable`)가 짝이 안 맞는 데몬을 **재사용하지 않고
-/// 거부/재기동**한다. 그 강제를 재는 자리 = 셸 `discovery` 시험의
+/// v4: codex wiring — **variant added** [`AgentSpawnCommand::Codex`] + new `backend` ([`AgentBackendKind`]) field in `SpawnByCwd`·`CreateProfile`.
+/// ★It adds a variant, so it is on the same **non-tolerant** axis as v3★ — `AgentSpawnCommand` is `#[serde(tag = "kind")]`,
+/// so an unknown `kind` is not a tolerated unknown **field** but a deserialization **failure**. 「Adding a
+/// `#[serde(default)]` field inside an existing variant keeps the version」 (passed that way several times between v2·v3) does not apply
+/// to this change. Each of the two directions breaks silently:
+///   - **new daemon + old shell**: if even one codex profile is in the registry, decoding fails at `AgentProfile.command`
+///     of `ProfileList`, and the failure unit is **the whole response**, so the old shell loses not that one row
+///     but **the whole registry**.
+///   - **old daemon + new shell**: the new `backend` field is `#[serde(default)]`, so the old daemon **discards** it and launches the old
+///     hard-coding (claude·StreamJson) — a person picked the codex terminal create item (`agent.createCodex`), but claude runs behind
+///     a node labeled codex. It is exactly the failure the decision of [`AgentBackendKind`] to have no default meant to prevent,
+///     but that decision does not reach a daemon that does not know it.
+/// ★It comes first in local development, not after release★ — by design the daemon outlives shell rebuilds (even if the shell is rebuilt,
+/// it attaches to the daemon that was running as is). So the two combinations above arise routinely during development. This is where the judgment
+/// that tried to skip this bump with 「it is pre-release, so there is no counterpart to protect」 was wrong.
+/// The bump makes both loud: auth's version check (daemon `link/auth.rs`) + discovery's
+/// version-mismatch refusal (`check_acceptable` in the shell's `discovery` module) **refuse/restart instead of reusing** a daemon that does not
+/// match. The place that measures that enforcement = the shell `discovery` test's
 /// `version_mismatch_live_daemon_errors_without_spawn`.
 ///
-/// v5: codex 출력 모드가 wire 를 건넌다 — [`AgentSpawnCommand::Codex`] 에 `output_format` 칸 신설 +
-/// 데몬 경계가 `CreateProfile.output_format` 을 codex 갈래에서 **버리지 않고** 나른다.
-/// ★모양만 보면 안 올려도 되는 변경이고, 그 판정이 틀린다★ — 새 칸은 양쪽 다 `#[serde(default)]` 라
-/// 어느 쪽 peer 도 역직렬화에서 죽지 않는다. 그래서 「기존 변형에 `#[serde(default)]` 칸을 더하면 버전
-/// 유지」 규칙에 걸려 보인다. ★그러나 v4 를 올린 기준은 모양이 아니라 **조용한 오작동**이었다★ — 바로 위
-/// v4 의 「구데몬 + 신셸」 항목이 그 기준이고, 이 변경은 그것을 낱말만 바꿔 그대로 재현한다:
-///   - **구데몬 + 신셸**: 모드 칸을 codex 갈래에서 버리던 데몬은 그 칸을 받고도 `Terminal` 을 띄운다 —
-///     사람이 codex JSON 생성 항목(`agent.createCodexJson`)을 골랐는데 그 라벨이 붙은 노드 뒤에서 대화형 TUI 가 돈다. 역직렬화는
-///     성공하므로 **아무것도 시끄럽지 않다**. v4 가 막은 실패와 같은 종류이고, 여기서 안 올리면 v4 를
-///     올린 근거가 이 자리에서만 예외가 된다.
-///   - **신데몬 + 구셸**: 구셸의 `AgentSpawnCommand` 는 모르는 필드를 관용하므로 명부는 살고, 모드만
-///     안 보인다. 이쪽은 조용하지만 **해롭지 않다**(화면이 덜 보일 뿐 다른 것이 돌지 않는다) — 즉 이
-///     bump 를 강제하는 것은 앞 항목 하나다.
-/// ★bump 가 만드는 차이★: discovery 의 `check_acceptable` 이 `daemon.json` 의 버전을 보고 짝이 안
-/// 맞는 **살아있는 데몬을 재사용하지 않는다** — 위 「구데몬 + 신셸」 조합이 악수를 지나기 전에 끊긴다.
-/// 그 강제를 재는 자리는 v4 항목과 같다(셸 `discovery` 시험의 `version_mismatch_live_daemon_errors_without_spawn`).
-/// (사용자 결정 2026-09-13)
+/// v5: the codex output mode crosses the wire — new `output_format` field in [`AgentSpawnCommand::Codex`] +
+/// the daemon boundary carries `CreateProfile.output_format` in the codex branch **instead of discarding it**.
+/// ★By shape alone it is a change that need not bump, and that judgment is wrong★ — the new field is `#[serde(default)]` on both sides, so
+/// no peer dies at deserialization. So it looks caught by the rule 「adding a `#[serde(default)]` field to an existing variant keeps
+/// the version」. ★But the criterion for bumping v4 was not shape but **silent malfunction**★ — the
+/// 「old daemon + new shell」 entry of v4 just above is that criterion, and this change reproduces it exactly with only the words changed:
+///   - **old daemon + new shell**: a daemon that discarded the mode field in the codex branch launches `Terminal` even though it received that field —
+///     a person picked the codex JSON create item (`agent.createCodexJson`), but an interactive TUI runs behind the node with that label. Deserialization
+///     succeeds, so **nothing is loud**. It is the same kind of failure v4 prevented, and not bumping here would make the basis for bumping v4
+///     an exception at this spot alone.
+///   - **new daemon + old shell**: the old shell's `AgentSpawnCommand` tolerates unknown fields, so the registry survives, and only the mode
+///     is not visible. This side is silent but **not harmful** (the screen shows less, nothing different runs) — i.e. what forces this
+///     bump is the previous entry alone.
+/// ★The difference the bump makes★: discovery's `check_acceptable` looks at the version in `daemon.json` and **does not reuse a live daemon
+/// that does not match** — the 「old daemon + new shell」 combination above is cut before it gets past the handshake.
+/// The place that measures that enforcement is the same as the v4 entry (`version_mismatch_live_daemon_errors_without_spawn` of the shell `discovery` test).
+/// (user decision 2026-09-13)
 ///
-/// v6: 대기 입력 목록 — `AgentCommand::ListQueuedInputs`·`AgentCommand::CancelQueuedInput` 추가 + 전용
-/// reply `AgentEvent::QueuedInputs`(행 · `as_of_seq` · 화신 표식 · `stopped_after_error`)·
-/// `AgentEvent::QueuedInputCancelReply`(ADR-0231). 명령 변형을 더한 것이라 v3 과 같은 **비관용 additive**
-/// 다 — 구데몬은 모르는 externally-tagged 키를 디코드하지 못해 명령 파싱 실패 갈래로 가고, 거기서
-/// **`Error{request_id: None}`** 로 답한다. 상관 키가 없으니 신셸의 대기 요청은 짝을 못 찾고 셸의 답장
-/// 상한까지 매달린다(v3 이 「신클라가 Ack 를 기다리며 무한 대기」로 적은 그 조용한 오작동). 그래서 auth 의
-/// version check + discovery 의 version-mismatch 거부가 구 데몬을 **재사용하지 않고 거부/재기동**하게
-/// 강제한다(재는 자리 = v4 항목과 같은 `version_mismatch_live_daemon_errors_without_spawn`).
-/// ★같은 판에 실려 나가지만 bump 사유가 아닌 것★: [`StructuredEvent::QueuedInput`](데몬→셸 한 방향 — 그
-/// 변형 doc)과 목록 응답의 `stopped_after_error` 칸. bump 를 강제하는 것은 명령 축 하나다. (사용자 승인 —
+/// v6: queued input list — added `AgentCommand::ListQueuedInputs`·`AgentCommand::CancelQueuedInput` + dedicated
+/// replies `AgentEvent::QueuedInputs` (rows · `as_of_seq` · incarnation marker · `stopped_after_error`)·
+/// `AgentEvent::QueuedInputCancelReply` (ADR-0231). It adds command variants, so it is **non-tolerant additive** like v3
+/// — an old daemon cannot decode the unknown externally-tagged key, goes to the command parse failure branch, and there
+/// answers with **`Error{request_id: None}`**. With no correlation key, the new shell's waiting request finds no pair and hangs until the shell's reply
+/// cap (the silent malfunction v3 recorded as 「the new client waits forever for the Ack」). So auth's
+/// version check + discovery's version-mismatch refusal force the old daemon to be **refused/restarted instead of reused**
+/// (the place that measures it = `version_mismatch_live_daemon_errors_without_spawn`, the same as the v4 entry).
+/// ★Shipped in the same edition but not a bump reason★: [`StructuredEvent::QueuedInput`] (one direction daemon→shell — see that
+/// variant's doc) and the `stopped_after_error` field of the list response. What forces the bump is the command axis alone. (user approval —
 /// ADR-0231)
 ///
-/// v7: 사용량 한도 슬롯(TRD S21 usage-limit-slot §1-6) — 명령 `AgentCommand::UsageSubscribe`(구독 집합 전량
-/// 교체 · 답 없음)·`AgentCommand::RefreshUsageLimits`(⟳ · 답 = 기존 `Ack`) + 구독한 연결로 가는
-/// `AgentEvent::UsageLimitsUpdated`. 명령 변형을 더한 것이라 v3·v6 과 같은 **비관용 additive** 다 — 구데몬 +
-/// 신셸이면 구데몬이 두 명령을 디코드하지 못해 파싱 실패 `Error{request_id: None}` 로 답한다. 그 오류는 상관 키가
-/// 없어 셸이 어느 명령의 실패인지 모른다 — 구독 실패는 알아볼 수 없이 슬롯이 빈 채 남고, ⟳ 는 셸의 답장
-/// 상한까지 매달린다. 둘 다 v4 의 기준(조용한 오작동)에 든다. 그래서 auth 의 version check + discovery 의
-/// version-mismatch 거부가 구 데몬을 **재사용하지 않고 거부/재기동**하게 강제한다(재는 자리 = v4 항목과 같다).
-/// ★같은 판에 실려 나가지만 bump 사유가 아닌 것★: 사용량 스냅숏 모양(`UsageLimitSnapshot` 의 `revision` ·
-/// 비정상 상태의 `detail`)과 이벤트의 `subscribed` 칸. 이 브랜치 전에는 사용량 wire 를 나르는 변형이 없어
-/// 그 모양을 읽는 옛 피어가 없다. bump 를 강제하는 것은 명령 축 하나다.
+/// v7: usage limit slot (TRD S21 usage-limit-slot §1-6) — commands `AgentCommand::UsageSubscribe` (replace the whole subscription set
+/// · no answer)·`AgentCommand::RefreshUsageLimits` (⟳ · answer = existing `Ack`) + `AgentEvent::UsageLimitsUpdated` going to subscribed
+/// connections. It adds command variants, so it is **non-tolerant additive** like v3·v6 — with old daemon +
+/// new shell, the old daemon cannot decode the two commands and answers with the parse failure `Error{request_id: None}`. That error has no
+/// correlation key, so the shell does not know which command failed — a subscribe failure leaves the slot empty with no way to tell, and ⟳ hangs until
+/// the shell's reply cap. Both fall under v4's criterion (silent malfunction). So auth's version check + discovery's
+/// version-mismatch refusal force the old daemon to be **refused/restarted instead of reused** (the place that measures it = same as the v4 entry).
+/// ★Shipped in the same edition but not a bump reason★: the usage snapshot shape (`UsageLimitSnapshot`'s `revision` ·
+/// `detail` of abnormal states) and the event's `subscribed` field. Before this branch no variant carried the usage wire, so
+/// there is no old peer reading that shape. What forces the bump is the command axis alone.
 ///
-/// ★이 기준을 대고 **안 올리기로** 한 변경도 있다★ — 턴 경계 + 결말을 나르는
-/// [`StructuredEvent::TurnEnd`] 추가가 그것이다. 두 방향 분석과 그 결론은 그 변형 자신의 doc 에 산다 —
-/// 여기 되풀어 적지 않는다. **기준의 집은 이 자리, 그 판단의 집은 저쪽이다.**
+/// ★There is also a change that was measured against this criterion and **not bumped**★ — adding [`StructuredEvent::TurnEnd`],
+/// which carries the turn boundary + outcome. The two-direction analysis and its conclusion live in that variant's own doc —
+/// not repeated here. **The criterion's home is this spot, that judgment's home is over there.**
 pub const PROTOCOL_VERSION: u32 = 7;

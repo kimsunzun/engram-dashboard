@@ -1,4 +1,4 @@
-//! Per-process handler table — 「내 표」 (my table) (TRD §3-3).
+//! Per-process handler table — 「my table」 (TRD §3-3).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -74,7 +74,7 @@ impl CommandTable {
                 .any(|other| other.name == spec.name)
             {
                 panic!(
-                    "command declared more than once in this crate: {} — 두 선언이 같은 이름을 쥐면 어느 계약이 이기는지 알 수 없다",
+                    "command declared more than once in this crate: {} — when two declarations hold the same name, it is unknown which contract wins",
                     spec.name
                 );
             }
@@ -121,7 +121,7 @@ impl CommandTable {
     /// (the next step, the registry, must carry it as is).
     ///
     /// ★The point is that there is no door that hands out the handler★: only if fitting arguments to the declared schema happens in this
-    /// one place does 「광고한 것을 실제로 받는다」 (what is advertised is actually accepted) become a property of **the whole table**, not of each adapter
+    /// one place does 「what is advertised is actually accepted」 become a property of **the whole table**, not of each adapter
     /// ([`crate::coerce`]). So a handler that implements [`CommandHandler`] directly gets the same coercion.
     /// The net that folds body panics is not here — the caller ([`crate::route`]) covers both entry points (`call` · first poll)
     /// together.
@@ -174,10 +174,10 @@ impl CommandTable {
         else {
             return Ok(());
         };
-        // Look at unknown fields first — a typo is caught together as 「모르는 칸 하나 + 빠진 필수 칸 하나」 (one unknown field + one missing required field), but what the caller
+        // Look at unknown fields first — a typo is caught together as 「one unknown field + one missing required field」, but what the caller
         //   should fix is **the very field it typed**.
         // ★Count **all** wrong fields★: if only one is pointed out, the caller fixes it, resends, and is rejected again, repeatedly
-        //   (field order is alphabetical, so it is not 「먼저 친 것」 (the one typed first) either). Showing three typos at once is what the net is worth.
+        //   (field order is alphabetical, so it is not 「the one typed first」 either). Showing three typos at once is what the net is worth.
         let unknown: Vec<&String> = given
             .keys()
             .filter(|key| !declared.contains_key(key.as_str()))
@@ -263,8 +263,8 @@ fn declared_names(args_schema: &serde_json::Value) -> String {
 /// ★Count them all but do not carry them all★: the number of fields can grow as large as the request body (thousands), and without a cap the rejection
 /// message grows by that much — and that cost is paid by the receiving side, not the typing side (same argument as [`quoted_input`]). If exceeded,
 /// it **says how many more there are** (if it did not, the caller would read the list as everything and could not fix the remaining fields).
-/// ★The eight named are **not** 「호출자가 먼저 친 여덟」 (the eight the caller typed first)★ — the argument map is a sorted data structure so they are the first
-/// eight alphabetically, and that order was not made by the caller. To get 「먼저 친 것부터」 (from the one typed first), the map would have to be changed
+/// ★The eight named are **not** 「the eight the caller typed first」★ — the argument map is a sorted data structure so they are the first
+/// eight alphabetically, and that order was not made by the caller. To get 「from the one typed first」, the map would have to be changed
 /// to an insertion-order-preserving form, and that is a decision outside this crate (the test below pins this choice).
 const MAX_NAMED_UNKNOWN: usize = 8;
 
@@ -303,11 +303,11 @@ fn quoted_list(keys: &[&String]) -> String {
 /// would go out of step and the very ambiguity just removed would come back (a piece with no closing quote + the next name's opening quote would
 /// read as a pair).
 /// ★The cap is applied **after escaping**★: if truncated first, one control character would swell to six bytes as `\u{1b}` and the message
-/// would grow up to six times the cap — the cap would vary 「입력 종류에 따라」 (by input kind) and the number written in the docs would become false.
+/// would grow up to six times the cap — the cap would vary 「by input kind」 and the number written in the docs would become false.
 /// ★Do not truncate in the middle of an escape sequence★: it accumulates character by character and stops at the budget, so no piece
-/// with only a lone `\` is produced — such a piece has broken notation and would violate the 「리터럴 표기」 (literal notation) promise above.
+/// with only a lone `\` is produced — such a piece has broken notation and would violate the 「literal notation」 promise above.
 /// ★The truncation marker states **what the number counts**★: what is visible is the escaped notation while the number is original bytes, so without a label
-/// 30 control characters (180 characters in notation) would read as 「30 바이트를 잘랐다」 (truncated 30 bytes) and the two would look inconsistent.
+/// 30 control characters (180 characters in notation) would read as 「truncated 30 bytes」 and the two would look inconsistent.
 fn quoted_input(text: &str) -> String {
     let quoted = format!("{text:?}");
     if quoted.len() <= MAX_QUOTED_INPUT_BYTES {
@@ -392,7 +392,7 @@ mod tests {
         name: "fixture.ping",
         effect: Effect::Read,
         since: 1,
-        summary: "  두 칸 들여쓴 요약  ",
+        summary: "  summary indented by two spaces  ",
         args_schema: "{\"type\":\"object\",\"properties\":{}}",
         ok_schema: "{\"type\":\"object\",\"properties\":{\"pong\":{\"type\":\"boolean\"}}}",
         errors: &[ErrorCode::Internal],
@@ -406,7 +406,7 @@ mod tests {
         name: "fixture.numbers",
         effect: Effect::Write,
         since: 1,
-        summary: "수치 칸",
+        summary: "numeric fields",
         args_schema: concat!(
             r#"{"type":"object","properties":{"count":{"type":"integer","minimum":0},"#,
             r#""depth":{"type":"integer"},"ratio":{"type":"number"},"#,
@@ -425,7 +425,7 @@ mod tests {
         name: "fixture.entrance",
         effect: Effect::Write,
         since: 1,
-        summary: "입구 검문 픽스처",
+        summary: "entrance check fixture",
         args_schema: concat!(
             r#"{"type":"object","properties":{"cwd":{"type":"string"},"#,
             r#""label":{"anyOf":[{"type":"string"},{"type":"null"}]}},"#,
@@ -449,7 +449,9 @@ mod tests {
     #[test]
     fn duplicate_name_is_refused_not_overwritten() {
         let mut table = CommandTable::new(DECLARED);
-        table.insert("fixture.ping", handler()).expect("첫 삽입");
+        table
+            .insert("fixture.ping", handler())
+            .expect("first insert");
         assert_eq!(
             table.insert("fixture.ping", handler()),
             Err(TableError::Duplicate("fixture.ping"))
@@ -474,7 +476,7 @@ mod tests {
             name: "fixture.ping",
             effect: Effect::Write,
             since: 2,
-            summary: "같은 이름, 다른 계약",
+            summary: "same name, different contract",
             args_schema: "{\"type\":\"object\",\"properties\":{}}",
             ok_schema: "{\"type\":\"object\",\"properties\":{}}",
             errors: &[],
@@ -488,20 +490,27 @@ mod tests {
             std::panic::catch_unwind(|| CommandTable::new(COLLIDING))
         });
 
-        assert!(outcome.is_err(), "중복 선언은 표 생성에서 터진다");
+        assert!(
+            outcome.is_err(),
+            "a duplicate declaration blows up at table creation"
+        );
     }
 
     #[test]
     fn unknown_lookup_is_none() {
         let mut table = CommandTable::new(DECLARED);
-        assert!(!table.contains("fixture.ping"), "아직 안 꽂혔다");
+        assert!(!table.contains("fixture.ping"), "not plugged in yet");
         assert!(table.call("fixture.ping", &mut json!({})).is_none());
 
-        table.insert("fixture.ping", handler()).expect("삽입");
+        table.insert("fixture.ping", handler()).expect("insert");
         assert!(!table.contains("nope"));
         let mut args = json!({ "kept": 1 });
         assert!(table.call("nope", &mut args).is_none());
-        assert_eq!(args, json!({ "kept": 1 }), "못 찾으면 인자를 안 가져간다");
+        assert_eq!(
+            args,
+            json!({ "kept": 1 }),
+            "if not found, it does not take the arguments"
+        );
     }
 
     /// ★Assembly does not run carrying a declaration it cannot advertise★ — if the schema text is not JSON, the registration packet's
@@ -512,7 +521,7 @@ mod tests {
             name: "fixture.broken",
             effect: Effect::Read,
             since: 1,
-            summary: "깨진 스키마",
+            summary: "broken schema",
             args_schema: "{not json",
             ok_schema: "{\"type\":\"object\",\"properties\":{}}",
             errors: &[],
@@ -539,7 +548,7 @@ mod tests {
             name: "fixture.broken-ok",
             effect: Effect::Read,
             since: 1,
-            summary: "인자는 멀쩡하고 반환이 깨졌다",
+            summary: "arguments are fine and the return is broken",
             args_schema: "{\"type\":\"object\",\"properties\":{}}",
             ok_schema: "{not json",
             errors: &[],
@@ -564,17 +573,17 @@ mod tests {
     #[test]
     fn decls_carry_the_schema_item_as_help() {
         let mut table = CommandTable::new(DECLARED);
-        table.insert("fixture.ping", handler()).expect("삽입");
+        table.insert("fixture.ping", handler()).expect("insert");
 
         let decls = table.decls();
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0].name, "fixture.ping");
         assert_eq!(decls[0].help, crate::spec_item_json(&PING));
         // It must have **the same origin** as the elements of the derived file (ADR-0156).
-        let parsed: serde_json::Value = serde_json::from_str(&decls[0].help).expect("help 는 JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&decls[0].help).expect("help is JSON");
         assert_eq!(parsed["name"], "fixture.ping");
         assert_eq!(parsed["effect"], "Read");
-        assert_eq!(parsed["summary"], "두 칸 들여쓴 요약");
+        assert_eq!(parsed["summary"], "summary indented by two spaces");
         assert_eq!(parsed["ok"]["properties"]["pong"]["type"], "boolean");
         assert_eq!(parsed["errors"][0], "INTERNAL");
         // The common errors the table adds are in the advertisement (they are not in the declaration).
@@ -588,20 +597,20 @@ mod tests {
     #[test]
     fn the_schema_file_element_is_byte_identical_to_help() {
         const EXPECTED: &str = concat!(
-            r#"{"name":"fixture.ping","effect":"Read","since":1,"summary":"두 칸 들여쓴 요약","#,
+            r#"{"name":"fixture.ping","effect":"Read","since":1,"summary":"summary indented by two spaces","#,
             r#""args":{"type":"object","properties":{}},"#,
             r#""ok":{"type":"object","properties":{"pong":{"type":"boolean"}}},"#,
             r#""errors":["INTERNAL","INVALID_ARGUMENT"]}"#
         );
 
         let mut table = CommandTable::new(DECLARED);
-        table.insert("fixture.ping", handler()).expect("삽입");
+        table.insert("fixture.ping", handler()).expect("insert");
         let help = table.decls().remove(0).help;
 
-        assert_eq!(help, EXPECTED, "등록 패킷의 help");
+        assert_eq!(help, EXPECTED, "help of the registration packet");
         assert!(
             crate::catalog_json(1, DECLARED).contains(EXPECTED),
-            "파생 파일의 원소"
+            "element of the derived file"
         );
     }
 
@@ -612,7 +621,7 @@ mod tests {
             name: "fixture.marked",
             effect: Effect::Write,
             since: 1,
-            summary: "표시 픽스처",
+            summary: "mark fixture",
             args_schema: concat!(
                 r#"{"type":"object","properties":{"target":{"type":"string"},"#,
                 r#""after":{"anyOf":[{"type":"string"},{"type":"null"}]}},"#,
@@ -627,25 +636,29 @@ mod tests {
         static MARKED_DECLARED: &[&CommandSpec] = &[&MARKED, &PING];
 
         let mut table = CommandTable::new(MARKED_DECLARED);
-        table.insert("fixture.marked", handler()).expect("삽입");
-        table.insert("fixture.ping", handler()).expect("삽입");
+        table.insert("fixture.marked", handler()).expect("insert");
+        table.insert("fixture.ping", handler()).expect("insert");
 
         let decls = table.decls();
         let marked = decls
             .iter()
             .find(|d| d.name == "fixture.marked")
-            .expect("표시한 명령");
-        assert_eq!(marked.agent_args, ["target", "after"], "선언 순서 그대로");
+            .expect("marked command");
+        assert_eq!(
+            marked.agent_args,
+            ["target", "after"],
+            "in declaration order"
+        );
         assert_eq!(
             marked.help,
             crate::spec_item_json(&MARKED),
-            "help 는 표시와 무관하다"
+            "help is unrelated to the marks"
         );
         assert!(!marked.help.contains("agent_args"));
         let plain = decls
             .iter()
             .find(|d| d.name == "fixture.ping")
-            .expect("표시 없는 명령");
+            .expect("unmarked command");
         assert!(plain.agent_args.is_empty());
     }
 
@@ -658,7 +671,7 @@ mod tests {
 
         let outcome = block_on(table_handler.call(json!("not an object")));
         assert_eq!(
-            outcome.expect_err("객체가 아니면 반려").code(),
+            outcome.expect_err("bounced if not an object").code(),
             ErrorCode::InvalidArgument
         );
     }
@@ -699,7 +712,7 @@ mod tests {
         let mut table = CommandTable::new(DECLARED);
         table
             .insert("fixture.numbers", Arc::new(RawNumbers))
-            .expect("선언된 이름");
+            .expect("declared name");
         table
     }
 
@@ -707,7 +720,7 @@ mod tests {
         let table = numbers_table();
         let future = table
             .call("fixture.numbers", &mut args)
-            .expect("표에 있는 이름");
+            .expect("name in the table");
         block_on(future)
     }
 
@@ -721,12 +734,12 @@ mod tests {
             "ratio": 1.0,
             "rows": [{ "size": 4.0 }],
         }))
-        .expect("스키마가 광고한 대로 받는다");
+        .expect("accepts as the schema advertised");
 
         assert_eq!(outcome["count"], 2);
         assert_eq!(outcome["depth"], -3);
-        assert_eq!(outcome["ratio"], 1.0, "실수 칸은 실수로 남는다");
-        assert_eq!(outcome["size"], 4, "중첩·배열 안까지 같다");
+        assert_eq!(outcome["ratio"], 1.0, "a float field stays a float");
+        assert_eq!(outcome["size"], 4, "the same down inside nesting·arrays");
     }
 
     #[test]
@@ -736,7 +749,9 @@ mod tests {
         }));
 
         assert_eq!(
-            outcome.expect_err("소수부가 있으면 정수가 아니다").code(),
+            outcome
+                .expect_err("with a fractional part it is not an integer")
+                .code(),
             ErrorCode::InvalidArgument
         );
     }
@@ -749,7 +764,7 @@ mod tests {
         }));
 
         assert_eq!(
-            outcome.expect_err("정수 칸에 담을 수 없다").code(),
+            outcome.expect_err("cannot fit in an integer field").code(),
             ErrorCode::InvalidArgument
         );
     }
@@ -760,7 +775,7 @@ mod tests {
         let mut table = CommandTable::new(DECLARED);
         table
             .insert("fixture.entrance", handler())
-            .expect("선언된 이름");
+            .expect("declared name");
         table
     }
 
@@ -773,23 +788,23 @@ mod tests {
                 "fixture.entrance",
                 &json!({ "cwd": "C:/x", "target": "alpha" }),
             )
-            .expect_err("선언에 없는 칸");
+            .expect_err("field not in the declaration");
 
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
         assert!(
             err.message().contains("target"),
-            "틀린 칸을 지목한다: {}",
+            "points at the wrong field: {}",
             err.message()
         );
         assert!(
             err.message().contains("cwd") && err.message().contains("label"),
-            "허용 집합을 함께 낸다: {}",
+            "emits the allowed set too: {}",
             err.message()
         );
     }
 
     /// ★If there are several wrong fields, all of them come out★ — if only one is pointed out, the caller repeats reject, fix, retry as many
-    /// times as there are typos. Field order is alphabetical, so there is no meaning of 「처음 친 칸」 (the field typed first) either.
+    /// times as there are typos. Field order is alphabetical, so there is no meaning of 「the field typed first」 either.
     #[test]
     fn every_undeclared_argument_field_is_named_not_just_the_first() {
         let err = entrance_table()
@@ -797,12 +812,12 @@ mod tests {
                 "fixture.entrance",
                 &json!({ "cwd": "C:/x", "target": "alpha", "zzz": 1, "aaa": 2 }),
             )
-            .expect_err("선언에 없는 칸 셋");
+            .expect_err("three fields not in the declaration");
 
         for offender in ["target", "zzz", "aaa"] {
             assert!(
                 err.message().contains(offender),
-                "{offender} 이 빠졌다: {}",
+                "{offender} is missing: {}",
                 err.message()
             );
         }
@@ -811,7 +826,7 @@ mod tests {
     /// A rejection message carrying `count` fields absent from the declaration (each `key_bytes` bytes).
     ///
     /// ★Insert in **reverse alphabetical order**★: if inserted ascending, insertion order and alphabetical order coincide, so even if the map changes
-    /// to an insertion-order-preserving form (`preserve_order`) the 「사전순 앞 여덟」 (first eight alphabetically) assertion still passes — and nobody would
+    /// to an insertion-order-preserving form (`preserve_order`) the 「first eight alphabetically」 assertion still passes — and nobody would
     /// know the property that assertion meant to measure is gone.
     fn flood_refusal(count: usize, key_bytes: usize) -> String {
         flood_refusal_of(count, key_bytes, "x")
@@ -827,7 +842,7 @@ mod tests {
         }
         entrance_table()
             .check_args("fixture.entrance", &serde_json::Value::Object(given))
-            .expect_err("선언에 없는 칸 다수")
+            .expect_err("many fields not in the declaration")
             .message()
             .to_string()
     }
@@ -839,16 +854,15 @@ mod tests {
 
         assert!(
             message.contains("(+32 more)"),
-            "남은 개수를 말한다: {message}"
+            "says the remaining count: {message}"
         );
         assert!(
             message.contains("stray0000"),
-            "이름 지어진 칸이 실제로 실린다: {message}"
+            "the named fields are actually carried: {message}"
         );
     }
 
-    /// ★The message length is **unrelated** to the request size★ — the property to keep is not 「몇 바이트 이하」 (at most so many bytes) but 「입력이 커져도
-    /// 안 자란다」 (does not grow as the input grows). The cap on one name is held by [`quoted_input`] and the cap on the number of names by [`MAX_NAMED_UNKNOWN`], and
+    /// ★The message length is **unrelated** to the request size★ — the property to keep is not 「at most so many bytes」 but 「does not grow as the input grows」. The cap on one name is held by [`quoted_input`] and the cap on the number of names by [`MAX_NAMED_UNKNOWN`], and
     /// only with both standing does this property stand (with only one, it grows along the other axis).
     ///
     /// The measured worst case is **about 1.4 KB** (eight names × quote cap 128B + truncation marker + declared set), and an escaped
@@ -859,11 +873,11 @@ mod tests {
         let small = flood_refusal(40, 1 << 10);
         let huge = flood_refusal(4_000, 1 << 14);
 
-        // The width allowed to grow = **the number of digits only**: the 「N 바이트」 (N bytes) notation of the eight names and the number in 「+N more」 get longer.
+        // The width allowed to grow = **the number of digits only**: the 「N bytes」 notation of the eight names and the number in 「+N more」 get longer.
         //   The margin of 32 is sized to cover that growth in digits (even if the input is 1000 times larger, decimal digits grow by only a few).
         assert!(
             huge.len() <= small.len() + 32,
-            "칸 수 100배·이름 크기 16배인데 문구가 자릿수 이상으로 자랐다: {} → {} 바이트",
+            "100x the field count·16x the name size, yet the message grew beyond the digits: {} → {} bytes",
             small.len(),
             huge.len()
         );
@@ -872,7 +886,7 @@ mod tests {
         for (label, measured) in [("printable", small.len()), ("escaped", escaped.len())] {
             assert!(
                 measured < 2048,
-                "{label}: 실측 최악(~1.4 KB) 근처를 벗어났다 — 상한 둘 중 하나가 풀렸다: {measured} 바이트"
+                "{label}: strayed from near the measured worst case (~1.4 KB) — one of the two caps came loose: {measured} bytes"
             );
         }
     }
@@ -889,31 +903,31 @@ mod tests {
         let at = |name: &str| message.find(name);
         // Looking only at both ends would pass even if the middle six got mixed up — we look at all eight positions.
         let places: Vec<usize> = (0..MAX_NAMED_UNKNOWN)
-            .map(|i| at(&format!("stray{i:04}")).expect("이름 지어진 여덟"))
+            .map(|i| at(&format!("stray{i:04}")).expect("the eight named"))
             .collect();
         assert!(
             places.windows(2).all(|pair| pair[0] < pair[1]),
-            "사전순 차례로 이어 붙인다: {message}"
+            "joins them in alphabetical order: {message}"
         );
         assert!(
             at("stray0008").is_none(),
-            "아홉째부터는 개수로만 센다: {message}"
+            "from the ninth on, counted only by number: {message}"
         );
         assert!(
             at("stray0039").is_none(),
-            "삽입 순서(역순 첫 칸)가 아니라 사전순으로 고른다: {message}"
+            "picks alphabetically, not by insertion order (the first field in reverse): {message}"
         );
         assert!(
             message.contains("truncated"),
-            "이 조합에서 이름 상한도 함께 걸린다: {message}"
+            "in this combination the name cap also applies: {message}"
         );
     }
 
-    /// Splits a truncated piece into `"본문…"` + truncation marker — measuring what the body holds needs a boundary.
+    /// Splits a truncated piece into `"body…"` + truncation marker — measuring what the body holds needs a boundary.
     fn literal_and_body(rendered: &str) -> (&str, &str) {
         let marker = rendered
             .find("(truncated")
-            .expect("잘림 표시가 있어야 한다");
+            .expect("there must be a truncation marker");
         let literal = &rendered[..marker];
         let body = literal
             .trim_start_matches('"')
@@ -935,19 +949,19 @@ mod tests {
         let rendered = quoted_input(&key);
         let (literal, body) = literal_and_body(&rendered);
 
-        assert!(rendered.starts_with('"'), "여는 따옴표: {rendered}");
+        assert!(rendered.starts_with('"'), "opening quote: {rendered}");
         assert!(
             rendered.contains("…\"(truncated"),
-            "닫는 따옴표가 잘림 표시 **앞**에 온다: {rendered}"
+            "the closing quote comes **before** the truncation marker: {rendered}"
         );
         assert!(
             literal.len() <= MAX_QUOTED_INPUT_BYTES,
-            "리터럴이 상한을 넘었다(따옴표·말줄임표 자리를 예산에서 안 뺐다): {} 바이트 — {rendered}",
+            "the literal exceeded the cap (the quote·ellipsis room was not taken out of the budget): {} bytes — {rendered}",
             literal.len()
         );
         assert!(
             rendered.contains(&format!("input was {} bytes", key.len())),
-            "무엇을 센 수인지 밝힌다: {rendered}"
+            "states what the number counts: {rendered}"
         );
 
         // ★Every quote in the body **must be escaped**★ — if even one is raw, that spot is read as a field boundary
@@ -957,12 +971,12 @@ mod tests {
             match ch {
                 _ if escaped => escaped = false,
                 '\\' => escaped = true,
-                '"' => panic!("본문에 이스케이프 안 된 따옴표가 있다: {rendered}"),
+                '"' => panic!("the body has an unescaped quote: {rendered}"),
                 _ => {}
             }
         }
 
-        // ★Checks **whether the last escape of the body is intact**★: `\u{1b}` is six characters so there are five places to be cut in the middle, and of those only 「`\` 바로 뒤」 (right after the backslash) is
+        // ★Checks **whether the last escape of the body is intact**★: `\u{1b}` is six characters so there are five places to be cut in the middle, and of those only 「right after the backslash」 is
         //   caught by backslash parity. The other four (`\u`·`\u{`·`\u{1`·
         //   `\u{1b`) pass the parity check as is, so we check whether everything from the last `\` to the end is a **closed sequence**.
         let control = quoted_input(&"\u{1b}".repeat(200));
@@ -979,17 +993,17 @@ mod tests {
             };
             assert!(
                 complete,
-                "본문이 미완성 이스케이프로 끝났다(시퀀스 한가운데서 잘렸다): {control}"
+                "the body ended in an incomplete escape (cut in the middle of a sequence): {control}"
             );
         }
         assert!(
             control_literal.len() <= MAX_QUOTED_INPUT_BYTES,
-            "제어문자 이름의 리터럴이 상한을 넘었다: {} 바이트 — {control}",
+            "the literal of a control-character name exceeded the cap: {} bytes — {control}",
             control_literal.len()
         );
         assert!(
             control.contains("input was 200 bytes"),
-            "표기는 이스케이프된 것이고 수는 원본이라는 것을 라벨이 밝힌다: {control}"
+            "the label states that the notation is escaped and the number is of the original: {control}"
         );
     }
 
@@ -1003,7 +1017,7 @@ mod tests {
             given.insert(key, json!(1));
             entrance_table()
                 .check_args("fixture.entrance", &serde_json::Value::Object(given))
-                .expect_err("선언에 없는 칸")
+                .expect_err("field not in the declaration")
                 .message()
                 .len()
         };
@@ -1013,7 +1027,7 @@ mod tests {
 
         assert!(
             escaped <= printable + 8,
-            "제어문자 이름이 인쇄 가능 이름보다 긴 문구를 만들었다: {printable} → {escaped} 바이트"
+            "a control-character name made a longer message than a printable name: {printable} → {escaped} bytes"
         );
     }
 
@@ -1026,19 +1040,19 @@ mod tests {
             .insert(
                 "fixture.entrance",
                 blocking_handler(|_: NoArgs| -> Result<serde_json::Value, CommandError> {
-                    panic!("검문이 통과시키면 안 되는 인자다")
+                    panic!("arguments the check must not let through")
                 }),
             )
-            .expect("선언된 이름");
+            .expect("declared name");
 
         let err = table
             .check_args("fixture.entrance", &json!({ "label": "alpha" }))
-            .expect_err("필수 칸이 빠졌다");
+            .expect_err("a required field is missing");
 
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
         assert!(
             err.message().contains("cwd"),
-            "빠진 칸을 지목한다: {}",
+            "points at the missing field: {}",
             err.message()
         );
     }
@@ -1049,27 +1063,27 @@ mod tests {
 
         table
             .check_args("fixture.entrance", &json!({ "cwd": "C:/x" }))
-            .expect("생략 가능한 칸은 없어도 된다");
+            .expect("an omittable field may be absent");
         table
             .check_args(
                 "fixture.entrance",
                 &json!({ "cwd": "C:/x", "label": "alpha" }),
             )
-            .expect("실어도 된다");
+            .expect("may be carried");
     }
 
-    /// ★The rejection **always** carries the allowed set★ — a caller that received only 「객체가 아니다」 (not an object) would have to try again
+    /// ★The rejection **always** carries the allowed set★ — a caller that received only 「not an object」 would have to try again
     /// without knowing what to carry (giving material to fix it itself is this screening's contract).
     #[test]
     fn a_non_object_refusal_also_carries_the_declared_set() {
         let err = entrance_table()
             .check_args("fixture.entrance", &json!("C:/x"))
-            .expect_err("객체가 아니다");
+            .expect_err("not an object");
 
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
         assert!(
             err.message().contains("cwd") && err.message().contains("label"),
-            "허용 집합을 함께 낸다: {}",
+            "emits the allowed set too: {}",
             err.message()
         );
     }
@@ -1085,19 +1099,19 @@ mod tests {
 
         let err = entrance_table()
             .check_args("fixture.entrance", &serde_json::Value::Object(given))
-            .expect_err("선언에 없는 칸");
+            .expect_err("field not in the declaration");
 
         // The measured size of a single-name message is ~230 bytes (quote cap 128 + truncation marker + declared set) — the numbers below are
-        //   that measurement plus margin, not a contract. The contract is 「입력 크기와 무관」 (unrelated to input size) and
+        //   that measurement plus margin, not a contract. The contract is 「unrelated to input size」 and
         //   `the_refusal_message_does_not_grow_with_the_body` measures it.
         assert!(
             err.message().len() < 512,
-            "1 MiB 이름 하나가 그만한 문구를 만들었다: {} 바이트",
+            "a single 1 MiB name made a message that large: {} bytes",
             err.message().len()
         );
         assert!(
             err.message().contains("truncated"),
-            "잘랐다고 말한다: {}",
+            "says it truncated: {}",
             err.message()
         );
     }
@@ -1117,7 +1131,7 @@ mod tests {
         ];
 
         for refusal in refusals {
-            let message = refusal.expect_err("반려").message().to_lowercase();
+            let message = refusal.expect_err("bounced").message().to_lowercase();
             for vocabulary in [
                 "engram",
                 "--",
@@ -1129,7 +1143,7 @@ mod tests {
             ] {
                 assert!(
                     !message.contains(vocabulary),
-                    "호출 표면의 어휘가 샜다({vocabulary}): {message}"
+                    "vocabulary of the calling surface leaked ({vocabulary}): {message}"
                 );
             }
         }
@@ -1141,7 +1155,7 @@ mod tests {
     fn a_name_this_table_does_not_hold_is_left_to_the_next_step() {
         entrance_table()
             .check_args("tab.create", &json!({ "anything": 1 }))
-            .expect("남의 이름은 통과한다");
+            .expect("another's name passes");
     }
 
     /// ★The net is in the table too★ — even on a path that calls a handler directly outside routing (harness · assembly code), a panic
@@ -1154,8 +1168,11 @@ mod tests {
 
         let outcome = crate::testing::with_quiet_panic_hook(|| block_on(panicking.call(json!({}))));
 
-        let err = outcome.expect_err("패닉은 오류가 된다");
+        let err = outcome.expect_err("a panic becomes an error");
         assert_eq!(err.code(), ErrorCode::Internal);
-        assert!(err.message().contains("handler blew up"), "사유가 실린다");
+        assert!(
+            err.message().contains("handler blew up"),
+            "the reason is carried"
+        );
     }
 }

@@ -19,7 +19,7 @@
 
 | Peer | Block order | Path position | Source | Confidence |
 |---|---|---|---|---|
-| macOS Finder Get Info | header → 일반 (General) → 추가 정보 (More Info) → 이름 및 확장자 (Name & Extension) → 설명 (Comments) → 다음으로 열기 (Open with) → 미리 보기 (Preview) → 공유 및 권한 (Sharing & Permissions) | 「위치」 (Where) inside 「일반」 — the full path | https://eclecticlight.co/2026/06/09/reading-the-finders-get-info-dialog/ | Certain (main confirmed the original text) |
+| macOS Finder Get Info | header → General → More Info → Name & Extension → Comments → Open with → Preview → Sharing & Permissions | 「위치」 (Where) inside 「일반」 — the full path | https://eclecticlight.co/2026/06/09/reading-the-finders-get-info-dialog/ | Certain (main confirmed the original text) |
 | Obsidian backlinks | note body → linked mentions → unlinked mentions (when bottom display is selected) · default = right sidebar | Not applicable | https://obsidian.md/help/plugins/backlinks | Certain (main confirmed the original text) |
 | Google Drive detail pane | Details · Activity tabs — a 「위치」 field in the details tab (folder link) · order relative to the preview unconfirmed | A field of the details tab | https://alicekeeler.com/2016/08/30/google-docs-find-document-details/ | Uncertain |
 | Unreal Content Browser | References = a separate Reference Viewer window | Unconfirmed | https://dev.epicgames.com/documentation/en-us/unreal-engine/reference-viewer-in-unreal-engine | Uncertain |

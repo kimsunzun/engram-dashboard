@@ -63,7 +63,7 @@ export function stripJsonComments(text) {
       while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i += 1
       // An unclosed block comment must not be silently swallowed as "a comment to the end" — a truncated file like `{}/*`
       // would parse cleanly as `{}` and an overlay with no content would pose as a valid value.
-      if (i >= text.length) throw new Error('닫히지 않은 블록 주석(`/*`)')
+      if (i >= text.length) throw new Error('unclosed block comment (`/*`)')
       i += 2
       continue
     }
@@ -77,7 +77,7 @@ function readIdentifier(configPath) {
   const parsed = JSON.parse(stripJsonComments(readFileSync(configPath, 'utf8')))
   const id = parsed.identifier
   if (typeof id !== 'string' || id === '') {
-    throw new Error(`${configPath} 에 쓸 수 있는 "identifier" 가 없습니다`)
+    throw new Error(`${configPath} has no usable "identifier"`)
   }
   return { parsed, id }
 }
@@ -93,7 +93,7 @@ export function readDevConfig(configPath = DEV_CONFIG_PATH, releaseConfigPath = 
   const { id: releaseId } = readIdentifier(releaseConfigPath)
   if (devId === releaseId) {
     throw new Error(
-      `dev identifier 가 release 와 같습니다("${devId}") — 두 빌드가 같은 single-instance 뮤텍스를 잡습니다`,
+      `dev identifier equals the release one ("${devId}") — the two builds would take the same single-instance mutex`,
     )
   }
   return { json: JSON.stringify(parsed), devId, releaseId }
@@ -110,7 +110,7 @@ if (invokedAsMain) {
     process.stdout.write(readDevConfigJson() + '\n')
   } catch (err) {
     // Folds read failure and invariant violation into one message — to the call site it arrives as "there is no value" either way.
-    process.stderr.write(`dev-config-json: ${DEV_CONFIG_PATH} 를 쓸 수 없습니다 - ${err.message}\n`)
+    process.stderr.write(`dev-config-json: cannot use ${DEV_CONFIG_PATH} - ${err.message}\n`)
     process.exit(1)
   }
 }

@@ -1,10 +1,9 @@
-//! Creation and cleanup of the per-agent **spawn attachment files** (ADR-0086 · S18 D) — two JSONs claude reads by path.
+//! Creation and cleanup of the per-agent spawn attachment files (ADR-0086 · S18 D) — two JSONs claude reads by path.
 //!
-//! ★Role★: on provision, write the files for (AgentId, epoch) into [`McpDir`]; on revoke, delete them. There are two kinds:
-//!   ① **mcp-config** (`--mcp-config`) — control channel endpoint + Bearer token.
-//!   ② **session settings fragment** (`--settings`, S18 D) — a minimal fragment that allows the engram MCP server for that session only.
-//!   Read the description below with ① as the reference, but the create/delete/sweep discipline applies to ② unchanged. claude reads ① and
-//!   sends the Authorization header on every request: initialize/tools/list/tools/call (measured on claude 2.1.170).
+//! ★Role★: on provision, write the files for (AgentId, epoch) into [`McpDir`]; on revoke, delete them.
+//!   ① mcp-config (`--mcp-config`) — control channel endpoint + Bearer token. claude sends the Authorization header on every request: initialize/tools/list/tools/call (measured on claude 2.1.170).
+//!   ② session settings fragment (`--settings`) — a minimal fragment allowing the engram MCP server for that session only.
+//!   The create/delete/sweep discipline applies to both.
 //!
 //! ★Schema (claude Streamable HTTP MCP server)★:
 //! ```json
@@ -14,37 +13,23 @@
 //!     "headers": { "Authorization": "Bearer <token>" }
 //! } } }
 //! ```
-//!   ※ This schema is the common mcp-config format, not knowledge of claude CLI **flags** — the flag (`--mcp-config`) belongs to
-//!   backend/claude/ alone (ADR-0004). Generating the file content is a daemon concern (the token and endpoint are owned by the daemon),
-//!   so it lives here. The backend only points `--mcp-config` at this file's path.
+//!   This is the common mcp-config format, not knowledge of claude CLI flags — the flag (`--mcp-config`) belongs to backend/claude/ alone (ADR-0004). The token and endpoint are owned by the daemon, so generating the content lives here; the backend only points `--mcp-config` at the file path.
 //!
-//! ★Security (ADR-0086 §Secrets)★:
-//!   - The file holds the token in plaintext → put it under `run` in the data folder and **always delete it on revoke**.
-//!   - Never print the token in logs (only the path and AgentId).
-//!
-//! tauri import 0 (daemon crate).
+//! ★Security (ADR-0086 §Secrets)★: the file holds the token in plaintext → put it under `run` in the data folder and always delete it on revoke; never log the token (only path and AgentId).
 
 use std::path::{Path, PathBuf};
 
 use engram_dashboard_agent::types::AgentId;
 
-/// ★Server logical name (the mcpServers key) = `engram`★ — **single source (ADR-0094)**. The server shows up in claude's `system:init` under this
-///   name, and the `mcpServers.<이 값>` (this value) key of the mcp-config JSON is this value too. When the ADR-0094 send-permission
-///   grant builds the `mcp__{server}__{tool}` pattern, it uses this constant as the server (DaemonControlChannel.provision).
-///   ADR-0086 §do not reuse the engram-ctl name — `engram` is the daemon's own brand (not a discarded crate name).
+/// ★Server logical name (the mcpServers key) = `engram`★ — single source (ADR-0094). The server shows up in claude's `system:init` under this name, the mcp-config `mcpServers.<name>` key is this value, and the ADR-0094 send-permission grant builds its `mcp__{server}__{tool}` pattern from this constant (DaemonControlChannel.provision). ADR-0086: do not reuse the engram-ctl name — `engram` is the daemon's own brand.
 ///
-/// ★The definition is in the agent crate, not here — do not move it back and write the literal here again★: a second
-///   consumer of this name has appeared in the backend folder (codex's `-c mcp_servers.<name>=…`), and it cannot depend on the daemon.
-///   This re-export is there to keep the existing `mcp_config::MCP_SERVER_NAME` call sites standing as they are.
+/// ★Defined in the agent crate, not here — do not write the literal here again★: a second consumer exists in the backend folder (codex's `-c mcp_servers.<name>=…`) and cannot depend on the daemon. This re-export keeps existing `mcp_config::MCP_SERVER_NAME` call sites.
 // ADR-0209
 pub use engram_dashboard_agent::types::MCP_SERVER_NAME;
 
-/// The spawn attachment folder **itself** (not the data folder) — in production = `data_dir::DataLayout::mcp_config_dir`
-/// (under the daemon's `run`). Every file of this module is placed directly inside it, and [`sweep_stale_configs`] deletes **all**
-/// the files inside it.
+/// The spawn attachment folder itself (not the data folder) — in production `data_dir::DataLayout::mcp_config_dir` (under the daemon's `run`). Every file of this module goes directly inside it, and [`sweep_stale_configs`] deletes all files inside it.
 ///
-/// ★Do not turn it back into a bare `Path`★: the mistake of passing the data folder would compile as is, and then the token file would be written at the bottom of
-/// the data folder, and the boot sweep would delete that folder's files (including the registry). One constructor makes the intent explicit.
+/// ★Do not turn it back into a bare `Path`★: passing the data folder would compile, write the token file at the bottom of the data folder, and the boot sweep would delete that folder's files (including the registry). One constructor makes the intent explicit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpDir(PathBuf);
 
@@ -58,15 +43,14 @@ impl McpDir {
     }
 }
 
-/// Put the epoch in the file name so that a rotation does not collide with the old file.
+/// The epoch is in the file name so a rotation does not collide with the old file.
 pub fn config_path(mcp_dir: &McpDir, id: AgentId, epoch: u32) -> PathBuf {
     mcp_dir.0.join(format!("{id}-{epoch}.json"))
 }
 
 /// Escaping is handled by serde_json (no hand assembly).
 ///
-/// ★Typed struct serialization (deterministic key order)★: serde writes struct fields in declaration order — it exposes the schema
-///   as the spec has it (claude accepts any order).
+/// ★Typed struct serialization★: serde writes fields in declaration order, exposing the schema as the spec has it (claude accepts any order).
 pub fn render_config(url: &str, token: &str) -> String {
     #[derive(serde::Serialize)]
     struct Root<'a> {
@@ -102,8 +86,7 @@ pub fn render_config(url: &str, token: &str) -> String {
 }
 
 /// (A new data root has no folder — the atomic write creates it.)
-// ADR-0291: the atomic write's temp file is also placed in the same folder, so the token is briefly carried there — same ACL, and what remains from a power-off or a failed
-//   delete is swept up by the boot sweep (all files in the folder).
+// ADR-0291: the atomic write's temp file is in the same folder, so the token is briefly there — same ACL; leftovers from a power-off or failed delete are swept by the boot sweep.
 fn write_attached(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     engram_dashboard_base::file::write_atomic(path, bytes, crate::file_hooks::OS_HOOKS)
 }
@@ -117,28 +100,19 @@ pub fn write_config(
 ) -> std::io::Result<PathBuf> {
     let path = config_path(mcp_dir, id, epoch);
     write_attached(&path, render_config(url, token).as_bytes())?;
-    tracing::info!(agent = %id, epoch, path = %path.display(), "mcp-config 기록(ADR-0086)");
+    tracing::info!(agent = %id, epoch, path = %path.display(), "mcp-config written (ADR-0086)");
     Ok(path)
 }
 
-/// ★Why the **same folder** as mcp-config (load-bearing — single lifetime management)★: this fragment has exactly
-///   the same lifetime as mcp-config (it appears at provision and vanishes at revoke for the same (id,epoch)). Creating a dedicated folder would make
-///   ① revoke ② boot sweep ③ data directory convention each exist in two copies, and if only one side is updated, fragment files pile up
-///   forever. Using the same folder means **the existing boot sweep (`sweep_stale_configs`) deletes all files in the folder**, so
-///   cleanup follows with no extra sweep code. The file name suffix (`.settings.json`) tells it apart from mcp-config (`.json`).
+/// ★Why the same folder as mcp-config (load-bearing — single lifetime management)★: the fragment has exactly mcp-config's lifetime (appears at provision, vanishes at revoke for the same (id,epoch)). A dedicated folder would duplicate ① revoke ② boot sweep ③ data directory convention, and updating only one side piles up fragment files forever. In the same folder the existing boot sweep (`sweep_stale_configs`) deletes everything, so cleanup follows with no extra code. The suffix `.settings.json` tells it from mcp-config (`.json`).
 pub fn settings_path(mcp_dir: &McpDir, id: AgentId, epoch: u32) -> PathBuf {
     mcp_dir.0.join(format!("{id}-{epoch}.settings.json"))
 }
 
-/// ★Content = `{"allowedMcpServers":[{"serverName":"engram"}]}` (spec §6)★. This reverses, **for this session only**, the problem (measured 2026-07-24) where the user's global setting
-///   `allowedMcpServers: []` (block everything) also applies to the spawned agent and the engram MCP server vanishes from the tool list.
-///   The global file is not touched.
-/// ★Minimal fragment principle (load-bearing)★: **do not put any other setting into this file**. `--settings` is a
-///   high-priority layer in the settings hierarchy (user → project → local → `--settings` → managed), so a key put here quietly
-///   overrides the user's project/local settings. So we carry only the one key we absolutely need — if this file
-///   became a "miscellaneous spawn settings" drawer it would intrude on user settings (once the settings IR layer arrives, it becomes the authority).
+/// ★Content = `{"allowedMcpServers":[{"serverName":"engram"}]}` (spec §6)★. Reverses, for this session only, the case where the user's global `allowedMcpServers: []` (block everything) also applies to the spawned agent and the engram MCP server vanishes from the tool list. The global file is not touched.
+/// ★Minimal fragment principle (load-bearing)★: put no other setting in this file. `--settings` is a high-priority layer (user → project → local → `--settings` → managed), so any key here quietly overrides the user's project/local settings. A "miscellaneous spawn settings" drawer would intrude on user settings (once the settings IR layer arrives, it becomes the authority).
 // ADR-0103 (spec §6 allowedMcpServers countermeasure)
-// ADR-0109 (--settings fragment — keep a single key · file injection)
+// ADR-0109 (--settings fragment — one key · file injection)
 pub fn render_settings() -> String {
     #[derive(serde::Serialize)]
     struct Root<'a> {
@@ -161,49 +135,45 @@ pub fn render_settings() -> String {
 pub fn write_settings(mcp_dir: &McpDir, id: AgentId, epoch: u32) -> std::io::Result<PathBuf> {
     let path = settings_path(mcp_dir, id, epoch);
     write_attached(&path, render_settings().as_bytes())?;
-    tracing::info!(agent = %id, epoch, path = %path.display(), "세션 설정 조각 기록(spec §6)");
+    tracing::info!(agent = %id, epoch, path = %path.display(), "session settings fragment written (spec §6)");
     Ok(path)
 }
 
-/// A delete failure does not block provision/revoke — this file holds no secret, and the next boot sweep sweeps it up anyway.
+/// A delete failure does not block provision/revoke — this file holds no secret, and the next boot sweep removes it.
 pub fn remove_settings(mcp_dir: &McpDir, id: AgentId, epoch: u32) {
     let path = settings_path(mcp_dir, id, epoch);
     match std::fs::remove_file(&path) {
-        Ok(()) => tracing::info!(agent = %id, epoch, "세션 설정 조각 삭제"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // idempotent no-op
-        Err(e) => tracing::warn!(agent = %id, epoch, "세션 설정 조각 삭제 실패(무시): {e}"),
-    }
-}
-
-/// ★A delete failure does not block provision (why it is harmless — FIX 5)★: even if deleting the file fails, only a warn is left and
-///   we proceed. That leftover file is **inert** — the token inside it was already evicted by registry.revoke
-///   (validate returns None → 401), so even if the file stays on disk no agent can authenticate with that token.
-///   That is, the remaining file is merely a dead credential (a string that is no longer valid) and opens no security window. The next
-///   boot's boot sweep sweeps it up anyway (the registry starts empty on every boot → every existing file is dead).
-pub fn remove_config(mcp_dir: &McpDir, id: AgentId, epoch: u32) {
-    let path = config_path(mcp_dir, id, epoch);
-    match std::fs::remove_file(&path) {
-        Ok(()) => tracing::info!(agent = %id, epoch, "mcp-config 삭제(ADR-0086)"),
+        Ok(()) => tracing::info!(agent = %id, epoch, "session settings fragment deleted"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // idempotent no-op
         Err(e) => {
-            tracing::warn!(agent = %id, epoch, "mcp-config 삭제 실패(무시 — 파일은 inert): {e}")
+            tracing::warn!(agent = %id, epoch, "session settings fragment delete failed (ignored): {e}")
         }
     }
 }
 
-/// ★Boot sweep (FIX 5)★: a daemon crash or a failure before session registration can leave stale files alive. To avoid leaving plaintext-token
-/// files on disk, clean up in bulk at boot. A failure to delete an individual file leaves only a warn and
-/// continues (the next boot retries — a cleanup failure does not block daemon startup).
+/// ★A delete failure does not block provision (harmless — FIX 5)★: only a warn is left. The leftover file is inert — its token was already evicted by registry.revoke (validate returns None → 401), so it is a dead credential and opens no security window. The next boot sweep removes it (the registry starts empty every boot → every existing file is dead).
+pub fn remove_config(mcp_dir: &McpDir, id: AgentId, epoch: u32) {
+    let path = config_path(mcp_dir, id, epoch);
+    match std::fs::remove_file(&path) {
+        Ok(()) => tracing::info!(agent = %id, epoch, "mcp-config deleted (ADR-0086)"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // idempotent no-op
+        Err(e) => {
+            tracing::warn!(agent = %id, epoch, "mcp-config delete failed (ignored — the file is inert): {e}")
+        }
+    }
+}
+
+/// ★Boot sweep (FIX 5)★: a daemon crash or a failure before session registration can leave stale plaintext-token files, so clean up in bulk at boot. An individual delete failure only warns and continues (the next boot retries — cleanup failure does not block startup).
 pub fn sweep_stale_configs(mcp_dir: &McpDir) {
     let dir = mcp_dir.as_path();
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        // On the first boot the folder itself does not exist — there is nothing to clean.
+        // On the first boot the folder does not exist — nothing to clean.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(e) => {
             tracing::warn!(
                 dir = %dir.display(),
-                "부팅 스윕 미실행 — stale 평문 토큰 파일이 디스크에 남아 있을 수 있다: {e}"
+                "boot sweep not run — stale plaintext token files may remain on disk: {e}"
             );
             return;
         }
@@ -217,14 +187,14 @@ pub fn sweep_stale_configs(mcp_dir: &McpDir) {
         match std::fs::remove_file(&path) {
             Ok(()) => removed += 1,
             Err(e) => {
-                tracing::warn!(path = %path.display(), "부팅 스윕: stale 스폰 부착 파일 삭제 실패(계속): {e}")
+                tracing::warn!(path = %path.display(), "boot sweep: failed to delete a stale spawn attachment file (continuing): {e}")
             }
         }
     }
     if removed > 0 {
         tracing::info!(
             count = removed,
-            "부팅 스윕: stale 스폰 부착 파일 청소(mcp-config + 세션 설정 조각, ADR-0086)"
+            "boot sweep: cleaned stale spawn attachment files (mcp-config + session settings fragment, ADR-0086)"
         );
     }
 }
@@ -244,7 +214,7 @@ mod tests {
         );
         assert_eq!(
             v["mcpServers"]["engram"]["headers"]["Authorization"], "Bearer abc123",
-            "Authorization 헤더는 'Bearer <token>' 형식"
+            "the Authorization header has the form 'Bearer <token>'"
         );
     }
 
@@ -253,12 +223,15 @@ mod tests {
         let id = AgentId::new_v4();
         let p = config_path(&McpDir::new("C:/data/mcp"), id, 2);
         let s = p.to_string_lossy();
-        assert!(s.contains(&id.to_string()), "경로에 agent id 포함");
-        assert!(s.ends_with("-2.json"), "경로에 epoch 포함: {s}");
+        assert!(
+            s.contains(&id.to_string()),
+            "the path contains the agent id"
+        );
+        assert!(s.ends_with("-2.json"), "the path contains the epoch: {s}");
         assert_eq!(
             p.parent(),
             Some(Path::new("C:/data/mcp")),
-            "받은 폴더 바로 안"
+            "directly inside the given folder"
         );
     }
 
@@ -269,16 +242,16 @@ mod tests {
         let id = AgentId::new_v4();
         let path = write_config(&dir, id, 0, "http://127.0.0.1:6000/mcp", "tok-xyz")
             .expect("write config");
-        assert!(path.exists(), "파일이 생성돼야 함");
+        assert!(path.exists(), "the file must be created");
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("Bearer tok-xyz"));
         remove_config(&dir, id, 0);
-        assert!(!path.exists(), "revoke 시 파일이 지워져야 함");
+        assert!(!path.exists(), "revoke must delete the file");
         remove_config(&dir, id, 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A new data root has no folder yet — the write must create up to the root for the first spawn to stand (ADR-0291 R11).
+    /// A new data root has no folder yet — the write must create up to the root for the first spawn (ADR-0291 R11).
     #[test]
     fn writes_into_a_folder_that_does_not_exist_yet() {
         let root = std::env::temp_dir().join(format!("engram-mcpcfg-fresh-{}", AgentId::new_v4()));
@@ -291,11 +264,11 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(names.len(), 2, "임시 파일이 남았다: {names:?}");
+        assert_eq!(names.len(), 2, "a temp file was left behind: {names:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Atomic-write temp files left by a power-off (a token may have been loaded in them) are also swept up by the boot sweep.
+    /// Atomic-write temp files left by a power-off (a token may be in them) are also swept by the boot sweep.
     #[test]
     fn boot_sweep_collects_a_leftover_atomic_write_temp() {
         let root = std::env::temp_dir().join(format!("engram-mcpcfg-tmp-{}", AgentId::new_v4()));
@@ -307,7 +280,10 @@ mod tests {
             .join(format!("{id}-0.json.tmp{}.0", std::process::id()));
         std::fs::write(&temp, "Bearer tok-leftover").unwrap();
         sweep_stale_configs(&dir);
-        assert!(!temp.exists(), "토큰이 실린 임시 파일이 남았다");
+        assert!(
+            !temp.exists(),
+            "a temp file carrying the token was left behind"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -316,16 +292,16 @@ mod tests {
     fn render_settings_allows_exactly_the_engram_server() {
         let s = render_settings();
         let v: serde_json::Value = serde_json::from_str(&s).expect("valid JSON");
-        let arr = v["allowedMcpServers"].as_array().expect("배열");
-        assert_eq!(arr.len(), 1, "허용 목록은 engram 하나뿐: {s}");
+        let arr = v["allowedMcpServers"].as_array().expect("array");
+        assert_eq!(arr.len(), 1, "the allow list is engram alone: {s}");
         assert_eq!(
             arr[0]["serverName"], MCP_SERVER_NAME,
-            "서버 이름은 mcp-config 키와 같은 단일 출처여야(갈리면 허용이 무력): {s}"
+            "the server name must be the same single source as the mcp-config key (if they diverge, the allow is powerless): {s}"
         );
         assert_eq!(
             v.as_object().map(|o| o.len()),
             Some(1),
-            "조각엔 allowedMcpServers 하나만: {s}"
+            "the fragment has only allowedMcpServers: {s}"
         );
     }
 
@@ -335,11 +311,14 @@ mod tests {
         let dir = McpDir::new("C:/data/mcp");
         let cfg = config_path(&dir, id, 3);
         let set = settings_path(&dir, id, 3);
-        assert_ne!(cfg, set, "두 파일은 서로 다른 이름이어야(덮어쓰기 금지)");
+        assert_ne!(
+            cfg, set,
+            "the two files must have different names (no overwrite)"
+        );
         assert_eq!(
             cfg.parent(),
             set.parent(),
-            "같은 폴더 = 기존 부팅 스윕/삭제 경로 재사용(수명 관리 단일화)"
+            "same folder = reuses the existing boot sweep/delete path (single lifecycle management)"
         );
         assert!(set.to_string_lossy().ends_with("-3.settings.json"));
     }
@@ -352,13 +331,16 @@ mod tests {
         let path = write_settings(&dir, id, 0).expect("write settings");
         assert!(path.exists());
         remove_settings(&dir, id, 0);
-        assert!(!path.exists(), "revoke 시 삭제");
+        assert!(!path.exists(), "deleted on revoke");
         remove_settings(&dir, id, 0); // idempotent
 
         let path = write_settings(&dir, id, 1).expect("write settings again");
         assert!(path.exists());
         sweep_stale_configs(&dir);
-        assert!(!path.exists(), "부팅 스윕이 설정 조각도 청소");
+        assert!(
+            !path.exists(),
+            "the boot sweep cleans the settings fragment too"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

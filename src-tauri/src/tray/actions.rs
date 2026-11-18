@@ -1,10 +1,9 @@
-//! tray actions — side-effect functions that the tray handler and the Tauri command **share** (impure: depends on Tauri/discovery).
+//! Tray actions — side-effect functions the tray handler and the Tauri command share (impure: Tauri/discovery).
 //!
-//! ## Why this module is separate (CLAUDE.md 「LLM-우선 제어」 — load-bearing)
-//! The native tray popup is not a WebView DOM, so cdp cannot click it directly. So a tray menu click and
-//! an LLM/cdp invoke are made to call the **same internal function** (here), so the two operating parties share the same behavior.
-//! Both the tray handler (mod.rs on_menu_event) and the command (commands/tray.rs) call only these functions —
-//! no duplicating behavior logic. Separate from core.rs (pure decisions): this one touches real windows/icons/the daemon (impure).
+// hangul-ok-begin
+//! ## Why this module is separate (CLAUDE.md 「LLM-우선 제어」)
+// hangul-ok-end
+//! The native tray popup is not a WebView DOM, so cdp cannot click it; a tray menu click and an LLM/cdp invoke therefore call the same internal function (here). Both the tray handler (mod.rs `on_menu_event`) and the command (commands/tray.rs) call only these functions — no duplicated behavior logic. Separate from core.rs (pure decisions): this one touches real windows/icons/the daemon.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,46 +25,26 @@ use crate::layout::{LayoutState, MAIN_WINDOW_LABEL};
 use crate::spare::pool::TrayShow;
 use crate::spare::SpareState;
 
-// The tray icon id (given to the builder, looked up again with tray_by_id). A single tray, so a fixed string.
 pub const TRAY_ID: &str = "engram-main-tray";
 
-// The single-owner state of the daemon liveness push (ADR-0028 single channel). Every source (observer probe · turn-on · turn-off) enters through
-// [`publish_daemon_liveness`] and is compared with `last` here → tray + emit only on change.
-//
-// ★Why unify into manage state (M-1 — load-bearing)★: previously the observer (periodic probe) and the turn-off immediate confirmation
-// (StopOutcome::DaemonClosed → set gray directly) **did not share state**, so there was a race — after clicking turn-off,
-// in the death-window while the daemon was still dying (between connection closed and process exit), the observer probed alive=true
-// in that window and turned the icon just set gray back to color (S13 race recurred). Now all liveness
-// sources converge on this single entry point, and turn-off sets a suppression window with [`force_daemon_down`] to close that race.
+// Single-owner state of the daemon liveness push (ADR-0028 single channel). Every source (observer probe · turn-on · turn-off) enters through [`publish_daemon_liveness`] and is compared with `last` → tray + emit only on change.
+// Liveness is shared manage state (M-1): were the observer (periodic probe) and the turn-off immediate confirmation (`StopOutcome::DaemonClosed` → set gray directly) not to share it, the observer could probe alive=true while the daemon is still dying and turn the just-set gray icon back to color (S13 race). All sources converge on one entry point, and turn-off sets a suppression window with [`force_daemon_down`].
 #[derive(Default)]
 pub struct LivenessState {
-    // The alive value pushed last (None = never pushed yet). The basis for change detection.
     last: Mutex<Option<bool>>,
-    // None = no suppression. Some(t) = ignore alive=true probes while now<t.
     suppress_alive_until: Mutex<Option<Instant>>,
 }
 
-// The death-window suppression time right after turn-off. The margin until the daemon closes the connection and actually exits — set to the same 5 seconds as discovery's
-// stop polling timeout, so that even if a probe reports a false alive within it, it is ignored.
+// Death-window suppression right after turn-off: the margin until the daemon closes the connection and exits, equal to discovery's stop polling timeout (5 s), so a false alive probe inside it is ignored.
 const STOP_GRACE: Duration = Duration::from_secs(5);
 
-// Keeps the handle of the "부팅 시 자동 시작" (start automatically at boot) CheckMenuItem (ADR-0027 §55).
-//
-// ★Why hold the handle in manage (load-bearing)★: after a toggle the check mark must be updated at once with set_checked, but
-// without the CheckMenuItem handle there is no update target. Re-looking it up by tray.menu() → id needs a cumbersome MenuItem
-// downcast (CheckMenuItem), so the handle build_tray made is kept as state as is and set_checked is called on it directly.
+// Keeps the handle of the "start automatically at boot" CheckMenuItem (ADR-0027 §55): after a toggle the check mark must update at once with `set_checked`, which needs the handle; re-looking it up via tray.menu() → id needs a cumbersome MenuItem downcast, so the handle `build_tray` made is kept as state.
 pub struct AutostartCheck(pub CheckMenuItem<Wry>);
 
-// Bring back all of main and the popout windows — hidden windows are shown and minimized windows are unminimized. `main` remains in the name because the command of the same name
-// is the LLM control surface — changing the name changes the surface. There are two branches (TRD S26-window-chrome §6-2 — which is which
-// branch is in the `Activation` docs):
-// - Click (`TrayClick`) — even windows that were already up are raised above other apps, and focus goes last to main, so main is on top and the popouts come right
-//   below it. A window that was waiting for first paint also has that wait withdrawn and is shown (it is a show a person pressed — §2-4 invariant 5).
-// - Not stealing focus (`NoSteal`) — [`show_main_ui_no_steal`].
-// ★`NoSteal` is called only from the main thread★ — that branch calls a raw Win32 raise (`SetWindowPos` inside `raise_without_activation`).
-//   Bus · invoke come in as main-thread work of `commands::window_ctl::TauriWindowControl`.
-// Even if one window fails (a popout closed after the list was taken, etc.), the rest and main keep being processed — do not cut it off with `?`.
-// Windows of the prewarmed-window pool are not shown in either branch — only a window that left the pool by adoption in the meantime is shown like a normal window ([`show_ui_windows`]).
+// Bring back all of main and the popout windows — hidden windows shown, minimized ones unminimized. `main` stays in the name because the same-named command is the LLM control surface; renaming changes the surface. Two branches (TRD S26-window-chrome §6-2; see the `Activation` docs):
+// - Click (`TrayClick`): windows already up are also raised above other apps, focus goes last to main so main is on top and the popouts right below. A window waiting for first paint has that wait withdrawn and is shown (a person pressed it — §2-4 invariant 5).
+// - Not stealing focus (`NoSteal`): [`show_main_ui_no_steal`]. Call it only from the main thread — it makes a raw Win32 raise (`SetWindowPos` in `raise_without_activation`); bus · invoke come in as main-thread work of `commands::window_ctl::TauriWindowControl`.
+// A failure on one window (e.g. a popout closed after the list was taken) must not stop the rest and main — no `?`. Prewarm pool windows are shown in neither branch; only one that left the pool by adoption in the meantime is shown like a normal window ([`show_ui_windows`]).
 // ADR-0229 · ADR-0299 · ADR-0302
 pub(crate) fn show_main_ui(app: &AppHandle, how: Activation) {
     match how {
@@ -74,15 +53,10 @@ pub(crate) fn show_main_ui(app: &AppHandle, how: Activation) {
     }
 }
 
-// ★The order show()→unminimize()→apply the desire→set_focus() per window is load-bearing★:
-// - show → unminimize → set_focus (Windows focus-stealing) — in any other order, from hidden/minimized you may get only a taskbar flash
-//   and the window may not actually come up (TRD §4).
-// - Applying the desire comes after unminimize — put before it, a minimized window loses its original-size desire (`apply_deferred_maximize` header ·
-//   TRD S26-window-chrome §6-2).
-// ★The order between windows (main last) is also load-bearing★: all four activate the window (tao 0.35 Windows = `SW_SHOW` ·
-//   `SW_RESTORE` · `SW_MAXIMIZE`/`SW_RESTORE` of applying the desire · `SetForegroundWindow`), so if anything is done after main, that window takes
-//   focus. The order is decided by
-//   [`core::ui_windows`].
+// The per-window order show()→unminimize()→apply the desire→set_focus() is load-bearing:
+// - show → unminimize → set_focus (Windows focus-stealing): any other order may yield only a taskbar flash from hidden/minimized, with the window not actually up (TRD §4).
+// - Applying the desire comes after unminimize — before it, a minimized window loses its original-size desire (`apply_deferred_maximize` header · TRD S26-window-chrome §6-2).
+// The between-window order (main last) is load-bearing too: all four activate the window (tao 0.35 Windows = `SW_SHOW` · `SW_RESTORE` · `SW_MAXIMIZE`/`SW_RESTORE` of applying the desire · `SetForegroundWindow`), so anything done after main takes the focus from it. Order: [`core::ui_windows`].
 // ADR-0229 · ADR-0299
 fn show_main_ui_on_click(app: &AppHandle) {
     let windows = app.webview_windows();
@@ -90,8 +64,7 @@ fn show_main_ui_on_click(app: &AppHandle) {
         let Some(w) = windows.get(label) else {
             return false;
         };
-        // If the window was waiting for first paint, withdraw that raise — this show ends that wait (the same path as hide). If left,
-        //   a notification · time limit that comes later would show the already-shown window once more outside this order (`crate::first_paint`).
+        // If the window was waiting for first paint, withdraw that raise — this show ends the wait (same path as hide); left, a later notification · time limit would show the already-shown window again outside this order (`crate::first_paint`).
         crate::first_paint::cancel_hold(app, label);
         let _ = w.show();
         let _ = w.unminimize();
@@ -110,13 +83,8 @@ fn show_main_ui_on_click(app: &AppHandle) {
     });
 }
 
-/// Show all windows without stealing focus (`Activation::NoSteal` — TRD S26-window-chrome §6-2) — in the same window order as the click branch
-/// (skip prewarmed windows · prewarmed windows that left the pool first · main last), it is `window_ctl::show_one_no_steal` per window: windows waiting
-/// for first paint are skipped (§2-4 invariant 5 — that window's first-paint gate will show it soon), and it raises to the top without activation, shows · unminimizes · applies the recorded
-/// maximize desire. Focus is given only to main, and only when our process already holds the foreground.
-///
-/// ★Call it from the main thread★ — `ops` calls a raw Win32 raise, and the per-window wait decision · show must not
-/// interleave with the first-paint show (§5-2). Bus · invoke call it as main-thread work of `commands::window_ctl::TauriWindowControl`.
+/// Show all windows without stealing focus (`Activation::NoSteal` — TRD S26-window-chrome §6-2): the click branch's window order (skip prewarmed windows · pool-leavers first · main last), `window_ctl::show_one_no_steal` per window — windows waiting for first paint are skipped (§2-4 invariant 5; their first-paint gate shows them), others are raised without activation, shown, unminimized, with the recorded maximize desire applied. Focus goes only to main, and only when our process already holds the foreground.
+/// Call from the main thread: `ops` makes a raw Win32 raise, and the per-window wait decision · show must not interleave with the first-paint show (§5-2). Bus · invoke call it as main-thread work of `commands::window_ctl::TauriWindowControl`.
 // ADR-0299
 pub(crate) fn show_main_ui_no_steal(app: &AppHandle, ops: &dyn WindowOps) {
     let windows = app.webview_windows();
@@ -148,14 +116,9 @@ fn tray_show(app: &AppHandle, label: &str) -> TrayShow {
         .map_or(TrayShow::Untouched, |spare| spare.on_tray_show(label))
 }
 
-// The order of the tray show — run [`for_each_ui_window`] as a show, and for each label skipped by the prewarmed-window predicate (`spare`), ask the pool
-// (`tray_show` — production = `SpareState::on_tray_show`). Only a window that left the pool by adoption after the predicate decision (`Adopted`) is shown with the same `show` as other windows,
-// and a handed-over window (`Rehold` — the pool re-applies the raise so adoption ③ shows it) and a prewarmed window not handed over (`Untouched`) are
-// not shown — showing them would reveal a frame with no content.
-// ★`Adopted` is shown before the windows whose order was decided★ — if shown after, its focus steals main's last focus.
-// ★`tray_show` must return after releasing the pool lock★ — right after, usage interest takes the layout lock (order = layout → pool) and calls the
-//   window (no window call while holding the pool lock — `SpareState`).
-// (TRD S21-slot-docking §3-9 「숨어 있기」)
+// The order of the tray show — run [`for_each_ui_window`] as a show, and for each label the prewarm predicate skipped (`spare`) ask the pool (`tray_show` — production = `SpareState::on_tray_show`). Only a window that left the pool by adoption after the predicate decision (`Adopted`) is shown with the same `show`; a handed-over window (`Rehold` — the pool re-applies the raise so adoption ③ shows it) and a not-handed-over prewarmed window (`Untouched`) are not shown — that would reveal a frame with no content.
+// `Adopted` is shown before the windows whose order was decided — after them its focus would steal main's last focus. `tray_show` must return after releasing the pool lock: right after, usage interest takes the layout lock (order layout → pool) and calls the window (no window call while holding the pool lock — `SpareState`).
+// (TRD S21-slot-docking §3-9 「staying hidden」)
 // ADR-0299
 fn show_ui_windows<'a>(
     labels: impl IntoIterator<Item = &'a str>,
@@ -181,8 +144,7 @@ fn show_ui_windows<'a>(
     );
 }
 
-// Hide all of main and the popout windows (not destruction — the WebView stays resident, and [`show_main_ui`] brings it back). Main's X also
-// comes here. The targets are the same as [`show_main_ui`] — if show cannot bring a hidden window back, there is no way to get it back.
+// Hide all of main and the popout windows (not destruction — the WebView stays resident and [`show_main_ui`] brings it back). Main's X comes here too. Targets equal [`show_main_ui`]'s — a hidden window show cannot bring back could never be recovered.
 // ADR-0229 · ADR-0299
 pub fn hide_main_ui(app: &AppHandle) {
     let windows = app.webview_windows();
@@ -196,15 +158,14 @@ pub fn hide_main_ui(app: &AppHandle) {
                 let Some(w) = windows.get(label) else {
                     return false;
                 };
-                // If the window was waiting for first paint, withdraw that raise — a notification · time limit that comes after hiding would show that window again
-                //   (`crate::first_paint`). It is withdrawn even if hiding fails — it is a window that was asked to hide.
+                // If the window was waiting for first paint, withdraw that raise — a notification · time limit after hiding would show it again (`crate::first_paint`). Withdrawn even if hiding fails: it was asked to hide.
                 crate::first_paint::cancel_hold(app, label);
                 match w.hide() {
                     Ok(()) => true,
                     Err(e) => {
                         tracing::warn!(
                             label,
-                            "[tray] 창 숨기기 실패 — 사용량 관심에서 빼지 않는다: {e}"
+                            "[tray] failed to hide the window — not removing it from usage interest: {e}"
                         );
                         false
                     }
@@ -215,11 +176,8 @@ pub fn hide_main_ui(app: &AppHandle) {
     });
 }
 
-// The order of the tray hide — after running [`for_each_ui_window`] as a hide, withdraw the raise of all popout labels regardless of the prewarmed-window
-// predicate (`cancel_hold` — a no-op for a label with no raise). That order does not call `hide` on windows skipped by the predicate (including a handed-over prewarmed window), so
-// if the raise set at hand-over stays, adoption ③ would show that window over the hidden UI.
-// ★Do not ask the pool again just to pick out the skipped ones★ — it races with adoption ① ([`for_each_ui_window`]). Put it after the order, so the raise of a window handed over
-//   while the order was running is also withdrawn (TRD S21-slot-docking §3-9 「숨어 있기」).
+// The order of the tray hide — after running [`for_each_ui_window`] as a hide, withdraw the raise of all popout labels regardless of the prewarm predicate (`cancel_hold` — no-op for a label with no raise): that order never calls `hide` on predicate-skipped windows (a handed-over prewarmed window included), so a raise set at hand-over would make adoption ③ show that window over the hidden UI.
+// Do not ask the pool again to pick out the skipped ones — it races with adoption ① ([`for_each_ui_window`]). Placed after the order, so the raise of a window handed over while it ran is withdrawn too (TRD S21-slot-docking §3-9 「staying hidden」).
 // ADR-0299
 fn hide_ui_windows<'a>(
     labels: &[&'a str],
@@ -234,14 +192,11 @@ fn hide_ui_windows<'a>(
     }
 }
 
-/// The spot that tells usage interest when tray show·hide changes one window's visibility (ADR-0012 seam — production =
-/// [`LayoutUsageVisibility`], test = recording type). The usage slot of a hidden window drops out of interest (TRD S21 usage-limit-slot
-/// §1-7 「숨김」).
+/// Tells usage interest when tray show·hide changes one window's visibility (ADR-0012 seam — production = [`LayoutUsageVisibility`], test = recording type). A hidden window's usage slot drops out of interest (TRD S21 usage-limit-slot §1-7 「hidden」).
 pub(crate) trait UsageVisibility {
     fn set_visible(&self, label: &str, visible: bool);
 }
 
-/// Production implementation — per window, takes the ViewManager lock **briefly** and recomputes only usage interest inside it.
 pub(crate) struct LayoutUsageVisibility<'a> {
     pub state: &'a LayoutState,
     pub client: &'a DaemonClient,
@@ -253,7 +208,7 @@ impl UsageVisibility for LayoutUsageVisibility<'_> {
             tracing::warn!(
                 label,
                 visible,
-                "[tray] 레이아웃 락 오염 — 사용량 관심 재계산 스킵"
+                "[tray] layout lock poisoned — skipping usage interest recount"
             );
             return;
         };
@@ -261,7 +216,6 @@ impl UsageVisibility for LayoutUsageVisibility<'_> {
     }
 }
 
-// An assembly where client creation failed (`lib.rs` setup — the app keeps coming up) has no usage interest — it handles only windows.
 struct NoUsageVisibility;
 
 impl UsageVisibility for NoUsageVisibility {
@@ -281,17 +235,9 @@ pub(crate) fn with_usage_visibility(app: &AppHandle, run: impl FnOnce(&dyn Usage
     }
 }
 
-// For each window the tray will handle ([`core::ui_windows`] order), handle the OS window (`os` — `true` = applied to that window) and tell usage interest
-// the visibility. A window that is `spare` (a window of the spare-window pool — TRD S21-slot-docking §3-9) is not handled — that window waits
-// hidden, so the show reveals it. A label skipped that way is received by `skipped` — exactly once, after filtering · before the first `os` call
-// (even if nothing was skipped). ★`spare` is asked only once per popout label and that decision is passed to `skipped`★ — if the caller
-// asks the pool again, that question races with adoption ① and a label handled by neither side can arise.
-// ★The order differs by direction — toward the side that is safe even if wrong★:
-// - Show = interest first · OS after. Even if the show fails, the only remaining cost is a lookup for a window that is not visible.
-// - Hide = OS first · only hidden windows are removed from interest. If a failed hide were removed, the value of a **visible** window would stall.
-// ★`os` is called outside the lock★ — the production implementation's ViewManager lock is taken and released within a single `set_visible`. This function
-//   also runs off the main thread (`state::placement::TauriRestoreWindows::set_shown`), and putting OS window calls inside that lock carries the same
-//   deadlock risk as the window-host port (`WindowHost` doc of `layout::apply`).
+// For each window the tray will handle ([`core::ui_windows`] order): handle the OS window (`os` — `true` = applied) and tell usage interest the visibility. A `spare` window (spare pool — TRD S21-slot-docking §3-9) is not handled — it waits hidden, so the show reveals it. Skipped labels go to `skipped` exactly once, after filtering and before the first `os` call (even if nothing was skipped). `spare` is asked once per popout label and that decision passed to `skipped` — a caller asking the pool again races with adoption ① and a label could be handled by neither side.
+// Order differs by direction — toward the side safe if wrong: show = interest first, OS after (a failed show costs only a lookup for an invisible window); hide = OS first, only hidden windows removed from interest (a failed hide removed from interest would stall a visible window's value).
+// `os` is called outside the lock: the production implementation's ViewManager lock is taken and released within a single `set_visible`. This function also runs off the main thread (`state::placement::TauriRestoreWindows::set_shown`), and OS calls inside that lock risk the same deadlock as the window-host port (`WindowHost` doc of `layout::apply`).
 // ADR-0295 · ADR-0299
 pub(crate) fn for_each_ui_window<'a>(
     labels: impl IntoIterator<Item = &'a str>,
@@ -315,11 +261,7 @@ pub(crate) fn for_each_ui_window<'a>(
     }
 }
 
-// Quit the whole app — stop the daemon on the one stop path's `Exit` plan, then exit whatever the outcome (ADR-0026).
-//
-// `Exit` waits at most 4 s on this thread and never kills (TRD S21 trd-3-2-u5 §3-3): the daemon is detached and outlives
-// the app if the stop does not land (ADR-0024). The stop runs on the daemon client's runtime, which is the only runtime
-// the shell owns — with no client (setup failed to build it) there is no stop, only the exit (R10).
+// Quit the whole app — stop the daemon on the one stop path's `Exit` plan, then exit whatever the outcome (ADR-0026). `Exit` waits at most 4 s on this thread and never kills (TRD S21 trd-3-2-u5 §3-3): the daemon is detached and outlives the app if the stop does not land (ADR-0024). The stop runs on the daemon client's runtime, the only runtime the shell owns — with no client (setup failed to build it) there is no stop, only the exit (R10).
 pub fn quit_app(app: &AppHandle) {
     let client = app.try_state::<Arc<DaemonClient>>();
     stop_before_exit(
@@ -330,13 +272,9 @@ pub fn quit_app(app: &AppHandle) {
     app.exit(0);
 }
 
-/// What the tray's daemon on / off and quit ask of the daemon client — a seam so their order is tested without a
-/// runtime or a daemon (ADR-0012). The real one is the `Arc<DaemonClient>` impl; each call blocks or fires as the
-/// [`DaemonClient`] method it names.
+/// What the tray's daemon on / off and quit ask of the daemon client — a seam so their order is tested without a runtime or a daemon (ADR-0012); the real one is the `Arc<DaemonClient>` impl, each call blocking or firing as the [`DaemonClient`] method it names.
 pub(crate) trait TrayDaemonClient {
-    /// [`DaemonClient::stop_daemon_blocking`].
     fn stop(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome;
-    /// [`DaemonClient::ensure_in_background`].
     fn attach_in_background(&self);
 }
 
@@ -361,33 +299,19 @@ fn stop_before_exit(client: Option<&dyn TrayDaemonClient>) -> Option<StopOutcome
     Some(outcome)
 }
 
-// Probe daemon alive and feed it into the single publish entry point ([`publish_daemon_liveness`]).
-//
-// ★Unified through publish (ADR-0028 single channel — load-bearing)★: it used to call set_icon directly here, but
-// now it passes the probe result to publish, which handles **duplicate blocking (set only on change) · emit · suppression-window decision** in one place.
-// That way all liveness sources — observer · turn-on · turn-off — pass through the same gate (LivenessState), and the M-1 race and
-// the emit asymmetry (m-2) are gone.
-//
-// daemon_status is a daemon.json + PID liveness decision (fast, non-blocking level). Periodic detection of external/crash death
-// is the observer's job (spawn_daemon_observer) — this is for updates right after an action · at the initial setup.
+// Probe daemon alive and feed the single publish entry point ([`publish_daemon_liveness`]), which does duplicate blocking (set only on change) · emit · suppression-window decision in one place (ADR-0028), so observer · turn-on · turn-off pass the same gate (LivenessState). `daemon_status` is a daemon.json + PID liveness decision (fast, non-blocking); periodic detection of external/crash death is the observer's job (`spawn_daemon_observer`) — this is for updates right after an action · initial setup.
 pub fn refresh_tray_icon(app: &AppHandle) {
     let data_dir = crate::discovery::default_data_dir();
     let alive = crate::discovery::daemon_status(&data_dir).alive;
     publish_daemon_liveness(app, alive);
 }
 
-// Daemon liveness single publish — only on change, tray set_icon + emit("daemon-status-changed").
-//
-// ★During the suppression window, alive=true is ignored (blocks the M-1 race — load-bearing)★: inside the suppression window (suppress_alive_until),
-// alive=true is discarded. alive=false always passes through (turn-off confirmation — regardless of suppression).
-//
-// ★No set_icon/emit while holding the lock (ADR-0006 lock order)★: only the change decision · suppression decision are done inside the lock, and after
-// dropping the lock set_icon/emit (external calls · main-thread post) are called. set_icon itself is guaranteed on the main thread by
-// set_tray_icon_state with run_on_main_thread.
+// Daemon liveness single publish — only on change, tray `set_icon` + `emit("daemon-status-changed")`.
+// During the suppression window (`suppress_alive_until`) alive=true is discarded (blocks the M-1 race); alive=false always passes (turn-off confirmation).
+// No `set_icon`/emit while holding the lock (ADR-0006 lock order): only the change · suppression decisions run inside; after dropping it `set_icon`/emit (external calls · main-thread post) are called. `set_icon` itself is on the main thread via `set_tray_icon_state`'s `run_on_main_thread`.
 pub fn publish_daemon_liveness(app: &AppHandle, observed_alive: bool) {
     let st = app.state::<LivenessState>();
 
-    // Suppression-window decision: an alive=true report inside the death-window may be false, so ignore it (take the lock briefly and drop).
     if observed_alive {
         if let Some(until) = *st.suppress_alive_until.lock().unwrap() {
             if Instant::now() < until {
@@ -396,7 +320,6 @@ pub fn publish_daemon_liveness(app: &AppHandle, observed_alive: bool) {
         }
     }
 
-    // Change decision (lock briefly) → drop → side effects. If no change, skip both set_icon/emit.
     {
         let mut last = st.last.lock().unwrap();
         if *last == Some(observed_alive) {
@@ -407,17 +330,12 @@ pub fn publish_daemon_liveness(app: &AppHandle, observed_alive: bool) {
 
     set_tray_icon_state(app, core::icon_state_for(observed_alive));
     if let Err(e) = app.emit("daemon-status-changed", observed_alive) {
-        tracing::warn!("[tray] daemon-status-changed emit 실패: {e}");
+        tracing::warn!("[tray] daemon-status-changed emit failed: {e}");
     }
-    tracing::debug!(alive = observed_alive, "[tray] 데몬 생사 push");
+    tracing::debug!(alive = observed_alive, "[tray] daemon liveness push");
 }
 
-// Turn-off confirmation (StopOutcome::DaemonClosed) — force gray and set the death-window suppression window.
-//
-// ★Suppression window first, publish(false) after (M-1 — load-bearing)★: set suppress_alive_until first, then
-// confirm gray with publish(false). false passes regardless of the suppression decision (suppression
-// blocks only alive=true), so gray+emit goes out immediately, and for STOP_GRACE after that, the observer's false alive=true probe is discarded by publish
-// at the suppression window → the gray does not go back to color.
+// Turn-off confirmation (`StopOutcome::DaemonClosed`) — force gray and set the death-window suppression window. Suppression first, `publish(false)` after (M-1): set `suppress_alive_until`, then confirm gray with `publish(false)`; false passes regardless (suppression blocks only alive=true), so gray+emit goes out immediately and for STOP_GRACE the observer's false alive=true probe is discarded — the gray does not return to color.
 pub fn force_daemon_down(app: &AppHandle) {
     *app.state::<LivenessState>()
         .suppress_alive_until
@@ -426,18 +344,9 @@ pub fn force_daemon_down(app: &AppHandle) {
     publish_daemon_liveness(app, false); // false passes regardless of suppression → gray+emit, last=false
 }
 
-// Directly replace the tray icon with the given [`IconState`] (**no PID probe**).
-//
-// ★The probe-bypass path (load-bearing — prevents recurrence of the S13 race)★: `refresh_tray_icon` *queries* the state with
-// `daemon_status().alive` (PID probe = OpenProcess) and sets it, but this function sets the state the caller has
-// already confirmed as is. So the StopOutcome::DaemonClosed (confirmed off) path does not go through the probe and sets gray directly with this function.
-// General updates that need a probe use `refresh_tray_icon`.
-//
-// The set_icon main-thread guarantee is the same as `refresh_tray_icon` (run_on_main_thread). The two icon sets are
-// cloned from TrayIcons state (cheap — internal Cow/Arc).
+// Directly replace the tray icon with the given [`IconState`] (no PID probe). Probe-bypass path (prevents recurrence of the S13 race): `refresh_tray_icon` queries `daemon_status().alive` (PID probe = OpenProcess), while this sets the state the caller already confirmed — the `StopOutcome::DaemonClosed` path sets gray directly here. General updates needing a probe use `refresh_tray_icon`. The set_icon main-thread guarantee is the same (`run_on_main_thread`); both icon sets are cloned from TrayIcons state (cheap).
 pub fn set_tray_icon_state(app: &AppHandle, state: IconState) {
     let icons = app.state::<TrayIcons>();
-    // Image<'static> is an internal Cow — clone is cheap. Cloned in advance to move into the main-thread closure.
     let img = match state {
         IconState::Active => icons.active.clone(),
         IconState::Inactive => icons.inactive.clone(),
@@ -447,43 +356,37 @@ pub fn set_tray_icon_state(app: &AppHandle, state: IconState) {
     let set = move || {
         if let Some(tray) = app_main.tray_by_id(TRAY_ID) {
             if let Err(e) = tray.set_icon(Some(img)) {
-                tracing::warn!("[tray] set_icon 실패: {e}");
+                tracing::warn!("[tray] set_icon failed: {e}");
             }
         }
     };
-    // If already on the main thread, immediately; otherwise post to the main loop.
     if let Err(e) = app.run_on_main_thread(set) {
-        tracing::warn!("[tray] run_on_main_thread(set_icon) 실패: {e}");
+        tracing::warn!("[tray] run_on_main_thread(set_icon) failed: {e}");
     }
 }
 
-// Toggle "부팅 시 자동 시작" (start automatically at boot) (ADR-0027 §55) — read whether it is currently enabled, invert it (enable/disable), and
-// sync the CheckMenuItem check mark to the new state. Tray click · command (set_autostart) could share it,
-// but the command takes an explicit bool, so the toggle (invert) is a tray-only entry.
-//
-// Failures of is_enabled/enable/disable·set_checked are only warn (one failed toggle must not kill the app). If the update is
-// missed, the next click toggles again, so it is not stuck permanently.
+// Toggle "start automatically at boot" (ADR-0027 §55): read whether it is enabled, invert it (enable/disable), sync the CheckMenuItem check mark. The command (set_autostart) takes an explicit bool, so the invert toggle is tray-only. Failures of is_enabled/enable/disable·set_checked only warn (one failed toggle must not kill the app); a missed update is corrected by the next click.
 pub fn toggle_autostart(app: &AppHandle) {
     let mgr = app.autolaunch();
     let enabled = match mgr.is_enabled() {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("[tray] autostart is_enabled 실패(토글 취소): {e}");
+            tracing::warn!("[tray] autostart is_enabled failed (toggle cancelled): {e}");
             return;
         }
     };
     let result = if enabled { mgr.disable() } else { mgr.enable() };
     if let Err(e) = result {
-        tracing::warn!("[tray] autostart 토글(enable/disable) 실패: {e}");
+        tracing::warn!("[tray] autostart toggle (enable/disable) failed: {e}");
         return;
     }
     let new_state = !enabled;
     if let Some(check) = app.try_state::<AutostartCheck>() {
         if let Err(e) = check.0.set_checked(new_state) {
-            tracing::warn!("[tray] autostart CheckMenuItem set_checked 실패: {e}");
+            tracing::warn!("[tray] autostart CheckMenuItem set_checked failed: {e}");
         }
     }
-    tracing::info!(enabled = new_state, "[tray] 부팅 자동 시작 토글");
+    tracing::info!(enabled = new_state, "[tray] autostart toggled");
 }
 
 #[cfg(test)]
@@ -492,8 +395,7 @@ mod tests {
 
     use super::*;
 
-    // R10: without a client quit skips the stop; with one it stops through the real client from a blocking thread (an
-    // unconnected client finds no daemon to stop). The plan it picks is `quit_stops_on_the_exit_plan`'s.
+    // R10: without a client quit skips the stop; with one it stops through the real client from a blocking thread (an unconnected client finds no daemon to stop). The plan it picks is `quit_stops_on_the_exit_plan`'s.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quit_stops_through_the_client_and_skips_without_one() {
         assert_eq!(stop_before_exit(None), None);
@@ -676,11 +578,14 @@ mod tests {
             },
             |_| true,
         );
-        assert_eq!(calls.get(), 1, "건너뛴 것이 없어도 훅은 한 번 불린다");
+        assert_eq!(
+            calls.get(),
+            1,
+            "the hook is called once even when nothing was skipped"
+        );
     }
 
-    // Show — among skipped prewarmed windows, only a window that left the pool in the meantime (`Adopted`) is shown with the same show as other windows, and since it comes before the windows whose order was decided,
-    // main is last. A handed-over window (`Rehold`) · a prewarmed window not handed over (`Untouched`) are not shown.
+    // Show — among skipped prewarmed windows only one that left the pool meanwhile (`Adopted`) is shown with the same show, and since it precedes the ordered windows main stays last. A handed-over window (`Rehold`) · a not-handed-over one (`Untouched`) are not shown.
     #[test]
     fn showing_reveals_only_the_spares_that_left_the_pool_before_the_ordered_windows() {
         let log = Log::default();
@@ -725,8 +630,7 @@ mod tests {
 
     // ── Show without stealing focus (TRD S26-window-chrome §6-2 · §10-1) ──
 
-    /// A stand-in for the OS side of hidden windows — `held` is windows waiting for first paint · `ours` = our process holds the foreground. It
-    /// blows up if an operation that belongs to the state command arrives (show-all does not call it).
+    /// Stand-in for the OS side of hidden windows — `held` = windows waiting for first paint, `ours` = our process holds the foreground. Blows up if a state-command operation arrives (show-all does not call it).
     #[derive(Default)]
     struct Ops {
         held: Vec<&'static str>,
@@ -787,8 +691,7 @@ mod tests {
         }
     }
 
-    // Show in the same window order as the click branch (prewarmed windows that left the pool first · main last) but skip windows waiting for first paint, and give focus
-    // only to main when the foreground is ours — if another app is in the foreground, it is given to no window.
+    // Show in the click branch's window order (pool-leavers first · main last) but skipping windows waiting for first paint, giving focus only to main when the foreground is ours — with another app in front, to no window.
     #[test]
     fn no_steal_skips_waiting_windows_and_focuses_only_main_when_the_foreground_is_ours() {
         for ours in [true, false] {
@@ -825,7 +728,7 @@ mod tests {
                     "usage:slot-popup-2:true",
                     "usage:main:true",
                 ],
-                "ours={ours} — 대기 창도 곧 보인다"
+                "ours={ours} — the waiting window is shown soon too"
             );
         }
     }

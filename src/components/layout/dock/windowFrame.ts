@@ -1,10 +1,7 @@
-// TRD S21-slot-docking §3-8: this window's window facts (restored inner size · maximized · frame inset · front window · chrome shape — the last two are TRD
-//   S26-window-chrome §6-5) — pulled once at mount with `window_frame`,
-//   after that it receives `window:frame`, which the shell pushes only when values change, and holds only the last value. It is the material the source webview uses at dragstart to compute the original size · new window
-//   size (R7 · R22), and the material the title row uses to draw maximize · dimming · buttons (TRD S26-window-chrome §7 — `subscribe`).
-//   It is communication outside the drag, so it is received without blocking even during a drag (ADR-0297) — the drag reads the value at that time only once at dragstart.
-// ★Do not compute the frame inset in the web as `outer* − inner*`★ — whether that value matches the window frame on WebView2 is untested, so only the value the shell computed is used.
-// The reason for calling invoke/listen directly · how to cut it apart is the same as `tabDrop.ts` (the shell owns it · not a bus command · ADR-0012).
+// TRD S21-slot-docking §3-8: this window's window facts (restored inner size · maximized · frame inset · front window · chrome shape — the last two TRD S26-window-chrome §6-5) — pulled once at mount with `window_frame`, then `window:frame` (pushed by the shell only on change) is received and only the last value held. The source webview uses it at dragstart to compute the original size (R7 · R22), and the title row to draw maximize · dimming · buttons (TRD S26-window-chrome §7 — `subscribe`).
+// It is communication outside the drag, so it is received without blocking even during a drag (ADR-0297); the drag reads the value once at dragstart.
+// ★Do not compute the frame inset in the web as `outer* − inner*`★ — whether that matches the window frame on WebView2 is untested, so only the shell-computed value is used.
+// Why invoke/listen are called directly · how it is cut apart: same as `tabDrop.ts` (the shell owns it · not a bus command · ADR-0012).
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
@@ -112,7 +109,7 @@ export function createWindowFrame(ipc: WindowFrameIpc): WindowFrameSource {
                 if (disposed) return
                 const next = frameOf(raw)
                 if (next === null) {
-                  console.warn(`[windowFrame] ${EVT_WINDOW_FRAME}: 모양이 계약과 다르다 — 버린다:`, raw)
+                  console.warn(`[windowFrame] ${EVT_WINDOW_FRAME}: shape differs from the contract — dropped:`, raw)
                   return
                 }
                 pushes += 1
@@ -120,7 +117,7 @@ export function createWindowFrame(ipc: WindowFrameIpc): WindowFrameSource {
               }),
             {
               isCancelled,
-              onRetry: (err, attempt) => console.warn(`[windowFrame] ${EVT_WINDOW_FRAME} 구독 재시도 #${attempt}:`, err),
+              onRetry: (err, attempt) => console.warn(`[windowFrame] ${EVT_WINDOW_FRAME} subscription retry #${attempt}:`, err),
             },
           )
           if (disposed) {
@@ -131,29 +128,27 @@ export function createWindowFrame(ipc: WindowFrameIpc): WindowFrameSource {
         } catch (err) {
           if (err instanceof RetryCancelledError) return
           // Issue the pull as is — even if events cannot be received, a value must exist at mount.
-          console.error(`[windowFrame] ${EVT_WINDOW_FRAME} 구독 최종 실패 — 이 창은 창 사실 바뀜을 못 받는다:`, err)
+          console.error(`[windowFrame] ${EVT_WINDOW_FRAME} subscription failed finally — this window will not receive window-fact changes:`, err)
         }
         if (disposed) return
-        // ★Pull **after** attaching the subscription★ — if issued side by side, a change between the pull and the registration is missed and it stays at the old value
-        //   (the same clause of `api/restoreClient.ts`).
+        // ★Pull **after** attaching the subscription★: issued side by side, a change between the pull and the registration is missed and the old value stays (same clause as `api/restoreClient.ts`).
         const seen = pushes
         try {
           const raw = await retryAsync(() => ipc.invoke<unknown>(CMD_WINDOW_FRAME), {
             isCancelled,
-            onRetry: (err, attempt) => console.warn(`[windowFrame] ${CMD_WINDOW_FRAME} 재시도 #${attempt}:`, err),
+            onRetry: (err, attempt) => console.warn(`[windowFrame] ${CMD_WINDOW_FRAME} retry #${attempt}:`, err),
           })
-          // If an event came after the pull was issued, the event carries the last value (the shell pushes on every change) — discard the answer so that, arriving later than the event, it does not
-          //   overwrite with the old value.
+          // If an event came after the pull was issued it carries the last value (the shell pushes on every change) — discard the answer so that, arriving later than the event, it does not overwrite with the old value.
           if (disposed || pushes !== seen) return
           const next = frameOf(raw)
           if (next === null) {
-            console.warn(`[windowFrame] ${CMD_WINDOW_FRAME}: 모양이 계약과 다르다 — 버린다:`, raw)
+            console.warn(`[windowFrame] ${CMD_WINDOW_FRAME}: shape differs from the contract — dropped:`, raw)
             return
           }
           set(next)
         } catch (err) {
           if (err instanceof RetryCancelledError) return
-          console.error(`[windowFrame] ${CMD_WINDOW_FRAME} 최종 실패 — 다음 ${EVT_WINDOW_FRAME} 까지 창 사실이 없다:`, err)
+          console.error(`[windowFrame] ${CMD_WINDOW_FRAME} failed finally — no window fact until the next ${EVT_WINDOW_FRAME}:`, err)
         }
       })()
 

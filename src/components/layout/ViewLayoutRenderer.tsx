@@ -1,5 +1,4 @@
-// ★The only layout renderer★ (Brick 1): the old frontend-only slotStore/LayoutRenderer (number id + content union)
-// was removed. This renderer draws only the wire LayoutNode (string UUID id + content: SlotContent, ADR-0060, src-tauri/bindings) —
+// ★The only layout renderer★: draws only the wire LayoutNode (string UUID id + content: SlotContent, ADR-0060, src-tauri/bindings) —
 // whether by a human click (SlotContextMenu — right-click only, ADR-0144) or the LLM (window.__engramCmd), it is updated through the same invoke→emit
 // authority loop.
 // ADR-0227: flat root — the tree is not unfolded recursively; areas (leaves) and dividers are placed absolutely under one root using
@@ -45,9 +44,9 @@ function sameIds(ids: readonly string[], expected: ReadonlySet<string> | Readonl
 
 // The error left when the rectangles cannot be used — it also states how it draws.
 const RECT_ERRORS = {
-  missing: '[ViewLayoutRenderer] 분할 트리인데 사각형이 없어 아무것도 그리지 않는다:',
-  mismatchBlank: '[ViewLayoutRenderer] 사각형의 칸·분할 id 가 트리와 어긋나 아무것도 그리지 않는다:',
-  mismatchFullBox: '[ViewLayoutRenderer] 사각형의 칸·분할 id 가 트리와 어긋나 루트 칸을 전체 상자로 그린다:',
+  missing: '[ViewLayoutRenderer] split tree but no rectangles, drawing nothing:',
+  mismatchBlank: '[ViewLayoutRenderer] rectangle area/split ids do not match the tree, drawing nothing:',
+  mismatchFullBox: '[ViewLayoutRenderer] rectangle area/split ids do not match the tree, drawing the root area as a full box:',
 } as const
 
 export default function ViewLayoutRenderer({

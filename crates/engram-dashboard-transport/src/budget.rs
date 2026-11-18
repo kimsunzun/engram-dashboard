@@ -13,8 +13,7 @@
 //! ★The window share is counted separately inside the tally★ — it is the bytes of stream fragments the resume window holds. The supervisor adds it when holding
 //! ([`Charge::hold`]) and subtracts it when releasing from the window or discarding. The whole tally (fill level) stays the same. Budget B is
 //! split into a read share and a window cap, and each gets its own cap.
-//! - Read gate — if 「물높이 − 창 몫」 (fill level minus window share) is at least the read share, the read task stops reading the link. The decision uses 「더하기 전
-//!   물높이」 (the fill level before adding; the same rule as net `CONN_RX_MAX_BYTES`), so while the gate is open one frame gets in whatever its size.
+//! - Read gate — if 「fill level minus window share」 is at least the read share, the read task stops reading the link. The decision uses 「the fill level before adding」 (the same rule as net `CONN_RX_MAX_BYTES`), so while the gate is open one frame gets in whatever its size.
 //!   ★Subtracting the window share at the gate is the point★ — if held fragments stopped reading, the replay that would fill their hole could not be read, and
 //!   a replay arriving late, after the window closed at its deadline, is discarded as a past number. A hole that could have been filled becomes a permanent loss.
 //! - Window cap — the window share never goes over the cap, not even by one frame. A fragment that would exceed it is not held and the window
@@ -29,7 +28,7 @@
 //! and a read happens only while the gate is open (fill level < read share + window cap at that moment), one frame at a time — putting into or taking out of the window does not
 //! change the fill level, and even if a share taken out of the window after the gate was seen open but before that one frame is read closes the gate again, the fill level stays the same.
 //! It also holds at the moment splitting starts — the read share only drops from B to half, so the gate moves only toward closing, and what is held
-//! until then is below B + M. The cap for one message is set by the adapter (crate header 「알려진 한계」 (known limits)).
+//! until then is below B + M. The cap for one message is set by the adapter (crate header 「known limits」).
 //!
 //! ★The tally is changed under one lock★ — three tasks open and close the gate: the read task (adds, then closes) · the supervisor (puts into the window and
 //! opens, takes out and closes, discards and opens) · the receiver (takes out and opens). Along with the gate state, the lock records the time the gate closed and the stretches where it
@@ -175,7 +174,7 @@ impl Ledger {
         self.update(|c| c.streams = true);
     }
 
-    /// Whether these bytes can still be held in the window — the window cap decision. Unlike the read gate, it measures 「더한 뒤」 (after adding) — the window share never goes
+    /// Whether these bytes can still be held in the window — the window cap decision. Unlike the read gate, it measures 「after adding」 — the window share never goes
     /// over the cap, not even by one frame. Before [`Ledger::use_streams`] the cap is 0, so this is always false.
     pub(crate) fn window_fits(&self, bytes: usize) -> bool {
         let c = self.counts();
@@ -332,8 +331,8 @@ mod tests {
     async fn woken(waiter: tokio::task::JoinHandle<()>, what: &str) {
         tokio::time::timeout(Duration::from_secs(5), waiter)
             .await
-            .unwrap_or_else(|_| panic!("문이 열렸는데 {what} 쪽을 안 깨웠다"))
-            .expect("기다리던 태스크가 패닉했다");
+            .unwrap_or_else(|_| panic!("the gate opened but did not wake the {what} side"))
+            .expect("the waiting task panicked");
     }
 
     #[test]
@@ -341,7 +340,11 @@ mod tests {
         assert_eq!(split(16 << 20), (8 << 20, 8 << 20));
         assert_eq!(split(100), (50, 50));
         assert_eq!(split(3), (1, 2));
-        assert_eq!(split(1), (1, 0), "읽기 몫이 0 이면 문이 영영 안 열린다");
+        assert_eq!(
+            split(1),
+            (1, 0),
+            "with a read share of 0 the gate never opens"
+        );
     }
 
     #[test]
@@ -362,7 +365,11 @@ mod tests {
     fn a_zero_byte_item_holds_no_share_of_the_ledger() {
         let (ledger, _clock) = ledger();
         let none = ledger.charge(0);
-        assert_eq!(Arc::strong_count(&ledger), 1, "빈 몫은 셈을 쥐지 않는다");
+        assert_eq!(
+            Arc::strong_count(&ledger),
+            1,
+            "an empty share holds no count"
+        );
         drop(none);
         assert_eq!(ledger.level(), 0);
     }
@@ -396,12 +403,12 @@ mod tests {
         crate::testing::settle().await;
         assert!(
             !reader.is_finished() && !holder.is_finished(),
-            "읽기 몫 이상이면 기다린다"
+            "waits if at or above the read share"
         );
 
         drop(first);
-        woken(reader, "읽기").await;
-        woken(holder, "감독").await;
+        woken(reader, "read").await;
+        woken(holder, "supervisor").await;
         drop(second);
     }
 
@@ -410,12 +417,15 @@ mod tests {
         let (ledger, _clock) = ledger();
         let mut held = ledger.charge(6);
         held.hold();
-        assert!(ledger.window_fits(4), "꽉 차는 것까지는 넘는 것이 아니다");
+        assert!(
+            ledger.window_fits(4),
+            "filling up completely is not exceeding"
+        );
         assert!(!ledger.window_fits(5));
         let _gated = ledger.charge(9);
         assert!(
             ledger.window_fits(4),
-            "★창 상한은 창 몫만 잰다★ — 읽기 몫이 찼다고 붙들 자리가 줄지 않는다"
+            "★the window cap measures only the window share★ — a full read share does not reduce the room to hold"
         );
     }
 
@@ -430,28 +440,31 @@ mod tests {
             tokio::spawn(async move { ledger.reader_room().await })
         };
         crate::testing::settle().await;
-        assert!(!reader.is_finished(), "읽기 몫 이상이면 기다린다");
+        assert!(!reader.is_finished(), "waits if at or above the read share");
 
         chunk.hold();
         assert_eq!((ledger.level(), ledger.held()), (12, 12));
         assert!(!ledger.over());
-        woken(reader, "읽기").await;
+        woken(reader, "read").await;
 
         chunk.hold();
         assert_eq!(
             (ledger.level(), ledger.held()),
             (12, 12),
-            "이미 창 몫이면 그대로다"
+            "unchanged if already in the window share"
         );
         chunk.unhold();
         assert_eq!((ledger.level(), ledger.held()), (12, 0));
-        assert!(ledger.over(), "창에서 나온 몫은 다시 문을 세운다");
+        assert!(
+            ledger.over(),
+            "the share coming out of the window sets up the gate again"
+        );
         chunk.hold();
         drop(chunk);
         assert_eq!(
             (ledger.level(), ledger.held()),
             (0, 0),
-            "창 몫인 채 버려지면 둘 다에서 빠진다"
+            "dropped while in the window share, it leaves both"
         );
     }
 
@@ -467,18 +480,18 @@ mod tests {
         assert_eq!(
             ledger.take_shut().since,
             Some(t0 + Duration::from_secs(3)),
-            "★선을 넘은 그 시각이다★ — 감독이 나중에 알아채도 이 시각부터 붙든 것으로 센다"
+            "★it is the very moment the line was crossed★ — even if the supervisor notices later, it counts as held from this moment"
         );
         clock.advance(Duration::from_secs(1));
         let _more = ledger.charge(1);
         assert_eq!(
             ledger.take_shut().since,
             Some(t0 + Duration::from_secs(3)),
-            "닫힌 채 더해도 처음 닫힌 시각 그대로다"
+            "adding while closed keeps the first closing time"
         );
 
         drop(big);
-        assert_eq!(ledger.take_shut().since, None, "열리면 지운다");
+        assert_eq!(ledger.take_shut().since, None, "cleared once opened");
 
         let mut chunk = ledger.charge(4);
         chunk.hold();
@@ -487,7 +500,7 @@ mod tests {
         assert_eq!(
             ledger.take_shut().since,
             Some(t0 + Duration::from_secs(6)),
-            "창에서 꺼내 닫혀도 그 시각을 적는다"
+            "even when taken out of the window and closed, that time is recorded"
         );
         drop(small);
     }
@@ -520,12 +533,12 @@ mod tests {
                     until: Some(t10),
                 },
             },
-            "★두 구간(2 s · 3 s)을 다 센다★ — 지금 닫힌 구간은 시작 시각으로만 알린다"
+            "★counts both sections (2 s · 3 s)★ — the section closed now is announced only by its start time"
         );
         assert_eq!(
             ledger.take_shut().closed,
             Closed::default(),
-            "한 번 넘긴 구간은 잊는다"
+            "a section once handed over is forgotten"
         );
 
         clock.advance(Duration::from_secs(2));
@@ -540,7 +553,7 @@ mod tests {
                     until: Some(t13),
                 },
             },
-            "물을 때 열려 있던 구간은 열린 뒤 통째로 넘긴다 — 그 시작을 앞서 `since` 로 본 쪽이 겹치지 않게 가려 쓴다"
+            "a section open at query time is handed over whole after it opens — the side that saw its start earlier through `since` picks it apart so it does not overlap"
         );
     }
 
@@ -551,15 +564,18 @@ mod tests {
         let clock = ManualClock::new();
         let ledger = Ledger::new(20, clock.handle());
         let below = ledger.charge(19);
-        assert!(!ledger.over(), "예산 밑이면 문이 열려 있다");
-        assert!(!ledger.window_fits(1), "창 상한 0 — 붙들 자리가 없다");
+        assert!(!ledger.over(), "below the budget the gate is open");
+        assert!(!ledger.window_fits(1), "window cap 0 — no room to hold");
         let full = ledger.charge(1);
-        assert!(ledger.over(), "예산에 닿으면 닫힌다");
+        assert!(ledger.over(), "closes when it reaches the budget");
         drop(full);
 
         clock.advance(Duration::from_secs(1));
         ledger.use_streams();
-        assert!(ledger.over(), "읽기 몫이 반으로 줄어 그 자리에서 닫힌다");
+        assert!(
+            ledger.over(),
+            "the read share is halved and it closes on the spot"
+        );
         assert_eq!(ledger.take_shut().since, Some(clock.now()));
         assert!(ledger.window_fits(10));
         assert!(!ledger.window_fits(11));

@@ -26,13 +26,13 @@ const awaiting = (version: number, token = 1): PreviewState =>
 
 // ── reconcile rules ──
 
-describe('reducePreview — 드래그', () => {
-  it('dragStart → drag, dragMove 가 ratio 를 바꾼다', () => {
+describe('reducePreview — drag', () => {
+  it('dragStart → drag, dragMove changes ratio', () => {
     const s = reducePreview(dragging(1, 'A', 0.4), { type: 'dragMove', token: 1, ratio: 0.62 })
     expect(s).toEqual({ token: 1, splitId: 'A', ratio: 0.62, phase: 'drag' })
   })
 
-  it('dragStart 는 어떤 상태든 새 드래그로 갈아 끼운다', () => {
+  it('dragStart replaces any state with a new drag', () => {
     expect(reducePreview(awaiting(9, 1), { type: 'dragStart', token: 2, splitId: 'B', ratio: 0.5 })).toEqual({
       token: 2,
       splitId: 'B',
@@ -41,28 +41,28 @@ describe('reducePreview — 드래그', () => {
     })
   })
 
-  it('dragCancel: drag 중이면 null, commit 중이면 무시', () => {
+  it('dragCancel: null while dragging, ignored while committing', () => {
     expect(reducePreview(dragging(1), { type: 'dragCancel', token: 1 })).toBeNull()
     const c = committed(1)
     expect(reducePreview(c, { type: 'dragCancel', token: 1 })).toBe(c)
   })
 
-  it('규칙 1: drag 중 스냅샷은 끌리는 split 이 남아 있으면 미리보기를 그대로 둔다', () => {
+  it('rule 1: a snapshot during drag leaves the preview as is if the dragged split remains', () => {
     const d = dragging(1, 'A', 0.7)
     expect(reducePreview(d, { type: 'snapshot', version: 50, splitIds: ids('A', 'B') })).toBe(d)
   })
 
-  it('규칙 1: drag 중 끌리는 split id 가 사라진 스냅샷 → null(드래그 취소)', () => {
+  it('rule 1: a snapshot during drag in which the dragged split id vanished → null (drag cancelled)', () => {
     expect(reducePreview(dragging(1, 'A'), { type: 'snapshot', version: 50, splitIds: ids('B') })).toBeNull()
   })
 
-  it('drag 중(release 전) 에 온 response·failure 는 무시한다', () => {
+  it('a response · failure arriving during drag (before release) is ignored', () => {
     const d = dragging(1)
     expect(reducePreview(d, { type: 'response', token: 1, outcome: 'Unchanged', version: 3, cachedVersion: 3 })).toBe(d)
     expect(reducePreview(d, { type: 'failure', token: 1 })).toBe(d)
   })
 
-  it('미리보기가 없으면 dragStart 말고는 아무것도 만들지 않는다', () => {
+  it('with no preview nothing is made except by dragStart', () => {
     expect(reducePreview(null, { type: 'dragMove', token: 1, ratio: 0.3 })).toBeNull()
     expect(reducePreview(null, { type: 'release', token: 1 })).toBeNull()
     expect(reducePreview(null, { type: 'response', token: 1, outcome: 'Applied', version: 9, cachedVersion: 1 })).toBeNull()
@@ -70,8 +70,8 @@ describe('reducePreview — 드래그', () => {
   })
 })
 
-describe('reducePreview — 확정', () => {
-  it('규칙 2: release → commit(ratio 유지)', () => {
+describe('reducePreview — commit', () => {
+  it('rule 2: release → commit (ratio kept)', () => {
     const s = reducePreview(reducePreview(dragging(1, 'A', 0.4), { type: 'dragMove', token: 1, ratio: 0.55 }), {
       type: 'release',
       token: 1,
@@ -79,19 +79,19 @@ describe('reducePreview — 확정', () => {
     expect(s).toEqual({ token: 1, splitId: 'A', ratio: 0.55, phase: 'commit' })
   })
 
-  it('규칙 2: Applied 응답 → awaitVersion = 응답 version, 캐시가 아직 아래면 미리보기 유지', () => {
+  it('rule 2: Applied response → awaitVersion = response version, if the cache is still below the preview is kept', () => {
     const s = reducePreview(committed(1), { type: 'response', token: 1, outcome: 'Applied', version: 12, cachedVersion: 11 })
     expect(s).toEqual({ token: 1, splitId: 'A', ratio: 0.4, phase: 'commit', awaitVersion: 12 })
   })
 
-  it('규칙 2: Applied 응답 때 캐시가 이미 그 version 이상이면 즉시 null(같음 포함)', () => {
+  it('rule 2: when the cache is already at or above that version at the Applied response, immediately null (including equal)', () => {
     const r = (cachedVersion: number) =>
       reducePreview(committed(1), { type: 'response', token: 1, outcome: 'Applied', version: 12, cachedVersion })
     expect(r(12)).toBeNull()
     expect(r(13)).toBeNull()
   })
 
-  it('규칙 2: Unchanged·TooSmall 응답 → 스냅샷을 기다리지 않고 즉시 null', () => {
+  it('rule 2: Unchanged · TooSmall response → immediately null without waiting for a snapshot', () => {
     for (const outcome of ['Unchanged', 'TooSmall'] as const) {
       // Even if the response version is above the cache, do not wait — if nothing changed, no snapshot of that version arrives.
       const s = reducePreview(committed(1), { type: 'response', token: 1, outcome, version: 99, cachedVersion: 1 })
@@ -100,24 +100,24 @@ describe('reducePreview — 확정', () => {
     }
   })
 
-  it('규칙 2·3: awaitVersion 이상 스냅샷에서 null, 미만이면 유지', () => {
+  it('rule 2·3: null at a snapshot at or above awaitVersion, kept if below', () => {
     const a = awaiting(12)
     expect(reducePreview(a, { type: 'snapshot', version: 11, splitIds: ids('A') })).toBe(a)
     expect(reducePreview(a, { type: 'snapshot', version: 12, splitIds: ids('A') })).toBeNull()
     expect(reducePreview(a, { type: 'snapshot', version: 13, splitIds: ids('A') })).toBeNull()
   })
 
-  it('규칙 3: 응답 전 commit 중 스냅샷은 version 과 무관하게 유지', () => {
+  it('rule 3: a snapshot during commit before the response is kept regardless of version', () => {
     const c = committed(1)
     expect(reducePreview(c, { type: 'snapshot', version: 1_000, splitIds: ids('A') })).toBe(c)
   })
 
-  it('규칙 4: 명령 실패 → null', () => {
+  it('rule 4: command failure → null', () => {
     expect(reducePreview(committed(1), { type: 'failure', token: 1 })).toBeNull()
     expect(reducePreview(awaiting(12, 1), { type: 'failure', token: 1 })).toBeNull()
   })
 
-  it('규칙 5: 새 드래그가 앞선 확정을 덮고, 옛 token 의 늦은 응답·실패는 무시된다', () => {
+  it('rule 5: a new drag overwrites the earlier commit, and a late response · failure with an old token is ignored', () => {
     const newer = reducePreview(committed(1, 'A'), { type: 'dragStart', token: 2, splitId: 'B', ratio: 0.3 })
     expect(newer).toEqual({ token: 2, splitId: 'B', ratio: 0.3, phase: 'drag' })
     expect(
@@ -129,27 +129,27 @@ describe('reducePreview — 확정', () => {
     expect(reducePreview(newer, { type: 'dragCancel', token: 1 })).toBe(newer)
   })
 
-  it('규칙 5: 확정 대기 중에도 다른 token 의 응답은 awaitVersion 을 바꾸지 않는다', () => {
+  it('rule 5: even while awaiting commit, a response with another token does not change awaitVersion', () => {
     const a = awaiting(12, 3)
     expect(reducePreview(a, { type: 'response', token: 2, outcome: 'Unchanged', version: 0, cachedVersion: 0 })).toBe(a)
   })
 })
 
-describe('needsPull — 규칙 6(당김 타이머를 걸어 둘 상태)', () => {
-  it('Applied 응답 뒤 awaitVersion 이 캐시보다 위인 동안만 참', () => {
+describe('needsPull — rule 6 (the state in which to set a pull timer)', () => {
+  it('true only while awaitVersion is above the cache after an Applied response', () => {
     const a = awaiting(12)
     expect(needsPull(a, 11)).toBe(true)
     expect(needsPull(a, 12)).toBe(false)
     expect(needsPull(a, 13)).toBe(false)
   })
 
-  it('미리보기 없음·drag·응답 전 commit 에서는 거짓', () => {
+  it('false with no preview · drag · commit before the response', () => {
     expect(needsPull(null, 0)).toBe(false)
     expect(needsPull(dragging(), 0)).toBe(false)
     expect(needsPull(committed(), 0)).toBe(false)
   })
 
-  it('당김 대기 = 500ms', () => {
+  it('pull wait = 500ms', () => {
     expect(COMMIT_PULL_DELAY_MS).toBe(500)
   })
 })
@@ -188,7 +188,7 @@ const bySlot = (rs: SlotRect[], id: string) => rs.find(r => r.slot_id === id)!
 const bySplit = (rs: SplitRect[], id: string) => rs.find(r => r.split_id === id)!
 
 describe('remapRects', () => {
-  it('미리보기 없음·모르는 split id·비유한 비율 → 입력 배열 그대로', () => {
+  it('no preview · unknown split id · non-finite ratio → the input array as is', () => {
     for (const p of [null, preview('nope', 0.3), preview('A', Number.NaN), preview('A', Number.POSITIVE_INFINITY)]) {
       const out = remapRects(SLOTS, SPLITS, p)
       expect(out.slotRects).toBe(SLOTS)
@@ -196,7 +196,7 @@ describe('remapRects', () => {
     }
   })
 
-  it('끌린 분할의 경계 B → B′ 가 정확하고, 그 경계를 공유하는 칸·분할 좌표가 모두 B′ 로 같다', () => {
+  it('the dragged split\'s boundary B → B′ is exact, and the area · split coordinates sharing that boundary are all the same B′', () => {
     const B2 = 0.5 + (1 - 0.5) * 0.6
     const { slotRects, splitRects } = remapRects(SLOTS, SPLITS, preview('C', 0.6))
     expect(bySplit(splitRects, 'C').at).toBe(B2)
@@ -208,7 +208,7 @@ describe('remapRects', () => {
     expect(bySplit(splitRects, 'C')).toMatchObject({ x0: 0.5, x1: 1, y0: 0.4, y1: 1 })
   })
 
-  it('상자 밖 사각형은 같은 객체 그대로, 다른 축 좌표도 그대로', () => {
+  it('rectangles outside the box are the same object as is, other-axis coordinates too', () => {
     const { slotRects, splitRects } = remapRects(SLOTS, SPLITS, preview('C', 0.6))
     expect(bySlot(slotRects, 'x')).toBe(bySlot(SLOTS, 'x'))
     expect(bySlot(slotRects, 'y')).toBe(bySlot(SLOTS, 'y'))
@@ -217,13 +217,13 @@ describe('remapRects', () => {
     expect(bySlot(slotRects, 'z')).toMatchObject({ y0: 0.4, y1: 1 })
   })
 
-  it('입력 배열·객체를 바꾸지 않는다', () => {
+  it('does not mutate the input arrays · objects', () => {
     const before = JSON.stringify([SLOTS, SPLITS])
     remapRects(SLOTS, SPLITS, preview('A', 0.2))
     expect(JSON.stringify([SLOTS, SPLITS])).toBe(before)
   })
 
-  it('조상을 끌면 서브트리의 중첩 분할 at(같은 축)까지 재사상되고 셸 재계산과 같다', () => {
+  it('dragging an ancestor also remaps the nested split at (same axis) of the subtree and equals the shell recomputation', () => {
     // A: 0.5 → 0.3. When the shell unfolds the new tree, B box x = [0.3,1], C box x = [0.3,1], C.at = 0.3 + 0.7·0.3.
     const { slotRects, splitRects } = remapRects(SLOTS, SPLITS, preview('A', 0.3))
     const A2 = 0 + (1 - 0) * 0.3
@@ -240,7 +240,7 @@ describe('remapRects', () => {
     expect(bySlot(slotRects, 'z').x0).toBe(bySlot(slotRects, 'y').x0)
   })
 
-  it('위아래 분할은 y 축만 옮긴다(ADR-0140 — a = 위)', () => {
+  it('a top/bottom split moves only the y axis (ADR-0140 — a = top)', () => {
     const { slotRects, splitRects } = remapRects(SLOTS, SPLITS, preview('B', 0.6))
     const B2 = 0 + (1 - 0) * 0.6
     expect(bySplit(splitRects, 'B').at).toBe(B2)
@@ -251,7 +251,7 @@ describe('remapRects', () => {
     expect(bySlot(slotRects, 'x')).toBe(bySlot(SLOTS, 'x'))
   })
 
-  it('범위 밖 비율은 상자 안에 갇힌다', () => {
+  it('a ratio outside the range is confined inside the box', () => {
     const { slotRects } = remapRects(SLOTS, SPLITS, preview('C', 1.7))
     for (const id of ['z', 'w']) {
       const r = bySlot(slotRects, id)
@@ -261,7 +261,7 @@ describe('remapRects', () => {
     }
   })
 
-  it('경계가 상자 끝에 붙은 퇴화 분할(B == X0)에서도 NaN·무한이 나오지 않는다', () => {
+  it('even in a degenerate split whose boundary touches the box end (B == X0) no NaN or infinity comes out', () => {
     const slots = [slot('p', 0, 0, 0, 1), slot('q', 0, 0, 1, 1)]
     const splits = [splitR('D', 'left_right', 0, 0, 1, 1, 0)]
     const { slotRects, splitRects } = remapRects(slots, splits, preview('D', 0.5))
@@ -275,7 +275,7 @@ describe('remapRects', () => {
 // ── allowed range ──
 
 // An oracle that transcribes the px clamp of shell `ViewManager::set_split_ratio` ④ (src-tauri/src/layout/manager.rs).
-//   `len = canvas × extent; edge = m / len; lo = max(RATIO_MIN, edge); hi = min(RATIO_MAX, 1 − edge); lo > hi → 빈 범위`.
+//   `len = canvas × extent; edge = m / len; lo = max(RATIO_MIN, edge); hi = min(RATIO_MAX, 1 − edge); lo > hi → empty range`.
 function shellRange(canvasLen: number, extent: number, m: number, rmin: number, rmax: number) {
   const len = canvasLen * extent
   const edge = m / len
@@ -290,7 +290,7 @@ describe('ratioRange', () => {
     expect(MIN_PANE_PX).toBe(30)
   })
 
-  it('두 쪽 모두 30px 이상', () => {
+  it('both sides at least 30px', () => {
     for (const axisPx of [60, 61, 100, 333, 1366, 1920]) {
       for (const boxExtent of [1, 0.5, 0.35, 0.9 * 0.1 + 0.2]) {
         const r = ratioRange({ ratioMin: 0.1, ratioMax: 0.9, minPanePx: 30, axisPx, boxExtent })
@@ -307,19 +307,19 @@ describe('ratioRange', () => {
     }
   })
 
-  it('스냅샷의 ratio_min/max 를 넘지 않는다', () => {
+  it('does not exceed the snapshot\'s ratio_min/max', () => {
     expect(ratioRange({ ratioMin: 0.1, ratioMax: 0.9, minPanePx: 30, axisPx: 1920, boxExtent: 1 })).toEqual({ lo: 0.1, hi: 0.9 })
     expect(ratioRange({ ratioMin: 0.2, ratioMax: 0.7, minPanePx: 30, axisPx: 1920, boxExtent: 1 })).toEqual({ lo: 0.2, hi: 0.7 })
   })
 
-  it('L < 60 → null(잠김), L = 60 → 0.5 한 점', () => {
+  it('L < 60 → null (locked), L = 60 → the single point 0.5', () => {
     expect(ratioRange({ ratioMin: 0.1, ratioMax: 0.9, minPanePx: 30, axisPx: 59, boxExtent: 1 })).toBeNull()
     expect(ratioRange({ ratioMin: 0.1, ratioMax: 0.9, minPanePx: 30, axisPx: 1000, boxExtent: 0.05 })).toBeNull()
     expect(ratioRange({ ratioMin: 0.1, ratioMax: 0.9, minPanePx: 30, axisPx: 0, boxExtent: 1 })).toBeNull()
     expect(ratioRange({ ratioMin: 0.1, ratioMax: 0.9, minPanePx: 30, axisPx: 60, boxExtent: 1 })).toEqual({ lo: 0.5, hi: 0.5 })
   })
 
-  it('같은 입력(보고한 정수 캔버스 × 스냅샷 상자 폭)이면 셸 식과 비트 단위로 같다', () => {
+  it('the same input (reported integer canvas × snapshot box width) is bit-for-bit equal to the shell formula', () => {
     // The box width is made from the boundary difference like the shell geometry.
     const extents = [1, 0.5 - 0, 1 - (0.5 + 0.5 * 0.3), (0.5 + 0.5 * 0.3) - 0.5, 0.9 - 0.1 * 0.9, 1 / 3, 0.0625]
     for (const axisPx of [1, 59, 60, 61, 119, 120, 121, 480, 1001, 1366, 1920, 3840]) {
@@ -336,16 +336,16 @@ describe('ratioRange', () => {
 
 describe('ratioFromPointer', () => {
   const range = { lo: 0.1, hi: 0.9 }
-  it('분할 상자 기준 비율로 바꾼다', () => {
+  it('converts to a ratio relative to the split box', () => {
     expect(ratioFromPointer({ pointerNorm: 0.5, box0: 0, box1: 1, range })).toBe(0.5)
     expect(ratioFromPointer({ pointerNorm: 0.75, box0: 0.5, box1: 1, range })).toBe(0.5)
   })
-  it('범위 밖은 가장 가까운 끝으로 자른다', () => {
+  it('out of range is clipped to the nearest end', () => {
     expect(ratioFromPointer({ pointerNorm: 0, box0: 0, box1: 1, range })).toBe(0.1)
     expect(ratioFromPointer({ pointerNorm: 2, box0: 0, box1: 1, range })).toBe(0.9)
     expect(ratioFromPointer({ pointerNorm: 0.52, box0: 0.5, box1: 1, range: { lo: 0.3, hi: 0.7 } })).toBe(0.3)
   })
-  it('NaN(폭 0 상자) → range.lo', () => {
+  it('NaN (zero-width box) → range.lo', () => {
     expect(ratioFromPointer({ pointerNorm: 0.5, box0: 0.5, box1: 0.5, range })).toBe(0.1)
     expect(ratioFromPointer({ pointerNorm: Number.NaN, box0: 0, box1: 1, range })).toBe(0.1)
   })

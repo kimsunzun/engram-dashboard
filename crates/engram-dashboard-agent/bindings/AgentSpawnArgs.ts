@@ -2,14 +2,14 @@
 
 export type AgentSpawnArgs = { 
 /**
- * 깨울 대상(이름 또는 id). cwd 와 상호배타.
+ * The target to wake (name or id). Mutually exclusive with cwd.
  */
 target?: string | null, 
 /**
- * 새로 만들어 띄울 작업 폴더. target 과 상호배타.
+ * The working folder to create and launch anew. Mutually exclusive with target.
  */
 cwd?: string | null, 
 /**
- * 새로 만들 때만 쓴다 — 깨우기에는 적용되지 않는다.
+ * Used only when creating anew — does not apply to waking.
  */
 name?: string | null, };

@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §4-2 「그림」: tab name label (VS Code `applyDragImage` style) — attached off screen, `setDragImage(el, −10, −10)` ·
+// TRD S21-slot-docking §4-2 「image」: tab name label (VS Code `applyDragImage` style) — attached off screen, `setDragImage(el, −10, −10)` ·
 //   removed in the next task · failure does not leak. Whether the engine actually captures that element cannot be measured here (/qa full).
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -11,7 +11,7 @@ afterEach(() => {
 })
 
 describe('setTabDragImage', () => {
-  it('라벨 = 탭 이름 · 화면 밖 · 둥근 상자(여백 1/7 · 둥글기 10 · 12 px · 최대 120 px · 말줄임 · 테마 토큰) · 커서 (−10, −10)', () => {
+  it('label = tab name · off screen · rounded box (margin 1/7 · radius 10 · 12 px · max 120 px · ellipsis · theme token) · cursor (−10, −10)', () => {
     const dt = { setDragImage: vi.fn() }
     const later: Array<() => void> = []
     setTabDragImage(dt, '아주 긴 탭 이름', fn => later.push(fn))
@@ -34,7 +34,7 @@ describe('setTabDragImage', () => {
     expect(el.isConnected).toBe(false)
   })
 
-  it('setDragImage 가 던져도 새지 않고(엔진 기본 그림) 붙인 라벨은 다음 task 에 뗀다', () => {
+  it('setDragImage throwing does not leak (the engine\'s default image) and the attached label is removed in the next task', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const dt = {
       setDragImage: vi.fn(() => {

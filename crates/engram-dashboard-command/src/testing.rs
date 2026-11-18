@@ -33,8 +33,8 @@ pub fn with_quiet_panic_hook<T>(body: impl FnOnce() -> T) -> T {
             .downcast_ref::<&str>()
             .copied()
             .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("<문자열이 아닌 패닉 페이로드>");
-        eprintln!("조용한 패닉 훅 구간 안에서 본문이 패닉했다(원래 출력은 삼켜졌다): {message}");
+            .unwrap_or("<non-string panic payload>");
+        eprintln!("the body panicked inside the quiet panic hook section (the original output was swallowed): {message}");
         std::panic::resume_unwind(payload)
     })
 }
@@ -106,13 +106,17 @@ mod tests {
 
         let escaped = catch_unwind(|| with_quiet_panic_hook(|| panic!("body blew up")));
 
-        let payload = escaped.expect_err("본문의 패닉이 밖으로 전파돼야");
+        let payload = escaped.expect_err("the body's panic must propagate out");
         assert_eq!(
             payload.downcast_ref::<&str>(),
             Some(&"body blew up"),
-            "페이로드는 원래 패닉 그대로"
+            "the payload is the original panic as is"
         );
-        assert_eq!(heard.load(Ordering::SeqCst), 0, "구간 안의 패닉은 조용해야");
+        assert_eq!(
+            heard.load(Ordering::SeqCst),
+            0,
+            "a panic inside the section must be quiet"
+        );
 
         // The probe is fired inside the lock — if another test's quiet span overlaps, the probe is swallowed there.
         let _held = PANIC_HOOK.lock().unwrap_or_else(PoisonError::into_inner);
@@ -122,6 +126,9 @@ mod tests {
         if let Ok(original) = Arc::try_unwrap(original) {
             std::panic::set_hook(original);
         }
-        assert!(restored, "구간이 끝났는데 원래 훅이 돌아오지 않았다");
+        assert!(
+            restored,
+            "the section ended but the original hook did not come back"
+        );
     }
 }

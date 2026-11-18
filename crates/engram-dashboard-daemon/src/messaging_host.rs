@@ -1,53 +1,33 @@
-//! messaging_host — 메시징 커널(`engram-dashboard-messaging`)의 **호스트 어댑터 + 조립실**(ADR-0110).
+//! messaging_host — the host adapter + assembly room of the messaging kernel (`engram-dashboard-messaging`) (ADR-0110).
 //!
-//! ★역할★: 커널이 소유한 계약(포트 trait)에 데몬의 실물을 꽂는다. 커널은 `AgentManager`·
-//!   `TurnObservations`·`ControlRegistry` 를 **타입으로도 모르므로**(완전 상호무지 — ADR-0110 결정 2),
-//!   그 셋을 아는 코드는 전부 이 파일에 모인다.
+//! Plugs the daemon's real objects into the port traits the kernel owns. The kernel does not know `AgentManager`,
+//! `TurnObservations` or `ControlRegistry` even as types (ADR-0110 decision 2), so all code knowing them lives here.
 //!
-//! ★★접합 원장(ledger) — 이 파일의 거주자 전수. 아래 불변식 2가 이 목록을 입장 심사로 쓴다★★
-//!   *형식: `타입/함수` — 어느 **커널 포트·seam** 에 묶이나 → 어느 **데몬 실물** 에 꽂나.*
-//!   *입도(정직 명시): 항목 단위는 **접합 단위**다 — 한 항목에만 쓰이는 사적 번역 헬퍼
-//!    (`to_live_agent`·`receipt`·`sort_key` 등)는 그 소유 항목에 딸린 것으로 보고 따로 적지 않는다.*
-//!     - `ManagerDeliveryPort` — `DeliveryPort`(주입·로스터·이름) → `AgentManager`.
-//!     - `is_live` — 로스터 술어(코어 `AgentStatus::is_live` 호출 어댑터). 항목이 **둘 이상**(위 포트와
-//!       아래 `RosterDiff`)에 걸려 있어 따로 적는다.
-//!     - `ManagerTurnFacts` — `TurnFacts`(턴 관측 사실 조회) → 코어의 대기 목록 표 + 턴 관측 표
-//!       (ADR-0113 결정 1 · ADR-0231).
-//!     - `ControlRegistry` 의 `ControlPlanePort` 구현 — 봉투 포맷 조회 + 배달 관측 적재.
-//!     - 조립 헬퍼(`messaging_for_manager`/`messaging_for_manager_gated`/`busy_gate_for_manager`) —
-//!       `MessagingService`/`BusyPolicy` 생성 seam → manager + control registry 배선.
-//!     - `ChannelIdleNotifier` — 커널 `IdleNotifier`(상한 sweep 깨우기)·`FlushTrigger`(서비스 도어벨)
-//!       → flush 채널 송신단. (`IdleCoalescer` 는 이 출구의 내부 상태다.)
-//!     - `MessagingFlushSink` — 커널엔 포트가 없다. 묶이는 seam = **코어 `StatusSink`**(데코레이터)이고,
-//!       그 위에서 등장/화신 교체를 diff 해(`RosterDiff`) 위 도어벨과 **같은 채널**로 flush 를 건다.
-//!     - `spawn_flush_worker`/`run_flush_worker`/`run_flush_lane`/`FlushWorkerHandles`/`FlushWiring` —
-//!       위 채널의 소비단 → `MessagingSlot`(늦은 주입된 `MessagingService`)의 `flush_for`.
-//!       (배달 레인의 내부 부품 — `DeliveryLanes`·`flush_recipient`·`spawn_delivery`·`advance_lane`·
-//!        `DeliveryDone` — 은 그 소비단의 스케줄링 살림이라 여기 딸린 것으로 본다.)
+//! Seam ledger — every resident of this file (the admission check of invariant 2). Form: `type/function` — kernel port/seam →
+//! daemon object. Private translation helpers used by one entry (`to_live_agent`, `receipt`, `sort_key`, ...) belong to that entry.
+//!   - `ManagerDeliveryPort` — `DeliveryPort` (inject · roster · name) → `AgentManager`.
+//!   - `is_live` — roster predicate (adapter over core `AgentStatus::is_live`); listed because it spans the port above and `RosterDiff`.
+//!   - `ManagerTurnFacts` — `TurnFacts` → the core's pending-list table + turn observation table (ADR-0113 decision 1 · ADR-0231).
+//!   - the `ControlPlanePort` implementation of `ControlRegistry` — envelope format lookup + delivery observation recording.
+//!   - `messaging_for_manager`/`messaging_for_manager_gated`/`busy_gate_for_manager` — `MessagingService`/`BusyPolicy` construction
+//!     seam → manager + control registry wiring.
+//!   - `ChannelIdleNotifier` — `IdleNotifier` · `FlushTrigger` → the sending end of the flush channel (`IdleCoalescer` is its internal state).
+//!   - `MessagingFlushSink` — no kernel port; binds to the core `StatusSink` (decorator), diffs appearance/incarnation changes
+//!     (`RosterDiff`) and triggers a flush on the same channel.
+//!   - `spawn_flush_worker`/`run_flush_worker`/`run_flush_lane`/`FlushWorkerHandles`/`FlushWiring` — the consuming end of that channel →
+//!     `flush_for` of `MessagingSlot` (the late-injected `MessagingService`); the delivery lane internals (`DeliveryLanes`,
+//!     `flush_recipient`, `spawn_delivery`, `advance_lane`, `DeliveryDone`) count as belonging here.
 //!
-//! ★불변식 1 — 커널 판정 재구현 금지(load-bearing · ADR-0110 "포트는 얇게, 정책은 lib에")★: 커널이
-//!   내리는 판정을 어댑터가 되풀이하거나 앞질러 내리지 않는다. busy 판정(positive-knowledge-only·상한)·
-//!   발송 3분기·파킹 TTL 은 전부 커널 소유다.
-//!   ★이 제약이 거는 대상은 **포트**다 — "이 파일에 정책이 하나도 없다" 가 아니다★:
-//!   flush 파이프라인은 **호스트 소유 정책**을 담는다 — Idle coalescing(`IdleCoalescer`),
-//!   로스터 diff 시퀀싱(`RosterDiff` — 락 보유 중 enqueue 라는 의도된 ADR-0006 이탈), blocking 격리
-//!   (`run_flush_lane` 의 `spawn_blocking`). 셋 다 **커널이 알 수 없는 사실**에 대한 판정이라 커널로
-//!   올릴 수 없다(코어 "표 갱신 → 통지" 순서 · status 콜백 블록 금지 · tokio executor 굶주림). 각 근거는
-//!   그 타입의 헤더가 정본이고, 이 헤더는 "그것들이 여기 있어도 되는 이유" 까지만 말한다.
-//! ★불변식 2 — 입장 심사(위 문장을 백지수표로 읽지 말 것)★: 새 타입이 여기 들어오려면 **위 접합 원장에
-//!   한 줄로 적을 수 있어야 한다** — "어느 커널 포트·seam 에 묶이고 어느 데몬 실물에 꽂는가". 적을 수
-//!   없으면 들어오지 않는다(원장에 안 적고 넣는 것도 위반 — 심사를 무력화한다).
-//!   ★왜 "메시징과 관련 있으면 OK" 가 아닌가★: 그 기준은 자기 증명이다(넣는 사람은 이미 관련 있다고
-//!   믿는다). ADR-0129 가 기록한 실제 부식(제어 평면·메시징 접합이 `ws.rs` 로 흘러든 과정)은 **매 단계
-//!   주제상 관련 있었다** — 그러니 "관련성" 은 아무것도 막지 못한다. 반면 포트/seam 이름을 대라는 요구는
-//!   기계적이라, 댈 이름이 없다는 사실 자체가 거절 사유가 된다.
-//!   그 위에서, 원장에 적히더라도 그 자리는 **접합**이지 데몬 살림이 아니다 — 살림이 쌓이면 ADR-0129 가
-//!   없애려는 "전부를 아는 자리" 의 재발이다.
-//! ★flush 파이프라인이 하필 여기 사는 이유(ADR-0129)★: 그것은 네트워크 살림이 아니라 메시징 접합이다 —
-//!   커널 포트(`IdleNotifier`/`FlushTrigger`)를 구현하고 커널 서비스(`MessagingSlot`)를 소비하며, 로스터
-//!   술어(`is_live`)를 발송 측과 공유해야 한다. 데몬 lib 3층 분리에서 이 파일은 통째로 에이전트 시스템 쪽이다.
-//!
-//! tauri import 0(daemon crate).
+//! Invariant 1 — never re-implement kernel decisions (load-bearing, ADR-0110 "ports thin, policy in the lib"): the busy decision
+//! (positive-knowledge-only · cap), the three send branches and the parking TTL are kernel-owned. This applies to the ports, not to
+//! the whole file: the flush pipeline holds host-owned policy — idle coalescing (`IdleCoalescer`), roster diff sequencing (`RosterDiff`,
+//! enqueue under a lock, an intended ADR-0006 deviation), blocking isolation (`spawn_blocking` in `run_flush_lane`) — decided on facts
+//! the kernel cannot know. Each rationale is canonical in that type's header.
+//! Invariant 2 — admission check: a new type enters only if it can be written as one line in the seam ledger (which kernel port/seam,
+//! which daemon object); adding without listing is also a violation. "Related to messaging" is not a criterion — the erosion ADR-0129
+//! recorded (control plane / messaging seams flowing into `ws.rs`) was topically related at every step. A listed place is a seam, not daemon housekeeping.
+//! The flush pipeline lives here (ADR-0129) because it implements kernel ports (`IdleNotifier`/`FlushTrigger`), consumes a kernel
+//! service (`MessagingSlot`) and shares the `is_live` predicate with the sending side.
 // ADR-0110
 // ADR-0129
 
@@ -75,10 +55,10 @@ use tokio::sync::mpsc;
 use crate::control::registry::ControlRegistry;
 use crate::usage_service::observe::UsageObserveSink;
 
-// ── 배달 어댑터 ────────────────────────────────────────────────────────────────────────────────
+// ── delivery adapter ────────────────────────────────────────────────────────────────────────────
 
-/// 운영 DeliveryPort — Arc<AgentManager> 얇은 래퍼. manager 공개 API 만 부른다(ADR-0006 각 호출이
-///   내부에서 sessions lock 을 clone 후 즉시 해제하는 규율을 그대로 탄다).
+/// Production DeliveryPort — a thin wrapper over Arc<AgentManager>, calling only its public API (ADR-0006: each call clones the
+///   sessions lock internally and releases it at once).
 pub struct ManagerDeliveryPort {
     manager: Arc<AgentManager>,
 }
@@ -89,11 +69,10 @@ impl ManagerDeliveryPort {
     }
 }
 
-/// ★로스터 술어(load-bearing — 이 파일의 **유일한** 멤버십 조건)★.
+/// Roster predicate — the only membership condition in this file (load-bearing).
 ///
-/// ★정의는 agent `AgentStatus::is_live`(ADR-0119 결정 4 — 에이전트 "사실" 계층은 코어)★: 명부
-///   (`AgentManager::roster`)도 같은 술어를 써야 하는데 코어는 데몬을 의존할 수 없다. 여기 남은 건
-///   `AgentInfo` 를 받는 데몬측 호출 어댑터다. (`pub(crate)` 는 크로스-모듈 호출의 잔재로 남겨 둔다.)
+/// Defined by agent `AgentStatus::is_live` (ADR-0119 decision 4); the roster (`AgentManager::roster`) must use the same predicate but the
+/// core cannot depend on the daemon, so this is the daemon-side adapter taking an `AgentInfo`.
 // ADR-0119
 pub(crate) fn is_live(a: &engram_dashboard_agent::types::AgentInfo) -> bool {
     a.status.is_live()
@@ -108,8 +87,7 @@ fn to_live_agent(a: engram_dashboard_agent::types::AgentInfo) -> LiveAgent {
     }
 }
 
-/// `@all` 결정성(아래 `live_agents` doc)의 정렬 키. 두 조회(`live_agents` ·
-/// `addressing_sources`)가 같은 키를 쓰게 함수로 묶었다(한쪽만 정렬하면 판정이 다른 순서를 본다).
+/// Sort key for `@all` determinism (see `live_agents`). Both lookups (`live_agents` · `addressing_sources`) share it, or the decision would see a different order.
 fn sort_key(a: &LiveAgent, b: &LiveAgent) -> std::cmp::Ordering {
     a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id))
 }
@@ -124,17 +102,14 @@ fn receipt(o: engram_dashboard_agent::types::WriteOutcome) -> InjectReceipt {
 }
 
 impl DeliveryPort for ManagerDeliveryPort {
-    /// ★`submit_stdin_observed` 여야 한다(`write_stdin_observed` 로 되돌리지 마라)★: 봉투 바이트만 쓰면
-    ///   터미널(TUI) 수신자는 그걸 입력창에 담아 둔 채 턴을 시작하지 않는다 — 배달은 "바이트가 닿았다" 가
-    ///   아니라 "수신자가 턴으로 받았다" 까지다(`DeliveryPort::inject` 계약).
-    /// ★그 동사가 지키는 것이 하나 더 있다 — 영수증이 **수락이 아니라 착지**를 뜻한다는 것★: 통로가 유계
-    ///   입력 큐를 쓰게 된 뒤로 `send_input` 의 `Ok` 는 「받았다」로 내려앉았고, 그것을 그대로 영수증에
-    ///   실으면 아직 안 나간 봉투가 배달 성공으로 기록된다. `submit_stdin_observed` 만 착지를 확인한다
-    ///   (`AgentSession::submit_input_observed` → `AgentTransport::flush_input`) — `write_stdin_observed`
-    ///   로 되돌리면 그 확인까지 함께 사라진다. 제출이 필요한 백엔드인지의
-    ///   판정은 agent seam 뒤 backend 소유라(ADR-0004) 이 어댑터는 동사만 고른다.
-    /// ★출처는 이 동사가 정한다 — `Mail`★: 우편은 턴 도중에도 사용자 대기 목록에 오르지 않는다(ADR-0231).
-    ///   출처를 받는 `write_stdin` 으로 옮기면 그 판정을 호출부가 다시 골라야 한다.
+    /// Must be `submit_stdin_observed` (do not go back to `write_stdin_observed`): with only envelope bytes written, a terminal (TUI)
+    ///   recipient keeps them in its input box and never starts a turn — delivery means "the recipient took it as a turn"
+    ///   (`DeliveryPort::inject` contract).
+    /// The receipt must mean landing, not acceptance: the bounded input queue makes `send_input`'s `Ok` mean "received", so recording it
+    ///   would log an unsent envelope as delivered. Only `submit_stdin_observed` confirms the landing (`AgentSession::submit_input_observed`
+    ///   → `AgentTransport::flush_input`). Whether a backend needs submission is the backend's decision (ADR-0004).
+    /// The source is fixed to `Mail`: mail never reaches the user's pending list even mid-turn (ADR-0231); `write_stdin` takes a source
+    ///   and would make the caller choose again.
     fn inject(&self, to_id: PeerId, bytes: &[u8]) -> Result<InjectReceipt, String> {
         self.manager
             .submit_stdin_observed(to_id, bytes)
@@ -142,26 +117,19 @@ impl DeliveryPort for ManagerDeliveryPort {
             .map_err(|e| e.to_string())
     }
 
-    /// ★정렬 = (이름, id) 오름차순(C4 리뷰 fix H · load-bearing — `@all` 결정성)★.
+    /// Sort = (name, id) ascending (load-bearing — `@all` determinism).
     ///
-    /// ★왜 여기서 정렬하나★: `@all` 명단은 이 로스터를 **verbatim** 쓴다(groups.rs 계약 축 1 — 해석기가
-    ///   정렬하면 안 된다). 그런데 manager 의 세션 저장소는 HashMap 이라 순회 순서가 실행마다 다르다 —
-    ///   그대로 두면 같은 방송이 실행마다 **다른 주입 순서·다른 `results[]` 순서**를 낸다(발신 LLM 이 보는
-    ///   회계가 흔들리고, 재현 불가한 순서 의존 버그를 숨긴다). 커널 단위 테스트는 Vec fake 라 이 비결정성을
-    ///   **못 잡는다** — 그래서 결정성을 운영 구현체 쪽에 박는다.
-    /// ★seam 계약은 그대로★: `DeliveryPort` 는 "산·도달 가능 로스터" 만 약속하고 순서는 구현 자유다. 여기서
-    ///   정렬해도 해석기(`GroupSource`)의 verbatim 계약과 충돌하지 않는다 — 정렬 위치가 **소스 앞단**(로스터
-    ///   생산 지점)이라 해석기는 여전히 받은 그대로 돌려준다.
-    /// ★2차 키가 id 인 이유★: 동명 다수(dup-name)여도 순서가 안정되게 — 이름만으로는 두 항목의 상대 순서가
-    ///   여전히 HashMap 순서에 좌우된다.
-    /// ★편지를 읽는 주체만 명단에 올린다(사용자 결정 2026-08-17)★: 상태 술어(`is_live`)에 더해
-    ///   `reads_messages` 로 셸을 뺀다 — 셸에 도착한 봉투는 읽히는 게 아니라 **명령으로 실행된다**.
-    ///   ★ADR-0116 결정 1·7 로의 회귀가 아니다★: 그건 "턴을 관측할 수 없으니 배달할 수 없다" 를 기각한
-    ///   것이고(터미널 claude 는 그대로 받는다), 이건 관측이 아니라 **입력이 무엇으로 해석되는가** 축이다.
-    /// ★`addressing_sources` 와 같은 술어여야 한다★: 한쪽만 걸면 입구 판정과 배달 명단이 갈려 셸이
-    ///   `@all` 로 해석된 뒤 주입까지 간다.
-    /// ★자격은 **스냅샷 필드**로 읽는다(매니저에 되묻지 마라)★: 항목마다 재조회하면 TOCTOU·비원자성·
-    ///   세션당 락이 한꺼번에 생긴다(`AgentInfo::reads_messages` doc).
+    /// The `@all` list uses this roster verbatim (groups.rs contract axis 1 — the resolver must not sort), but the manager's session store
+    /// is a HashMap, so unsorted the same broadcast yields different injection and `results[]` orders per run. Kernel unit tests use a Vec
+    /// fake and cannot catch it, so determinism is pinned on the production implementation. The sort sits before the source, so the
+    /// resolver still returns what it received; `DeliveryPort` promises only a live, reachable roster. The second key is id so same-name
+    /// entries (dup-name) stay stable.
+    /// Only those that read mail are listed (user decision 2026-08-17): besides `is_live`, `reads_messages` removes the shell — an envelope
+    /// reaching a shell is run as a command, not read. This is not a regression to ADR-0116 decisions 1·7 (they rejected "cannot deliver
+    /// because the turn cannot be observed"; this is about what the input is interpreted as).
+    /// Must be the same predicate as `addressing_sources`, or a shell is resolved as `@all` and then injected.
+    /// Eligibility comes from a snapshot field (do not re-ask the manager): per-item re-query brings TOCTOU, non-atomicity and per-session
+    /// locks (`AgentInfo::reads_messages` doc).
     fn live_agents(&self) -> Vec<LiveAgent> {
         let mut live: Vec<LiveAgent> = self
             .manager
@@ -174,25 +142,21 @@ impl DeliveryPort for ManagerDeliveryPort {
         live
     }
 
-    /// ★차집합 계산은 여기 없다(ADR-0119 결정 2)★: 옛날엔 이 함수가 산 목록과 프로필 목록을 각자 떠서
-    ///   id 차집합으로 잠든 이름을 만들었다 — 그 합성이 프론트에도 사본으로 있어 한쪽만 고쳐지는 drift 가
-    ///   확정적이었다. 이제 합성은 매니저 한 곳이고 여기는 포워딩이다. **여기서 다시 합치지 말 것.**
-    /// ★정렬★: 잠든 쪽도 `@all` 결정성 때문에 (이름, id) 로 정렬해 둔다(위 `live_agents` doc · `sort_key` 와
-    ///   같은 2차 키).
-    // ADR-0119 (명부 단일 입구 — 이 함수는 포워더)
-    // ADR-0309 (결정 3 — 잠든 쪽은 (id, 이름) 쌍)
+    /// No set-difference computation here (ADR-0119 decision 2): the dormant names are synthesized in the manager alone and this forwards.
+    /// A copy of that synthesis existed in the frontend and drifted; do not merge them again here.
+    /// The dormant side is sorted by (name, id) too (as `live_agents` and `sort_key`).
+    // ADR-0119 (single entry of the roster — this function is a forwarder)
+    // ADR-0309 (decision 3 — the dormant side is an (id, name) pair)
     fn addressing_sources(&self) -> AddressingSources {
         let mut roster: Vec<LiveAgent> = Vec::new();
         let mut dormant: Vec<DormantAgent> = Vec::new();
         for entry in self.manager.roster() {
             match entry.live {
-                // 산 명단은 `live_agents` 와 **같은 술어**여야 한다(위 doc) — 여기만 걸고 한쪽을 빠뜨리면
-                // 셸이 입구에선 해석되고 배달 명단엔 없어 판정이 갈린다. 자격은 이 한 스냅샷의 필드다.
+                // The live list must use the same predicate as `live_agents`, or a shell gets resolved at entry yet is absent from the delivery list.
                 Some(info) if info.reads_messages => roster.push(to_live_agent(info)),
-                // ★잠든 이름은 거르지 않는다(알려진 잔여 — 배달 안전과 무관)★: 잠든 셸 이름 앞으로 편지가
-                //   파킹될 수는 있으나, 깨어나도 산 명단에 오르지 않으므로 **주입은 일어나지 않는다**(TTL 로
-                //   만료). 여기까지 거르면 셸 프로필을 산 에이전트 대역으로 쓰는 기존 통합 테스트의 전제가
-                //   무너진다 — 그 fixture 전략은 별도 결정 사항이라 이 수정에서 건드리지 않는다.
+                // Dormant names are not filtered (known residual, unrelated to delivery safety): mail to a dormant shell name can be parked, but after waking
+                //   the shell does not enter the live list, so nothing is injected (it expires by TTL). Filtering would break existing integration tests
+                //   that use a shell profile as a stand-in for a live agent.
                 Some(_) => {}
                 None => dormant.push(DormantAgent {
                     id: entry.id,
@@ -213,13 +177,12 @@ impl DeliveryPort for ManagerDeliveryPort {
     }
 }
 
-// ── 제어 평면 어댑터 ────────────────────────────────────────────────────────────────────────────
+// ── control plane adapter ────────────────────────────────────────────────────────────────────────────
 
 impl ControlPlanePort for ControlRegistry {
-    // ★자기 재귀 함정(load-bearing)★: 아래 `ControlRegistry::…(self)` 경로는 **고유(inherent) 메서드가
-    //   트레잇 메서드보다 우선 해석**되기에 고유 쪽에 묶인다. 고유 메서드를 개명/제거하면 같은 경로가
-    //   이 트레잇 메서드 **자신**에 조용히 재바인딩돼(컴파일 에러 없음) 배달 핫패스에서 무한 재귀 →
-    //   스택 오버플로가 된다. registry 쪽 개명 시 여기를 반드시 함께 고칠 것.
+    // Self-recursion trap (load-bearing): in the `ControlRegistry::…(self)` path below an inherent method resolves ahead of a trait method.
+    //   Renaming/removing the inherent method silently rebinds the path to this trait method itself (no compile error) and the delivery hot
+    //   path recurses until stack overflow. Rename on the registry side together.
     fn envelope_format(&self) -> EnvelopeFormat {
         ControlRegistry::envelope_format(self)
     }
@@ -228,25 +191,22 @@ impl ControlPlanePort for ControlRegistry {
     }
 }
 
-// ── 턴 관측 어댑터 ──────────────────────────────────────────────────────────────────────────────
+// ── turn observation adapter ──────────────────────────────────────────────────────────────────────────────
 
-/// 운영 `TurnFacts` — 코어의 턴 관측 표(ADR-0113 사실 계층)를 커널 어휘로 번역하는 **읽기 전용** 창.
+/// Production `TurnFacts` — a read-only window translating the core's turn observation tables (ADR-0113 facts layer) into kernel vocabulary.
 ///
-/// ★얇음이 계약이다★: 여기엔 판정이 없다 — 상한·폴백은 커널 `BusyPolicy` 소유다(ADR-0110 "포트는 얇게,
-///   정책은 lib에"). 이 어댑터에 "늙었으면 안 보여 준다" 같은 조건을 넣으면 우편 정책이 데몬으로 새고,
-///   같은 표를 보는 다른 소비자와 판정이 갈린다.
-/// ★표를 직접 든다(manager 를 안 든다)★: 조회 경로에 sessions 락을 끼우지 않는다 — 이 조회는 배달 판정
-///   경로에 있고, 표는 매니저와 무관한 leaf 락이다(ADR-0006).
-/// ★두 표를 읽는 순서 = 대기 목록 표 먼저, 턴 관측 표 나중(load-bearing)★: 코어가 쓰는 순서(진행 → 「비었다」)의
-///   거울이라, 「비었다」를 본 읽기는 그 앞의 진행도 본다. 뒤집으면 목록을 비우는 턴 진행 한 번 안에서 두
-///   사실이 함께 한가로 읽히는 틈이 생기고, 그때 든 우편이 사용자의 턴에 접혀 든다.
+/// Thin by contract: the cap and fallback belong to the kernel `BusyPolicy` (ADR-0110); a condition like "hide it if old" here would
+/// leak mail policy into the daemon.
+/// Holds the tables directly, not the manager: no sessions lock on this delivery-decision path; the tables are leaf locks (ADR-0006).
+/// Read order = pending-list table first, turn observation table second (load-bearing): it mirrors the core's write order (progress →
+/// "emptied"), so a read seeing "emptied" also sees the progress before it. Reversed, mail arriving in the gap is read as idle and folded into the user's turn.
 // ADR-0231
 pub struct ManagerTurnFacts {
     pending: Arc<dyn PendingRead>,
     turns: Arc<dyn TurnRead>,
 }
 
-/// 어댑터가 두 표를 읽는 창 — 시험이 읽힌 순서를 기록하는 가짜를 끼우는 자리다.
+/// The window through which the adapter reads the two tables — where a test plugs in a fake recording the read order.
 trait PendingRead: Send + Sync {
     fn inputs_pending(&self, id: AgentId, epoch: u32) -> Option<bool>;
 }
@@ -290,8 +250,7 @@ impl TurnFacts for ManagerTurnFacts {
                 inputs_pending: pending.unwrap_or(false),
                 last_end_failed: o.last_end_failed,
             }),
-            // 턴 관측 없이 목록만 찼다 — 바쁨이라는 사실은 버리지 않는다. `last_signal` 은 `in_turn` 일
-            //   때만 읽히므로 조회 시각을 싣는다.
+            // A full list without a turn observation: the fact of being busy is not discarded. `last_signal` is read only when `in_turn`.
             (None, Some(true)) => Some(TurnFact {
                 in_turn: false,
                 last_signal: Instant::now(),
@@ -307,10 +266,9 @@ impl TurnFacts for ManagerTurnFacts {
     }
 }
 
-// ── 조립 헬퍼 ──────────────────────────────────────────────────────────────────────────────────
+// ── assembly helpers ──────────────────────────────────────────────────────────────────────────────────
 
-/// ★게이트 없음(즉시 주입)★ — 실험 bin 등 idle 게이트를 쓰지 않는 조립용. 데몬 부팅은
-///   `messaging_for_manager_gated` 를 쓴다.
+/// No gate (immediate injection) — for assemblies without the idle gate (experiment bins). Daemon boot uses `messaging_for_manager_gated`.
 pub fn messaging_for_manager(
     manager: Arc<AgentManager>,
     registry: Arc<ControlRegistry>,
@@ -318,7 +276,7 @@ pub fn messaging_for_manager(
     MessagingService::new(Arc::new(ManagerDeliveryPort::new(manager)), registry)
 }
 
-/// ★idle 게이트 주입★ — 데몬 부팅·통합 테스트용.
+/// Idle gate injected — for daemon boot and integration tests.
 pub fn messaging_for_manager_gated(
     manager: Arc<AgentManager>,
     registry: Arc<ControlRegistry>,
@@ -334,31 +292,27 @@ pub fn busy_gate_for_manager(
     BusyPolicy::new(Arc::new(ManagerTurnFacts::new(&manager)), notifier)
 }
 
-// ── MessagingFlushSink(등장/epoch flush 트리거, ADR-0104 — C1/C2) ──────────────────────────
+// ── MessagingFlushSink (appearance/epoch flush trigger, ADR-0104 — C1/C2) ──────────────────────────
 
-/// flush worker 로 흐르는 작업 단위(C1 등장 flush + C2 idle 게이트 도어벨).
+/// The unit of work flowing to the flush worker (C1 appearance flush + C2 idle gate doorbell).
 ///
-/// ★하나의 채널·하나의 소비자★: 두 종류를 따로 나르면 같은 에이전트의 등장과 턴 종료가 서로 앞질러
-///   배선 추론이 어려워진다.
+/// One channel, one consumer: separate channels would let the appearance and the turn end of one agent overtake each other.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlushMsg {
-    /// 로스터 등장/화신 교체 — 그 에이전트(id) 앞 파킹을 일괄 flush(큐 키 = id · ADR-0309).
+    /// Roster appearance/incarnation change — flush the parked mail of that agent (queue key = id, ADR-0309).
     Appear { id: AgentId },
-    /// 턴 종료(idle 전이) 관측 — 그 id 의 파킹을 오래된 순 일괄 주입(C2 idle 게이트, ADR-0104 결정 3).
+    /// Turn end (idle transition) observed — inject that id's parked mail oldest-first (C2 idle gate, ADR-0104 decision 3).
     Idle { id: AgentId },
 }
 
-/// ★Idle 통지 coalescer(C2 리뷰 fix 10)★ — 같은 id 의 **미처리** Idle 이 이미 큐에 있으면 새 enqueue 를 접는다.
+/// Idle notification coalescer (C2): a new enqueue is folded away if an unprocessed Idle of the same id is already queued.
 ///
-/// ★왜 필요한가(유계 채널 압력)★: 통지는 MessageDone **마다** 나간다(누락 < 잉여 — busy.rs `IdleNotifier`).
-///   에이전트가 도구 호출을 연달아 돌리면 짧은 시간에 MessageDone 이 여러 번 나올 수 있고, unbounded 채널
-///   이라 그만큼 항목이 쌓인다(메모리·처리 낭비 — 대부분 빈 큐 no-op). flush 는 **큐 전체를 drain** 하므로
-///   같은 id 의 Idle N개는 1개와 결과가 같다 → 접어도 의미가 보존된다.
-/// ★lost wakeup 이 없는 이유(load-bearing)★: 코어가 "① 턴 관측 표 갱신 → ② 통지" 순서를 지키므로
-///   (output_core.rs emit), 접힌 통지가 가리키는 상태 변화는 **아직 처리 안 된 그 Idle** 이 대표한다.
-///   소비자는 **집어들 때 먼저 집합에서 지우고**(그 뒤에 게이트를 보고 flush) 처리하므로, 처리 도중 도착한
-///   새 턴 종료 신호는 다시 enqueue 된다.
-/// ★Appear 는 절대 접지 않는다★: 등장은 고유한 사건이라 무손실이어야 한다. 이 coalescer 는 **Idle 전용**이다.
+/// Needed because every MessageDone notifies (busy.rs `IdleNotifier`) and back-to-back tool calls would pile up items in the unbounded
+/// channel. A flush drains the whole queue, so N Idles of one id equal one.
+/// No lost wakeup (load-bearing): the core updates the turn observation table before notifying (output_core.rs emit), so the state a
+/// folded notification points at is represented by the still-unprocessed Idle; the consumer removes the id from the set when it picks
+/// up (before looking at the gate), so a turn end arriving mid-processing is enqueued again.
+/// Appear is never folded: an appearance is unique and must be lossless — Idle only.
 #[derive(Debug, Default)]
 pub struct IdleCoalescer {
     pending: Mutex<std::collections::HashSet<AgentId>>,
@@ -369,7 +323,7 @@ impl IdleCoalescer {
         Self::default()
     }
 
-    /// 이 id 의 Idle 을 enqueue 해야 하나(= 미처리 항목이 아직 없나). true 면 호출자가 send 한다.
+    /// Must an Idle of this id be enqueued (no unprocessed item yet)? If true the caller sends.
     fn claim(&self, id: AgentId) -> bool {
         self.pending
             .lock()
@@ -377,7 +331,7 @@ impl IdleCoalescer {
             .insert(id)
     }
 
-    /// 소비자가 이 id 의 Idle 을 집어들었다 — 이후 도착하는 통지는 다시 enqueue 돼야 한다.
+    /// The consumer picked up an Idle of this id — later notifications must be enqueued again.
     fn taken(&self, id: AgentId) {
         self.pending
             .lock()
@@ -386,13 +340,12 @@ impl IdleCoalescer {
     }
 }
 
-/// 커널 → flush worker 통지 구현 — `IdleNotifier`(상한 sweep 의 깨우기)와 `FlushTrigger`(서비스 도어벨)를 **같은
-///   채널**로 잇는다(C2). 둘 다 결과가 "그 id 의 파킹 큐를 flush" 라 메시지를 나눌 이유가 없다.
+/// The kernel → flush worker notification implementation — `IdleNotifier` (waking the cap sweep) and `FlushTrigger` (service doorbell)
+///   share one channel (C2); both mean "flush that id's parking queue".
 ///
-/// ★논블록 계약(load-bearing)★: `notify_idle` 은 **pump 스레드**에서, `request_flush` 는 발신(MCP/HTTP)
-///   스레드에서 불린다. unbounded 채널의 `send` 는 논블록·무-await 라 그 계약을 만족한다. 채널이 닫혔으면
-///   (worker 종료) 결과를 버린다 — 그 시점엔 데몬이 내려가는 중이고 파킹은 인메모리라 잃을 게 없다
-///   (spec §0 영속화 없음).
+/// Non-blocking contract (load-bearing): `notify_idle` runs on the pump thread and `request_flush` on the sender (MCP/HTTP) thread;
+/// an unbounded `send` is non-blocking and await-free. A closed channel (worker ended) is ignored — the daemon is going down and
+/// parking is in memory (spec §0 no persistence).
 pub struct ChannelIdleNotifier {
     tx: mpsc::UnboundedSender<FlushMsg>,
     coalescer: Arc<IdleCoalescer>,
@@ -422,51 +375,40 @@ impl engram_dashboard_messaging::service::FlushTrigger for ChannelIdleNotifier {
     }
 }
 
-/// ★파킹 flush 트리거(ADR-0104 · S18 메시징 v1 C1)★: 상태 sink 를 **감싸** 로스터 변화를
-///   데몬측에서 관측하고, 새로 살아났거나 화신이 갈린 에이전트(id) 앞으로 파킹된 메시지를 flush 시킨다.
+/// Parking flush trigger (ADR-0104 · S18 messaging v1 C1): wraps the status sink to observe roster changes on the daemon side and
+/// flush parked mail of an agent (id) that newly came alive or whose incarnation changed.
 ///
-/// ★왜 sink 를 감싸나(agent seam 무변경 — ADR-0104)★: 코어는 메시징을 몰라야 한다(격리 ADR-0028/0104).
-///   AgentManager 의 상태 sink 가 이미 `agent_list_updated(Vec<AgentInfo>)` 로 로스터 스냅샷을 push 하므로
-///   (ADR-0028 single-push broadcast), 그 사실을 **데몬측에서 diff** 해 flush 를 건다 — 코어에 새 seam 을
-///   내지 않고 이미 흐르는 이벤트에 얹는다. wrap 이라 기존 broadcast(프론트 fanout)는 그대로 delegate 된다.
+/// Wrapping needs no agent seam change (ADR-0028/0104: the core must not know messaging): the manager's status sink already pushes a
+/// roster snapshot via `agent_list_updated(Vec<AgentInfo>)`, which is diffed here; the existing broadcast is delegated as is.
 ///
-/// ★flush 작업을 status-sink 콜백에서 분리(finding 5 · load-bearing)★: 예전엔 이 sink 가
-///   `agent_list_updated` **안에서 동기적으로** `flush_for` 를 돌렸다 — 이 콜백은 manager/reaper 스레드가
-///   부르는 block 금지 경로인데, 큰 배치가 여러 blocking write 를 마칠 때까지 로스터 이벤트 forwarding 이
-///   막혀 spawn/reap/프론트 업데이트가 지연됐다. 이제 sink 는 **싼 diff 만** 하고 `FlushMsg` 를
-///   unbounded 채널에 push 한 뒤 status 이벤트를 **즉시** forward 한다. 실제 flush 는 flush worker 몫이다.
+/// Flush work is split off the status-sink callback (load-bearing): that callback is a no-blocking path called by the manager/reaper thread,
+/// and a synchronous `flush_for` blocked roster forwarding through several blocking writes. The sink does only a cheap diff, pushes a
+/// `FlushMsg` onto the unbounded channel and forwards the status event at once; the flush worker flushes.
 ///
-/// ★락 규율(ADR-0006) — **의도된 이탈**★: prev 스냅샷 Mutex 는 diff 뿐 아니라 **채널 enqueue 까지 든 채로**
-///   끝난다(`RosterDiff::dispatch` — 근거는 그 헤더가 정본). ★"락 놓고 send" 로 되돌리지 말 것★: 그게 이
-///   이탈이 막는 회귀다.
-/// ★그 락을 든 채 **밖으로 나가는 호출은 하나**다 — flush 채널 unbounded send(전수 — 나머지는 전부 이
-///   crate 안의 순수 자료 조작: `is_live` 술어 · HashMap 조작)★. ★안전 근거 = 재진입 불가 · 논블록★ — 채널
-///   수신자는 flush worker 라 `RosterDiff::inner` 로 되돌아올 수 없고, unbounded send 는 막히지 않는다. 이 락
-///   구간에 로그 · 다른 락 · port 호출을 더하면 이 전수가 깨진다(옛 동명 다수 건너뜀 갈래의 `tracing::debug!`
-///   가 그런 둘째 호출이었다 — ADR-0309 로 그 갈래가 사라졌다).
-///   실제 flush(messaging 락 + port 호출 + blocking write)는 worker 스레드로 옮겨져 이 락 **밖**에 있다.
+/// Lock discipline (ADR-0006) — an intended deviation: the prev-snapshot Mutex stays held through the channel enqueue
+/// (`RosterDiff::dispatch`, rationale canonical there). Do not go back to "release the lock then send".
+/// With the lock held there is exactly one outbound call — the unbounded flush channel send (everything else is pure data handling:
+/// the `is_live` predicate · HashMap handling). Safety = non-reentrant (the receiver is the flush worker, which cannot re-enter
+/// `RosterDiff::inner`) and non-blocking. Adding a log, another lock or a port call in this section breaks that exhaustiveness. The
+/// actual flush (messaging lock + port call + blocking write) runs on the worker, outside this lock.
 pub struct MessagingFlushSink {
-    /// ★Box<dyn>★: 운영은 `UsageObserveSink(DaemonStatusSink)`(사용량 관측 + 프론트 broadcast), 통합 테스트는
-    ///   NoopSink 를 감싸 flush 만 검증한다 — 감싼 대상이 무엇이든 diff/flush 로직은 동일하므로 trait object 로 받는다.
+    /// `Box<dyn>`: production is `UsageObserveSink(DaemonStatusSink)`; integration tests wrap a NoopSink — the diff/flush logic is the same whatever is wrapped.
     inner: Box<dyn StatusSink>,
-    /// flush 작업(FlushMsg)을 flush worker 로 보내는 채널(unbounded — status 콜백을 절대 막지 않게).
-    ///   worker 미가동/드롭이어도 send 실패는 무시(파킹은 다음 등장에 재시도 — 무손실 유지).
+    /// Channel sending flush work (FlushMsg) to the flush worker (unbounded — never blocks the status callback). A send failure (worker
+    ///   not running/dropped) is ignored: parking is retried on the next appearance.
     flush_tx: mpsc::UnboundedSender<FlushMsg>,
-    /// 로스터 diff 시퀀싱 상태(스냅샷 + enqueue 직렬화).
+    /// Roster diff sequencing state (snapshot + enqueue serialization).
     diff: RosterDiff,
-    /// 턴 종료 push(코어 `StatusSink::turn_ended`)를 도어벨로 옮기는 출구 — coalescer 를 통지 측과 공유한다.
+    /// The outlet moving the turn-end push (core `StatusSink::turn_ended`) to the doorbell — shares the coalescer with the notifying side.
     idle: ChannelIdleNotifier,
 }
 
-/// ★로스터 diff 시퀀싱 상태(C2 리뷰 fix 7)★ — 직전 스냅샷을 락 아래 두고, 그 락을 **든 채로 채널
-///   enqueue 까지** 끝낸다.
+/// Roster diff sequencing state — keeps the previous snapshot under a lock and finishes the channel enqueue while holding it.
 ///
-/// ★왜 락 보유 중 send 인가(load-bearing)★: 스냅샷을 락 안에서 갱신하고 락을 놓은 뒤 send 하면,
-///   `agent_list_updated` 콜백 둘이 동시에 들어올 때(코어는 이 콜백의 직렬화를 보장하지 않는다) 스냅샷
-///   갱신 순서와 enqueue 순서가 **갈릴 수 있다** — 옛 스냅샷이 만든 Appear 가 새 스냅샷의 것보다 뒤에
-///   도착해 사라진 incarnation 으로 flush 를 건다. enqueue 를 락 안으로 넣으면 "스냅샷 순서 = 채널 순서"
-///   가 구조적으로 보장된다. unbounded send 는 논블록이라 락 보유 구간이 여전히 짧다(콜백 blocking 금지
-///   규율 유지).
+/// Why send under the lock (load-bearing): with the lock released before send, two concurrent `agent_list_updated` callbacks (the core does
+/// not serialize them) can let snapshot update order and enqueue order diverge — an Appear from the old snapshot arriving after the new
+/// one's and flushing an incarnation that is gone. Enqueue inside the lock guarantees snapshot order = channel order; the unbounded
+/// send is non-blocking, so the section stays short.
 #[derive(Debug, Default)]
 pub struct RosterDiff {
     inner: Mutex<RosterSnapshots>,
@@ -474,7 +416,7 @@ pub struct RosterDiff {
 
 #[derive(Debug, Default)]
 struct RosterSnapshots {
-    /// 직전 스냅샷의 산 에이전트 — id → 화신 표식. 키가 id 라 개명은 diff 에 보이지 않는다(ADR-0309).
+    /// Live agents of the previous snapshot — id → incarnation marker. Keyed by id so a rename is invisible to the diff (ADR-0309).
     prev: HashMap<AgentId, u32>,
 }
 
@@ -483,18 +425,16 @@ impl RosterDiff {
         Self::default()
     }
 
-    /// 로스터 업데이트 1회 처리 — diff 를 계산해 **락 보유 중** 순서대로 enqueue 한다.
+    /// Handles one roster update — computes the diff and enqueues in order while holding the lock.
     fn dispatch(&self, agents: &[CoreAgentInfo], flush_tx: &mpsc::UnboundedSender<FlushMsg>) {
         let mut st = self.inner.lock().expect("flush roster diff poisoned");
 
-        // ★산(Running|Exiting) 에이전트 전원★을 id → 화신 표식으로 모은다. ★4차 개정(ADR-0116 결정 7)★:
-        //   여기엔 **structured 조건을 걸지 않는다** — 로스터 자격에서 capability 가 빠졌으므로 턴 신호 없는
-        //   세션도 파킹을 들고 있을 수 있다(그 부류의 유일한 파킹 경로 = **주입 실패**, spec §5 분기 3).
-        //   그 조건을 되살리면 그 파킹분에 재등장 flush 계기가 **영원히 없어** 24h TTL 로 조용히 만료된다.
-        // ★키 = id — 이름을 보지 않는다(ADR-0309 결정 1 · TRD S29 X4)★: 큐가 id 키라 flush 대상이 그 id
-        //   하나로 정해진다. 그래서 동명이 여럿이어도 각자 자기 큐를 flush 하고, 개명(같은 id · 같은 화신)은
-        //   등장이 아니다. 옛 「이름이 유일할 때만 flush」 건너뜀은 이름 키 큐가 엉뚱한 동명에게 갈 수 있어서
-        //   두었던 장치다 — 되살리면 동명 쌍둥이의 파킹이 둘 다 다음 계기까지 묶인다.
+        // Collects all live (Running|Exiting) agents as id → incarnation marker. No structured condition applies (ADR-0116 decision 7, 4th
+        //   amendment): capability was dropped from roster eligibility, so a session with no turn signal can hold parked mail too (via
+        //   injection failure, spec §5 branch 3); reviving the condition would leave that mail without a reappearance flush until the 24h TTL.
+        // Key = id, the name is not looked at (ADR-0309 decision 1 · TRD S29 X4): the queue is keyed by id, so same-name agents each flush their own
+        //   queue and a rename (same id · same incarnation) is not an appearance. The old "flush only when the name is unique" skip existed
+        //   because a name-keyed queue could go to the wrong namesake — reviving it ties up both twins' mail until the next trigger.
         // ADR-0309
         let next: HashMap<AgentId, u32> = agents
             .iter()
@@ -502,10 +442,9 @@ impl RosterDiff {
             .map(|a| (a.id, a.epoch))
             .collect();
         for (id, epoch) in &next {
-            // ★flush 트리거 = 직전에 없던 id(새 에이전트 · 잠듦에서 깨어남) OR 같은 id 의 **다른 화신**
-            //   (재스폰/재활성화)★. ★화신은 대소가 아니라 불일치다★: 표식은 화신마다 뽑은 난수라 순서에 뜻이
-            //   없다(`AgentProfile::epoch`). 대소로 걸면 새 화신의 표식이 우연히 작을 때 등장을 놓쳐, 그 에이전트
-            //   앞 파킹이 다음 재스폰까지 묶인다.
+            // Flush trigger = an id not there before (new agent · woke from dormancy) OR a different incarnation of the same id (respawn/reactivation).
+            //   Incarnation is mismatch, not order: the marker is random per incarnation (`AgentProfile::epoch`), so an order test misses an
+            //   appearance when the new marker is smaller and that agent's mail is tied up until the next respawn.
             if st.prev.get(id) != Some(epoch) {
                 let _ = flush_tx.send(FlushMsg::Appear { id: *id });
             }
@@ -515,9 +454,8 @@ impl RosterDiff {
 }
 
 impl MessagingFlushSink {
-    /// 운영 생성자 — `idle` 은 flush 레인과 **공유하는** Idle coalescer 다. 운영 사슬은
-    /// `MessagingFlushSink(UsageObserveSink(DaemonStatusSink))` 하나이고, 가운데 고리를 타입으로 받아 사용량
-    /// 관측 없는 운영 사슬을 짤 수 없게 한다.
+    /// Production constructor — `idle` is the Idle coalescer shared with the flush lane. The production chain is the single
+    /// `MessagingFlushSink(UsageObserveSink(DaemonStatusSink))`; taking the middle link by type makes a chain without usage observation unbuildable.
     pub fn new(
         inner: UsageObserveSink,
         flush_tx: mpsc::UnboundedSender<FlushMsg>,
@@ -526,7 +464,7 @@ impl MessagingFlushSink {
         Self::new_boxed(Box::new(inner), flush_tx, idle)
     }
 
-    /// 테스트 생성자 — 임의 inner StatusSink(NoopSink 등)를 감싼다. flush 로직만 검증할 때.
+    /// Test constructor — wraps an arbitrary inner StatusSink (NoopSink, etc.) to verify only the flush logic.
     pub fn new_test(
         inner: Box<dyn StatusSink>,
         flush_tx: mpsc::UnboundedSender<FlushMsg>,
@@ -549,21 +487,15 @@ impl MessagingFlushSink {
     }
 }
 
-/// ★2-레인 파이프라인(C2 리뷰 fix 3 — head-of-line blocking 격리, load-bearing)★:
-///   - **main lane(이 함수)** — 채널에서 꺼내 배달 레인으로 **forward** 만 한다(논블록). 여기가 막히지
-///     않아야 status 콜백이 넣은 작업이 계속 흡수된다.
-///   - **배달 레인(`run_flush_lane`)** — 자체 task + 자체 채널. `spawn_blocking` 이 자식 stdin write 와
-///     제출 페이싱으로 막히는 곳이 여기다. 레인은 **수신자(AgentId)별로 직렬**이고 서로 다른 수신자는
-///     병렬로 돈다(분할 축의 근거·불변식은 그 함수 헤더가 정본).
+/// 2-lane pipeline (head-of-line blocking isolation, load-bearing):
+///   - main lane (this function): only forwards from the channel to the delivery lane (non-blocking), so work from the status callback keeps being absorbed.
+///   - delivery lane (`run_flush_lane`): its own task + channel, where `spawn_blocking` can stick on child stdin writes and submit pacing;
+///     serial per recipient (AgentId), parallel across recipients (split axis canonical in that function's header).
 ///
-/// ★레인 task 는 **호출자(부팅)가 소유**한다 — 이 함수가 spawn 하지 않는다(round-3 finding 1, BLOCK)★:
-///   레인을 이 future **안에서** spawn 하고 JoinHandle 을 지역 변수로 들면, 종료 경로가 main lane 을 abort
-///   할 때 그 핸들이 **그냥 drop**(= detach, abort 아님)되므로 레인은 계속 살아 있고 lib.rs 의 5s join belt 는
-///   **정작 blocking 작업이 없는** main lane 만 감시하게 된다(모든 blocking inject 는 레인에 있다) → 진짜
-///   blocking 을 지닌 task 가 belt 밖에 남아 런타임 drop 이 종료 시점에 hang 할 수 있다. 그래서 두 task 를
-///   **둘 다 호출자가 들고** 각각 abort + belt 로 내린다(`spawn_flush_worker` / `FlushWorkerHandles::shutdown`).
-/// ★수명★: main lane 이 끝나면(또는 abort 되면) `lane_tx` 가 drop 되어 레인도 자연 종료한다 — 단 레인은
-///   **큐에 남은 배달을 다 처리한 뒤** 끝나므로 즉시 멈추지 않는다.
+/// The lane task is owned by the caller (boot) — this function does not spawn it: a JoinHandle held in a local and dropped when shutdown
+/// aborts the main lane only detaches the lane, so the 5s join belt in lib.rs would watch just the main lane (no blocking work) and a
+/// runtime drop could hang. Both tasks are held by the caller and brought down by abort + belt (`spawn_flush_worker` / `FlushWorkerHandles::shutdown`).
+/// When the main lane ends or is aborted `lane_tx` drops and the lane exits after handling the deliveries left in its queue.
 pub async fn run_flush_worker(
     mut flush_rx: mpsc::UnboundedReceiver<FlushMsg>,
     lane_tx: mpsc::UnboundedSender<FlushMsg>,
@@ -571,90 +503,74 @@ pub async fn run_flush_worker(
     while let Some(msg) = flush_rx.recv().await {
         match msg {
             other @ (FlushMsg::Appear { .. } | FlushMsg::Idle { .. }) => {
-                // ★send 실패를 삼키지 않는다(round-3 finding 1)★: 레인이 죽었다면(패닉 등) 이 경로의 조용한
-                //   `let _ =` 는 **모든 배달이 영구 정지**한 사실을 감춘다(파킹만 쌓이다 TTL 로 만료 —
-                //   메시징 최악 실패 모드인데 로그 한 줄도 없다). 그래서 warn 으로 표면화한다. 여기서
-                //   복구(레인 재기동)는 하지 않는다 — 레인은 개별 flush 의 패닉을 격리하므로(run_flush_lane,
-                //   단 **훅 없는 시험 빌드 한정** — 운영 프로세스에서는 표시 밖 패닉이라 훅이 데몬을 끝낸다 ·
-                //   ADR-0292) 이 실패는
-                //   "종료 중" 이거나 진짜 버그이고, 후자면 로그가 유일한 단서다.
+                // Do not swallow the send failure: if the lane died (panic, etc.) a silent `let _ =` hides that all deliveries stopped permanently
+                //   (parking piles up and expires by TTL, with no log). No lane restart here — the lane isolates an individual flush's panic only in test
+                //   builds without the hook (in production a panic outside the marker ends the daemon — ADR-0292), so this failure is either
+                //   shutdown or a real bug, and the log is the only clue.
                 if let Err(e) = lane_tx.send(other) {
-                    tracing::warn!("flush 레인 forward 실패(레인 종료/패닉 — 이후 배달 정지): {e}");
+                    tracing::warn!("flush lane forward failed (lane ended/panicked — later deliveries stop): {e}");
                 }
             }
         }
     }
-    tracing::debug!("flush worker(main lane) 종료(채널 닫힘)");
+    tracing::debug!("flush worker (main lane) ended (channel closed)");
 }
 
-/// flush worker **2-레인 묶음** 핸들 — 부팅(운영 `run()` / 테스트 서버)이 두 task 를 함께 소유한다.
-///
-/// ★왜 묶음인가(round-3 finding 1)★: 레인이 detach 되면 종료 belt 가 무의미해진다(위 `run_flush_worker`
-///   주석). 조립·종료를 한 타입에 모아 호출자가 **한쪽만 내리는 실수**를 구조적으로 못 하게 한다.
+/// The 2-lane bundle handle of the flush worker — boot (production `run()` / test server) owns both tasks together. A detached lane makes
+/// the shutdown belt meaningless (see `run_flush_worker`), so one type brings down both sides.
 pub struct FlushWorkerHandles {
-    /// 수신 레인 — 채널에서 꺼내 배달 레인으로 넘기기만 한다(blocking 작업 없음).
+    /// Receiving lane — takes from the channel and passes to the delivery lane (no blocking work).
     main: tokio::task::JoinHandle<()>,
-    /// 배달 레인(Appear/Idle) — 여기서 띄운 `spawn_blocking` 배달이 자식 stdin write·제출 페이싱으로
-    ///   막힐 수 있다(수신자별 최대 1건, 서로 다른 수신자는 동시에 여러 건).
+    /// Delivery lane (Appear/Idle) — its `spawn_blocking` deliveries can stick on child stdin writes and submit pacing (at most 1 per
+    ///   recipient, several across recipients).
     lane: tokio::task::JoinHandle<()>,
 }
 
 impl FlushWorkerHandles {
-    /// 두 레인을 내린다 — **호출 전에 `shutdown_all`(자식 kill·파이프 닫기)이 끝나 있어야 한다**(순서가
-    ///   load-bearing: lib.rs 종료 주석). 각 abort 뒤 join 을 5s belt 로 감싸, 예측 못 한 blocking 이
-    ///   남아도 데몬 종료를 hang 시키지 않고 warn 후 detach 한다(프로세스 종료가 스레드를 회수).
+    /// Brings both lanes down — `shutdown_all` (child kill · pipe close) must have finished before calling (load-bearing order: the shutdown
+    ///   comment in lib.rs). Each abort's join has a 5s belt so an unforeseen blocking cannot hang the daemon shutdown — it warns and
+    ///   detaches (process exit reclaims the threads).
     ///
-    /// ★수용된 잔여(residual) — abort·belt 로 `spawn_blocking` **본문**을 끊을 수는 없다(round-4 finding 2)★:
-    ///   abort 는 task 의 `.await` 지점에서만 먹으므로 blocking pool 스레드가 syscall 안에 있으면 그대로 돈다.
-    ///   그래도 이 종료 경로가 hang 하지 않는 이유는 belt 가 아니라 **호출 순서**다:
-    ///     ① 여기 오기 전에 `shutdown_all` 이 끝나 있다 → 자식이 kill 되고 stdin 파이프가 닫힌다 → 그 파이프에
-    ///        막혀 있던 `inject`(동기 write_all+flush)가 **에러로 풀려** 클로저가 스스로 반환한다.
-    ///     ② 배달 레인 밖에는 blocking 작업이 없다(main lane 은 forward 만 한다).
-    ///   즉 **kill-first 순서가 실제 보증이고, abort + 5s belt 는 관측 장치**다 — belt 가 실제로 발화한다면
-    ///   그건 위 두 전제 중 하나가 깨졌다는 신호(warn 로그)이고, 그러려면 kill 된 자식의 파이프 write 가 에러도
-    ///   안 내고 영원히 blocking 하는 **병리적 OS 동작**이 필요하다. 그래서 여기서 더 강한 취소 수단(별도
-    ///   프로세스·스레드 강제 종료 등)을 도입하지 않는다 — 비용은 크고 막는 실패는 가정상 존재하지 않는다.
+    /// Accepted residual — abort and the belt cannot cut the body of `spawn_blocking`: abort acts only at `.await` points, so a blocking-pool
+    /// thread inside a syscall keeps running. The shutdown does not hang because of the call order, not the belt: (1) `shutdown_all` has
+    /// finished, so the child is killed and the stdin pipe closed, and the blocked `inject` (write_all+flush) is released with an error;
+    /// (2) there is no blocking work outside the delivery lane. Kill-first is the real guarantee; abort + belt is an observation device
+    /// (a firing belt means a premise broke, and needs a pathological OS where a killed child's pipe write neither errors nor returns). No stronger
+    /// cancellation (separate process, forced thread termination) is introduced.
     ///
-    /// ★파이프를 닫아도 **제출 페이싱 대기는 풀리지 않는다**(잔여 지연의 실체)★: 배달 1건은 본문 write →
-    ///   `agent::backend::SUBMIT_PACING`(0.5초) 대기 → 제출 write 다. ①의 파이프 닫힘은 **write** 를
-    ///   에러로 풀지만 그 대기는 그대로 잔다. 그래서 진행 중인 배달 클로저는 abort 뒤에도 최대 ~0.5초(+ write)
-    ///   더 돌고 나서 반환한다.
-    /// ★데몬 프로세스 종료가 그 ~0.5초를 실제로 기다린다★: bin 은 `#[tokio::main]` 이고 종료 경로에
-    ///   `shutdown_timeout`/`shutdown_background` 가 없어, 런타임 drop 이 **시작된 blocking task 의 반환을
-    ///   기다린다**. 이 대기를 없애려면 페이싱을 건드려야 하는데 그건 TUI 수신자의 제출 자체를 깨뜨린다
-    ///   (`SUBMIT_PACING` doc).
-    /// ★그 "belt + ~0.5초" 상한이 서는 전제 4가지(하나라도 깨지면 상한이 아니다)★:
-    ///   ① **동시 배달 수 ≤ blocking pool 용량**(tokio 기본 512). 그 아래에서는 클로저들이 **동시에** 자므로
-    ///      대기가 누적되지 않는다. 넘으면 초과분이 줄을 서 건수에 비례해 늘고, 게다가 `shutdown_all` 도
-    ///      **같은 pool** 에 실리므로(lib.rs 종료 절) 포화는 위 kill-first 순서 자체를 늦춘다. 사람이 띄우는
-    ///      에이전트 수에서 512 는 닿지 않는 수라 위험이 아니라 전제로 적는다.
-    ///   ② **belt 시간 = 5초 × 2**. `shutdown` 은 main·배달 레인에 belt 를 **순차로** 두 번 건다(아래 본문).
-    ///   ③ **남은 주입이 빨리 실패한다** — 파이프가 닫혀 본문 write 가 페이싱 **전에** 에러로 끊긴다는 뜻이다.
-    ///      계속 성공하는 배치라면 그 배치의 남은 건수 × 0.5초를 낸다.
-    ///   ④ **정상(Ok) 종료 경로일 때만 기다린다** — `main.rs` 의 에러 경로는 `std::process::exit` 라 런타임
-    ///      drop 자체를 건너뛴다(그 갈래에서는 기다림도 없고 정리도 없다).
+    /// Closing the pipe does not release the submit pacing wait: a delivery is body write → `agent::backend::SUBMIT_PACING` (0.5s) wait →
+    /// submit write; (1) errors the write but the wait sleeps on, so an in-flight closure runs up to ~0.5s (+ write) after the abort.
+    /// The daemon process exit waits that ~0.5s: the bin is `#[tokio::main]` and the shutdown path has no `shutdown_timeout`/`shutdown_background`,
+    /// so the runtime drop waits for started blocking tasks. Removing it would need touching the pacing, which breaks submission for a TUI recipient (`SUBMIT_PACING` doc).
+    /// The "belt + ~0.5s" cap holds under 4 premises (if one breaks it is not a cap):
+    ///   1. concurrent deliveries ≤ blocking pool capacity (tokio default 512) — below it the sleeps are concurrent; above it they queue
+    ///      and `shutdown_all` shares the same pool, delaying kill-first itself. 512 is out of reach for one person's agents.
+    ///   2. belt time = 5s × 2 (`shutdown` belts the main and delivery lanes sequentially).
+    ///   3. remaining injections fail fast (pipe closed, body write cut off before the pacing); a batch that keeps succeeding yields remaining count × 0.5s.
+    ///   4. it waits only on the normal (Ok) exit path — the error path in `main.rs` is `std::process::exit` and skips the runtime drop.
     pub async fn shutdown(self) {
-        // main 먼저 — abort 시 lane_tx 가 drop 되어 레인이 새 작업을 받지 않는다.
+        // main first — on abort `lane_tx` is dropped so the lane accepts no new work.
         self.main.abort();
         if tokio::time::timeout(FLUSH_JOIN_BELT, self.main)
             .await
             .is_err()
         {
-            tracing::warn!("flush worker(main lane) 종료 {FLUSH_JOIN_BELT:?} 타임아웃 — detach");
+            tracing::warn!(
+                "flush worker (main lane) shutdown timed out after {FLUSH_JOIN_BELT:?} — detach"
+            );
         }
-        // 그 다음 배달 레인. 여기 남은 배달은 버린다(파킹은 인메모리 — 프로세스와 함께 소멸, spec §0).
+        // then the delivery lane; deliveries left here are discarded (parking is in memory — spec §0).
         self.lane.abort();
         if tokio::time::timeout(FLUSH_JOIN_BELT, self.lane)
             .await
             .is_err()
         {
-            tracing::warn!("flush 레인 종료 {FLUSH_JOIN_BELT:?} 타임아웃 — detach(종료 hang 방지)");
+            tracing::warn!("flush lane shutdown timed out after {FLUSH_JOIN_BELT:?} — detach (prevents a shutdown hang)");
         }
     }
 }
 
-/// 레인 채널은 **unbounded** 다: forward 가 논블록이어야 한다(main lane 이 레인 진행을 기다리면 head-of-line
-///   blocking 이 되살아난다 — `run_flush_worker` 헤더).
+/// The lane channel is unbounded: the forward must be non-blocking, or head-of-line blocking returns (`run_flush_worker` header).
 pub fn spawn_flush_worker(
     flush_rx: mpsc::UnboundedReceiver<FlushMsg>,
     wiring: FlushWiring,
@@ -665,48 +581,44 @@ pub fn spawn_flush_worker(
     FlushWorkerHandles { main, lane }
 }
 
-/// 종료 join belt — abort 후 이 시간 안에 안 끝나면 warn 후 detach(데몬 종료 hang 방지, round-3 finding 1).
+/// Shutdown join belt — if not finished this long after abort, warn and detach (prevents a daemon shutdown hang).
 const FLUSH_JOIN_BELT: Duration = Duration::from_secs(5);
 
-/// 수신자별 배달 대기열 — **엔트리 존재 = 그 수신자의 배달이 지금 돌고 있다**, 값 = 그 뒤에 기다리는 작업.
+/// Per-recipient delivery wait queue — an entry's existence = a delivery to that recipient is running now; the value = work waiting behind it.
 ///
-/// ★running 플래그를 따로 두지 않는 이유★: 같은 사실을 두 곳에 적으면 갈린다 — "돌고 있는데 엔트리가 없다"
-///   (다음 배달이 겹쳐 시작) 또는 "엔트리만 남았다"(그 수신자 우편이 영구 정지)가 컴파일 에러 없이 생긴다.
+/// There is no separate running flag: the same fact in two places can diverge ("running but no entry" overlaps the next delivery;
+/// "only the entry remains" stops that recipient's mail permanently) without a compile error.
 // ADR-0142
 type DeliveryLanes = HashMap<AgentId, VecDeque<FlushMsg>>;
 
-/// 이 작업이 향하는 수신자 — 배달 직렬화의 분할 키.
+/// The recipient this work is addressed to — the split key of delivery serialization.
 fn flush_recipient(msg: &FlushMsg) -> AgentId {
     match msg {
         FlushMsg::Appear { id } | FlushMsg::Idle { id } => *id,
     }
 }
 
-/// 배달 클로저의 **종료 보고**(정상 종료·패닉 언와인딩 공통) — Drop 으로 완료를 디스패처에 알린다.
+/// The end report of a delivery closure (normal exit and panic unwind) — Drop tells the dispatcher completion.
 ///
-/// ★왜 JoinHandle await 이 아니라 Drop 인가(load-bearing)★: 핸들을 인라인 await 하면 디스패처가 그 배달에
-///   묶여 head-of-line blocking 이 그대로 되살아난다(그게 이 디스패처가 없애는 것이다). 그래서 완료 신호가
-///   클로저 안에 있고, Drop 이라 패닉 언와인딩에서도 발화한다. ★이 신호가 빠지면 증상★: 그 AgentId 의
-///   대기열이 영원히 안 열려 그 수신자 앞 우편이 **조용히** 멈춘다(로그도 없다).
-/// ★패닉 격리는 **훅 없는 시험 빌드 한정**이다★: 배달 클로저는 가둠 표시 밖이라 운영 프로세스에서는
-///   패닉 = 프로세스 즉사다(훅이 되감기 전에 끝내 이 Drop 도 안 돈다 · ADR-0292). "패닉해도 운영에서 레인이
-///   살아남는다" 로 읽지 말 것.
+/// Drop rather than awaiting the JoinHandle (load-bearing): awaiting inline would tie the dispatcher to that delivery and bring back
+/// head-of-line blocking. Being Drop it fires on panic unwind too; without it that AgentId's queue never reopens and its mail stops silently.
+/// Panic isolation exists only in test builds without the hook: the delivery closure is outside the containment marker, so in production a
+/// panic ends the process before unwinding (this Drop does not run either — ADR-0292). Do not read it as "the lane survives a panic in production".
 struct DeliveryDone {
     id: AgentId,
     tx: mpsc::UnboundedSender<AgentId>,
     stage: DeliveryStage,
 }
 
-/// 배달 클로저가 어디까지 갔나 — `DeliveryDone` 의 Drop 이 남길 말을 가른다.
+/// How far the delivery closure got — decides what the `Drop` of `DeliveryDone` says.
 ///
-/// ★두 미완 갈래를 반드시 갈라야 한다★: 하나로 뭉치면 **운영 프로세스에서 항상 거짓말**이 된다 — 거기서는
-///   배달 클로저의 패닉이 되감기 전에 프로세스를 끝내므로(훅 · ADR-0292) Drop 이 미완으로 도는 유일한 경우가
-///   아래 `NotStarted` 다. "패닉했다" 로 찍으면 종료 때마다 없는 버그를 보고한다.
+/// The two incomplete branches must stay separate: merged, it would always lie in production, where a delivery panic ends the process
+/// before unwinding (ADR-0292), so the only incomplete Drop is `NotStarted`; logging "panicked" would report a nonexistent bug at every shutdown.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeliveryStage {
-    /// blocking pool 이 클로저를 **한 번도 실행하지 않았다** — 런타임 종료 중 큐에서 취소된 경우.
+    /// The blocking pool never ran the closure — cancelled from the queue during runtime shutdown.
     NotStarted,
-    /// 실행에는 들어갔으나 끝내지 못했다 = 언와인딩(훅 없는 시험 빌드에서만 가능).
+    /// Entered execution but did not finish = unwinding (possible only in test builds without the hook).
     Started,
     Finished,
 }
@@ -717,20 +629,20 @@ impl Drop for DeliveryDone {
             DeliveryStage::Finished => {}
             DeliveryStage::NotStarted => tracing::debug!(
                 agent = %self.id,
-                "flush 배달이 시작 전에 취소됐다(런타임 종료 중) — 레인만 해제"
+                "flush delivery was cancelled before it started (runtime shutting down) — releasing the lane only"
             ),
             DeliveryStage::Started => tracing::warn!(
                 agent = %self.id,
-                "flush 배달이 완료 전에 언와인딩됐다(그 수신자 레인은 계속 — 이 갈래는 패닉 훅이 없는 실행에서만 닿는다)"
+                "flush delivery unwound before completing (that recipient's lane continues — this branch is reached only in runs without the panic hook)"
             ),
         }
-        // 채널이 닫혔으면(디스패처 종료) 버린다 — 그 시점엔 데몬이 내려가는 중이다.
+        // If the channel is closed (dispatcher ended) discard — the daemon is going down.
         let _ = self.tx.send(self.id);
     }
 }
 
-/// 이 작업의 배달을 blocking pool 로 띄운다. `false` = 띄우지 못했다(서비스 미주입 — 그 작업은 소비됐고
-///   완료 통지도 오지 않으므로 호출자가 그 수신자 레인을 직접 이어야 한다).
+/// Launches this work's delivery onto the blocking pool. `false` = could not launch (service not injected — the work was consumed and no
+///   completion notice will come, so the caller must continue that recipient's lane itself).
 fn spawn_delivery(
     msg: FlushMsg,
     messaging: &Arc<crate::control::mcp_server::MessagingSlot>,
@@ -739,15 +651,13 @@ fn spawn_delivery(
 ) -> bool {
     let id = flush_recipient(&msg);
     if matches!(msg, FlushMsg::Idle { .. }) {
-        // ★집어들 때 coalescing 집합에서 먼저 지운다(fix 10 — lost wakeup 방지)★: 이 flush 처리 도중
-        //   도착하는 새 MessageDone 은 다시 enqueue 돼야 한다(그 턴 종료는 이 배치가 대표하지 않는다).
-        // ★지우는 시점 = 이 배달이 **실제로 시작하는** 순간이다★: 채널에서 꺼낸 시점이나 대기열에 넣는
-        //   시점으로 앞당기면, 아직 시작도 안 한 대기 항목이 대표할 턴 종료가 **새 항목으로 또 쌓여**
-        //   중복이 불어난다. 반대로 flush 뒤로 미루면 그 사이의 턴 종료가 접혀 사라진다(lost wakeup).
+        // Remove from the coalescing set first when picking up (lost wakeup prevention): a MessageDone arriving during this flush must be
+        //   enqueued again. The removal moment is when this delivery actually starts — earlier (taken from the channel / queued) lets a
+        //   waiting item's turn end pile up as a new item (duplicates); later folds away the turn end in between.
         idle.taken(id);
     }
     let Some(svc) = messaging.get() else {
-        // 서비스 미주입(부팅 초기) — 파킹이 없으니 스킵. 다음 등장/턴 종료 이벤트에 다시 온다.
+        // Service not injected (early boot) — no parking, skip; it comes again on the next appearance/turn-end event.
         return false;
     };
     let svc = svc.clone();
@@ -768,7 +678,7 @@ fn spawn_delivery(
     true
 }
 
-/// 이 수신자의 다음 대기 작업을 시작한다 — 시작할 것이 없으면 엔트리를 지운다(유계 상태).
+/// Starts the next waiting work for this recipient — if none, removes the entry (bounded state).
 fn advance_lane(
     id: AgentId,
     lanes: &mut DeliveryLanes,
@@ -777,7 +687,7 @@ fn advance_lane(
     done_tx: &mpsc::UnboundedSender<AgentId>,
 ) {
     loop {
-        // 스킵된 작업(서비스 미주입)은 완료 통지가 오지 않으므로 여기서 곧바로 다음 것을 본다.
+        // A skipped work (service not injected) gets no completion notice, so look at the next one here.
         let Some(next) = lanes.get_mut(&id).and_then(|q| q.pop_front()) else {
             lanes.remove(&id);
             return;
@@ -788,37 +698,23 @@ fn advance_lane(
     }
 }
 
-/// ★배달 레인(C2 리뷰 fix 3) — 수신자별 직렬 디스패처★. 배달 작업(Appear/Idle) 전용 소비자로, 여기의
-///   blocking write 가 막혀도 수신 레인은 계속 돌아 채널을 비운다.
+/// Delivery lane — a per-recipient serial dispatcher for delivery work (Appear/Idle); a stuck blocking write here leaves the receiving lane running.
 ///
-/// ★분할 키 = **도어벨 AgentId**(load-bearing — 이 축을 넓히지 말 것)★: 한 도어벨 id 앞 배달은 한 번에
-///   하나만 돈다. 노리는 것은 **처리량**이다 — 페이싱(제출 대기 0.5초)이 필요한 쪽은 터미널(Raw) 수신자뿐인데
-///   (구조화 입력 수신자는 제출 시퀀스가 아예 없다) 전원을 한 줄로 세우면 그 0.5초를 **모두가** 낸다.
-///   같은 도어벨 id 안에서 순서를 지키는 것도 여기 얹혀 있다(배치 "오래된 순" — ADR-0104).
-///
-/// ★주입 타깃 = 도어벨 id★: 커널 `MessagingService::drain_queue` 는 명부에서 id 가 그 큐 id 와 같은 항목에만
-///   주입한다(ADR-0309) — 큐 id = 도어벨 id 라 도어벨 id 가 다른 두 레인이 한 세션으로 수렴하지 않는다.
-///   커널의 **타깃 축 in-flight 가드**(ADR-0142)는 남아 있지만 그 축을 세운 계기(다른 두 큐가 한 세션으로
-///   수렴)는 이제 생기지 않는다 — 걷을지는 `docs/tracking.md` T-30 이 맡는다.
-///
-/// ★디스패처 자신은 막지 않는다★: 띄운 blocking task 를 **인라인 await 하지 않는다**. 완료는 별도 채널로
-///   돌아오고(`DeliveryDone`), 그 사이에도 `lane_rx` 를 계속 비운다 — 이 성질이 깨지면 수신자별 직렬화만
-///   남고 head-of-line blocking 이 그대로 되살아난다.
-///
-/// ★Appear 는 접지 않는다★: 대기열에 세우는 것은 무손실이지만(flush 는 그 수신자 앞 파킹을 통째로 drain
-///   하므로 늦게 돌아도 효과가 남는다) 버리면 그 id 앞 파킹이 TTL 까지 stranded 된다. coalescing 은
-///   통지 측 Idle 전용이다(`IdleCoalescer`).
-///
-/// ★spawn_blocking 격리(round-4 finding 1 — executor starvation)★: `flush_for` 안의 `inject` 는
-///   transport.send_input = **동기 blocking write_all+flush**다(논블록 채널 send 가 아니라 실제 자식
-///   stdin 파이프 write — `PtyTransport`/`StdioTransport::send_input`). 이걸 async task 본문에서 **직접** 부르면
-///   그 blocking 이 runtime worker 스레드를 점유한다 — current-thread/단일 worker 런타임에선 이 한 task 가
-///   executor 를 독점해 다른 task(종료 시 shutdown_all·5s join belt 등)가 폴링될 틈이 없다(실제로 통합
-///   테스트가 이 굶주림 때문에 multi_thread 로 우회해야 했다). 그래서 각 flush 를 `spawn_blocking` 으로
-///   던져 blocking pool 스레드에서 돌린다: (1) blocking write 는 runtime worker 가 아닌 blocking pool 을
-///   점유하고 (2) 디스패처는 늘 아래 select 의 `.await` 지점에 있어 abort 가 즉시 먹으며 (3) 5s join belt·
-///   종료 task 가 계속 폴링돼 current-thread 런타임도 건강하게 유지된다. 이 격리가 고치는 건 executor
-///   굶주림뿐이다 — 종료 순서 의존은 그대로 남는다(`FlushWorkerHandles::shutdown`).
+/// Split key = doorbell AgentId (load-bearing — do not widen): one delivery per doorbell id at a time. The aim is throughput — only terminal
+/// (Raw) recipients need the 0.5s submit pacing (structured input has no submit sequence); one queue would make everyone pay it. Order within a
+/// doorbell id ("oldest first" batch — ADR-0104) rides on this too.
+/// Injection target = doorbell id: the kernel `MessagingService::drain_queue` injects only into the roster entry whose id equals the queue id
+/// (ADR-0309), so two lanes with different doorbell ids never converge on one session. The kernel's target-axis in-flight guard (ADR-0142)
+/// remains though the trigger that set it up no longer arises — removal is up to `docs/tracking.md` T-30.
+/// The dispatcher itself does not block: it does not await the blocking task inline; completion returns on a separate channel (`DeliveryDone`)
+/// while it keeps emptying `lane_rx`. Breaking that brings head-of-line blocking straight back.
+/// Appear is not folded: queueing is lossless (a flush drains the recipient's parked mail whole), while dropping it would strand that id's
+/// mail until the TTL. Coalescing is for the notifying-side Idle only (`IdleCoalescer`).
+/// spawn_blocking isolation (executor starvation): the `inject` inside `flush_for` is transport.send_input = a synchronous blocking
+/// write_all+flush to the child stdin pipe (`PtyTransport`/`StdioTransport::send_input`). Called directly in an async task it occupies a
+/// runtime worker; on a current-thread/single-worker runtime that starves other tasks (`shutdown_all`, the 5s join belt). So each flush runs on
+/// `spawn_blocking`: the write occupies the blocking pool, the dispatcher stays at the select's `.await` so abort acts at once, and the belt
+/// and shutdown task keep being polled. This fixes only executor starvation — the dependence on shutdown order remains (`FlushWorkerHandles::shutdown`).
 // ADR-0142
 async fn run_flush_lane(
     mut lane_rx: mpsc::UnboundedReceiver<FlushMsg>,
@@ -827,8 +723,8 @@ async fn run_flush_lane(
 ) {
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<AgentId>();
     let mut lanes: DeliveryLanes = DeliveryLanes::new();
-    // 수신 채널이 닫힌 뒤에도 **진행 중·대기 중 배달을 다 비운 뒤** 끝난다(수명 계약 = `run_flush_worker`
-    //   헤더). done_tx 를 이 스코프가 들고 있으므로 완료 채널은 절대 먼저 닫히지 않는다.
+    // Even after the receiving channel closes it ends only after draining in-flight deliveries and waiting (lifetime contract = the
+    //   `run_flush_worker` header). This scope holds done_tx so the completion channel never closes first.
     let mut open = true;
 
     while open || !lanes.is_empty() {
@@ -849,18 +745,18 @@ async fn run_flush_lane(
                 None => open = false,
             },
             Some(id) = done_rx.recv() => advance_lane(id, &mut lanes, &messaging, &idle, &done_tx),
-            // 두 갈래가 모두 닫힌 상태(위 루프 조건이 이미 막지만, select 는 전 갈래 불활성이면 패닉한다).
+            // Both branches are closed (the loop condition blocks this, but select panics when every branch is inactive).
             else => break,
         }
     }
-    tracing::debug!("flush 레인 종료(채널 닫힘)");
+    tracing::debug!("flush lane ended (channel closed)");
 }
 
-/// flush worker 배선 묶음 — 인자 수를 줄이고 "무엇을 공유하는가" 를 한눈에 보이게 한다(부팅에서 조립).
+/// The flush worker wiring bundle (assembled at boot) — fewer arguments, and what is shared is visible at a glance.
 #[derive(Clone)]
 pub struct FlushWiring {
     pub messaging: Arc<crate::control::mcp_server::MessagingSlot>,
-    /// Idle coalescing 집합 — 통지 측(`MessagingFlushSink`)과 공유(집어들 때 해제).
+    /// Idle coalescing set — shared with the notifying side (`MessagingFlushSink`), released on pick-up.
     pub idle: Arc<IdleCoalescer>,
 }
 
@@ -878,27 +774,26 @@ impl StatusSink for MessagingFlushSink {
         self.inner.restore_result(report);
     }
 
-    // 사용량은 flush 계기가 아니라 흘리기만 한다 — 빠뜨리면 안 되는 이유는 `turn_ended` 의 decorator 계약.
+    // Usage is only passed through, not a flush trigger — it must not be omitted (decorator contract of `turn_ended`).
     fn usage_observed(&self, obs: engram_dashboard_agent::usage::UsageObservation) {
         self.inner.usage_observed(obs);
     }
 
-    /// ★턴 종료 push → flush 도어벨(ADR-0113 결정 3 — 데몬은 중계만)★. 여기서 하는 일은 coalescing
-    ///   판정 + 논블록 채널 send 뿐이다(그 계약은 `StatusSink::turn_ended`).
+    /// Turn-end push → flush doorbell (ADR-0113 decision 3 — the daemon only relays): the coalescing decision + a non-blocking channel send
+    ///   (contract: `StatusSink::turn_ended`).
     // ADR-0113
     fn turn_ended(&self, id: AgentId, epoch: u32) {
-        // epoch 을 도어벨에 싣지 않는 이유: flush 는 **에이전트 단위** 큐를 여는 동작이고, 어느 화신이
-        //   끝났든 그 시점의 현재 화신에게 배달하는 게 맞다(메일은 논리 에이전트를 향한다 — ADR-0086 §F5).
+        // The epoch is not put on the doorbell: a flush opens the per-agent queue, and whichever incarnation ended, delivering to the current
+        //   one is right (mail is addressed to the logical agent — ADR-0086 §F5).
         self.idle.enqueue(id);
-        // ★감싼 sink 로도 반드시 흘린다(decorator 계약)★: 이 wrapper 가 데몬이 설치하는 **유일한**
-        //   StatusSink 이고 이 훅은 기본 구현이 no-op 이라, 빠뜨리면 안쪽이 이 훅을 구현하는 날
-        //   **컴파일 에러 없이** 조용히 죽는다. 턴 상태를 프론트/LLM 제어 표면으로 내보내는 경로가
-        //   그 안쪽에 생길 예정이다(ADR-0113 §영향 — §5 정합).
+        // Always pass it to the wrapped sink too (decorator contract): this wrapper is the only StatusSink the daemon installs and the hook is a
+        //   no-op by default, so omitting it dies silently when the inner one implements it. A path exporting turn state to the frontend/LLM
+        //   control surface is planned inside it (ADR-0113 §Impact — aligned with §5).
         self.inner.turn_ended(id, epoch);
     }
 
-    /// ★목록이 빈 push → 같은 flush 도어벨★ — flush 레인이 바쁨을 다시 묻으므로 오류 뒤 멈춤 중에 울려도
-    ///   우편은 안 든다. 감싼 sink 로 흘리는 이유는 `turn_ended` 와 같다(decorator 계약).
+    /// Empty-list push → the same flush doorbell: the flush lane asks again whether busy, so ringing during a pause after an error lets no mail in.
+    ///   Passed to the wrapped sink as in `turn_ended` (decorator contract).
     // ADR-0231
     fn inputs_drained(&self, id: AgentId, epoch: u32) {
         self.idle.enqueue(id);
@@ -911,7 +806,7 @@ mod tests {
     use super::*;
     use engram_dashboard_agent::types::AgentId;
 
-    // ── 턴 사실 어댑터 ──────────────────────────────────────────────────────────────────────
+    // ── turn fact adapter ──────────────────────────────────────────────────────────────────────
 
     fn facts(pending: Arc<InputsPendingTable>, turns: Arc<TurnObservations>) -> ManagerTurnFacts {
         ManagerTurnFacts { pending, turns }
@@ -923,7 +818,11 @@ mod tests {
         let turns = Arc::new(TurnObservations::new());
         let f = facts(Arc::new(InputsPendingTable::new()), turns.clone());
         let id = AgentId::new_v4();
-        assert_eq!(f.turn_fact(id, 0), None, "미관측은 미관측으로 넘긴다");
+        assert_eq!(
+            f.turn_fact(id, 0),
+            None,
+            "unobserved is passed on as unobserved"
+        );
 
         let t0 = Instant::now();
         turns.observe_at(id, 0, 1, TurnSignal::Progress, t0);
@@ -950,7 +849,7 @@ mod tests {
         );
         assert!(
             f.in_turn_snapshot().is_empty(),
-            "sweep 입구에는 턴 중인 것만 오른다"
+            "only those in a turn reach the sweep entrance"
         );
     }
 
@@ -977,7 +876,7 @@ mod tests {
         );
         assert!(
             f.in_turn_snapshot().is_empty(),
-            "목록·멈춤은 상한 sweep 입구에 오르지 않는다"
+            "a list or a pause does not reach the cap sweep entrance"
         );
 
         let other = AgentId::new_v4();
@@ -985,17 +884,17 @@ mod tests {
         pending.set(other, 0, 1, true);
         let fact = f
             .turn_fact(other, 0)
-            .expect("턴 관측 없이 찬 목록도 바쁨의 사실이다");
+            .expect("a list filled without a turn observation is also a fact of being busy");
         assert!(fact.inputs_pending && !fact.in_turn && !fact.last_end_failed);
         pending.set(other, 0, 2, false);
         assert_eq!(
             f.turn_fact(other, 0),
             None,
-            "두 표 모두 사실이 없으면 미관측"
+            "no fact in either table means unobserved"
         );
     }
 
-    /// 읽힌 순서를 한 줄에 적는 가짜 표 둘.
+    /// Two fake tables that write the read order on one line.
     struct Recorded {
         log: Arc<Mutex<Vec<&'static str>>>,
     }
@@ -1027,16 +926,16 @@ mod tests {
         assert_eq!(
             *log.lock().unwrap(),
             vec!["pending", "turn"],
-            "쓰는 순서(진행 → 비었다)의 거울 — 뒤집으면 두 사실이 함께 한가로 읽히는 틈이 생긴다"
+            "mirror of the write order (progress → emptied) — reversed, there is a gap where the two facts are read together as idle"
         );
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════
-    // 리뷰 fix D9-a — 로스터 술어 **실물 어댑터** 봉인(ADR-0116 결정 1·7 · spec §7)
+    // Review fix D9-a — sealing the real adapter of the roster predicate (ADR-0116 decisions 1·7 · spec §7)
     // ══════════════════════════════════════════════════════════════════════════════════════════
 
-    /// ★플랫폼 게이트는 **spawn 하는 테스트에만** 건다★: 잠듦 축 봉인은 `upsert` 뿐이라 OS 의존이 없는데,
-    /// 모듈째 `#[cfg(windows)]` 로 덮으면 non-Windows 에서 그 회귀가 초록으로 샌다.
+    /// The platform gate applies only to tests that spawn: the dormancy-axis seal is only `upsert` (no OS dependency), and `#[cfg(windows)]`
+    /// on the whole module would let that regression pass green elsewhere.
     mod roster_predicate {
         use super::*;
         use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
@@ -1081,9 +980,8 @@ mod tests {
             ))
         }
 
-        /// ★base 이름(`AgentProfile::name`)과 canonical 이름(`display_name`)을 **일부러 다르게** 만드는
-        ///   fixture★: 두 값이 같으면 트랩 필드(`p.name`)로 잠든 이름을 뽑는 회귀가 그대로 통과한다
-        ///   (ADR-0116 영향 절 — "그 필드로 잠든 이름을 뽑으면 조용히 어긋난다").
+        /// A fixture whose base name (`AgentProfile::name`) and canonical name (`display_name`) deliberately differ: if equal, a regression
+        ///   picking the dormant name from the trap field (`p.name`) passes (ADR-0116 Impact — "picking the dormant name from that field silently diverges").
         fn profile(base: &str, canonical: &str) -> AgentProfile {
             let mut p = AgentProfile::new(
                 base.to_string(),
@@ -1099,22 +997,20 @@ mod tests {
             p
         }
 
-        /// 턴 신호 없는 산 세션(shell = structured false) — 4차 로스터의 **핵심 모집단**.
+        /// A live session with no turn signal (shell = structured false) — the core population of the 4th-amendment roster.
         #[cfg(windows)]
         fn shell(name: &str) -> AgentProfile {
             profile(name, name)
         }
 
-        /// ★셸은 편지를 읽는 주체가 아니다(사용자 결정 2026-08-17)★ — 셸에 도착한 봉투는 읽히는 게
-        /// 아니라 명령으로 실행되므로 수신자 명단에서 뺀다(`@all` 자동 포함도 이걸로 닫힌다).
+        /// A shell is not one that reads mail (user decision 2026-08-17): an envelope reaching a shell is run as a command, so it is removed from
+        /// the recipient list (this also closes automatic `@all` inclusion).
         ///
-        /// ★삭제 정리 게이트(`is_agent_live`)는 **같이 걸지 않는다**★: 그 게이트가 묻는 건 "이 세션이
-        ///   지금 살아 있나" 지 "편지를 받나" 가 아니다. 함께 걸면 셸 프로필을 지울 때 다른 축의 정리가
-        ///   엉뚱하게 발동한다 — 그래서 두 축이 갈린다는 사실을 여기서 못 박는다.
-        /// ★멤버십 술어의 capability 무관성(ADR-0116 결정 1·7)은 별도 테스트가 지킨다★
-        ///   (`tests/control_send.rs` — `roster_includes_a_terminal_agent_without_a_turn_signal_no_claude`)
-        ///   — 이 fixture 는 셸이라 그 축을 더 이상 대변하지 못한다(터미널 claude 는 실 바이너리가 필요해
-        ///   여기서 못 띄우고, 세션 주입 seam 은 통합 테스트 쪽에 있다).
+        /// The delete-cleanup gate (`is_agent_live`) is not applied together: it asks "is this session alive right now", not "does it receive mail";
+        /// applying both would fire the cleanup of another axis when deleting a shell profile — pinned here.
+        /// The capability-independence of the membership predicate (ADR-0116 decisions 1·7) is guarded by `tests/control_send.rs`
+        /// `roster_includes_a_terminal_agent_without_a_turn_signal_no_claude`; this shell fixture cannot speak for it (a terminal claude needs a
+        /// real binary, and the session injection seam is on the integration side).
         #[cfg(windows)]
         #[test]
         fn a_live_shell_is_excluded_from_the_mail_roster_but_still_counts_as_live() {
@@ -1124,7 +1020,7 @@ mod tests {
                 .spawn_agent(&shell("sheller"), SpawnMode::Fresh)
                 .expect("shell spawn")
                 .into_started()
-                .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+                .expect("this call really launches (not a duplicate request)");
             assert!(wait_until(Duration::from_secs(3), || manager
                 .list_agents()
                 .iter()
@@ -1132,24 +1028,24 @@ mod tests {
 
             assert!(
                 !port.live_agents().iter().any(|a| a.id == info.id),
-                "셸은 배달 명단에 오르면 안 된다(봉투가 명령으로 실행된다)"
+                "a shell must not get on the delivery list (the envelope would be run as a command)"
             );
             let sources = port.addressing_sources();
             assert!(
                 !sources.roster.iter().any(|a| a.id == info.id),
-                "입구 판정 소스도 같은 술어여야(한쪽만 걸면 해석과 배달이 갈린다): {sources:?}"
+                "the entry-decision source must use the same predicate (applying it to one side only splits interpretation and delivery): {sources:?}"
             );
             assert!(
                 port.is_agent_live(info.id),
-                "삭제 정리 게이트는 '살아 있나' 축이라 그대로 true 여야(리뷰 fix D1)"
+                "the delete-cleanup gate is the 'is it alive' axis so it must stay true (review fix D1)"
             );
 
-            // ★실제로 뚫렸던 구멍★: `DeleteProfile` 은 산 세션을 죽이지 않는다. 판정을 프로필에서 뽑으면
-            //   여기서 "모름" 이 되어 셸이 명단으로 되돌아온다 — 판정 근거가 세션에 있어야 이 단언이 산다.
-            manager.try_delete_agent(info.id).expect("저장 성공");
+            // A hole that was really open: `DeleteProfile` does not kill a live session. A decision drawn from the profile would be "unknown" here and the
+            //   shell would return to the list — the decision basis must be in the session.
+            manager.try_delete_agent(info.id).expect("save succeeded");
             assert!(
                 !port.live_agents().iter().any(|a| a.id == info.id),
-                "프로필이 사라져도 산 셸은 여전히 배달 명단 밖이어야"
+                "even when the profile is gone a live shell must still be off the delivery list"
             );
             assert!(
                 !port
@@ -1157,25 +1053,23 @@ mod tests {
                     .roster
                     .iter()
                     .any(|a| a.id == info.id),
-                "입구 판정 소스도 마찬가지"
+                "the entry-decision source likewise"
             );
 
             manager.kill_agent(info.id).ok();
         }
 
-        // ADR-0116 결정 1·7(capability ≠ 멤버십)의 봉인은 어댑터 **산출 함수 두 개**를 실제로 태워야
-        // 성립하므로 세션 주입 seam 이 있는 통합 테스트가 맡는다
-        // (`tests/control_send.rs` — `roster_includes_a_terminal_agent_without_a_turn_signal_no_claude`).
-        // ★여기서 `is_live` 만 부르는 테스트로 대신하지 말 것★: 그 술어는 상태 한 줄이라 capability 를
-        //   읽지도 않아 항상 참이다(항진명제). 실제로 그렇게 썼다가 리뷰에서 걸렸다.
+        // The seal of ADR-0116 decisions 1·7 (capability ≠ membership) holds only if the adapter's two output functions are exercised, so the
+        // integration test with the session injection seam takes it (`tests/control_send.rs`
+        // `roster_includes_a_terminal_agent_without_a_turn_signal_no_claude`). Do not substitute a test calling only `is_live`: that predicate is a
+        // single status line that never reads capability, so it is always true (a tautology — written that way once and caught in review).
 
         #[test]
         fn two_dormant_profiles_sharing_a_name_are_both_reported() {
             let manager = manager("dormant-dup");
             let port = ManagerDeliveryPort::new(manager.clone());
-            // ★하네스 seam 으로 심는다(ADR-0120)★: 정상 경로(`try_create_agent`)는 명부 전역 이름 유일성을
-            //   강제해 동명 2건을 **만들 수 없다**. 유일성이 데이터 전체에 적용되기 전(기존 agents.json)엔
-            //   이 상태가 실재할 수 있다.
+            // Plant it via the harness seam (ADR-0120): the normal path (`try_create_agent`) enforces registry-wide name uniqueness and cannot create two
+            //   same names; before uniqueness applied to all data (an existing agents.json) this state can really exist.
             let twin_a = profile("raw-twin-a", "twin");
             let twin_b = profile("raw-twin-b", "twin");
             let mut expected = vec![
@@ -1195,16 +1089,16 @@ mod tests {
             let sources = port.addressing_sources();
             assert!(
                 sources.roster.is_empty(),
-                "스폰이 없으므로 로스터는 비어야: {sources:?}"
+                "no spawn so the roster must be empty: {sources:?}"
             );
             assert_eq!(
                 sources.dormant, expected,
-                "동명 잠듦 2건은 각자의 id 와 canonical 이름 그대로 2건 올라와야(이름 · id 순): {sources:?}"
+                "two same-name dormant entries must come up as 2 with their own ids and canonical names (name · id order): {sources:?}"
             );
         }
 
-        /// ★잠든 에이전트를 개명해도 id 는 그대로다(ADR-0309 결정 1)★ — 대기 우편 · 계약이 그 id 에 묶이므로,
-        ///   어댑터가 넘기는 쌍의 id 가 개명으로 바뀌면 그 에이전트가 자기 우편 · 의무를 잃는다.
+        /// Renaming a dormant agent keeps its id (ADR-0309 decision 1): pending mail · contracts are bound to that id, so an id changing with a
+        ///   rename would make the agent lose its own mail and obligations.
         #[test]
         fn a_renamed_dormant_profile_is_reported_with_the_same_id_and_the_new_name() {
             let manager = manager("dormant-rename");
@@ -1218,15 +1112,15 @@ mod tests {
                     id,
                     name: "before".to_string()
                 }],
-                "전제: 잠든 쌍"
+                "premise: a dormant pair"
             );
 
             let outcome = manager
                 .try_rename_agent(id, Some("after".to_string()))
-                .expect("저장 성공");
+                .expect("save succeeded");
             assert!(
                 matches!(&outcome, engram_dashboard_agent::manager::RenameOutcome::Renamed(n) if n == "after"),
-                "전제: 개명이 확정됐다: {outcome:?}"
+                "premise: the rename is confirmed: {outcome:?}"
             );
             assert_eq!(
                 port.addressing_sources().dormant,
@@ -1234,56 +1128,53 @@ mod tests {
                     id,
                     name: "after".to_string()
                 }],
-                "같은 id · 새 이름이어야"
+                "must be the same id · a new name"
             );
         }
 
         #[cfg(windows)]
         #[test]
         fn a_live_namesake_does_not_hide_a_dormant_profile_with_the_same_name() {
-            // ★발송 결말과의 관계★: 이름으로 부르면 산 동명이 이겨 잠듦 축이 결말에 닿지 않는다. `@all` 은 id 로
-            //   펼치므로 잠든 동명도 자기 몫을 받는다(`service.rs::a_live_agent_wins_over_a_dormant_namesake` ·
-            //   ADR-0309) — 이름 축으로 빼는 회귀는 그 몫을 조용히 잃게 한다.
+            // By name a live namesake wins, so the dormancy axis never reaches the outcome; `@all` expands by id so a dormant namesake gets its own share
+            //   (`service.rs::a_live_agent_wins_over_a_dormant_namesake` · ADR-0309) — a regression removing by the name axis silently loses it.
             let manager = manager("live-namesake");
             let port = ManagerDeliveryPort::new(manager.clone());
             let info = manager
                 .spawn_agent(&profile("raw-live-twin", "twin"), SpawnMode::Fresh)
                 .expect("shell spawn")
                 .into_started()
-                .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
+                .expect("this call really launches (not a duplicate request)");
             assert!(wait_until(Duration::from_secs(3), || manager
                 .list_agents()
                 .iter()
                 .any(|a| a.id == info.id)));
-            // ★하네스 seam★: 산 `twin` 이 이미 명부에 있으므로 정상 경로면 `twin(1)` 로 개명된다
-            //   (ADR-0120). 이 테스트가 보는 건 **차집합 축이 id 라는 사실**이라 이름이 같아야 성립한다.
+            // Harness seam: the live `twin` is already in the registry, so the normal path would rename it to `twin(1)` (ADR-0120); the set-difference
+            //   axis being id needs equal names.
             let dormant_twin = profile("raw-dormant-twin", "twin");
             let dormant_id = dormant_twin.id;
             manager.seed_agent_bypassing_uniqueness(dormant_twin);
 
             let sources = port.addressing_sources();
-            // ★전제가 바뀌었다★: 산 쪽은 셸이라 배달 명단엔 안 오른다(`reads_messages`). 그래도 이 테스트가
-            //   보는 축은 그대로다 — 차집합은 **agent `roster()`** 가 id 로 끝내고 어댑터는 그 뒤에서 거를
-            //   뿐이라, 이름 축으로 빼는 회귀가 생기면 산 `twin` 이 잠든 `twin` 을 삼켜 아래가 비어 버린다.
+            // The live side is a shell, so it is not on the delivery list (`reads_messages`). The axis is unchanged: the set difference is finished by
+            //   agent `roster()` by id and the adapter only filters after, so a regression removing by name makes the live `twin` swallow the dormant one and the list empty.
             assert_eq!(
                 sources.dormant,
                 vec![DormantAgent {
                     id: dormant_id,
                     name: "twin".to_string()
                 }],
-                "산 쪽은 id 로 빠지고 잠든 동명은 남아야(이름 축으로 빼면 비어 버린다): {sources:?}"
+                "the live side drops out by id and the dormant same-name must remain (removing by the name axis would empty it): {sources:?}"
             );
 
             manager.kill_agent(info.id).ok();
         }
 
-        // ★종료된 세션의 로스터 부재는 여기서 단언하지 않는다(정직 명시)★: 이 조립에서 실제 종료는
-        // reaper 가 세션을 **맵에서 곧바로 제거**하므로(reaper.rs — 시체 보존은 프로필 축이다) "terminal
-        // 상태인데 목록에 남아 있는" 상태를 실 세션으로 만들 수 없다. 그 술어의 봉인은 세션 주입 seam 이 있는
-        // 통합 테스트가 맡는다(`tests/control_send.rs` — `roster_excludes_a_terminal_session_still_in_the_map`).
+        // The absence of a terminated session from the roster is not asserted here: the reaper removes a really terminated session from the map at once
+        // (reaper.rs), so "terminal status yet in the list" cannot be made from a real session. The seal is the integration test with the session injection
+        // seam (`tests/control_send.rs` `roster_excludes_a_terminal_session_still_in_the_map`).
     }
 
-    // ── 7. MessagingFlushSink diff/enqueue 로직 — worker 없이 순수 diff 검증 ──────────────────────
+    // ── 7. MessagingFlushSink diff/enqueue logic — pure diff verification without the worker ──────────────────────
     use engram_dashboard_agent::types::{
         AgentInfo as TAgentInfo, Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps,
         SessionCaps,
@@ -1338,7 +1229,7 @@ mod tests {
         }
     }
 
-    /// 테스트용 no-op inner StatusSink — broadcast 는 무관(diff 만 검증).
+    /// Test no-op inner StatusSink — broadcast is irrelevant (only the diff is verified).
     struct TestNoopSink;
     impl StatusSink for TestNoopSink {
         fn status_changed(&self, _: AgentId, _: CoreStatus, _: u32) {}
@@ -1346,7 +1237,7 @@ mod tests {
         fn restore_result(&self, _: CoreRestoreReport) {}
     }
 
-    /// flush 작업만 뽑는 sink + 그 채널 수신단을 만든다(worker 미배선 — diff 만 관측).
+    /// Builds a sink that extracts only flush work + the receiving end of its channel (worker not wired — only the diff is observed).
     fn flush_sink() -> (MessagingFlushSink, mpsc::UnboundedReceiver<FlushMsg>) {
         let (tx, rx) = mpsc::unbounded_channel::<FlushMsg>();
         let sink = MessagingFlushSink::new_test(
@@ -1365,7 +1256,7 @@ mod tests {
         out
     }
 
-    /// 등장 flush 대상(Appear)의 id 만 추린다 — 한 스냅샷 안 순서는 HashMap 순회라 정렬해 돌려준다.
+    /// The ids of appearance flush targets (Appear) — one snapshot's order is HashMap iteration, so sorted before returning.
     fn drain_targets(rx: &mut mpsc::UnboundedReceiver<FlushMsg>) -> Vec<AgentId> {
         let mut ids: Vec<AgentId> = drain_msgs(rx)
             .into_iter()
@@ -1383,11 +1274,14 @@ mod tests {
         let (sink, mut rx) = flush_sink();
         let id = AgentId::new_v4();
         sink.agent_list_updated(vec![flush_info(id, "alice", 0, true, CoreStatus::Running)]);
-        assert_eq!(drain_targets(&mut rx), vec![id], "새로 산 에이전트 flush");
+        assert_eq!(
+            drain_targets(&mut rx),
+            vec![id],
+            "flush for a newly live agent"
+        );
     }
 
-    /// ★동명 쌍둥이는 각자 자기 큐를 flush 한다(ADR-0309 · TRD S29 X4)★ — 큐가 id 키라 이름이 겹쳐도 flush
-    ///   대상이 갈린다. 옛 「이름이 유일할 때만」 건너뜀을 되살리면 둘 다 여기서 빠진다.
+    /// Same-name twins each flush their own queue (ADR-0309 · TRD S29 X4): the queue is keyed by id; reviving the old "only when the name is unique" skip would drop both.
     #[test]
     fn flush_sink_flushes_each_same_named_twin() {
         let (sink, mut rx) = flush_sink();
@@ -1399,17 +1293,16 @@ mod tests {
         ]);
         let mut both = vec![a, b];
         both.sort();
-        assert_eq!(drain_targets(&mut rx), both, "쌍둥이 둘 다 등장");
+        assert_eq!(drain_targets(&mut rx), both, "both twins appear");
         sink.agent_list_updated(vec![flush_info(a, "dup", 0, true, CoreStatus::Running)]);
         assert!(
             drain_targets(&mut rx).is_empty(),
-            "한쪽이 빠져 이름이 유일해져도 남은 쪽은 같은 화신이라 등장이 아니다"
+            "even if one drops out and the name becomes unique, the remaining one is the same incarnation so it is not an appearance"
         );
     }
 
-    /// ★개명은 등장이 아니다 — 등장은 새 id 또는 같은 id 의 다른 화신뿐이다(ADR-0309 · TRD S29 §6-3 U4)★.
-    ///   diff 가 이름으로 돌면 개명 한 번에 등장이 나고(헛 flush), 옛 이름을 새로 가진 다른 에이전트를 같은
-    ///   에이전트로 본다.
+    /// A rename is not an appearance — only a new id or a different incarnation of the same id is (ADR-0309 · TRD S29 §6-3 U4). A by-name diff
+    ///   would raise a needless flush on rename and see an agent that took the old name as the same agent.
     #[test]
     fn flush_sink_appears_by_id_and_tag_and_ignores_a_rename() {
         let (sink, mut rx) = flush_sink();
@@ -1420,7 +1313,7 @@ mod tests {
         sink.agent_list_updated(vec![flush_info(x, "b", 4, true, CoreStatus::Running)]);
         assert!(
             drain_targets(&mut rx).is_empty(),
-            "같은 id · 같은 화신의 개명은 등장이 아니다"
+            "a rename with the same id · the same incarnation is not an appearance"
         );
 
         let y = AgentId::new_v4();
@@ -1431,19 +1324,22 @@ mod tests {
         assert_eq!(
             drain_targets(&mut rx),
             vec![y],
-            "옛 이름을 새로 가진 다른 에이전트는 그 자신(새 id)으로만 등장한다"
+            "a different agent that newly took the old name appears only as itself (the new id)"
         );
 
         sink.agent_list_updated(vec![
             flush_info(x, "b", 7, true, CoreStatus::Running),
             flush_info(y, "a", 4, true, CoreStatus::Running),
         ]);
-        assert_eq!(drain_targets(&mut rx), vec![x], "같은 id 의 새 화신은 등장");
+        assert_eq!(
+            drain_targets(&mut rx),
+            vec![x],
+            "a new incarnation of the same id is an appearance"
+        );
     }
 
-    /// ★대소가 아니라 **불일치**로 판정한다★: 화신 표식은 화신마다 뽑은 난수라 새 화신의 값이 옛 값보다
-    /// 작을 수 있다(`AgentProfile::epoch`). 대소로 걸면 그 절반의 재스폰에서 등장을 놓쳐, 그 에이전트 앞에
-    /// 파킹된 우편이 다음 재스폰까지 묶인다.
+    /// Decided by mismatch, not order: the incarnation marker is random per incarnation, so a new value can be smaller (`AgentProfile::epoch`);
+    /// an order test misses the appearance in half of respawns and ties up that agent's mail until the next respawn.
     #[test]
     fn flush_sink_enqueues_on_any_different_tag_but_not_the_same_one() {
         let (sink, mut rx) = flush_sink();
@@ -1453,19 +1349,19 @@ mod tests {
         sink.agent_list_updated(vec![flush_info(id, "a", 5, true, CoreStatus::Running)]);
         assert!(
             drain_targets(&mut rx).is_empty(),
-            "같은 표식 재-push 는 flush 안 함"
+            "re-pushing the same marker does not flush"
         );
         sink.agent_list_updated(vec![flush_info(id, "a", 9, true, CoreStatus::Running)]);
         assert_eq!(
             drain_targets(&mut rx),
             vec![id],
-            "표식이 갈리면 flush(재스폰/재활성화)"
+            "a differing marker flushes (respawn/reactivation)"
         );
         sink.agent_list_updated(vec![flush_info(id, "a", 2, true, CoreStatus::Running)]);
         assert_eq!(
             drain_targets(&mut rx),
             vec![id],
-            "같은 id 라도 표식이 **작아지는** 재스폰이 있다 — 그것도 등장이다"
+            "there are respawns where the marker gets **smaller** even with the same id — that is also an appearance"
         );
     }
 
@@ -1480,12 +1376,12 @@ mod tests {
         assert_eq!(
             drain_targets(&mut rx),
             vec![new],
-            "동명 다른 에이전트(새 id)는 epoch 이 낮아도 flush(finding 3)"
+            "a different agent with the same name (new id) flushes even with a lower epoch (finding 3)"
         );
         sink.agent_list_updated(vec![flush_info(new, "svc", 0, true, CoreStatus::Running)]);
         assert!(
             drain_targets(&mut rx).is_empty(),
-            "같은 id+epoch 재-push 는 flush 안 함"
+            "re-pushing the same id+epoch does not flush"
         );
     }
 
@@ -1495,17 +1391,17 @@ mod tests {
         let tui = AgentId::new_v4();
         let dead = AgentId::new_v4();
         sink.agent_list_updated(vec![
-            flush_info(tui, "tui", 0, false, CoreStatus::Running), // 비-structured = 턴 신호 없음
+            flush_info(tui, "tui", 0, false, CoreStatus::Running), // non-structured = no turn signal
             flush_info(dead, "dead", 0, true, CoreStatus::Killed), // terminal
         ]);
         assert_eq!(
             drain_msgs(&mut rx),
             vec![FlushMsg::Appear { id: tui }],
-            "턴 신호 없는 산 세션 = Appear · terminal 은 아무것도 아님"
+            "a live session with no turn signal = Appear · terminal is nothing"
         );
     }
 
-    // ── 7b. 턴 종료 push → 도어벨(ADR-0113 — 데몬은 중계만) ─────────────────────────────
+    // ── 7b. turn-end push → doorbell (ADR-0113 — the daemon only relays) ─────────────────────────────
 
     #[test]
     fn a_turn_end_push_from_the_core_becomes_an_idle_doorbell() {
@@ -1515,7 +1411,7 @@ mod tests {
         assert_eq!(drain_msgs(&mut rx), vec![FlushMsg::Idle { id }]);
     }
 
-    /// 감싼 sink 로 흘렸는지 보는 inner.
+    /// The inner that records whether it was passed to the wrapped sink.
     struct DrainedInner {
         seen: Arc<Mutex<Vec<(AgentId, u32)>>>,
     }
@@ -1543,9 +1439,9 @@ mod tests {
         assert_eq!(
             drain_msgs(&mut rx),
             vec![FlushMsg::Idle { id }],
-            "턴 끝과 같은 도어벨 — 미처리분이 있으면 서로 접힌다"
+            "same doorbell as the turn end — if there is an unprocessed one they fold into each other"
         );
-        assert_eq!(*seen.lock().unwrap(), vec![(id, 3)], "decorator 계약");
+        assert_eq!(*seen.lock().unwrap(), vec![(id, 3)], "decorator contract");
     }
 
     #[test]
@@ -1558,7 +1454,7 @@ mod tests {
         assert_eq!(
             drain_msgs(&mut rx),
             vec![FlushMsg::Idle { id }],
-            "미처리분이 있으면 접는다(소비자가 집어들면 다시 열린다 — IdleCoalescer)"
+            "folds if there is an unprocessed one (reopens when the consumer picks it up — IdleCoalescer)"
         );
     }
 
@@ -1577,7 +1473,7 @@ mod tests {
         assert_eq!(
             drain_msgs(&mut rx),
             vec![FlushMsg::Idle { id: a }, FlushMsg::Idle { id: b }],
-            "id 별로 미처리 1건씩만(다른 id 는 서로 접히지 않는다)"
+            "only 1 unprocessed per id (different ids do not fold into each other)"
         );
         coalescer.taken(a);
         notifier.notify_idle(a);
@@ -1596,7 +1492,7 @@ mod tests {
         assert_eq!(drain_msgs(&mut rx), vec![FlushMsg::Idle { id }]);
     }
 
-    // ── 7c. 사용량 관측 — 도어벨 없이 감싼 sink 로만 흐른다 ─────────────────────────────────
+    // ── 7c. usage observation — flows only through the wrapped sink, without the doorbell ─────────────────────────────
 
     struct UsageRecordingInner {
         seen: Arc<Mutex<Vec<engram_dashboard_agent::usage::UsageObservation>>>,
@@ -1639,15 +1535,15 @@ mod tests {
         assert_eq!(
             *seen.lock().unwrap(),
             vec![obs],
-            "decorator 계약 — 받은 관측 그대로 한 번"
+            "decorator contract — the received observation as is, once"
         );
         assert!(
             drain_msgs(&mut rx).is_empty(),
-            "사용량은 flush 계기가 아니다"
+            "usage is not a flush trigger"
         );
     }
 
-    // ── 9b. flush worker: 2-레인 소유/종료(round-3 finding 1) ────────────────────────────────
+    // ── 9b. flush worker: 2-lane ownership/shutdown (round-3 finding 1) ────────────────────────────────
 
     fn lane_wiring() -> FlushWiring {
         FlushWiring {
@@ -1660,30 +1556,30 @@ mod tests {
     async fn flush_worker_handles_shutdown_stops_both_lanes() {
         let (tx, rx) = mpsc::unbounded_channel::<FlushMsg>();
         let handles = spawn_flush_worker(rx, lane_wiring());
-        // 배달 작업 1건을 넣어 레인이 실제로 돌게 한다(messaging slot 미주입이라 즉시 skip = 결정적).
+        // Put in one delivery work so the lane actually runs (messaging slot not injected, so it skips at once = deterministic).
         tx.send(FlushMsg::Idle {
             id: AgentId::new_v4(),
         })
-        .expect("수신 레인 수신");
+        .expect("receiving lane receive");
         tokio::time::timeout(Duration::from_secs(6), handles.shutdown())
             .await
-            .expect("shutdown 이 belt 안에 반환해야");
+            .expect("shutdown must return within the belt");
         assert!(
             tx.send(FlushMsg::Idle {
                 id: AgentId::new_v4()
             })
             .is_err(),
-            "shutdown 후 수신 레인은 더 이상 수신하지 않는다"
+            "after shutdown the receiving lane no longer receives"
         );
     }
 
-    // ── 9c. 배달 레인: 수신자별 직렬 · 수신자 간 병렬 ─────────────────────────────────────────
+    // ── 9c. delivery lane: serial per recipient · parallel across recipients ─────────────────────────────────────────
 
     use engram_dashboard_messaging::envelope::Entrance;
     use engram_dashboard_messaging::service::{SendMeta, SendStatus};
     use engram_dashboard_messaging::SenderIdentity;
 
-    /// 배달 클로저의 진입/이탈 표식. 로스터 조회 표식엔 수신자가 없고 주입 표식엔 있다(`LaneProbe` 헤더).
+    /// Entry/exit marker of a delivery closure. The roster-lookup marker has no recipient; the injection marker has one (`LaneProbe` header).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Probe {
         EnterDrain,
@@ -1692,27 +1588,25 @@ mod tests {
         ExitInject(AgentId),
     }
 
-    /// 배달 클로저의 진입/이탈을 관측하고 **시점을 테스트가 통제**하게 하는 fake DeliveryPort.
+    /// A fake DeliveryPort observing entry/exit of delivery closures with test-controlled timing.
     ///
-    /// ★관측점 둘(커널 코드가 정하는 외부 사실)★
-    ///   - **로스터 조회(`live_agents`)** — 그 수신자 큐에 편지가 있으면 Appear(`flush_for`)든 Idle
-    ///     (`flush_for_agent`)든 드레인 머리에서 이 포트를 정확히 한 번 부른다. ★큐가 빈 수신자의 Idle 은 포트를
-    ///     한 번도 부르지 않는다★(`flush_for_agent` 의 빈 큐 조기 반환) — Appear 는 큐와 무관하게 부른다. 같은
-    ///     수신자 앞 두 배달의 순서는 이 차이로 가린다.
-    ///   - **주입(`inject`)** — 받는 이가 깨어 있으면 드레인이 그 id 로 부른다. 수신자가 실리는 표식은 이것뿐이다.
+    /// Two observation points (external facts fixed by kernel code):
+    ///   - Roster lookup (`live_agents`): if that recipient's queue has mail, Appear (`flush_for`) or Idle (`flush_for_agent`) calls this port once at
+    ///     the head of the drain. An Idle for an empty queue never calls it (the empty-queue early return of `flush_for_agent`); Appear calls it
+    ///     regardless — the order of two deliveries to one recipient is told apart by this.
+    ///   - Injection (`inject`): an awake recipient's drain calls it with that id; the only marker carrying the recipient.
     ///
-    /// ★편지는 잠든 동안 맡긴다(`park_while_asleep`)★: 깨어 있는 수신자 앞 발송은 테스트 스레드에서 곧장
-    ///   드레인해 표식이 레인 밖에서 찍힌다. 잠든 수신자 앞 발송은 파킹만 하고 flush 를 부르지 않는다.
+    /// Mail is parked while asleep (`park_while_asleep`): a send to an awake recipient drains at once on the test thread (the marker is stamped
+    /// outside the lane); a send to a dormant recipient only parks.
     struct LaneProbe {
         agents: Vec<(AgentId, String)>,
-        /// 거짓 = 전원 잠듦(로스터가 비고 잠든 쪽에만 보인다) · 참 = 전원 깨어 있음.
+        /// False = everyone dormant (roster empty, seen only on the dormant side) · true = everyone awake.
         awake: std::sync::atomic::AtomicBool,
         events: mpsc::UnboundedSender<Probe>,
-        /// 이 표식으로 진입한 클로저는 허가를 받을 때까지 막힌다.
+        /// A closure that entered with this marker blocks until it gets a permit.
         blocked: Vec<Probe>,
-        /// 허가 채널 — 테스트가 send 할 때마다 막힌 클로저 하나가 풀린다. Mutex 는 `Receiver` 가 `!Sync`
-        ///   이기 때문이고(포트는 `Sync` 여야 한다), 대기 중 이 락을 든다 — 표식 send 는 그 **앞**이라
-        ///   막힌 클로저의 진입도 관측된다.
+        /// Permit channel — each test send releases one blocked closure. The Mutex is because `Receiver` is `!Sync` (the port must be `Sync`); the
+        ///   lock is held while waiting, and the marker send is before it so a blocked closure's entry is observed too.
         release: Mutex<std::sync::mpsc::Receiver<()>>,
         inflight: std::sync::atomic::AtomicUsize,
         peak_inflight: std::sync::atomic::AtomicUsize,
@@ -1746,9 +1640,9 @@ mod tests {
             if self.blocked.contains(&enter) {
                 self.release
                     .lock()
-                    .expect("허가 채널 poisoned")
+                    .expect("permit channel poisoned")
                     .recv()
-                    .expect("허가 채널이 살아 있어야");
+                    .expect("the permit channel must be alive");
             }
             self.inflight.fetch_sub(1, SeqCst);
             let _ = self.events.send(exit);
@@ -1803,7 +1697,7 @@ mod tests {
     }
 
     impl LaneHarness {
-        /// 잠든 수신자 앞에 편지 한 통을 맡긴다 — 파킹만 하고 flush 를 부르지 않는다(`LaneProbe` 헤더).
+        /// Parks one letter for a dormant recipient — only parks, no flush (`LaneProbe` header).
         fn park_while_asleep(&self, name: &str) {
             let rows = self
                 .svc
@@ -1819,17 +1713,16 @@ mod tests {
                     Entrance::Mcp,
                     &SendMeta::default(),
                 )
-                .expect("발송 수락");
+                .expect("send accepted");
             assert_eq!(
                 rows[0].status,
                 SendStatus::Pending,
-                "잠든 수신자 → 파킹: {rows:?}"
+                "dormant recipient → parked: {rows:?}"
             );
         }
     }
 
-    /// 실 `MessagingService`(fake 포트) + 실 2-레인 worker 조립 — 레인 스케줄링만 관측 대상으로 남긴다.
-    ///   수신자는 전원 잠든 채 시작한다(`LaneProbe::wake` 로 깨운다).
+    /// A real `MessagingService` (fake port) + a real 2-lane worker assembly — only lane scheduling is observed. Recipients start dormant (woken with `LaneProbe::wake`).
     fn lane_harness(agents: Vec<(AgentId, String)>, blocked: Vec<Probe>) -> LaneHarness {
         let (ev_tx, events) = mpsc::unbounded_channel::<Probe>();
         let (release, release_rx) = std::sync::mpsc::channel::<()>();
@@ -1866,18 +1759,16 @@ mod tests {
         }
     }
 
-    /// 다음 표식을 **유계 대기**로 받는다 — 타임아웃은 동기화 수단이 아니라 실패 backstop 이다(표식이 안
-    /// 오는 것 자체가 회귀다).
+    /// Receives the next marker with a bounded wait — the timeout is a failure backstop, not synchronization (a missing marker is itself a regression).
     async fn next_probe(events: &mut mpsc::UnboundedReceiver<Probe>) -> Probe {
         tokio::time::timeout(Duration::from_secs(5), events.recv())
             .await
-            .expect("배달 표식이 5s 안에 와야 — 오지 않으면 그 배달이 시작조차 못 했다")
-            .expect("표식 채널이 살아 있어야")
+            .expect("the delivery marker must arrive within 5s — if it does not, that delivery could not even start")
+            .expect("the marker channel must be alive")
     }
 
-    /// ★막힌 수신자가 다른 수신자의 배달을 막지 않는다★ — 배달 1건은 제출 페이싱으로 0.5초 넘게 잡혀 있고,
-    /// 그 뒤에 전원이 줄을 서면 페이싱이 필요 없는 수신자까지 그 시간을 낸다. a 의 주입을 막아 두고 b 가
-    /// 주입까지 완주하는지 본다.
+    /// A blocked recipient does not block another's delivery: one delivery is held over 0.5s by submit pacing, and a single queue would make
+    /// even a recipient needing no pacing pay it. Block a's injection and see whether b reaches injection.
     #[tokio::test]
     async fn a_stalled_recipient_does_not_hold_up_another_recipients_delivery() {
         let a = AgentId::new_v4();
@@ -1890,72 +1781,73 @@ mod tests {
         h.park_while_asleep("bravo");
         h.probe.wake();
 
-        h.tx.send(FlushMsg::Idle { id: a }).expect("수신 레인 수신");
+        h.tx.send(FlushMsg::Idle { id: a })
+            .expect("receiving lane receive");
         assert_eq!(next_probe(&mut h.events).await, Probe::EnterDrain);
         assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
         assert_eq!(next_probe(&mut h.events).await, Probe::EnterInject(a));
-        h.tx.send(FlushMsg::Idle { id: b }).expect("수신 레인 수신");
+        h.tx.send(FlushMsg::Idle { id: b })
+            .expect("receiving lane receive");
 
         assert_eq!(
             next_probe(&mut h.events).await,
             Probe::EnterDrain,
-            "a 가 막혀 있어도 b 의 배달은 시작해야"
+            "b's delivery must start even while a is blocked"
         );
         assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
         assert_eq!(next_probe(&mut h.events).await, Probe::EnterInject(b));
         assert_eq!(
             next_probe(&mut h.events).await,
             Probe::ExitInject(b),
-            "a 가 아직 막혀 있는 동안 b 는 완주해야"
+            "b must run through while a is still blocked"
         );
         assert!(
             h.probe.peak() >= 2,
-            "두 수신자 배달이 실제로 겹쳐 돌았어야(순차로 흘러가면 이 테스트가 무의미해진다)"
+            "the two recipients' deliveries must actually have run overlapping (if they flow sequentially this test is meaningless)"
         );
 
-        h.release.send(()).expect("허가");
+        h.release.send(()).expect("permit");
         assert_eq!(next_probe(&mut h.events).await, Probe::ExitInject(a));
         h.handles.shutdown().await;
     }
 
-    /// ★같은 도어벨 id 의 배달은 겹치지 않고 디스패치 순서로 돈다★ — 이 축이 배치의 "오래된 순" 을 떠받친다.
-    /// (같은 **세션**에 두 배달이 겹치지 않는 보장은 여기 축이 아니다 — `run_flush_lane` 헤더가 가리키는
-    /// 커널의 타깃 축 가드 몫이고, 그쪽 회귀는 커널 테스트가 진다.)
+    /// Deliveries of one doorbell id do not overlap and run in dispatch order — this underpins the batch's "oldest first". (Two deliveries to
+    /// one session not overlapping is not this axis: it is the kernel's target-axis guard noted in the `run_flush_lane` header, tested in the kernel.)
     ///
-    /// ★순서를 가리는 법★: 큐가 빈 채 Appear · Idle 을 차례로 넣는다. Appear 는 빈 큐에도 로스터를 뜨고(첫
-    ///   표식), 그 Appear 가 막혀 있는 동안 편지를 맡긴다. 그래서 둘째 표식은 **큐가 찬 뒤에 시작한 Idle** 만 낼
-    ///   수 있다 — Idle 이 먼저 돌았다면 빈 큐라 표식 없이 끝나 둘째 표식이 오지 않고, 겹쳐 돌았다면 첫 표식이
-    ///   풀리기 전에 둘째가 온다.
+    /// Telling the order: put Appear then Idle with the queue empty. Appear reads the roster even for an empty queue (the first marker), and a
+    /// letter is parked while it is blocked. The second marker can then come only from an Idle that started after the queue filled — an Idle run
+    /// first would end without a marker, and overlapping runs would show the second before the first is released.
     #[tokio::test]
     async fn same_recipient_deliveries_are_serialized_in_dispatch_order() {
         let a = AgentId::new_v4();
         let mut h = lane_harness(vec![(a, "alpha".to_string())], vec![Probe::EnterDrain]);
 
-        // 둘을 **먼저 다 넣는다** — 직렬화가 없으면 두 배달이 함께 in-flight 가 되어 아래 단언이 잡는다.
+        // Put both in first — without serialization both deliveries would be in flight together and the assertion below catches it.
         h.tx.send(FlushMsg::Appear { id: a })
-            .expect("수신 레인 수신");
-        h.tx.send(FlushMsg::Idle { id: a }).expect("수신 레인 수신");
+            .expect("receiving lane receive");
+        h.tx.send(FlushMsg::Idle { id: a })
+            .expect("receiving lane receive");
 
         assert_eq!(
             next_probe(&mut h.events).await,
             Probe::EnterDrain,
-            "먼저 디스패치한 Appear 가 먼저 시작(빈 큐의 Idle 은 표식을 내지 않는다)"
+            "the Appear dispatched first starts first (an Idle on an empty queue emits no marker)"
         );
         h.park_while_asleep("alpha");
-        h.release.send(()).expect("허가");
+        h.release.send(()).expect("permit");
         assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
         assert_eq!(
             next_probe(&mut h.events).await,
             Probe::EnterDrain,
-            "앞 배달이 끝난 뒤에야 다음 배달(Idle — 큐가 찼다)이 시작"
+            "the next delivery (Idle — the queue is full) starts only after the previous one ends"
         );
-        h.release.send(()).expect("허가");
+        h.release.send(()).expect("permit");
         assert_eq!(next_probe(&mut h.events).await, Probe::ExitDrain);
 
         assert_eq!(
             h.probe.peak(),
             1,
-            "같은 수신자 배달은 절대 겹치지 않는다(봉투 합쳐짐 방지)"
+            "deliveries to the same recipient never overlap (prevents envelopes merging)"
         );
         h.handles.shutdown().await;
     }

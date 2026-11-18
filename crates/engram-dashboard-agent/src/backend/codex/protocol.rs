@@ -107,23 +107,23 @@ pub(crate) enum Inbound {
 /// (TRD §4-6: we do not die on a non-JSON stdout line).
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ParseError {
-    #[error("JSON 이 아니다: {0}")]
+    #[error("not JSON: {0}")]
     NotJson(serde_json::Error),
-    #[error("JSON 최상위가 객체가 아니다")]
+    #[error("the JSON top level is not an object")]
     NotObject,
-    #[error("`method` 가 문자열이 아니다")]
+    #[error("`method` is not a string")]
     MethodNotString,
-    #[error("`id` 가 문자열도 i64 도 아니다")]
+    #[error("`id` is neither a string nor an i64")]
     BadId,
-    #[error("`error` 가 {{code,message}} 모양이 아니다: {0}")]
+    #[error("`error` does not have the {{code,message}} shape: {0}")]
     BadError(serde_json::Error),
-    #[error("`{0}` 봉투에 `id` 가 없다")]
+    #[error("the `{0}` envelope has no `id`")]
     MissingId(&'static str),
     /// `result` and `error` came together in one line. It is a line claiming success and failure at once, so reading it either way may be wrong —
     /// ★if the field that appears first is let to win, a failure is read as a success★.
-    #[error("`result` 와 `error` 가 한 봉투에 함께 있다")]
+    #[error("`result` and `error` are together in one envelope")]
     ConflictingEnvelope,
-    #[error("네 봉투 모양 중 어느 것도 아니다 — method·result·error 가 전부 없다")]
+    #[error("none of the four envelope shapes — method, result and error are all missing")]
     UnknownShape,
 }
 
@@ -269,7 +269,7 @@ pub(crate) mod turn_status {
     pub(crate) const IN_PROGRESS: &str = "inProgress";
 
     /// For telling grades apart — a value **not** here is upstream drift, and a value that is here but not carried into an outcome
-    /// (today [`IN_PROGRESS`] alone) is 「뜻을 아직 모른다」 (meaning not yet known). Either way the translation is still done.
+    /// (today [`IN_PROGRESS`] alone) is 「meaning not yet known」. Either way the translation is still done.
     pub(crate) const ALL: &[&str] = &[COMPLETED, INTERRUPTED, FAILED, IN_PROGRESS];
 }
 
@@ -278,7 +278,7 @@ pub(crate) mod turn_status {
 /// ★The schema does not fix a code range★ — `JSONRPCErrorError.code` is an unconstrained i64 and
 /// `-32xxx` never appears in the schema. We are the side that defines the envelope, so we pick the value, borrowing
 /// the JSON-RPC 2.0 convention's "method not found" (its meaning is clear to a reader).
-/// ★The app-server reads this answer to an approval request as 「승인 요청 실패」 (approval request failed)★ (measured codex-cli 0.156.1 · fixture
+/// ★The app-server reads this answer to an approval request as 「approval request failed」★ (measured codex-cli 0.156.1 · fixture
 /// `refuse_u2a`): it closes that item right away without executing it (command = `failed` · file change = `declined`), and the turn continues and
 /// ends with `completed` — there is no `error` notification. The reaction to a non-approval request is unverified. Either way it is better than dropping:
 /// if dropped, that agent freezes permanently (TRD §6-2).
@@ -365,7 +365,7 @@ pub(crate) struct InitializeResponse {
 
 // ── thread/start · thread/resume ──────────────────────────────────────────────
 
-/// Approval policy. The schema is `oneOf[문자열 3 종, GranularAskForApproval]` but ★we send only the string branch★
+/// Approval policy. The schema is `oneOf[3 strings, GranularAskForApproval]` but ★we send only the string branch★
 /// — the granular side is a field we do not use, so we did not copy its shape.
 /// Note that the value spelling is kebab-case: the other approval enums of the same protocol are camelCase.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -419,7 +419,7 @@ pub(crate) struct ThreadStartParams {
 }
 
 /// ★There is **no** `developerInstructions` counterpart here — leaving it absent is the decision★: we have not measured whether that field is in this request's
-/// schema either, and the price of putting an unknown field on JSON-RPC params is a 「거절당한 핸드셰이크」 (rejected handshake),
+/// schema either, and the price of putting an unknown field on JSON-RPC params is a 「rejected handshake」,
 /// so the resume spawn would die entirely. So **a resumed app-server thread gets no priming** —
 /// terminal mode is argv so it is carried on resume as well, so the gap is this one branch only. If the field's existence is
 /// confirmed by measurement, we add it then.
@@ -735,7 +735,7 @@ pub(crate) struct MisalignmentSteer {
 /// (`v2/AccountRateLimitsUpdatedNotification.json` — the regeneration command is in this file's header).
 ///
 /// ★One notification = a sparse update of **one** limit bucket★ — buckets are told apart by [`RateLimitSnapshot::limit_id`]. The schema
-/// description says 「가장 최근 `account/rateLimits/read` 응답에 병합하라 — 비어 온 값은 앞 값을 지우지 않는다」 (merge into the most recent account/rateLimits/read response — an empty value does not erase the earlier value).
+/// description says 「merge into the most recent account/rateLimits/read response — an empty value does not erase the earlier value」.
 /// It was measured that it arrives mid-turn (`docs/process/S21-codex-backend/trd-phase2a.md` L7), and no carried value has ever been captured.
 ///
 /// ★If params and `rateLimits` are not JSON **objects**, it is a deserialization failure ([`object_only`])★ — unlike the two field-lenient types below,
@@ -764,7 +764,7 @@ impl<'de> Deserialize<'de> for AccountRateLimitsUpdatedNotification {
 ///
 /// ★Each field fails separately★ — a field of the wrong type becomes `None` for that field alone and the snapshot survives ([`lenient`]·[`lenient_object`]).
 /// If one field's shape change made the whole notification a deserialization failure, the bucket's remaining values would be lost too.
-/// ★Only `limit_id` is taken as a raw [`Value`] intentionally★ — this field tells 「어느 버킷인가」 (which bucket it is), and if a wrong type were folded into
+/// ★Only `limit_id` is taken as a raw [`Value`] intentionally★ — this field tells 「which bucket it is」, and if a wrong type were folded into
 ///   `None` it could not be told apart from absence (= the side read as the default bucket). The consumer interprets.
 /// ★This type itself would read even a JSON array in field order★ — enforcing an object is carried by the [`object_only`] of the side that carries this type (the notification ·
 ///   [`GetAccountRateLimitsResponse`]). When this type is read on a new path, it must also pass that gate — if not, a
@@ -808,8 +808,8 @@ pub(crate) struct RateLimitWindow {
 /// The params of `account/rateLimits/read` — ★no field is carried at all (`{}`)★. The schema (0.156.1
 /// `v2/NullableGetAccountRateLimitsParams.json`) accepts `null` or an object whose fields are all optional, and the probe measured with `{}`
 /// (`.claude/handoff/attachments/codex-usage-probe.mjs`).
-/// ★Not carrying `excludeResetCreditDetails` is to keep the measured shape★ — the schema description is 「배경 폴링용 —
-///   리셋 크레딧 상세 조회를 건너뛴다」 (for background polling — skips the reset credit detail query) and fits our use, but a request carrying that field has not been measured.
+/// ★Not carrying `excludeResetCreditDetails` is to keep the measured shape★ — the schema description is 「for background polling —
+///   skips the reset credit detail query」 and fits our use, but a request carrying that field has not been measured.
 ///
 /// Being a struct with braces is for the same reason as [`TurnInterruptResponse`] — a unit struct serializes as `null`.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -888,7 +888,7 @@ where
 }
 
 /// Read only JSON **objects** and anything else is an error. The ground of the object check is the same as [`lenient_object`] — an array is read in field order
-/// and becomes a plausible fake value (params that are `[{…스냅숏…}]` · a snapshot that is `["codex", {…창…}, {…창…}]`).
+/// and becomes a plausible fake value (params that are `[{…snapshot…}]` · a snapshot that is `["codex", {…window…}, {…window…}]`).
 fn object_only<'de, D, T>(de: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -896,7 +896,7 @@ where
 {
     let value = Value::deserialize(de)?;
     if !value.is_object() {
-        return Err(serde::de::Error::custom("JSON 객체가 아니다"));
+        return Err(serde::de::Error::custom("not a JSON object"));
     }
     serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
@@ -907,7 +907,7 @@ mod tests {
 
     fn field<'a>(v: &'a Value, key: &str) -> &'a Value {
         v.get(key)
-            .unwrap_or_else(|| panic!("필드 `{key}` 가 없다: {v}"))
+            .unwrap_or_else(|| panic!("field `{key}` is missing: {v}"))
     }
 
     // ── Envelope discrimination ────────────────────────────────────────────────────────────
@@ -915,50 +915,50 @@ mod tests {
     #[test]
     fn notification_has_method_and_no_id() {
         let line = r#"{"method":"item/agentMessage/delta","params":{"delta":"hi"}}"#;
-        match classify(line).expect("알림으로 읽혀야 한다") {
+        match classify(line).expect("must read as a notification") {
             Inbound::Notification { method, params } => {
                 assert_eq!(method, "item/agentMessage/delta");
                 assert_eq!(field(&params.unwrap(), "delta"), "hi");
             }
-            other => panic!("알림이 아니다: {other:?}"),
+            other => panic!("not a notification: {other:?}"),
         }
     }
 
     #[test]
     fn method_plus_id_is_a_request_never_a_notification() {
         let line = r#"{"id":7,"method":"item/fileChange/requestApproval","params":{}}"#;
-        match classify(line).expect("요청으로 읽혀야 한다") {
+        match classify(line).expect("must read as a request") {
             Inbound::Request { id, method, .. } => {
                 assert_eq!(id, RequestId::Num(7));
                 assert_eq!(method, "item/fileChange/requestApproval");
             }
-            other => panic!("요청이 아니다: {other:?}"),
+            other => panic!("not a request: {other:?}"),
         }
     }
 
     #[test]
     fn id_plus_result_is_a_response_never_a_request() {
         let line = r#"{"id":"abc","result":{"thread":{"id":"t-1"}}}"#;
-        match classify(line).expect("응답으로 읽혀야 한다") {
+        match classify(line).expect("must read as a response") {
             Inbound::Response { id, result } => {
                 assert_eq!(id, RequestId::Str("abc".to_string()));
                 assert_eq!(field(field(&result, "thread"), "id"), "t-1");
             }
-            other => panic!("응답이 아니다: {other:?}"),
+            other => panic!("not a response: {other:?}"),
         }
     }
 
     #[test]
     fn id_plus_error_is_an_error_envelope() {
         let line = r#"{"id":3,"error":{"code":-1,"message":"nope"}}"#;
-        match classify(line).expect("오류로 읽혀야 한다") {
+        match classify(line).expect("must read as an error") {
             Inbound::Error { id, error } => {
                 assert_eq!(id, RequestId::Num(3));
                 assert_eq!(error.code, -1);
                 assert_eq!(error.message, "nope");
                 assert!(error.data.is_none());
             }
-            other => panic!("오류 봉투가 아니다: {other:?}"),
+            other => panic!("not an error envelope: {other:?}"),
         }
     }
 
@@ -967,7 +967,7 @@ mod tests {
         let line = r#"{"id":"req-42","method":"x","params":null}"#;
         match classify(line).unwrap() {
             Inbound::Request { id, .. } => assert_eq!(id, RequestId::Str("req-42".to_string())),
-            other => panic!("요청이 아니다: {other:?}"),
+            other => panic!("not a request: {other:?}"),
         }
     }
 
@@ -1037,9 +1037,9 @@ mod tests {
     fn an_extra_sibling_key_does_not_break_classification() {
         let line =
             r#"{"method":"item/started","params":{"turnId":"u"},"emittedAtMs":1764000000000}"#;
-        match classify(line).expect("알림으로 읽혀야 한다") {
+        match classify(line).expect("must read as a notification") {
             Inbound::Notification { method, .. } => assert_eq!(method, "item/started"),
-            other => panic!("알림이 아니다: {other:?}"),
+            other => panic!("not a notification: {other:?}"),
         }
     }
 
@@ -1060,7 +1060,7 @@ mod tests {
     fn missing_params_is_not_an_error() {
         match classify(r#"{"method":"thread/closed"}"#).unwrap() {
             Inbound::Notification { params, .. } => assert!(params.is_none()),
-            other => panic!("알림이 아니다: {other:?}"),
+            other => panic!("not a notification: {other:?}"),
         }
     }
 
@@ -1083,7 +1083,7 @@ mod tests {
                 assert_eq!(field(&p, "threadId"), "t-1");
                 assert_eq!(field(&p, "turnId"), "u-9");
             }
-            other => panic!("요청이 아니다: {other:?}"),
+            other => panic!("not a request: {other:?}"),
         }
     }
 
@@ -1125,7 +1125,7 @@ mod tests {
                 assert_eq!(error.code, -32601);
                 assert_eq!(error.message, "unsupported");
             }
-            other => panic!("오류 봉투가 아니다: {other:?}"),
+            other => panic!("not an error envelope: {other:?}"),
         }
     }
 
@@ -1187,7 +1187,7 @@ mod tests {
         assert_eq!(field(&v, "approvalPolicy"), "never");
         assert_eq!(field(&v, "sandbox"), "workspace-write");
         // ★Going out as camelCase is the contract★ — if it leaks out as snake_case, codex reads it as an unknown field and quietly
-        //   drops it, and the one symptom is 「프라이밍이 안 먹는다」 (priming has no effect) (there is no error).
+        //   drops it, and the one symptom is 「priming has no effect」 (there is no error).
         assert_eq!(field(&v, "developerInstructions"), "be brief");
     }
 
@@ -1244,7 +1244,7 @@ mod tests {
         assert_eq!(field(item, "text"), "hello");
         assert!(
             v.get("clientUserMessageId").is_none(),
-            "식별자 없는 봉투에 칸이 생겼다: {v}"
+            "a field appeared on an envelope without an identifier: {v}"
         );
     }
 
@@ -1280,7 +1280,11 @@ mod tests {
         let item = &field(&v, "input").as_array().unwrap()[0];
         assert_eq!(field(item, "type"), "text");
         assert_eq!(field(item, "text"), "more");
-        assert_eq!(v.as_object().unwrap().len(), 4, "모르는 칸이 실렸다: {v}");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            4,
+            "an unknown field was carried: {v}"
+        );
     }
 
     #[test]
@@ -1377,20 +1381,20 @@ mod tests {
             "error": {
                 "message": "blocked",
                 "misalignment": {
-                    "detailedExplanation": "이 요청은 정책을 벗어난다",
+                    "detailedExplanation": "this request is outside the policy",
                     "errorType": "somethingBrandNew",
-                    "steer": {"message": "다르게 물어보세요"}
+                    "steer": {"message": "ask it differently"}
                 }
             }
         }))
         .unwrap();
-        let m = n.error.misalignment.expect("misalignment 가 읽혀야 한다");
+        let m = n.error.misalignment.expect("misalignment must be read");
         assert_eq!(
             m.detailed_explanation.as_deref(),
-            Some("이 요청은 정책을 벗어난다")
+            Some("this request is outside the policy")
         );
         assert_eq!(m.error_type.as_deref(), Some("somethingBrandNew"));
-        assert_eq!(m.steer.unwrap().message, "다르게 물어보세요");
+        assert_eq!(m.steer.unwrap().message, "ask it differently");
     }
 
     #[test]

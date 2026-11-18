@@ -14,7 +14,7 @@
 //! ★The caller passes the log folder — this module does not find it itself★: the data folder layout belongs to the daemon `data_dir` and the
 //! shell `discovery` (copy)'s `DataLayout`, and both depend on this crate, so calling it from here would make a cycle (the leaf
 //! crate invariant — lib.rs header, tenancy condition ②). What this module owns is only the file
-//! name convention inside the received folder (`<종류>-<UTC>-<pid>.log`) and the `%TEMP%` fallback location.
+//! name convention inside the received folder (`<kind>-<UTC>-<pid>.log`) and the `%TEMP%` fallback location.
 //!
 //! ★If that folder cannot be used, it does not give up silently but falls back under `%TEMP%`★: otherwise this feature **fails at
 //! its own purpose** — being unable to use the data folder is exactly a common reason for the daemon failing to start,
@@ -93,7 +93,7 @@ const LOG_EXT: &str = ".log";
 /// `KEEP_PER_KIND - 1` are kept before creating a new file).
 const KEEP_PER_KIND: usize = 10;
 
-/// Where it falls back when the primary folder is unusable = `%TEMP%/<이 이름>/logs/`. The product name is used as is so that it **does not collide in name**
+/// Where it falls back when the primary folder is unusable = `%TEMP%/<this name>/logs/`. The product name is used as is so that it **does not collide in name**
 /// with the data folder (if several distributions fall back into one person's temp folder they share a folder,
 /// but the pid in file names keeps them from mixing, and only the retention cap is shared).
 const FALLBACK_DIR_NAME: &str = "engram-dashboard";
@@ -126,7 +126,7 @@ const PANICKING_LOCK_WAIT: Duration = Duration::from_millis(100);
 
 thread_local! {
     /// Does this thread currently hold the file lock of [`FileSink`]? As a const value without `Drop` it is thought to be readable even during thread teardown,
-    /// but that is std implementation behavior, not a documented guarantee — if it cannot be read, it is read as 「쥐고 있지 않음」 (not holding).
+    /// but that is std implementation behavior, not a documented guarantee — if it cannot be read, it is read as 「not holding」.
     static WRITING: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -238,12 +238,12 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Is this name a run log **of this kind** — only a name that matches exactly the `<종류>-YYYYMMDD-HHMMSS-<pid>.log` grammar
+/// Is this name a run log **of this kind** — only a name that matches exactly the `<kind>-YYYYMMDD-HHMMSS-<pid>.log` grammar
 /// is true.
 ///
-/// ★Do not select by prefix match (`starts_with("<종류>-")`) (do not revive it)★: then two things break.
+/// ★Do not select by prefix match (`starts_with("<kind>-")`) (do not revive it)★: then two things break.
 /// ① If a label is merely the prefix of another label (`app` vs `app-updater`), one side's cleanup **deletes files of the other
-/// kind** — labels will keep growing. ② The name is the sort key, so one hand-placed `daemon-메모.log`
+/// kind** — labels will keep growing. ② The name is the sort key, so one hand-placed `daemon-note.log`
 /// settles at the end of lexicographic order and **pushes real logs out of the cap and deletes them.**
 ///
 /// It does not check calendar validity either (`daemon-20261301-…` passes). The grammar alone blocks the two above, and the names we
@@ -281,7 +281,7 @@ fn prune_old_logs(dir: &Path, kind: LogKind, keep: usize) -> Vec<String> {
         Ok(e) => e,
         Err(e) => {
             return vec![format!(
-                "{} 목록을 읽지 못해 보존 정리 생략: {e}",
+                "could not read the {} listing, skipping retention cleanup: {e}",
                 dir.display()
             )]
         }
@@ -298,7 +298,7 @@ fn prune_old_logs(dir: &Path, kind: LogKind, keep: usize) -> Vec<String> {
     let mut failures = Vec::new();
     for stale in &names[..names.len() - keep] {
         if let Err(e) = std::fs::remove_file(dir.join(stale)) {
-            failures.push(format!("낡은 로그 {stale} 를 지우지 못함: {e}"));
+            failures.push(format!("could not delete stale log {stale}: {e}"));
         }
     }
     failures
@@ -314,7 +314,7 @@ struct OpenedLog {
     deferred: Vec<String>,
 }
 
-/// Newly opens `<dir>/<종류>-<UTC>-<pid>.log` and returns the handle (`dir` is created if missing).
+/// Newly opens `<dir>/<kind>-<UTC>-<pid>.log` and returns the handle (`dir` is created if missing).
 ///
 /// The pid is added to keep two runs started in the same second from sharing one file.
 ///
@@ -333,7 +333,7 @@ fn open_run_log(dir: &Path, kind: LogKind) -> io::Result<OpenedLog> {
     ));
     let mut file = File::options().create(true).append(true).open(&path)?;
     if let Err(e) = write_header(&mut file, kind, &stamp) {
-        deferred.push(format!("로그 머리글을 쓰지 못함: {e}"));
+        deferred.push(format!("could not write the log header: {e}"));
     }
     Ok(OpenedLog {
         path,
@@ -351,7 +351,7 @@ fn open_run_log(dir: &Path, kind: LogKind) -> io::Result<OpenedLog> {
 fn open_run_log_with_fallback(logs_dir: &Path, kind: LogKind) -> Result<OpenedLog, Vec<String>> {
     let primary = match open_run_log(logs_dir, kind) {
         Ok(opened) => return Ok(opened),
-        Err(e) => format!("{} 를 열지 못함: {e}", logs_dir.display()),
+        Err(e) => format!("could not open {}: {e}", logs_dir.display()),
     };
 
     let fallback_root = std::env::temp_dir().join(FALLBACK_DIR_NAME);
@@ -359,14 +359,14 @@ fn open_run_log_with_fallback(logs_dir: &Path, kind: LogKind) -> Result<OpenedLo
         Ok(mut opened) => {
             opened.deferred.insert(
                 0,
-                format!("{primary} — 대신 {} 에 기록한다", opened.path.display()),
+                format!("{primary} — logging to {} instead", opened.path.display()),
             );
             Ok(opened)
         }
         Err(e) => Err(vec![
             primary,
             format!(
-                "{} 폴백도 열지 못함: {e}",
+                "could not open the {} fallback either: {e}",
                 fallback_root.join(LOG_SUBDIR).display()
             ),
         ]),
@@ -381,7 +381,7 @@ fn open_run_log_with_fallback(logs_dir: &Path, kind: LogKind) -> Result<OpenedLo
 fn write_header(file: &mut File, kind: LogKind, stamp: &str) -> io::Result<()> {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|e| format!("(exe 경로 불명: {e})"));
+        .unwrap_or_else(|e| format!("(exe path unknown: {e})"));
     writeln!(
         file,
         "==== engram {kind} | {stamp} UTC | pid {pid} | {exe} ====",
@@ -443,7 +443,7 @@ pub fn init_logging_with_file(logs_dir: &Path, kind: LogKind) -> Option<PathBuf>
             //   The owner for this case (neither the primary folder nor the temp folder can be used) is the data folder preflight the client runs before it starts the daemon
             //   (ADR-0135), and the user sees the reason in that window.
             for r in reasons {
-                tracing::warn!("파일 로그를 열지 못해 stdout 으로만 기록함: {r}");
+                tracing::warn!("could not open the file log, logging to stdout only: {r}");
             }
             None
         }
@@ -530,41 +530,50 @@ mod tests {
         );
         let early = utc_stamp(UNIX_EPOCH + Duration::from_secs(1_755_000_000));
         let late = utc_stamp(UNIX_EPOCH + Duration::from_secs(1_755_000_001));
-        assert!(early < late, "사전순이 시간순이어야: {early} < {late}");
+        assert!(
+            early < late,
+            "lexical order must be time order: {early} < {late}"
+        );
     }
 
     // ── File creation ──
     #[test]
     fn open_run_log_creates_the_given_dir_and_kind_prefixed_file() {
         let logs_dir = temp_dir("open").join("logs");
-        let opened = open_run_log(&logs_dir, LogKind::Daemon).expect("열려야");
+        let opened = open_run_log(&logs_dir, LogKind::Daemon).expect("must open");
         let path = opened.path;
 
-        assert!(opened.deferred.is_empty(), "정상 경로는 진단이 없어야");
+        assert!(
+            opened.deferred.is_empty(),
+            "the normal path must have no diagnostics"
+        );
         assert_eq!(
             path.parent().unwrap(),
             logs_dir,
-            "받은 폴더 바로 안 — 하위 폴더를 덧붙이지 않는다"
+            "directly inside the received folder — no subfolder appended"
         );
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with("daemon-"), "종류 접두사: {name}");
-        assert!(name.ends_with(LOG_EXT), "확장자: {name}");
+        assert!(name.starts_with("daemon-"), "kind prefix: {name}");
+        assert!(name.ends_with(LOG_EXT), "extension: {name}");
         assert!(
             name.contains(&std::process::id().to_string()),
-            "pid 포함: {name}"
+            "includes pid: {name}"
         );
 
         // A normal startup prints nothing at warn level, so without the header the file would be entirely empty.
-        let head = std::fs::read_to_string(&path).expect("읽기");
-        assert!(head.starts_with("==== engram daemon | "), "머리글: {head}");
-        assert!(head.ends_with("====\n"), "머리글 한 줄로 끝나야: {head}");
+        let head = std::fs::read_to_string(&path).expect("read");
+        assert!(head.starts_with("==== engram daemon | "), "header: {head}");
+        assert!(
+            head.ends_with("====\n"),
+            "the header must end as one line: {head}"
+        );
     }
 
     #[test]
     fn two_kinds_never_share_a_file() {
         let data_dir = temp_dir("kinds");
-        let daemon = open_run_log(&data_dir, LogKind::Daemon).expect("열려야");
-        let app = open_run_log(&data_dir, LogKind::App).expect("열려야");
+        let daemon = open_run_log(&data_dir, LogKind::Daemon).expect("must open");
+        let app = open_run_log(&data_dir, LogKind::App).expect("must open");
         assert_ne!(daemon.path, app.path);
     }
 
@@ -587,7 +596,7 @@ mod tests {
 
         assert!(
             prune_old_logs(&dir, LogKind::Daemon, 4).is_empty(),
-            "삭제 실패 없음"
+            "no deletion failures"
         );
 
         let mut left: Vec<String> = std::fs::read_dir(&dir)
@@ -606,7 +615,7 @@ mod tests {
                 "daemon-20260101-000013-1.log".to_string(),
                 "daemon-20260101-000014-1.log".to_string(),
             ],
-            "같은 종류의 오래된 것만 지워야(다른 종류·다른 확장자는 보존)"
+            "must delete only old ones of the same kind (other kinds · other extensions kept)"
         );
     }
 
@@ -621,7 +630,7 @@ mod tests {
         // A future kind that does not exist yet (the label starts with `app-`) and a hand-placed name.
         for name in [
             "app-updater-20260101-000000-1.log",
-            "app-메모.log",
+            "app-메모.log", // hangul-ok
             "app-zzzz-99999999-999999-1.log",
         ] {
             std::fs::write(dir.join(name), "x").expect("write");
@@ -646,9 +655,9 @@ mod tests {
                 "app-20260101-000004-1.log".to_string(),
                 "app-updater-20260101-000000-1.log".to_string(),
                 "app-zzzz-99999999-999999-1.log".to_string(),
-                "app-메모.log".to_string(),
+                "app-메모.log".to_string(), // hangul-ok
             ],
-            "문법에 맞는 이 종류의 파일만 후보여야"
+            "only files of this kind matching the grammar may be candidates"
         );
     }
 
@@ -662,7 +671,7 @@ mod tests {
                 .expect("write");
         }
 
-        let _opened = open_run_log(&dir, LogKind::Daemon).expect("열려야");
+        let _opened = open_run_log(&dir, LogKind::Daemon).expect("must open");
 
         let count = std::fs::read_dir(&dir)
             .expect("read")
@@ -694,20 +703,27 @@ mod tests {
             .read(true)
             .share_mode(0)
             .open(&held)
-            .expect("배타 열기");
+            .expect("exclusive open");
 
         let failures = prune_old_logs(&dir, LogKind::Daemon, 2);
 
-        assert!(held.exists(), "잠긴 파일은 남아야(삭제 실패를 삼킨다)");
-        assert_eq!(failures.len(), 1, "삼키되 사유는 돌려줘야: {failures:?}");
+        assert!(
+            held.exists(),
+            "the locked file must remain (deletion failure is swallowed)"
+        );
+        assert_eq!(
+            failures.len(),
+            1,
+            "swallowed, but the reason must be returned: {failures:?}"
+        );
         assert!(
             failures[0].contains("daemon-20260100-000000-1.log"),
-            "어느 파일인지 남아야: {failures:?}"
+            "the failure must name the file: {failures:?}"
         );
         assert!(
             !dir.join(format!("daemon-20260102-000000-1{LOG_EXT}"))
                 .exists(),
-            "잠기지 않은 오래된 파일은 그대로 지워져야"
+            "old files that are not locked must be deleted as usual"
         );
         assert!(dir
             .join(format!("daemon-20260104-000000-1{LOG_EXT}"))
@@ -724,15 +740,15 @@ mod tests {
     #[test]
     fn file_sink_writer_survives_poisoned_lock() {
         let data_dir = temp_dir("poison");
-        let opened = open_run_log(&data_dir, LogKind::App).expect("열려야");
+        let opened = open_run_log(&data_dir, LogKind::App).expect("must open");
         let slot = leaked_slot();
-        assert!(slot.set(Mutex::new(opened.file)).is_ok(), "칸 채우기");
+        assert!(slot.set(Mutex::new(opened.file)).is_ok(), "fill the slot");
         let sink = FileSink(slot);
 
         std::thread::scope(|s| {
             let _ = s
                 .spawn(|| {
-                    let _guard = slot.get().expect("칸").lock().expect("lock");
+                    let _guard = slot.get().expect("slot").lock().expect("lock");
                     panic!("poison");
                 })
                 .join();
@@ -740,9 +756,9 @@ mod tests {
 
         sink.make_writer()
             .write_all(b"after-poison\n")
-            .expect("써야");
+            .expect("must write");
         assert!(std::fs::read_to_string(&opened.path)
-            .expect("읽기")
+            .expect("read")
             .ends_with("after-poison\n"));
     }
 
@@ -751,7 +767,9 @@ mod tests {
     #[test]
     fn file_sink_writer_discards_lines_before_the_file_exists() {
         let sink = FileSink(leaked_slot());
-        sink.make_writer().write_all(b"nowhere\n").expect("삼켜야");
+        sink.make_writer()
+            .write_all(b"nowhere\n")
+            .expect("must swallow");
     }
 
     /// If the thread that holds the writer comes back (a hook log of a thread that panicked while holding it), that line is dropped and it does not wait for itself.
@@ -759,31 +777,33 @@ mod tests {
     #[test]
     fn file_sink_drops_the_line_of_a_thread_already_writing() {
         let data_dir = temp_dir("reentry");
-        let opened = open_run_log(&data_dir, LogKind::App).expect("열려야");
+        let opened = open_run_log(&data_dir, LogKind::App).expect("must open");
         let slot = leaked_slot();
-        assert!(slot.set(Mutex::new(opened.file)).is_ok(), "칸 채우기");
+        assert!(slot.set(Mutex::new(opened.file)).is_ok(), "fill the slot");
         let sink = FileSink(slot);
 
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut outer = sink.make_writer();
-            outer.write_all(b"outer-1\n").expect("써야");
+            outer.write_all(b"outer-1\n").expect("must write");
             let mut inner = sink.make_writer();
             let inner_void = matches!(inner, FileSinkWriter::Void);
-            inner.write_all(b"inner\n").expect("삼켜야");
+            inner.write_all(b"inner\n").expect("must swallow");
             drop(inner);
-            outer.write_all(b"outer-2\n").expect("써야");
+            outer.write_all(b"outer-2\n").expect("must write");
             drop(outer);
-            sink.make_writer().write_all(b"after\n").expect("써야");
+            sink.make_writer()
+                .write_all(b"after\n")
+                .expect("must write");
             let _ = done_tx.send(inner_void);
         });
 
         let inner_void = done_rx
             .recv_timeout(Duration::from_secs(10))
-            .expect("같은 스레드의 두 번째 writer 가 자기 잠금을 기다렸다");
-        assert!(inner_void, "두 번째 writer 는 버리는 쪽이어야");
+            .expect("the second writer on the same thread waited for its own lock");
+        assert!(inner_void, "the second writer must be the discarding one");
         assert!(std::fs::read_to_string(&opened.path)
-            .expect("읽기")
+            .expect("read")
             .ends_with("outer-1\nouter-2\nafter\n"));
     }
 
@@ -792,18 +812,18 @@ mod tests {
     #[test]
     fn a_panicking_thread_gives_up_on_a_lock_held_by_another_thread() {
         let data_dir = temp_dir("held-elsewhere");
-        let opened = open_run_log(&data_dir, LogKind::App).expect("열려야");
+        let opened = open_run_log(&data_dir, LogKind::App).expect("must open");
         let slot = leaked_slot();
-        assert!(slot.set(Mutex::new(opened.file)).is_ok(), "칸 채우기");
+        assert!(slot.set(Mutex::new(opened.file)).is_ok(), "fill the slot");
 
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let holder = std::thread::spawn(move || {
-            let _guard = slot.get().expect("칸").lock().expect("lock");
-            held_tx.send(()).expect("알림");
+            let _guard = slot.get().expect("slot").lock().expect("lock");
+            held_tx.send(()).expect("notify");
             let _ = release_rx.recv();
         });
-        held_rx.recv().expect("쥔 스레드가 잠갔다");
+        held_rx.recv().expect("the holding thread locked it");
 
         struct LogWhileUnwinding(FileSink, std::sync::mpsc::Sender<(bool, Duration)>);
         impl Drop for LogWhileUnwinding {
@@ -819,43 +839,44 @@ mod tests {
         std::thread::spawn(move || {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _log = LogWhileUnwinding(FileSink(slot), done_tx);
-                panic!("쥔 이가 따로 있는 동안 panic");
+                panic!("panic while someone else holds it");
             }));
         });
 
         let outcome = done_rx.recv_timeout(Duration::from_secs(10));
         let _ = release_tx.send(());
-        holder.join().expect("쥔 스레드");
-        let (void, waited) = outcome.expect("panic 중인 스레드가 남이 쥔 잠금을 끝없이 기다렸다");
-        assert!(void, "상한 뒤에는 버리는 writer 여야");
+        holder.join().expect("holding thread");
+        let (void, waited) =
+            outcome.expect("a panicking thread waited forever for a lock held by another");
+        assert!(void, "after the cap it must be the discarding writer");
         assert!(
             waited >= PANICKING_LOCK_WAIT,
-            "상한까지는 기다려야: {waited:?}"
+            "must wait up to the cap: {waited:?}"
         );
         assert!(!std::fs::read_to_string(&opened.path)
-            .expect("읽기")
+            .expect("read")
             .contains("while-panicking"));
     }
 
     #[test]
     fn file_sink_lowers_the_writing_mark_when_a_writer_unwinds() {
         let data_dir = temp_dir("unwind");
-        let opened = open_run_log(&data_dir, LogKind::App).expect("열려야");
+        let opened = open_run_log(&data_dir, LogKind::App).expect("must open");
         let slot = leaked_slot();
-        assert!(slot.set(Mutex::new(opened.file)).is_ok(), "칸 채우기");
+        assert!(slot.set(Mutex::new(opened.file)).is_ok(), "fill the slot");
         let sink = FileSink(slot);
 
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _writer = sink.make_writer();
-            panic!("쥔 채 panic");
+            panic!("panic while holding");
         }));
 
         assert!(unwound.is_err());
         sink.make_writer()
             .write_all(b"after-unwind\n")
-            .expect("써야");
+            .expect("must write");
         assert!(std::fs::read_to_string(&opened.path)
-            .expect("읽기")
+            .expect("read")
             .ends_with("after-unwind\n"));
     }
 }

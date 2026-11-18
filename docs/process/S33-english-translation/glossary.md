@@ -58,7 +58,7 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 적대 리뷰 / 탈출구 | adversarial review / escape hatch | |
 | A→B→B 불량 시 C | A→B→(C if B is poor) | one step, not two |
 | X은 Y가 … 건너뛰어짐 | X is skipped because Y … | the topic (X) is what gets skipped |
-| 명부 / 로스터 | registry / roster | registry = all agents, roster = alive now |
+| 명부 / 로스터 | roster (registry only when mirroring a `Registry` identifier) | S38 decision; earlier S33 rendering was registry = all agents, roster = alive now |
 | 장부 / 보관함 / 봉투 | ledger / mailbox / envelope | |
 | 파킹 / 반려 | parking / bounced | |
 | 유예 (flush) | deferral / deferred | not "grace" |
@@ -86,18 +86,18 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 녹 / 빨강 (측정) | green / red | "M9 · M10 녹" = M9 and M10 passed; not "folded in" |
 | \<id\> 앞 (파킹분·드레인) | addressed to \<id\> | not "in front of" (no queue position meant) |
 | N차 (개정) | Nth amendment | amendment generation, not a review round |
-| 칸 | area (UI / layout region) · field (struct, JSON, wire) · entry (list) | never "slot" — slot is 슬롯 |
-| 바람 (숨은 창의 최대화) | desire | the deferred-maximize record; 거두다 on it = clear the desire |
+| 칸 | area (UI / layout region) · field (struct, JSON, wire) · entry (list) · cell · permit | by meaning; never "slot" unless mirroring a slot identifier — slot is 슬롯 |
+| 바람 (숨은 창의 최대화) | wish (desire) | the deferred-maximize record; the code says "wish"; 거두다 on it = clear the wish |
 | 재기 | measurements | UI metrics; not timers |
 | 떠 두다 | copy aside / capture | `copy_aside`; "captured at launch" for spawn settings |
-| 맡기다 / 맡김표 / 되물림 | hand over / claim ticket / take back | prewarmed-window handover |
+| 맡기다 / 맡김표 / 되물림 | entrust · hand over / entrust ticket · claim ticket / hand-back · take back | prewarmed-window handover; both renderings are in the shell code, pick by context |
 | 네트워크 행 | network layer | the `net` crate, not a row |
 | 독 (락) | poison | not "dock" |
 | 배치 (항목·사본) | placement | in the queued-input code; not "batch" (배치 of a layout = layout) |
-| 부재 막 / 막 | absence curtain / curtain | the slot overlay; not "veil" |
+| 부재 막 / 막 | absence veil / veil | the slot overlay; S38 follows the code and tests ("veil"); supersedes the S33 "curtain" |
 | 물높이 | fill level | byte budget in transport; not "water level" |
 | 앞잡이 줄 / 앞잡이 버퍼 | read-ahead queue / read-ahead buffer | `Policy::frame_buffer`, drained by `salvage_read_ahead`; not "front queue" |
-| 몫 | share (byte / permit budget) · role, part, job (otherwise) | do not use "share" for a duty |
+| 몫 | share (byte / permit budget) · part / job / left to (otherwise) | do not use "share" for a duty |
 | 창 상한 | window cap | transport resume window |
 | 유예 (bounded wait) | grace period | a wait with a timeout before a fallback; the flush sense stays "deferral" |
 | 칸 (connection-count permit) | permit | upgrade / auth-wait / operating permits in transport |
@@ -114,5 +114,64 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 정리 유예 | cleanup grace period | bounded wait, see 유예 (bounded wait) |
 | 순서 칸 | ordering area | supervisor-local ordering queue (transport) |
 | 보냄 칸 | the sent field | write without backticks unless the source has them |
+| 물러남 | retire | |
+| 판 (file / build / CLI version) | version | |
+| 껍데기 | thin wrapper / stub / empty output | never "shell" |
+| 대기 목록 | pending list | |
+| 거두다 (reap) | reap | process or entry reclaiming; the ✕-withdraw sense is the 거두다 row above |
+| 자리 (correlation table) | seat | |
+| 보유 / 보유 자리 | hold / held seat | |
+| 왕복 | round trip | |
+| 수거기 | sweeper | |
+| 임대 | lease | input lease |
+| 도어벨 | doorbell | |
+| 붙들다 | hold | |
+| 찢어진 창 | torn window | |
+| 입히다 | apply | an OS title or size |
+| 걷다 | lift (an OS minimum size) · remove (otherwise) | |
+| 짓기 / 다시 짓기 | build / rebuild | |
+| 차분 | diff | |
+| 띠 | band | |
+| 끌기 / 놓기 | drag / drop | |
+| 이음새 | seam | |
+| 골든 | golden | |
+| 마커 | marker | |
+| 좀비 | zombie | |
+| 예열 창 | prewarmed window | |
+| 대기 창 | waiting window | |
+| 모델 밖 창 | window outside the model | |
+| 대기 표시 | waiting indicator | |
+| 걸쇠 | latch | |
+| 묘비 | tombstone | |
+| 맴돎 | hover | |
+| 시연 층 | presentation layer | |
+| 그물 | net (safety net) | |
+| 칸 틀 | area frame | |
+| 잰 폭 | measured width | |
+| 얼음 / 풀림 | freeze / thaw | |
+| 구역 | zone | |
+| 끄는 탭 | dragged tab | 끄는 = dragging here, see the 끄는 row |
+| 운영 의존 / 운영 그래프 | production dependency / production graph | |
+| 조립 (폴더) | assembly folder / staging folder | |
+| 고지 (third-party) | notice | |
+| 짝 (검사) | pair (check) | |
+| 상한 게이트 | ceiling gate | |
+| 입주자 / 입주 조건 | tenant / entry condition | |
+| 갈래 | arm (match) / branch | |
+| 변형 | variant | |
+| 잎 / 바닥 crate | leaf / bottom crate | |
+| 실소켓 | real-socket | |
+| 배송 / 배송물 | ship / shipped artifact | |
+| 눈먼 통과 | passes blind | |
+| 표본 | sample | |
+| 로컬 대체 | local substitute | |
+| 동봉물 | bundled material | |
+| 교체 파일 | replacement file | |
+| 표준 본문 | standard text | |
+| 매인 버전 | bound version | |
+| 고름 | [Picked] | marker for what a document chose on its own (S21 TRD legend and body) |
+| 미검 | [Unverified] | |
+| (가)(나) | (ga)(na) | list labels |
+| 행 (行) | layer | as in a stack of rows; the `net` crate row = network layer (see the 네트워크 행 row) |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.

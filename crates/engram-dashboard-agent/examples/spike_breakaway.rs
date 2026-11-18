@@ -159,14 +159,14 @@ fn run_diag() {
                     flags & SILENT_BREAKAWAY_OK != 0,
                 );
                 if flags & KILL_ON_JOB_CLOSE == 0 {
-                    println!("[A]   => 부모 Job 이 KILL_ON_JOB_CLOSE 아님 → 상속돼도 부모 종료 시 자식 생존(데몬화 무해) ✅");
+                    println!("[A]   => parent Job is not KILL_ON_JOB_CLOSE → even if inherited, the child survives the parent's exit (daemonizing harmless) ✅");
                 } else if flags & (BREAKAWAY_OK | SILENT_BREAKAWAY_OK) != 0 {
-                    println!("[A]   => KILL_ON_JOB_CLOSE 이지만 breakaway 허용 → CREATE_BREAKAWAY 로 분리 가능 ✅");
+                    println!("[A]   => KILL_ON_JOB_CLOSE but breakaway allowed → can separate with CREATE_BREAKAWAY ✅");
                 } else {
-                    println!("[A]   => KILL_ON_JOB_CLOSE + breakaway 불허 → 데몬 분리 불가(worst-case) ❌");
+                    println!("[A]   => KILL_ON_JOB_CLOSE + breakaway not allowed → daemon cannot separate (worst-case) ❌");
                 }
             }
-            Err(e) => println!("[A] parent_job_limit_flags 조회 실패: {e:?}"),
+            Err(e) => println!("[A] parent_job_limit_flags query failed: {e:?}"),
         }
 
         let exe = std::env::current_exe().expect("current_exe");
@@ -192,11 +192,13 @@ fn run_diag() {
                     .unwrap_or_else(|e| format!("ERR {e:?}"));
                 println!("[A] breakaway spawn OK, child pid={pid}, child_in_job={in_job}");
                 if in_job == "false" {
-                    println!("[A] => BREAKAWAY SUCCESS (자식이 부모 Job 에서 분리됨) ✅");
+                    println!("[A] => BREAKAWAY SUCCESS (child separated from the parent Job) ✅");
                 } else if in_job == "true" {
-                    println!("[A] => BREAKAWAY FAILED (자식이 여전히 Job 안 — fallback 필요) ⚠");
+                    println!(
+                        "[A] => BREAKAWAY FAILED (child still inside the Job — fallback needed) ⚠"
+                    );
                 } else {
-                    println!("[A] => 판정 불가 ({in_job})");
+                    println!("[A] => cannot decide ({in_job})");
                 }
             }
             Err(e) => {
@@ -204,7 +206,9 @@ fn run_diag() {
                     "[A] breakaway spawn FAILED: {e} (errno={:?}) ⚠",
                     e.raw_os_error()
                 );
-                println!("[A] => 부모 Job 이 breakaway 불허일 가능성 — fallback 검증 필수");
+                println!(
+                    "[A] => the parent Job may disallow breakaway — fallback verification required"
+                );
             }
         }
 
@@ -226,13 +230,13 @@ fn run_diag() {
                     "[C] fallback cmd/start/b spawn OK, marker_contains_ALIVE={}",
                     alive.contains("ALIVE")
                 );
-                println!("[C] (Job 분리 여부는 selfkill 테스트로 최종 확인)");
+                println!("[C] (whether it left the Job is finally confirmed by the selfkill test)");
             }
             Err(e) => println!("[C] fallback spawn FAILED: {e}"),
         }
 
         std::thread::sleep(Duration::from_millis(500));
-        println!("=== DIAG 끝 (자식 marker 는 ~6초 뒤 SURVIVED 추가) ===");
+        println!("=== DIAG end (the child marker gets SURVIVED appended after ~6s) ===");
     }
 }
 
@@ -271,8 +275,8 @@ fn run_wmikill(marker: &str) {
         println!("=== spike_breakaway: WMIKILL (marker={marker}) ===");
         let job = win::create_kill_on_close_job().expect("create job");
         match win::assign(job, win::current_process()) {
-            Ok(()) => println!("[D] 부모를 KILL_ON_JOB_CLOSE Job 에 assign 함"),
-            Err(e) => println!("[D] WARN 부모 assign 실패: {e:?}"),
+            Ok(()) => println!("[D] assigned the parent to a KILL_ON_JOB_CLOSE Job"),
+            Err(e) => println!("[D] WARN parent assign failed: {e:?}"),
         }
 
         let exe = std::env::current_exe().expect("current_exe");
@@ -294,14 +298,14 @@ fn run_wmikill(marker: &str) {
                     println!("[D] stderr: {}", String::from_utf8_lossy(&o.stderr).trim());
                 }
             }
-            Err(e) => println!("[D] WMI 호출 실패: {e}"),
+            Err(e) => println!("[D] WMI call failed: {e}"),
         }
 
         std::thread::sleep(Duration::from_millis(1200)); // Time the child's ALIVE was recorded
-        println!("[D] 부모 자살(TerminateJobObject) — 외부에서 marker SURVIVED 확인");
+        println!("[D] parent suicide (TerminateJobObject) — confirm marker SURVIVED from outside");
         let _ = win::terminate(job, 1);
         std::thread::sleep(Duration::from_secs(2));
-        println!("[D] (여기 출력되면 자살 실패)");
+        println!("[D] (if this prints, suicide failed)");
     }
 }
 
@@ -322,8 +326,10 @@ fn run_selfkill(marker: &str) {
         let job = win::create_kill_on_close_job().expect("create job");
         // Put the parent (itself) into a KILL_ON_JOB_CLOSE Job — simulates the situation where Tauri is inside its own PTY job.
         match win::assign(job, win::current_process()) {
-            Ok(()) => println!("[B] 부모를 KILL_ON_JOB_CLOSE Job 에 assign 함"),
-            Err(e) => println!("[B] WARN 부모 assign 실패(이미 breakaway 불가 nested?): {e:?}"),
+            Ok(()) => println!("[B] assigned the parent to a KILL_ON_JOB_CLOSE Job"),
+            Err(e) => {
+                println!("[B] WARN parent assign failed (already nested without breakaway?): {e:?}")
+            }
         }
 
         let exe = std::env::current_exe().expect("current_exe");
@@ -334,9 +340,9 @@ fn run_selfkill(marker: &str) {
             .creation_flags(flags)
             .spawn();
         match child {
-            Ok(c) => println!("[B] breakaway 자식 spawn pid={}", c.id()),
+            Ok(c) => println!("[B] breakaway child spawned pid={}", c.id()),
             Err(e) => {
-                println!("[B] breakaway spawn 실패: {e} — fallback 으로 재시도");
+                println!("[B] breakaway spawn failed: {e} — retrying with fallback");
                 let exe_str = exe.to_string_lossy().to_string();
                 let _ = Command::new("cmd")
                     .args(["/c", "start", "", "/b", &exe_str, "child", marker])
@@ -347,10 +353,10 @@ fn run_selfkill(marker: &str) {
 
         // Time for the child to write ALIVE.
         std::thread::sleep(Duration::from_millis(800));
-        println!("[B] 이제 부모 자살(TerminateJobObject) — 외부에서 marker 확인할 것");
+        println!("[B] now parent suicide (TerminateJobObject) — confirm the marker from outside");
         let _ = win::terminate(job, 1); // Terminate every process in the job (= the parent). The breakaway child is excluded.
                                         // May not be reached (it terminates itself).
         std::thread::sleep(Duration::from_secs(2));
-        println!("[B] (여기 출력되면 자살 실패 — 부모가 job 에 안 들어갔을 수 있음)");
+        println!("[B] (if this prints, suicide failed — the parent may not have joined the job)");
     }
 }

@@ -30,13 +30,12 @@
 //!
 //! ## What it guarantees / what it leaves to the consumer
 //!
-//! Guarantee = the [`Frame`]↔`Message` round trip · carrying the close code and message **in both directions** (so that 「붙었는데
-//! 거절」 (connected but rejected) crosses over as [`LinkRead::Closed`] and ADR-0180 decision 5 holds in code) · raising transport-layer Ping/Pong as
+//! Guarantee = the [`Frame`]↔`Message` round trip · carrying the close code and message **in both directions** (so that 「connected but rejected」 crosses over as [`LinkRead::Closed`] and ADR-0180 decision 5 holds in code) · raising transport-layer Ping/Pong as
 //! [`Frame::Keepalive`].
 //!
 //! ★Of these three, the **translation table** is asserted by the unit tests below this file★ — [`to_message`]/[`from_message`] are
 //! pure functions, so they are measured without a socket. **What is not the table** (the real-socket round trip · whether the close frame really goes out)
-//! belongs to the real-socket suite in `tests/`, and of those nobody yet measures the keepalive round trip (see 「알려진 한계」 below).
+//! belongs to the real-socket suite in `tests/`, and of those nobody yet measures the keepalive round trip (see 「Known limits」 below).
 //!
 //! What it leaves = the address syntax (this adapter hands [`Address`] to `tokio-tungstenite` as is) · reconnect, deadline and
 //! keepalive interval (all up to [`crate::Policy`] and the supervisor — ★the dialing-side adapter does not apply its own deadline again★,
@@ -79,7 +78,7 @@
 //!   explicitly set to 4 KiB★. Another axis of the same measurement: repeating 1 MiB frames swallows 2 MiB and
 //!   then stalls on the third. **Interpretation** (not an observation) — we read the two numbers diverging in the same setup as Windows'
 //!   dynamic send buffering swallowing one large send whole. Even if that interpretation is wrong, the two numbers
-//!   stand. ★Do not read backpressure as 「한 프레임이 크면 걸린다」 (a big single frame triggers it)★ — the axis that triggers it is not size but **accumulation**.
+//!   stand. ★Do not read backpressure as 「a big single frame triggers it」★ — the axis that triggers it is not size but **accumulation**.
 //! - ★The frame of a truncated write can go out late★ — confirmed by reading the source (not measured by running).
 //!   `SinkExt::send` hands over the item and **then** waits in `flush` (futures-util 0.3.32 `sink/feed.rs:38-40`
 //!   → `sink/send.rs:37`), and the handed-over item stays in one slot of `SplitSink` (`stream/stream/split.rs:114`) or
@@ -96,7 +95,7 @@
 //!   directions — the dialing side via [`WsDialer::new`], the receiving side via [`AcceptPolicy::max_message_bytes`]. The receiving
 //!   side has `max_message_size` = `max_frame_size` = that value.
 //!   ★So the [`LinkTx::send`] implementation **returns an error** for a frame over that value★ — if only the receiving side enforces the cap,
-//!   **an innocent peer burns its own reconnect budget**. ★This refusal rests on 「상대도 같은 값을 쓴다」 (the peer uses the same value)★
+//!   **an innocent peer burns its own reconnect budget**. ★This refusal rests on 「the peer uses the same value」★
 //!   — a peer using a smaller cap is still cut by the receiving side. ★The point is that it is a value, not a panic★
 //!   — a panic raised inside the supervisor task ends the whole process if it is a production process with a panic hook
 //!   (ADR-0292), and in a process without a hook nobody holds its `JoinHandle`, so unobserved the emitted state
@@ -104,9 +103,9 @@
 //!   making it a disconnect event plus reconnect. Release and debug behave the same.
 //! - ★**But no diagnostic is left on this branch**★ — the error message above is dropped when the supervisor turns `Ok(Err(_))` into `LinkLost(WriteFailed)`
 //!   (`Supervisor::write` in `peer.rs`), and [`crate::TransportEvent::Disconnected`] has
-//!   no message field at all (`lib.rs` 「운영 중 끊김은 사유 문구를 안 나른다」 (a disconnect during operation does not carry a reason message)). The frame over the cap is
+//!   no message field at all (`lib.rs` 「a disconnect during operation does not carry a reason message」). The frame over the cap is
 //!   counted as one outgoing-side loss if it is a notification or fan-out, and `FailPending` wakes it if it is a request, but neither
-//!   says 「너무 커서」 (because it is too big). What the consumer sees is a **`WriteFailed` disconnect with no reason**. To make this branch
+//!   says 「because it is too big」. What the consumer sees is a **`WriteFailed` disconnect with no reason**. To make this branch
 //!   diagnosable, the disconnect event first needs a message field.
 //! - ★**When** the automatic Pong for an incoming Ping goes out★ — confirmed by reading the tungstenite 0.26.2 source
 //!   (not measured by running): when the receiver meets a Ping it puts the Pong into `additional_send`
@@ -116,30 +115,30 @@
 //!   `unflushed_additional`, and keeps reading (the comment there: "If blocked continue reading, but try
 //!   again later"), and tokio-tungstenite's waker proxy also hooks the reading side's waker onto the write axis
 //!   (`WakerProxy` in `compat.rs`), so when the socket becomes writable the reading task wakes and flushes again. So
-//!   the symptom of congestion is 「우리 Pong 이 늦는다」 (our Pong is late), not 「우리가 못 읽는다」 (we cannot read) — the last
+//!   the symptom of congestion is 「our Pong is late」, not 「we cannot read」 — the last
 //!   receive time the supervisor measures does not stop because of this. If a late Pong exceeds the peer's patience, the symptom is
-//!   「상대가 우리를 침묵으로 끊는다」 (the peer cuts us with silence). ★The basis for being bounded is `write_deadline` alone★ — the supervisor applies
+//!   「the peer cuts us with silence」. ★The basis for being bounded is `write_deadline` alone★ — the supervisor applies
 //!   that deadline to **every write** (that invariant in `peer.rs`), so a stuck write is cut at that deadline and the link is dropped.
 //!   ★Do not cite `Policy::check` as the basis★ — the
 //!   `write_deadline < ping_interval < idle_timeout` it demands is checked **only in debug builds** (the production callers are
 //!   just the two `debug_assert_eq!` in `registry.rs` and the other callers are tests). In release, if the consumer flips that
 //!   order, nobody stops it. ★And that inequality cannot line up the **peer's** patience in the first place★
 //!   — the peer's `idle_timeout` is set on its side regardless of our policy, so comparing our own values
-//!   cannot establish 「우리의 늦음 < 상대의 인내」 (our lateness < the peer's patience). What can be established is only that 「우리 쓰기가 무한히 걸려 있지는 않다」 (our writes do not hang forever).
+//!   cannot establish 「our lateness < the peer's patience」. What can be established is only that 「our writes do not hang forever」.
 //! - ★The keepalive **round trip** is unmeasured on a real socket★ — the unit tests of this file assert the translation table in both directions
-//!   (「보증」 (guarantee) above), but no test measures a real Ping going out and a real Pong coming back as [`Frame::Keepalive`].
+//!   (「guarantee」 above), but no test measures a real Ping going out and a real Pong coming back as [`Frame::Keepalive`].
 //!   The crate's `ping_interval` is far longer than the lifetime of any real-socket test, so that round trip does not happen
 //!   inside a test. If it goes wrong, the symptom is the one in the item right above.
 //! - ★`Message::Frame` does not come up from real-socket receiving★ (tungstenite docs) — so that branch
 //!   is skipped rather than translated into a [`Frame`].
 //! - ★The cancel safety of [`LinkRx::recv`] **is not load-bearing anywhere** in this crate★ — ★but the reason is
-//!   **not** 「취소되지 않아서」 (it is never cancelled)★: the operating-phase read really is
+//!   **not** 「it is never cancelled」★: the operating-phase read really is
 //!   dropped mid-poll every time a link is dropped (`drop_link` in `peer.rs` calls `abort()` on the reading task and waits for its end — the
 //!   `recv()` future in progress at that moment is simply dropped). The real reason it is not load-bearing is that **every place that cancels
 //!   drops both ends whole right after**: after that `abort()` `frames_rx` and `rx_raw` are released together and
 //!   nothing reads the same link again. The handshake side is the same — the deadline and peer-closed branches return `Err` and
 //!   drop the link (`handshake_once`), and the branch where control wins drops the handshake future together with both ends
-//!   (`shake_hands`). So there is no place where something is left to lose in a cancelled poll. ★That is why no 「미검」 (unmeasured) label is
+//!   (`shake_hands`). So there is no place where something is left to lose in a cancelled poll. ★That is why no 「unverified」 label is
 //!   put here★ — it is not a debt to repay but a debt never taken on, and if the label stayed the next session would try to measure a risk
 //!   that does not exist. **If a new call that reads the same link again after cancelling is written, this sentence becomes void.**
 
@@ -178,7 +177,7 @@ use crate::mask::mask_reason;
 /// ★External fact★ — RFC 6455 §5.5 fixes the control frame payload at 125 bytes, and a close frame spends the first
 /// 2 bytes on the code. tungstenite 0.26.2 **does not check the outgoing side** (`Frame::close` just
 /// concatenates the code and message) but **the receiving side cuts anything over 125 with `ControlFrameTooBig`**
-/// (`protocol/mod.rs:640`). So with a long message 「붙었는데 거절」 (connected but rejected) reaches the peer as a **read error**,
+/// (`protocol/mod.rs:640`). So with a long message 「connected but rejected」 reaches the peer as a **read error**,
 /// the rejection decision collapses, and the reconnect budget gets burned too — [`WsTx::close`] truncates before that.
 const MAX_CLOSE_REASON_BYTES: usize = 123;
 
@@ -186,7 +185,7 @@ const MAX_CLOSE_REASON_BYTES: usize = 123;
 /// sitting in this queue has not been accepted by us yet.
 const LISTEN_BACKLOG: u32 = 1024;
 
-/// The pause before accepting again after a TCP accept error — the reason and the branch that pauses are in the file header 「알려진 한계」. ★It is not a security value but one that keeps the loop
+/// The pause before accepting again after a TCP accept error — the reason and the branch that pauses are in the file header 「Known limits」. ★It is not a security value but one that keeps the loop
 /// from spinning, so it was not raised to an [`AcceptPolicy`] field★ — it merely delays one connection per error.
 ///
 /// ★It pauses with tokio's real clock, not the [`Clock`] given to the listener★ — the pause applies only to real-socket accept errors, so there is nothing to measure with a hand-pushed
@@ -194,8 +193,8 @@ const LISTEN_BACKLOG: u32 = 1024;
 pub const ACCEPT_ERROR_PAUSE: Duration = Duration::from_millis(100);
 
 /// Whether to pause for [`ACCEPT_ERROR_PAUSE`] after a TCP accept error. ★Errors tied to one connection do not pause★ — the peer cut
-/// before we accepted, so the next accept is a different connection, and pausing there would let a peer that cuts right after opening delay accepting (file header 「알려진
-/// 한계」).
+/// before we accepted, so the next accept is a different connection, and pausing there would let a peer that cuts right after opening delay accepting (file header 「Known
+/// limits」).
 fn pauses_after_accept_error(kind: io::ErrorKind) -> bool {
     !matches!(
         kind,
@@ -258,7 +257,7 @@ pub struct WsDialer {
 
 impl WsDialer {
     /// `max_message_bytes` = the byte cap of one message and one frame — both the receiving side's size cap and the boundary at which an outgoing frame is
-    /// returned as an error (file header 「통로 성질」). Give the same value as the peer listener's [`AcceptPolicy::max_message_bytes`].
+    /// returned as an error (file header 「Link properties」). Give the same value as the peer listener's [`AcceptPolicy::max_message_bytes`].
     pub fn new(max_message_bytes: usize) -> Self {
         Self { max_message_bytes }
     }
@@ -316,7 +315,7 @@ pub struct AcceptPolicy {
     /// closed right after accept. 0 = accept nothing.
     pub max_pending_upgrades: usize,
     /// The byte cap of one message and one frame (TRD 3 §5 15) — both the receiving-side cap of the accepted link and the boundary at which an outgoing frame is
-    /// returned as an error (file header 「통로 성질」). Give the same value to the dialing side's [`WsDialer::new`].
+    /// returned as an error (file header 「Link properties」). Give the same value to the dialing side's [`WsDialer::new`].
     pub max_message_bytes: usize,
     /// The size of the refusal report queue (TRD 3 §5 18) — when full, new reports are dropped and [`AcceptRefusals::dropped`] is raised. 0 counts as 1.
     pub refusal_queue: usize,
@@ -540,7 +539,7 @@ fn ensure_loopback(local: SocketAddr) -> Result<(), LinkError> {
         Ok(())
     } else {
         Err(LinkError::new(format!(
-            "ws bind {local}: loopback 이 아니다 — 평문 ws:// 청취기는 loopback 에만 연다"
+            "ws bind {local}: not loopback — a plaintext ws:// listener is opened only on loopback"
         )))
     }
 }
@@ -553,7 +552,7 @@ fn ensure_host_names(names: &[String]) -> Result<(), LinkError> {
         .find(|name| name.contains(':') && !bracketed(name))
     {
         Some(name) => Err(LinkError::new(format!(
-            "ws accept policy: Host 이름 {name:?} 에 대괄호 밖 콜론이 있다 — IPv6 는 `[::1]` 꼴로 · 포트는 빼고 적는다"
+            "ws accept policy: Host name {name:?} has a colon outside brackets — write IPv6 as `[::1]` · leave the port out"
         ))),
         None => Ok(()),
     }
@@ -802,7 +801,7 @@ fn single(headers: &HeaderMap, name: header::HeaderName) -> OneHeader {
     }
 }
 
-/// Whether the Host header value `이름[:포트]` matches the accepted names · this listener's port. In the `[::1]:포트` form only the colon after the bracket is the port.
+/// Whether the Host header value `name[:port]` matches the accepted names · this listener's port. In the `[::1]:port` form only the colon after the bracket is the port.
 /// The port accepts digits only (signs · blanks rejected) · 80 if absent.
 fn host_matches(value: &str, names: &[String], local_port: u16) -> bool {
     let (name, port) = match value.rsplit_once(':') {
@@ -823,7 +822,7 @@ fn host_matches(value: &str, names: &[String], local_port: u16) -> bool {
             .any(|allowed| allowed.eq_ignore_ascii_case(name))
 }
 
-/// Splits an open stream into the two ends of a link. `max_payload` = the outgoing frame cap (file header 「통로 성질」).
+/// Splits an open stream into the two ends of a link. `max_payload` = the outgoing frame cap (file header 「Link properties」).
 ///
 /// ★Crate-internal only★ (TRD 3 §3-5 · §5 17) — if opened to the outside, anyone could build a link from their own accept and
 /// skip every check of [`WsListener`].
@@ -859,7 +858,7 @@ impl<S: WsStream> LinkTx for WsTx<S> {
     fn send(&mut self, frame: Frame) -> BoxFuture<'_, Result<(), LinkError>> {
         Box::pin(async move {
             // ★A frame over the cap fails **as a value**★ — otherwise only the receiving side enforces the cap
-            //   (file header 「tungstenite 는 들어오는 것의 크기만 재고 나가는 것은 안 잰다」), so the link is cut and
+            //   (file header 「tungstenite measures only the size of what comes in, not what goes out」), so the link is cut and
             //   **an innocent peer burns its own reconnect budget**. ★Do not go back to panicking★ —
             //   the version that was a `debug_assert` fires inside the supervisor task, and nobody holds its `JoinHandle`
             //   (`Unstarted::start`), so there was **no place to observe the panic**: the sending side of the state watch dropped,
@@ -871,7 +870,7 @@ impl<S: WsStream> LinkTx for WsTx<S> {
             let len = payload_len(&frame);
             if len > self.max_payload {
                 return Err(LinkError::new(format!(
-                    "ws write: 나가는 프레임이 {len} 바이트다 — 상한 {} 을 넘으면 받는 쪽이 통로를 끊는다",
+                    "ws write: the outgoing frame is {len} bytes — above the cap {} the receiver cuts the link",
                     self.max_payload
                 )));
             }
@@ -915,19 +914,19 @@ struct WsRx<S: WsStream> {
     stream: SplitStream<WebSocketStream<S>>,
     /// Reading has already failed on this link.
     ///
-    /// ★It exists to keep [`LinkRead::Closed`] as 「상대가 닫았다고 말했다」 (the peer said it closed)★ — the reason is in [`WsRx::recv`].
+    /// ★It exists to keep [`LinkRead::Closed`] as 「the peer said it closed」★ — the reason is in [`WsRx::recv`].
     failed: bool,
 }
 
 impl<S: WsStream> LinkRx for WsRx<S> {
     fn recv(&mut self) -> BoxFuture<'_, Result<LinkRead, LinkError>> {
         Box::pin(async move {
-            // ★A read that failed once keeps failing★ — only then does the [`LinkRead::Closed`] contract (「상대가 닫았다고 **말했다**」 (the
-            //   peer said it closed)) hold unconditionally. Without it there is a leak like this: the first read of a socket dropped
+            // ★A read that failed once keeps failing★ — only then does the [`LinkRead::Closed`] contract (「the
+            //   peer **said** it closed」) hold unconditionally. Without it there is a leak like this: the first read of a socket dropped
             //   without a word is a `Protocol(ResetWithoutClosingHandshake)` error, but after that tungstenite
             //   sets its own `ended` marker and **the next read gives `Ready(None)`** (`lib.rs:303`
             //   in 0.26.2). If that `None` is passed along as is, a close nobody spoke is reported, and a consumer that
-            //   branches on that value swaps 「거절당했다/곱게 갔다」 (rejected / left politely) for 「끊겼다」 (cut off).
+            //   branches on that value swaps 「rejected / left politely」 for 「cut off」.
             if self.failed {
                 return Err(LinkError::new("ws read: link already failed"));
             }
@@ -938,7 +937,7 @@ impl<S: WsStream> LinkRx for WsRx<S> {
                         self.failed = true;
                         return Err(LinkError::new(format!("ws read: {e}")));
                     }
-                    // ★A dried-up stream is **not** 「말 없이 끊겼다」 (cut without a word)★ — it comes here
+                    // ★A dried-up stream is **not** 「cut without a word」★ — it comes here
                     //   only after a close frame has already been read (external fact: tokio-tungstenite 0.26.2 turns only `ConnectionClosed`
                     //   /`AlreadyClosed` into `Ready(None)` at `lib.rs:303`, and that error arises only when the state is
                     //   `ClosedByPeer`/`CloseAcknowledged` at `protocol/mod.rs:706`).
@@ -1066,7 +1065,7 @@ mod tests {
     #[test]
     fn a_long_reason_is_cut_on_a_character_boundary() {
         // One character is 3 bytes, so 41 characters = 123 bytes, and the 42nd character exceeds the cap.
-        let long = "가".repeat(60);
+        let long = "가".repeat(60); // hangul-ok
         let cut = clamp_close_reason(&long, MAX_CLOSE_REASON_BYTES);
         assert!(cut.len() <= MAX_CLOSE_REASON_BYTES);
         assert_eq!(cut.chars().count(), MAX_CLOSE_REASON_BYTES / 3);
@@ -1077,13 +1076,13 @@ mod tests {
     #[test]
     fn a_four_byte_character_is_cut_below_the_limit_not_at_it() {
         // ★An input with 4-byte characters is why this test exists★ — with 3-byte characters alone 123 is a multiple of 3,
-        //   so the mutant 「경계 맞추기를 지우고 123 에서 그냥 자른다」 (delete the boundary alignment and just cut at 123) passes (measured 2026-09-07:
+        //   so the mutant 「delete the boundary alignment and just cut at 123」 passes (measured 2026-09-07:
         //   under that mutant all four old inputs were green). With 4-byte characters 123 is not a boundary
         //   and that mutant dies of a slice panic.
         let emoji = "\u{1F600}".repeat(40);
         assert_eq!(emoji.len(), 160);
         let cut = clamp_close_reason(&emoji, MAX_CLOSE_REASON_BYTES);
-        assert_eq!(cut.len(), 120, "4 바이트 글자는 120 에서 잘려야 한다");
+        assert_eq!(cut.len(), 120, "4-byte characters must be cut at 120");
         assert_eq!(cut.chars().count(), 30);
         assert!(emoji.starts_with(cut));
     }
@@ -1147,19 +1146,19 @@ mod tests {
         // ★Bounded wait★ — if it hangs it fails cleanly.
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            tx.close(Close::new(CloseCode(4001), "긴".repeat(200))),
+            tx.close(Close::new(CloseCode(4001), "긴".repeat(200))), // hangul-ok
         )
         .await
-        .expect("닫기가 안 끝났다");
+        .expect("the close did not finish");
 
         let bytes = written.lock().unwrap().clone();
-        assert_eq!(bytes[0], 0x88, "닫기 프레임이 아니다: {:02x?}", &bytes[..2]);
+        assert_eq!(bytes[0], 0x88, "not a close frame: {:02x?}", &bytes[..2]);
         // ★The second byte is the payload length★ — 126 means it moved to the extended length, and that is itself over 125
         //   (external fact: RFC 6455 §5.5 forbids extended length on control frames and tungstenite cuts
         //   it on the receiving side with `ControlFrameTooBig`).
         assert!(
             bytes[1] <= 125,
-            "제어 프레임 payload 가 {} 바이트다 — 받는 쪽이 통로를 끊는다",
+            "the control frame payload is {} bytes — the receiver cuts the link",
             bytes[1]
         );
         // The code goes out as is even when truncated — which is why the branching material is the code, not the message.
@@ -1170,6 +1169,7 @@ mod tests {
     fn a_cut_reason_fits_a_control_frame() {
         // Measures on a real frame that code 2 bytes + message does not exceed 125 — if it does, the receiving side
         //   cuts with `ControlFrameTooBig` ([`MAX_CLOSE_REASON_BYTES`]).
+        // hangul-ok-begin
         for reason in ["", "짧다", &"긴".repeat(200), &"a".repeat(200)] {
             let frame = WsFrame::close(Some(CloseFrame {
                 code: WsCloseCode::from(4001),
@@ -1177,6 +1177,7 @@ mod tests {
             }));
             assert!(frame.payload().len() <= 125, "{}", frame.payload().len());
         }
+        // hangul-ok-end
     }
 
     // ★A size cap below 125 also applies to the close frame★ — the receiving side's `max_frame_size` applies to control frames too
@@ -1198,16 +1199,20 @@ mod tests {
                 tx.close(Close::new(CloseCode(4001), "a".repeat(200))),
             )
             .await
-            .expect("닫기가 안 끝났다");
+            .expect("the close did not finish");
 
             let bytes = written.lock().unwrap().clone();
-            assert_eq!(bytes[0], 0x88, "상한 {limit}: 닫기 프레임이 아니다");
-            assert_eq!(usize::from(bytes[1]), payload, "상한 {limit}: payload 길이");
+            assert_eq!(bytes[0], 0x88, "cap {limit}: not a close frame");
+            assert_eq!(
+                usize::from(bytes[1]),
+                payload,
+                "cap {limit}: payload length"
+            );
             if payload >= 2 {
                 assert_eq!(
                     u16::from_be_bytes([bytes[2], bytes[3]]),
                     4001,
-                    "상한 {limit}: 코드"
+                    "cap {limit}: code"
                 );
             }
         }
@@ -1228,14 +1233,14 @@ mod tests {
         .await;
         let (mut tx, _rx) = split_link(ws, 8);
         let over = tx.send(Frame::Binary(vec![0; 9])).await;
-        assert!(over.is_err(), "상한 + 1 이 나갔다");
+        assert!(over.is_err(), "cap + 1 went out");
         assert!(
             written.lock().unwrap().is_empty(),
-            "거절한 프레임이 소켓에 닿았다"
+            "a rejected frame reached the socket"
         );
         tx.send(Frame::Binary(vec![0; 8]))
             .await
-            .expect("상한 그대로는 나가야 한다");
+            .expect("exactly the cap must go out");
         assert!(!written.lock().unwrap().is_empty());
     }
 
@@ -1247,7 +1252,7 @@ mod tests {
         assert_eq!(config.max_frame_size, Some(1234));
     }
 
-    // ── loopback 단언 ──
+    // ── loopback assertions ──
     #[test]
     fn only_a_loopback_address_may_be_listened_on() {
         for ok in ["127.0.0.1:0", "127.9.9.9:4000", "[::1]:0"] {
@@ -1288,7 +1293,7 @@ mod tests {
             io::ErrorKind::ConnectionAborted,
             io::ErrorKind::ConnectionReset,
         ] {
-            assert!(!pauses_after_accept_error(kind), "{kind:?} 에 쉬었다");
+            assert!(!pauses_after_accept_error(kind), "rested on {kind:?}");
         }
         // Running out of file handles (`EMFILE`) has no named branch and arrives as a different branch per platform — measure with the named rest.
         for kind in [
@@ -1297,7 +1302,7 @@ mod tests {
             io::ErrorKind::PermissionDenied,
             io::ErrorKind::InvalidInput,
         ] {
-            assert!(pauses_after_accept_error(kind), "{kind:?} 에 안 쉬었다");
+            assert!(pauses_after_accept_error(kind), "did not rest on {kind:?}");
         }
     }
 
@@ -1358,7 +1363,7 @@ mod tests {
                 stream,
                 "127.0.0.1:5555".parse().unwrap(),
                 self.clock.now(),
-                self.permits.try_take().expect("칸"),
+                self.permits.try_take().expect("permit"),
                 self.shared.clone(),
                 self.ready_tx.clone(),
             )
@@ -1367,14 +1372,18 @@ mod tests {
         fn assert_timed_out(&mut self, what: &str) {
             assert!(
                 self.ready.try_recv().is_err(),
-                "{what}: 시한을 넘긴 업그레이드가 준비 큐에 앉았다"
+                "{what}: an upgrade past its deadline sat in the ready queue"
             );
             let report = self
                 .refusals
                 .try_recv()
-                .unwrap_or_else(|| panic!("{what}: 보고가 없다"));
+                .unwrap_or_else(|| panic!("{what}: no report"));
             assert_eq!(report.kind, RefusalKind::UpgradeTimeout, "{what}");
-            assert_eq!(self.permits.in_use(), 0, "{what}: 칸이 안 돌아갔다");
+            assert_eq!(
+                self.permits.in_use(),
+                0,
+                "{what}: the permit was not returned"
+            );
         }
     }
 
@@ -1401,12 +1410,15 @@ mod tests {
             // The spawned task never ran before the deadline.
             rig.clock.advance(late);
             task.await;
-            rig.assert_timed_out(&format!("수락 뒤 {late:?} 에 처음 돎"));
+            rig.assert_timed_out(&format!("first ran {late:?} after accept"));
             let mut answer = Vec::new();
             tokio::io::AsyncReadExt::read_to_end(&mut client, &mut answer)
                 .await
                 .unwrap();
-            assert!(answer.is_empty(), "시한을 넘긴 뒤 응답을 썼다");
+            assert!(
+                answer.is_empty(),
+                "wrote the response after the deadline passed"
+            );
         }
     }
 
@@ -1416,14 +1428,14 @@ mod tests {
             let mut rig = rig();
             let (mut client, server) = tokio::io::duplex(64 * 1024);
             let mut task = Box::pin(rig.upgrade(server));
-            assert!(!poll_once(&mut task).await, "요청 없이 끝났다");
+            assert!(!poll_once(&mut task).await, "ended without a request");
             // The deadline and the request stand together — on the next poll the upgrade is polled before the deadline and finishes.
             rig.clock.advance(late);
             tokio::io::AsyncWriteExt::write_all(&mut client, UPGRADE_REQUEST)
                 .await
                 .unwrap();
             task.await;
-            rig.assert_timed_out(&format!("수락 뒤 {late:?} 에 끝남"));
+            rig.assert_timed_out(&format!("ended {late:?} after accept"));
         }
     }
 
@@ -1434,17 +1446,20 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(64 * 1024);
         let accepted_at = rig.clock.now();
         let mut task = Box::pin(rig.upgrade(server));
-        assert!(!poll_once(&mut task).await, "요청 없이 끝났다");
+        assert!(!poll_once(&mut task).await, "ended without a request");
         let early = UPGRADE_TIMEOUT - Duration::from_millis(1);
         rig.clock.advance(early);
         tokio::io::AsyncWriteExt::write_all(&mut client, UPGRADE_REQUEST)
             .await
             .unwrap();
         task.await;
-        let accepted = rig.ready.try_recv().expect("시한 전에 끝난 업그레이드");
+        let accepted = rig
+            .ready
+            .try_recv()
+            .expect("an upgrade that finished before the deadline");
         assert_eq!(accepted.upgraded_at(), accepted_at + early);
         assert!(rig.refusals.try_recv().is_none());
-        assert_eq!(rig.permits.in_use(), 1, "받은 통로가 칸을 쥔다");
+        assert_eq!(rig.permits.in_use(), 1, "the accepted link holds a permit");
     }
 
     /// A stream whose reads give the bytes it was handed and whose writes are never accepted — builds an upgrade that stalled while writing the response.
@@ -1491,10 +1506,10 @@ mod tests {
             Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
         let mut task = Box::pin(rig.upgrade(WriteStalled(std::io::Cursor::new(request.to_vec()))));
-        assert!(!poll_once(&mut task).await, "403 을 다 썼다");
+        assert!(!poll_once(&mut task).await, "wrote all of the 403");
         rig.clock.advance(UPGRADE_TIMEOUT);
         task.await;
-        let report = rig.refusals.try_recv().expect("보고");
+        let report = rig.refusals.try_recv().expect("report");
         assert_eq!(report.kind, RefusalKind::OriginRejected);
         assert_eq!(report.origin.as_deref(), Some("http://evil"));
         assert!(rig.ready.try_recv().is_err());
@@ -1600,7 +1615,7 @@ mod tests {
         assert_eq!(
             screen(&p, &headers(&[]), 9000),
             Ok(None),
-            "Host 없음은 받는다(D9)"
+            "no Host is accepted (D9)"
         );
         for bad in [
             &b"evil.example:9000"[..],
@@ -1638,7 +1653,7 @@ mod tests {
             &headers(&[("origin", b"http://ok"), ("host", b"evil:9000")]),
             9000,
         )
-        .expect_err("Host 가 밖이다");
+        .expect_err("Host is outside");
         assert_eq!(
             seen,
             Screened {
@@ -1669,12 +1684,12 @@ mod tests {
         );
         reporter.report(RefusalKind::SlotsFull, Some(remote), None, None);
         reporter.report(RefusalKind::SlotsFull, Some(remote), None, None);
-        assert_eq!(refusals.dropped(), 2, "찬 줄에서 버린 수");
-        let first = refusals.try_recv().expect("첫 보고");
+        assert_eq!(refusals.dropped(), 2, "count dropped from the full queue");
+        let first = refusals.try_recv().expect("first report");
         assert_eq!(
             first.kind,
             RefusalKind::OriginRejected,
-            "먼저 온 것이 남는다"
+            "the first to come remains"
         );
         assert_eq!(first.remote.as_deref(), Some("127.0.0.1:5555"));
         assert_eq!(first.origin.as_deref(), Some("http://evilx"));

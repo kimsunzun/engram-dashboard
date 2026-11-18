@@ -5,32 +5,32 @@ import type { ToolOutcome } from "./ToolOutcome";
 import type { TurnOutcome } from "./TurnOutcome";
 
 /**
- * 구조화 출력 이벤트 wire 미러(ADR-0045 tag1 StructuredEvent) — agent `OutputEvent`의 **충실한 미러**.
+ * Structured output event wire mirror (ADR-0045 tag1 StructuredEvent) — a **faithful mirror** of agent `OutputEvent`.
  *
- * ★왜 새 타입인가(OutputChunk 확장 아님)★: 기존 wire `OutputChunk`(아래)는 S14 잔재라 `turn_id`/
- * `id`/`message_id`가 없고 `MessageDone`/`Error` variant도 없다. 게다가 `AgentEvent::Output`·
- * `export_all_to` 사용처에 묶여 있어 확장하면 그 계약이 깨질 위험이 있다. ADR-0045 "self-describing +
- * 교체성(optional turn_id/message_id 보존)"을 만족하려면 agent `OutputEvent`를 필드 유실 0으로 미러해야
- * 하므로, 오염 없는 **새 wire 타입**을 신설한다(OutputChunk 는 GetSnapshot 스냅샷 전용으로 그대로 둔다).
+ * ★Why a new type (not extending OutputChunk)★: the existing wire `OutputChunk` (below) is an S14 leftover, so it has no `turn_id`/
+ * `id`/`message_id` and no `MessageDone`/`Error` variant. Besides, it is tied to the `AgentEvent::Output`·
+ * `export_all_to` use sites, so extending it risks breaking that contract. Satisfying ADR-0045 "self-describing +
+ * swappability (preserve optional turn_id/message_id)" requires mirroring agent `OutputEvent` with zero field loss,
+ * so a clean **new wire type** is introduced (OutputChunk stays as is, only for the GetSnapshot snapshot).
  *
- * ★agent↔wire 변환은 daemon adapter★(ADR-0003 격리): agent `OutputEvent`(도메인 타입, Serialize 미부착)
- * → 이 wire 타입은 daemon `connection_core::output_event_to_wire` 가 명시 매핑한다. protocol 은 wire
- * 타입만 소유(agent 무의존).
+ * ★The agent↔wire conversion is the daemon adapter★ (ADR-0003 isolation): agent `OutputEvent` (domain type, no Serialize)
+ * → this wire type is mapped explicitly by daemon `connection_core::output_event_to_wire`. protocol owns only the wire
+ * type (no agent dependency).
  *
- * ★TerminalBytes 는 제외★: 콘솔 raw 바이트는 tag0 terminal frame(payload=raw bytes)으로만 흐르고
- * tag1 payload 에 실리지 않는다. 따라서 이 미러에는 TerminalBytes variant 를 두지 않는다 — agent
- * `OutputEvent::TerminalBytes` 가 이 변환에 오면 adapter 가 방어적으로 흡수(근거 주석은 output_event_to_wire).
+ * ★TerminalBytes is excluded★: console raw bytes flow only in the tag0 terminal frame (payload=raw bytes) and
+ * are not carried in the tag1 payload. So this mirror has no TerminalBytes variant — if agent
+ * `OutputEvent::TerminalBytes` comes to this conversion, the adapter absorbs it defensively (the rationale comment is in output_event_to_wire).
  *
- * ★self-describing serde★: internally-tagged(`#[serde(tag="type")]`) — payload JSON 에 `"type"` 판별자가
- * 박혀 프론트가 JSON.parse 후 variant 를 가른다.
- * wire 직렬화 형식 = JSON(serde_json) — daemon adapter 가 `serde_json::to_vec` 로 tag1 payload 를 만든다.
+ * ★self-describing serde★: internally-tagged (`#[serde(tag="type")]`) — the `"type"` discriminator is embedded in the payload JSON
+ * so the frontend splits the variant after JSON.parse.
+ * wire serialization format = JSON (serde_json) — the daemon adapter builds the tag1 payload with `serde_json::to_vec`.
  */
 export type StructuredEvent = { "type": "TextDelta", text: string, turn_id: string | null, message_id: string | null, } | { "type": "ToolCall", name: string, args_json: string, 
 /**
- * 호출 식별자(권한 UX·결과 매칭용). claude tool_use id 등.
+ * Call identifier (for permission UX · result matching). claude tool_use id etc.
  */
 id: string | null, turn_id: string | null, message_id: string | null, 
 /**
- * 도구의 중립 종류. ★칸이 없으면(옛 데몬) 프론트 소비자는 `Other` 로 읽는다★ — 새 데몬은 늘 싣는다.
+ * The tool's neutral category. ★If the field is absent (old daemon), the frontend consumer reads it as `Other`★ — a new daemon always carries it.
  */
 category?: ToolCategory, } | { "type": "ToolResult", id: string, outcome: ToolOutcome, } | { "type": "Usage", input_tokens: number, output_tokens: number, turn_id: string | null, } | { "type": "MessageDone", turn_id: string | null, message_id: string | null, } | { "type": "TurnEnd", turn_id: string | null, outcome: TurnOutcome, } | { "type": "Error", message: string, } | { "type": "Structured", kind: string, json: string, } | { "type": "QueuedInput", op: QueuedInputEvent, };

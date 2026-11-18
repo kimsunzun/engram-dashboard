@@ -44,13 +44,13 @@ async function flush(): Promise<void> {
 
 function deliver(payload: unknown): void {
   const handler = listeners.get(EVT)
-  if (!handler) throw new Error(`${EVT} 리스너가 없다`)
+  if (!handler) throw new Error(`no ${EVT} listener`)
   handler({ payload })
 }
 
 function outcomeOf(): Record<string, unknown> {
   const call = invokeMock.mock.calls.find(([cmd]) => cmd === 'report_command_outcome')
-  if (!call) throw new Error('결말 회신이 없다')
+  if (!call) throw new Error('no outcome reply')
   return call[1] as Record<string, unknown>
 }
 
@@ -67,13 +67,13 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('offeredCommands — help 를 가진 것만 밖으로 나간다', () => {
-  it('help 있는 것만 골라 {name, help} 로 투영한다', () => {
+describe('offeredCommands — only the ones with help go out', () => {
+  it('picks only the ones with help and projects them to {name, help}', () => {
     register({
       id: 'tab.next',
       title: () => 'next',
       help: {
-        summary: '다음 탭으로 옮긴다',
+        summary: 'Moves to the next tab',
         effect: 'write',
         args: { window: { type: 'string' } },
         required: ['window'],
@@ -86,7 +86,7 @@ describe('offeredCommands — help 를 가진 것만 밖으로 나간다', () =>
       {
         name: 'tab.next',
         help: {
-          summary: '다음 탭으로 옮긴다',
+          summary: 'Moves to the next tab',
           effect: 'write',
           args: { window: { type: 'string' } },
           required: ['window'],
@@ -95,24 +95,24 @@ describe('offeredCommands — help 를 가진 것만 밖으로 나간다', () =>
     ])
   })
 
-  it('summary 가 공백뿐이면 내놓지 않는다 — 이름만으로는 부를 수 없다', () => {
+  it('does not offer it when summary is blank only — it cannot be called by name alone', () => {
     register({ id: 'tab.next', title: () => 'next', help: { summary: '   ', effect: 'write' }, run: () => {} })
     expect(offeredCommands()).toEqual([])
   })
 })
 
-describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 돌아간다', () => {
+describe('installViewCommandBridge — the envelope goes through the registry and back as an answer', () => {
   // ★★Do not delete this assertion★★: if `target` is missing `listen()` registers as `Any`, and Tauri wakes **every**
   //   `Any` listener **regardless of the filter** — even if the shell picks one window and sends, main · tree · popout all receive it,
   //   each runs the same command and each answers (one reply per envelope — a TRD §4-⑤ violation).
-  it('자기 창 label 로 구독한다 — 안 그러면 창 수만큼 같은 명령이 실행된다', async () => {
+  it('subscribes with its own window label — otherwise the same command runs as many times as there are windows', async () => {
     installViewCommandBridge()
     await flush()
     expect(listenOptions).toEqual([{ target: 'popup-7' }])
   })
 
-  it('구독을 건 뒤에 보고한다 — 순서가 뒤집히면 첫 봉투가 이 창에 도착조차 안 한다', async () => {
-    register({ id: 'slot.empty', title: () => 'empty', help: { summary: '슬롯을 비운다', effect: 'write' }, run: () => {} })
+  it('reports after the subscription is set — if the order flips, the first envelope does not even arrive at this window', async () => {
+    register({ id: 'slot.empty', title: () => 'empty', help: { summary: 'Empties the slot', effect: 'write' }, run: () => {} })
     installViewCommandBridge()
     await flush()
 
@@ -120,7 +120,7 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
     const [cmd, args] = invokeMock.mock.calls[0]
     expect(cmd).toBe('report_view_commands')
     expect(args).toEqual({
-      commands: [{ name: 'slot.empty', help: { summary: '슬롯을 비운다', effect: 'write' } }],
+      commands: [{ name: 'slot.empty', help: { summary: 'Empties the slot', effect: 'write' } }],
     })
     // Subscription before the report — invoke goes out only after listen resolves.
     expect(listenMock.mock.invocationCallOrder[0]).toBeLessThan(
@@ -128,9 +128,9 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
     )
   })
 
-  it('봉투 → run(id, args) → 성공 결말(같은 상관 키)', async () => {
+  it('envelope → run(id, args) → success outcome (same correlation key)', async () => {
     const spy = vi.fn((args?: Record<string, unknown>) => ({ got: args?.window }))
-    register({ id: 'tab.next', title: () => 'next', help: { summary: '다음 탭', effect: 'write' }, run: spy })
+    register({ id: 'tab.next', title: () => 'next', help: { summary: 'Next tab', effect: 'write' }, run: spy })
     installViewCommandBridge()
     await flush()
 
@@ -141,13 +141,13 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
     expect(outcomeOf()).toEqual({ requestId: 'req-1', ok: { got: 'main' }, error: null })
   })
 
-  it('handler 가 던지면 실패 결말을 낸다 — 답 없이 끝나면 셸이 마감까지 매단다', async () => {
+  it('produces a failure outcome when the handler throws — ending without an answer leaves the shell hanging until the deadline', async () => {
     register({
       id: 'slot.empty',
       title: () => 'empty',
-      help: { summary: '슬롯 비우기', effect: 'write' },
+      help: { summary: 'Empty the slot', effect: 'write' },
       run: () => {
-        throw new Error('[slot.empty] viewId 필요')
+        throw new Error('[slot.empty] viewId required')
       },
     })
     installViewCommandBridge()
@@ -159,11 +159,11 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
     expect(outcomeOf()).toEqual({
       requestId: 'req-2',
       ok: null,
-      error: '[slot.empty] viewId 필요',
+      error: '[slot.empty] viewId required',
     })
   })
 
-  it('모르는 이름도 답으로 끝난다(registry 가 throw 하고 그것이 결말이 된다)', async () => {
+  it('an unknown name ends with an answer too (the registry throws and that becomes the outcome)', async () => {
     installViewCommandBridge()
     await flush()
 
@@ -175,8 +175,8 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
     expect(String(outcome.error)).toContain('nope.nope')
   })
 
-  it('정리한 뒤에 온 봉투는 답하지 않는다 — 죽은 인스턴스가 답하면 한 봉투에 답이 둘이 된다', async () => {
-    register({ id: 'slot.empty', title: () => 'empty', help: { summary: '슬롯을 비운다', effect: 'write' }, run: () => {} })
+  it('an envelope that comes after cleanup gets no answer — if a dead instance answers, one envelope gets two answers', async () => {
+    register({ id: 'slot.empty', title: () => 'empty', help: { summary: 'Empties the slot', effect: 'write' }, run: () => {} })
     const dispose = installViewCommandBridge()
     await flush()
     dispose()

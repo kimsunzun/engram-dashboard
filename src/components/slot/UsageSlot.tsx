@@ -1,11 +1,9 @@
 // Usage limit slot (TRD S21 usage-limit-slot §1-8) — draws the remaining amount of enabled companies as a small display and opens a detail popup when pressed.
 //
-// ★Operations go only through commands (§5)★ — the ⟳ of the small display (all enabled companies) and the popup's per-company ⟳ (`vendor` argument) call `usageSlot.refresh`,
-//   and the popup's display toggle calls `usageSlot.toggle*`. The slot right-click menu has no usage item (user decision 2026-09-29).
-// ★Only enabled companies are drawn★ — a disabled company, even if the store has values, is nowhere in the small display · badge · popup detail, and its name remains only in the popup's display
-//   toggle row (the place to turn it back on). Query demand (interest) is computed by the shell from the layout, so this component does not report interest.
-// ★The width stage is chosen by the drawn width (R3)★ — for each stage the natural width of the hidden render is measured and compared with the real width. No px threshold
-//   is set: when font · text · values change the threshold would have to move with them.
+// ★Operations go only through commands (§5)★ — the small display's ⟳ (all enabled companies) and the popup's per-company ⟳ (`vendor` argument) call `usageSlot.refresh`; the popup's display toggle calls `usageSlot.toggle*`. The slot right-click menu has no usage item.
+// ★Only enabled companies are drawn★ — a disabled company, even with store values, is absent from the small display · badge · popup detail; its name remains only in the popup's display toggle row (the place to turn it back on).
+//   Query demand (interest) is computed by the shell from the layout, so this component does not report interest.
+// ★The width stage is chosen by the drawn width (R3)★ — each stage's hidden render natural width is measured against the real width; no px threshold, since font · text · values changing would move it.
 // ★Time is driven by a single per-minute tick★ — age · remaining time · next attempt flow locally with no request (R32).
 // Values are kept as DOM text + `data-usage-vendor`/`data-usage-window` (R27 — LLM and cdp read them).
 
@@ -47,10 +45,7 @@ type UsageContent = Extract<SlotContent, { type: 'usage' }>
 type Stage = 1 | 2 | 3
 type ValueReading = Extract<WindowReading, { kind: 'value' }>
 
-/**
- * Per company, the display field of the slot content and the command that flips that field. The popup's display toggle rows are drawn in the order of this table — when a company is added
- * (`AgentBackendKind`) the type catches the missing row.
- */
+/** Per company, the slot content's display field and the command that flips it. The popup's toggle rows follow this table's order — adding a company (`AgentBackendKind`) makes the type catch the missing row. */
 const VENDOR_SLOT: Record<AgentBackendKind, { show: Exclude<keyof UsageContent, 'type'>; toggle: string }> = {
   claude: { show: 'show_claude', toggle: 'usageSlot.toggleClaude' },
   codex: { show: 'show_codex', toggle: 'usageSlot.toggleCodex' },
@@ -58,8 +53,7 @@ const VENDOR_SLOT: Record<AgentBackendKind, { show: Exclude<keyof UsageContent, 
 const USAGE_VENDORS = Object.keys(VENDOR_SLOT) as AgentBackendKind[]
 
 /**
- * The 「사용량 페이지 ↗」 (usage page) destination. ★It must match the shell's opener allow list (`src-tauri/capabilities/usage-links.json`) down to the character★
- * — if even one query or trailing slash differs the shell refuses to open it. `UsageSlot.test.tsx` does the comparison.
+ * The 「usage page」 destination. ★Must match the shell's opener allow list (`src-tauri/capabilities/usage-links.json`) character for character★ — one differing query or trailing slash makes the shell refuse to open it (`UsageSlot.test.tsx` compares).
  */
 export const USAGE_PAGE_URL: Record<AgentBackendKind, string> = {
   claude: 'https://claude.ai/settings/usage',
@@ -181,7 +175,7 @@ export default function UsageSlot({
   viewId: string | null
   slotId: string
 }) {
-  // TRD §3 #82: separately from the boot pull after the broadcast is connected, even if the slot is placed late it is drawn at once from the shell cache.
+  // TRD §3 #82: separately from the boot pull after the broadcast is connected, a late-placed slot draws at once from the shell cache.
   useEffect(() => {
     void useUsageStore.getState().pull()
   }, [])
@@ -205,26 +199,19 @@ export default function UsageSlot({
 interface Measures {
   /** Width of the slot root (`width:100%` — it does not change with content or stage). */
   rootW: number | null
-  /**
-   * Width of the ⟳ area (including the right margin of ⟳). If there is no ⟳ (a notice text) it is 0 — the observer does not notify a 0×0 element at the start of observation, so
-   * it starts from 0, not null.
-   */
+  /** Width of the ⟳ area (including its right margin). 0 when there is no ⟳ (a notice text) — the observer does not notify a 0×0 element at observation start, so it starts from 0, not null. */
   refreshW: number
   s1: number | null
   s2: number | null
 }
 
-/**
- * Width the content can use = slot width − ⟳ area − left/right margins of the summary button. The measurement copies (`s1`·`s2`) are measured without ⟳ — the ⟳ share is subtracted here
- * only once (putting it in the copies would subtract it twice).
- */
+/** Width the content can use = slot width − ⟳ area − the summary button's left/right margins. The measurement copies (`s1`·`s2`) are measured without ⟳, so the ⟳ share is subtracted only here (in the copies it would be subtracted twice). */
 function contentAvail({ rootW, refreshW }: Measures): number | null {
   return rootW === null ? null : rootW - refreshW - 2 * SUMMARY_PAD_X_PX
 }
 
-// ADR-0259: the stage is chosen by width only — do not revive the height fallback (stage 3 if stage 2 is taller than the slot). If revived, in a low slot
-//   stage 1 skips stage 2 and goes straight to stage 3. When height is short, the root's `overflow: hidden` cuts the lower line, and that line's
-//   badge is hidden with it (the price accepted — PRD R31).
+// ADR-0259: the stage is chosen by width only — do not revive the height fallback (stage 3 if stage 2 is taller than the slot): in a low slot stage 1 would skip stage 2 and go straight to stage 3.
+//   When height is short, the root's `overflow: hidden` cuts the lower line and that line's badge with it (accepted — PRD R31).
 /** The widest stage that fits. If not yet measured, stage 1 (the most detailed). If narrower than stage 3, stage 3 is cut with an ellipsis. */
 function pickStage(m: Measures): Stage {
   const { s1, s2 } = m
@@ -254,14 +241,13 @@ const LINE_STYLE: CSSProperties = {
   minWidth: 0,
 }
 
-// Stages 1·2 put all lines on one grid — sharing cells is what lines up the bars · % · reset times of two companies · two windows vertically (user decision
-//   2026-09-29). One window = name | bar | % | reset time.
+// Stages 1·2 put all lines on one grid — shared cells line up the bars · % · reset times of two companies · two windows vertically. One window = name | bar | % | reset time.
 const WINDOW_TRACKS = 'auto minmax(4em, 1fr) auto auto'
 const STAGE1_COLUMNS = `auto ${WINDOW_TRACKS} ${WINDOW_TRACKS}`
 const STAGE2_COLUMNS = `auto ${WINDOW_TRACKS}`
 const WINDOW_TRACK_COUNT = 4
 
-// Of the gaps between cells, bar↔% is the narrowest (user decision 2026-09-29 — so the bar and % read together). Between other cells a margin is added.
+// Of the gaps between cells, bar↔% is the narrowest (so the bar and % read together); other cells get an added margin.
 const GRID_STYLE: CSSProperties = {
   display: 'grid',
   alignItems: 'center',
@@ -304,9 +290,8 @@ function UsageSummary({
   const [measures, setMeasures] = useState<Measures>({ rootW: null, refreshW: 0, s1: null, s2: null })
   const [open, setOpen] = useState(false)
 
-  // Slot width · ⟳ area · the natural widths of two stages are measured by one observer — the hidden render is called again because its size changes when values·text change.
-  // ★Elements whose size changes with the chosen stage (summary button · content · line) are not measured★ — if the stage changes its own input, a width once
-  //   shrunk to stage 3 does not widen again or the stage goes back and forth.
+  // Slot width · ⟳ area · the two stages' natural widths are measured by one observer — the hidden render is called again because its size changes with values·text.
+  // ★Elements whose size changes with the chosen stage (summary button · content · line) are not measured★ — if the stage changed its own input, a width once shrunk to stage 3 would not widen again, or the stage would oscillate.
   useLayoutEffect(() => {
     if (typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver(entries => {
@@ -341,8 +326,7 @@ function UsageSummary({
   const runSlotCommand = (id: string) => fireAndForget(id, { viewId, slotId, content })
   const refreshVendor = (vendor: AgentBackendKind) =>
     fireAndForget('usageSlot.refresh', { viewId, slotId, content, vendor })
-  // Even if presses come in succession before the broadcast, the old `content` is sent as is — the toggle command writes only its own one field, so it does not
-  //   undo another company's earlier press (`usageCommands`). The check mark is `content` too (no optimistic update — ADR-0035).
+  // Even if presses come in succession before the broadcast, the old `content` is sent as is — the toggle command writes only its own one field, so it does not undo another company's earlier press (`usageCommands`). The check mark is `content` too (no optimistic update — ADR-0035).
   const toggleShown = (vendor: AgentBackendKind) => runSlotCommand(VENDOR_SLOT[vendor].toggle)
   const shown = Object.fromEntries(USAGE_VENDORS.map(v => [v, content[VENDOR_SLOT[v].show]])) as Record<
     AgentBackendKind,
@@ -352,11 +336,9 @@ function UsageSummary({
   return (
     <div ref={rootRef} data-usage-slot="" style={ROOT_STYLE}>
       {/* ★⟳ is a sibling outside the summary button★ — no button inside a button (the press would overlap with opening the popup).
-          ★⟳ is right next to the content in every stage★ (position = ADR-0258 decision 1 · user 2026-09-30 「알아서 잘 붙이도록」 (attach it well on your own) ·
-          method = TRD §3 #104) — in stages 1·2 the grid's bar cell (`1fr`) fills the summary button to the end of the line, and in stage 3 there is no cell to fill so the line shrinks to its own
-          content width. If the content is wider than the slot the line stops at the slot width (`maxWidth` — without it the minimum
-          width of a line that cannot wrap pushes ⟳ out of the slot) and the summary button shrinks and cuts the content — the ⟳ area does not shrink. So in stage 3, when
-          values change the content width, like digit count or a badge, ⟳ moves with it. The querying indicator is ⟳'s own rotation so it does not change the content width (ADR-0261). */}
+          ★⟳ is right next to the content in every stage★ (ADR-0258 decision 1; method = TRD §3 #104): in stages 1·2 the grid's bar cell (`1fr`) fills the summary button to the end of the line; in stage 3 there is no cell to fill, so the line shrinks to its content width.
+          If the content is wider than the slot the line stops at the slot width (`maxWidth` — without it the minimum width of a line that cannot wrap pushes ⟳ out of the slot) and the summary button shrinks and cuts the content — the ⟳ area does not shrink.
+          So in stage 3 ⟳ moves when digit count or a badge changes the content width. The querying indicator is ⟳'s own rotation, so it does not change the content width (ADR-0261). */}
       <div
         ref={rowRef}
         data-usage-row=""
@@ -371,8 +353,7 @@ function UsageSummary({
           // Children of a button are flattened for assistive tech, so a short name is given instead of the bar·badge inside (D14). If there is only a notice text, that text is the name.
           aria-label={views.length > 0 ? summaryLabel(views) : undefined}
           // Keyboard (Enter·Space) calls the same click through native button activation (D14).
-          // ADR-0259: it only opens and closes — do not attach a query when opening the popup. There is a periodic query, so not fetching on open is
-          //   the custom, and attaching it raises the Claude 429 risk with every open action (429 is not caught by blocking during refusal — TRD §6 #21).
+          // ADR-0259: it only opens and closes — do not attach a query to opening the popup: there is a periodic query, and a query per open raises the Claude 429 risk (429 is not caught by blocking during refusal — TRD §6 #21).
           onClick={() => setOpen(o => !o)}
           style={{
             display: 'block',
@@ -438,8 +419,7 @@ function UsageSummary({
  */
 function RefreshButton({ views, onRefresh }: { views: VendorView[]; onRefresh: () => void }) {
   const targets = views.filter(v => !v.rejected)
-  // This marker carries whether each company is being queried (R27 — cdp·LLM) — a single rotation does not show which company is running. A refusing company's
-  //   query is carried too (the rotation looks only at the targets).
+  // This marker carries whether each company is being queried (R27 — cdp·LLM); a single rotation does not show which company is running. A refusing company's query is carried too (the rotation looks only at the targets).
   const inFlight = views.filter(v => v.refreshing).map(v => v.vendor)
   return (
     <RefreshIconButton
@@ -451,7 +431,7 @@ function RefreshButton({ views, onRefresh }: { views: VendorView[]; onRefresh: (
         'data-usage-refresh': '',
         ...(inFlight.length > 0 ? { 'data-usage-refreshing': inFlight.join(' ') } : {}),
       }}
-      // The margin is put on the ⟳ side — the content width of the ⟳ area (`data-usage-refresh-area`) wraps this margin too and enters the ⟳ share of the stage decision.
+      // The margin is on the ⟳ side — the ⟳ area's content width (`data-usage-refresh-area`) wraps it too and enters the stage decision's ⟳ share.
       marginRight={SUMMARY_PAD_X_PX}
     />
   )
@@ -476,25 +456,21 @@ function RefreshIconButton({
   attrs: Record<string, string>
   marginRight?: number
 }) {
-  // ADR-0261: rotation = starts turning when a query turns on (including automatic queries) and, after the query ends, stops at the boundary (`animationiteration`)
-  //   of the wheel that was turning — at least one turn, and it does not jump to 0° at the end. On every press the icon is attached anew to restart the rotation from 0°
-  //   (the confirmation of a press — even a press that sent no query). The wheel length is `animate-spin` (1 second) as it is.
-  // ★It turns even under reduced motion and e-ink★ — this repo's rotating-symbol rule (`agent/agentGlyph.css` · `ui/loading-panel.css` —
-  //   user decisions 2026-08-24·2026-09-24: a stopped spinner cannot be told apart from 「멈춤」 (stopped)).
+  // ADR-0261: rotation starts when a query turns on (including automatic queries) and, after the query ends, stops at the boundary (`animationiteration`) of the turning wheel — at least one turn, no jump to 0°. Every press attaches the icon anew to restart from 0°
+  //   (the confirmation of a press, even one that sent no query). The wheel length is `animate-spin` (1 second).
+  // ★It turns even under reduced motion and e-ink★ — this repo's rotating-symbol rule (`agent/agentGlyph.css` · `ui/loading-panel.css`): a stopped spinner cannot be told apart from 「stopped」.
   const [spinning, setSpinning] = useState(false)
   const [spinRun, setSpinRun] = useState(0)
   if (busy && !spinning) setSpinning(true)
-  // ADR-0258: only the two below block a press — no time interval is set (the 429 that rapid presses would call is an accepted risk).
-  // It is blocked during a visible refusal — within the deadline ⟳ neither queries nor rotates (R24 · D11). A press while a query is running is discarded —
-  //   only the rotation restarts from the beginning (ADR-0261).
+  // ADR-0258: only the two below block a press — no time interval (the 429 that rapid presses could call is an accepted risk).
+  // Blocked during a visible refusal — within the deadline ⟳ neither queries nor rotates (R24 · D11). A press while a query runs is discarded — only the rotation restarts from the beginning (ADR-0261).
   return (
     <button
       type="button"
       {...attrs}
       aria-label={label}
       title={label}
-      // ★It is `aria-disabled`, not `disabled`★ — at the moment a focused ⟳ turns into a refusal, `disabled` drops focus to
-      //   body (HTML focus fixup). Focus is kept and only the press is blocked.
+      // ★`aria-disabled`, not `disabled`★ — when a focused ⟳ turns into a refusal, `disabled` drops focus to body (HTML focus fixup); keep focus and block only the press.
       aria-disabled={blocked || undefined}
       aria-busy={busy || undefined}
       onClick={() => {
@@ -527,10 +503,7 @@ function RefreshIconButton({
   )
 }
 
-/**
- * `measure` = a hidden copy that only measures size — draws the same text · same shape but carries no role · name · `data-usage-*` · animation
- * (so cdp and assistive tech do not read values twice). The line is a `span` too because it goes inside the summary button (button content = phrasing).
- */
+/** `measure` = a hidden copy that only measures size — same text · shape but no role · name · `data-usage-*` · animation (so cdp and assistive tech do not read values twice). The line is a `span` too because it goes inside the summary button (button content = phrasing). */
 function StageRender({
   stage,
   views,
@@ -665,11 +638,7 @@ function Badge({ view, measure }: { view: VendorView; measure: boolean }) {
   )
 }
 
-/**
- * One window of the stage 1·2 grid — name | bar (only when there is a value) | remaining % | reset time, four cells from `column`. If expired, one 「리셋됨 — 갱신 대기」 (reset — waiting for refresh) cell covers the
- * bar · % · reset time cells. The wrapping `span` is `display: contents` so the cells become grid items directly, and it
- * carries only the value marker (`data-usage-vendor`·`data-usage-window`).
- */
+/** One window of the stage 1·2 grid — name | bar (only with a value) | remaining % | reset time, four cells from `column`. If expired, one 「reset — waiting for refresh」 cell covers the bar · % · reset cells. The wrapping `span` is `display: contents` so cells are direct grid items and carries only the value marker (`data-usage-vendor`·`data-usage-window`). */
 function WindowCells({
   view,
   w,
@@ -731,12 +700,8 @@ function WindowCells({
 
 const RESET_ICON_GAP = '0.15em'
 
-// ADR-0259: reset = hourglass + time — the word 「리셋」 (reset) remains only in the tooltip (`title`). Do not use arrow icons (`History`·`RotateCcw`·
-//   `RotateCw`·`Repeat` etc.) — they get mixed up with ⟳.
-/**
- * Reset time — shared by the small display and the popup. Tooltip = 「리셋 11:29」 (reset 11:29) (on another day, date + time). `measure` = hidden copy (no name ·
- * role · `attrs`).
- */
+// ADR-0259: reset = hourglass + time — the word 「reset」 remains only in the tooltip (`title`). Do not use arrow icons (`History`·`RotateCcw`·`RotateCw`·`Repeat` etc.) — they get mixed up with ⟳.
+/** Reset time — shared by the small display and the popup. Tooltip = 「reset 11:29」 (on another day, date + time). `measure` = hidden copy (no name · role · `attrs`). */
 function ResetMark({
   resetsAt,
   nowWall,
@@ -753,8 +718,7 @@ function ResetMark({
   const name = formatResetClock(resetsAt, nowWall)
   return (
     <span
-      // No separate `aria-label` — `role="img"` gets its name from `title`, and if the same text were also given as `aria-label`,
-      //   the `title` unused for the name would attach as a description and the same words would be read twice (accname).
+      // No separate `aria-label` — `role="img"` takes its name from `title`; giving the same text as `aria-label` would attach `title` as a description and read it twice (accname).
       {...(measure ? {} : { ...attrs, role: 'img', title: name })}
       style={{ display: 'inline-flex', alignItems: 'center', gap: RESET_ICON_GAP, color: 'var(--text-muted)', ...style }}
     >
@@ -765,10 +729,8 @@ function ResetMark({
 }
 
 /**
- * Bar — drawn only when there is a value (with no value there is no bar at all — it is not drawn as 0%, R21). `meter` = exposed to assistive tech
- * as a bar (D14 — popup). Inside the summary button the button name stands in, so it is hidden.
- * ★Color only by tokens★ — in e-ink the same tokens resolve to hatching · black fill · thick border (R11). `cell` = grid cell position · width (stages 1·2 fill
- * the cell width).
+ * Bar — drawn only with a value (no value = no bar, not 0%, R21). `meter` = exposed to assistive tech as a bar (D14 — popup); inside the summary button the button name stands in, so it is hidden.
+ * ★Color only by tokens★ — in e-ink the same tokens resolve to hatching · black fill · thick border (R11). `cell` = grid cell position · width (stages 1·2 fill the cell width).
  */
 function Bar({
   view,
@@ -821,9 +783,7 @@ function Bar({
 }
 
 /**
- * Remaining % text. `bare` = stage 3 where only the number remains (without 「%」, expiry is a short phrase). An old value dims only the number — the age
- * phrase is only in the popup (R32 · user decision 2026-09-27). ★No symbol is attached below 20% either★ — the cue outside color is the e-ink bar
- * shape (user decision 2026-09-29 — R10 amended).
+ * Remaining % text. `bare` = stage 3 where only the number remains (no 「%」, expiry is a short phrase). An old value dims only the number — the age phrase is only in the popup (R32). ★No symbol is attached below 20% either★ — the cue outside color is the e-ink bar shape (R10 amended).
  */
 function ValueText({
   w,
@@ -870,9 +830,7 @@ function ValueText({
 // ── Popup ──────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Opening downward comes first, and if it does not fit it flips upward from the summary's top edge — flipping from the summary's bottom edge would make the popup cover the
- * summary. If it fits in neither down nor up, it falls back to the same push as the slot right-click menu, and ★then the popup may partly cover the summary★
- * (keeping it on screen comes first). Horizontally it is exactly that menu's rule (R7).
+ * Opens downward first, flipping upward from the summary's top edge if it does not fit (flipping from the bottom edge would cover the summary). If neither fits, it falls back to the slot right-click menu's push, and ★then the popup may partly cover the summary★ (staying on screen comes first). Horizontally exactly that menu's rule (R7).
  */
 function placePopup(anchor: Anchor, w: number, h: number, vw: number, vh: number): { top: number; left: number } {
   const pushed = clampMenuPosition(anchor.left, anchor.bottom, w, h, vw, vh)
@@ -883,13 +841,12 @@ function placePopup(anchor: Anchor, w: number, h: number, vw: number, vh: number
   return pushed
 }
 
-// ADR-0261: the popup's two company areas are one table — columns are set on one grid and the company area · window rows inherit those columns (`subgrid`). If each
-//   row were laid out separately, a long name (`gpt-reserve`) would push only that row's bar, and the % digit count would push only that row's hourglass.
-//   Columns = name | bar | remaining % | reset time | remaining time 「(… 뒤)」 (… left). The company head · link row span all columns.
+// ADR-0261: the popup's two company areas are one table — columns are set on one grid and the company area · window rows inherit them (`subgrid`); laid out per row, a long name (`gpt-reserve`) would push only that row's bar and the % digit count only that row's hourglass.
+//   Columns = name | bar | remaining % | reset time | remaining time 「… left」. The company head · link row span all columns.
 const POPUP_TABLE_STYLE: CSSProperties = {
   display: 'grid',
   gridTemplateColumns: 'repeat(5, auto)',
-  // So that when the popup is wider than the table (a long status line) the `auto` columns do not share the spare width and stretch — if they stretched the gap between bar and % would open up.
+  // When the popup is wider than the table (a long status line) the `auto` columns must not share the spare width and stretch — the gap between bar and % would open up.
   justifyContent: 'start',
   columnGap: '0.5em',
   // Between company areas — the same as the gap between the popup's other lumps.
@@ -899,11 +856,10 @@ const POPUP_TABLE_STYLE: CSSProperties = {
 }
 const POPUP_SUBGRID: CSSProperties = { display: 'grid', gridTemplateColumns: 'subgrid', gridColumn: '1 / -1' }
 const POPUP_FULL_ROW: CSSProperties = { gridColumn: '1 / -1' }
-// Pin the window row height — a row with mixed fonts (Hangul fallback font · Latin name) has a different content height per row, so row spacing becomes uneven.
+// Pin the window row height — a row with mixed fonts (Hangul fallback · Latin name) has a different content height per row, making row spacing uneven.
 const POPUP_WINDOW_ROW_HEIGHT = '1.5em'
 
-// ADR-0259: the popup does not call a query — the only way to fetch anew inside the popup is the per-company ⟳ (the reason for no query on open = the summary
-//   button onClick).
+// ADR-0259: the popup does not call a query — the per-company ⟳ is the only way to fetch anew inside it (the reason for no query on open = the summary button onClick).
 function UsagePopup({
   summaryRef,
   views,
@@ -929,10 +885,8 @@ function UsagePopup({
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
 
-  // Measured on every draw of the popup and summary, but stops if the position is the same — the popup height varies with values, and if a company is enabled while open the summary
-  //   grid gains a row and keeping the summary rectangle of the moment it opened would make the popup cover that row. The summary's size changes only when this popup's parent redraws
-  //   (content · stage · slot size are received as state by the parent's measurement observer) — so it is not observed separately. Only a position shift
-  //   without a size change (swapping same-size slots etc.) is not measured again.
+  // Measured on every draw of the popup and summary, stopping if the position is the same — the popup height varies with values, and enabling a company while open adds a row to the summary grid, so keeping the opening-time summary rectangle would make the popup cover it.
+  //   The summary's size changes only when this popup's parent redraws (content · stage · slot size reach the parent's measurement observer), so it is not observed separately; a pure position shift without a size change (swapping same-size slots) is not re-measured.
   useLayoutEffect(() => {
     const popup = ref.current
     const summary = summaryRef.current
@@ -942,8 +896,7 @@ function UsagePopup({
     setPos(prev => (prev !== null && prev.top === next.top && prev.left === next.left ? prev : next))
   })
 
-  // ★Focus is moved only after the position is set★ — the first commit is before measurement so it is `visibility:hidden`, and Chromium refuses focus()
-  //   on an element that is not visible (then Esc·Tab would not reach the popup).
+  // ★Focus is moved only after the position is set★ — the first commit is before measurement so it is `visibility:hidden`, and Chromium refuses focus() on an invisible element (Esc·Tab would not reach the popup).
   const positioned = pos !== null
   useEffect(() => {
     if (positioned) ref.current?.focus()
@@ -952,17 +905,15 @@ function UsagePopup({
   useEffect(() => {
     const inPopup = (node: Node | null) => node !== null && (ref.current?.contains(node) ?? false)
     const inOwner = (node: Node | null) => node !== null && (ownerRef.current?.contains(node) ?? false)
-    // Esc only when focus is in the popup · summary row — it does not intercept Esc elsewhere. ★It closes when focus is nowhere (body·null) too★ —
-    //   if the focused element inside the popup goes away (redrawn and gone etc.) focus drops to body, and blocking then leaves the mouse as the only way to
-    //   close. When focus went to another element, focusin below has already closed the popup. Focus that was on the summary row (⟳ etc.) is left in place.
+    // Esc only when focus is in the popup · summary row — Esc elsewhere is not intercepted. ★Also closes when focus is nowhere (body·null)★: if the focused element inside the popup goes away focus drops to body, and blocking then leaves the mouse as the only way to close.
+    //   When focus went to another element, focusin below has already closed the popup. Focus on the summary row (⟳ etc.) is left in place.
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       const active = document.activeElement
       if (active === null || active === document.body || inPopup(active)) onClose(true)
       else if (inOwner(active)) onClose(false)
     }
-    // A press on the summary row does not close — the summary button closes by its own click (closing here too would make the click reopen it at once), and ⟳
-    //   refreshes with the popup left open (so one can press it while looking at the detail).
+    // A press on the summary row does not close — the summary button closes by its own click (closing here too would make that click reopen it at once), and ⟳ refreshes with the popup left open.
     const onDown = (e: MouseEvent) => {
       const target = e.target as Node
       if (!inPopup(target) && !inOwner(target)) onClose(false)
@@ -973,8 +924,7 @@ function UsagePopup({
       if (!inPopup(target) && !inOwner(target)) onClose(false)
     }
     document.addEventListener('keydown', onKey)
-    // Capture phase — a press on a window-drag spot does not reach the bubble phase (`layout/titleRow/dragRegion.ts`). That press does not move focus either, so
-    //   focusin below does not come.
+    // Capture phase — a press on a window-drag spot does not reach the bubble phase (`layout/titleRow/dragRegion.ts`) and does not move focus either, so focusin below does not come.
     document.addEventListener('mousedown', onDown, true)
     document.addEventListener('focusin', onFocusIn)
     return () => {
@@ -1038,10 +988,7 @@ function UsagePopup({
 }
 
 // ADR-0258: the human UI for turning on and off is this one place — the slot right-click menu has no usage item.
-/**
- * The display toggle row at the bottom of the popup — carries both enabled and disabled companies (this is the place to turn a disabled company back on). Check state draws the slot content
- * as it is — a press goes through the command, and when the layout returns the changed content the check follows.
- */
+/** The display toggle row at the bottom of the popup — carries enabled and disabled companies (the place to turn a disabled one back on). Check state draws the slot content as is: a press goes through the command and the check follows the returned content. */
 function ShowToggles({
   shown,
   onToggle,
@@ -1088,10 +1035,7 @@ function ShowToggles({
   )
 }
 
-/**
- * Detail of one company — head (name · plan (only when present) · age · that company's own ⟳) · absolute reset time per window · per-model windows (only those with a value
- * — D8) · link. The age is once in the head and is not repeated on every window row (ADR-0259 decision 1). The window row columns are the popup table's columns (ADR-0261).
- */
+/** Detail of one company — head (name · plan (only when present) · age · its own ⟳) · absolute reset time per window · per-model windows (only those with a value — D8) · link. The age is once in the head, not repeated per window row (ADR-0259 decision 1); window row columns are the popup table's (ADR-0261). */
 function VendorDetail({
   view,
   nowWall,
@@ -1102,9 +1046,8 @@ function VendorDetail({
   onRefresh: (vendor: AgentBackendKind) => void
 }) {
   const snapshot = view.entry?.snapshot
-  // ADR-0259: the head's age = the oldest age among the two windows, 5-hour and weekly (`view.windows`) — do not include the per-model windows added below
-  //   (user decision). The pickup does not carry per-model windows, so only that window ages by hours while the conversation continues, and including it would make the head look
-  //   stale (amber) even though both windows are fresh. If neither of the two windows has a value, no age is written. Amber looks at this value too.
+  // ADR-0259: the head's age = the oldest age among the 5-hour and weekly windows (`view.windows`) — not the per-model windows added below: the pickup does not carry them, so only that window ages by hours while the conversation continues and would make the head look stale (amber)
+  //   though both main windows are fresh. If neither main window has a value, no age is written. Amber looks at this value too.
   const age = oldestAgeSecs(view.windows.map(w => w.reading))
   const stale = age !== null && isStale(age)
   const rows: WindowView[] = [...view.windows]
@@ -1137,8 +1080,7 @@ function VendorDetail({
             {t('usage.headSeparator')}
           </span>
         )}
-        {/* ADR-0259: age and ⟳ are kept together — only a ⟳ right next to the time reads as refresh (user decision). Do not attach a clock icon
-            to the age (「아이콘 2개 나와서 난잡」 (two icons show up, cluttered)). */}
+        {/* ADR-0259: age and ⟳ are kept together — only a ⟳ right next to the time reads as refresh. Do not attach a clock icon to the age (two icons clutter). */}
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35em' }}>
           {age !== null && (
             <span
@@ -1172,7 +1114,7 @@ function VendorDetail({
           data-usage-link={view.vendor}
           title={t('usage.linkTitle', { vendor: view.name, url })}
           onClick={() => {
-            openUrl(url).catch((err: unknown) => console.warn(`[UsageSlot] openUrl(${url}) 실패:`, err))
+            openUrl(url).catch((err: unknown) => console.warn(`[UsageSlot] openUrl(${url}) failed:`, err))
           }}
           style={{
             padding: 0,
@@ -1191,10 +1133,7 @@ function VendorDetail({
   )
 }
 
-/**
- * One window row of the popup — the table's five cells are position-pinned (even with no bar because there is no value or no reset time the later cells are not pulled
- * forward). If expired, one 「리셋됨 — 갱신 대기」 (reset — waiting for refresh) cell covers from the bar to the end.
- */
+/** One window row of the popup — the table's five cells are position-pinned (with no bar or no reset time the later cells are not pulled forward). If expired, one 「reset — waiting for refresh」 cell covers from the bar to the end. */
 function PopupWindowRow({ view, row, nowWall }: { view: VendorView; row: WindowView; nowWall: number }) {
   const r = row.reading
   const resetsAt = r.kind === 'expired' ? null : r.resetsAt
@@ -1223,10 +1162,8 @@ function PopupWindowRow({ view, row, nowWall }: { view: VendorView; row: WindowV
         </>
       )}
       {resetsAt !== null && resetInSecs !== null && (
-        // The remaining time is put outside the name — the marker that carries the name (「리셋 11:29」) hides the text inside from assistive tech, so if put inside
-        //   the remaining time would not be read.
-        // The whitespace character between the two is for the side that reads DOM text (R27 — LLM·cdp). The visible gap is drawn by the gap between cells — a text
-        //   of only whitespace inside the grid is not drawn. The wrapping `span` is `display: contents` so the two cells become cells of the row directly.
+        // The remaining time is outside the name — the marker carrying the name (「reset 11:29」) hides inner text from assistive tech, so inside it the remaining time would not be read.
+        // The whitespace between the two is for the side that reads DOM text (R27 — LLM·cdp); the visible gap is the gap between cells (whitespace-only text in the grid is not drawn). The wrapping `span` is `display: contents` so the two cells are cells of the row directly.
         <span data-usage-reset-at="" style={{ display: 'contents' }}>
           <ResetMark resetsAt={resetsAt} nowWall={nowWall} measure={false} style={{ gridColumn: 4 }} />{' '}
           <span data-usage-reset-in="" style={{ gridColumn: 5, color: 'var(--text-muted)' }}>

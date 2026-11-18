@@ -1,15 +1,8 @@
-// Commands of the usage slot (TRD S21 usage-limit-slot §1-8) — refresh and the per-vendor display toggle. The ⟳ of the small display (all enabled vendors) ·
-//   the per-vendor ⟳ in the popup (`vendor` argument — that one vendor · ADR-0259) · the display toggle row in the popup call these.
-//
-// ★Does not contribute to the slot right-click menu (user decision 2026-09-29)★ — refresh is carried by the ⟳ of the small display · popup, and the display toggle by the popup.
-// ★Do not attach `help` (TRD §3 #26)★ — if attached it goes on the bus and overlaps the daemon's `usage.refresh`. The path from outside (LLM · CLI) already
-//   exists: query = `usage.get`/`usage.refresh`, display = the show_* fields of `layout.setSlotContent`. Inside the window,
-//   call these three as is with `__engramCmd.run(id, {viewId, slotId, content})` (refresh with `vendor` added is one vendor).
+// Commands of the usage slot (TRD S21 usage-limit-slot §1-8) — refresh and the per-vendor display toggle. The ⟳ of the small display (all enabled vendors) · the per-vendor ⟳ in the popup (`vendor` argument — that one vendor · ADR-0259) · the popup's display toggle row call these.
+// ★Does not contribute to the slot right-click menu★ — refresh is carried by the ⟳ of the small display · popup, the display toggle by the popup.
+// ★Do not attach `help` (TRD §3 #26)★ — it would go on the bus and overlap the daemon's `usage.refresh`. The outside path (LLM · CLI) already exists: query = `usage.get`/`usage.refresh`, display = the show_* fields of `layout.setSlotContent`. Inside the window call these three as is with `__engramCmd.run(id, {viewId, slotId, content})` (refresh with `vendor` added is one vendor).
 // ADR-0258
-// ★A display toggle writes only its own field★ — from the slot content the caller gave, it sends one absolute value with that field flipped to `set_usage_slot`,
-//   and the shell keeps the other fields at their current values inside the lock. If both fields were built and sent (full replacement), another vendor's
-//   toggle made in succession before the broadcast would be reverted to the old value — the webview's content is stale until the broadcast arrives. Being an absolute value, pressing the same field twice
-//   before the broadcast sends the same value twice (the second press does not revert the first).
+// ★A display toggle writes only its own field★ — from the slot content the caller gave, it sends one absolute value with that field flipped to `set_usage_slot`, and the shell keeps the other fields at their current values inside the lock. Building and sending both fields (full replacement) would revert another vendor's toggle made in succession before the broadcast to the old value — the webview's content is stale until then. Being absolute, pressing the same field twice before the broadcast sends the same value twice (the second does not revert the first).
 
 import type { SlotContent } from '../api/layoutTypes'
 import type { AgentBackendKind } from '../api/types'
@@ -31,16 +24,15 @@ function isVendor(value: unknown): value is AgentBackendKind {
 }
 
 /**
- * Usage content where both fields are boolean — the ⟳ of all enabled vendors reads both fields. The ⟳ and toggle of one vendor read only their own field, but
- * we keep a single argument contract.
+ * Usage content where both fields are boolean — the ⟳ of all enabled vendors reads both fields; the ⟳ and toggle of one vendor read only their own field, but a single argument contract is kept.
  */
 function requireUsageContent(args: CommandArgs | undefined, cmd: string): UsageContent {
   const content = args?.content as Partial<Record<string, unknown>> | undefined
   if (content?.type !== 'usage') {
-    throw new Error(`[${cmd}] 사용량 슬롯의 content 필요(받음: ${JSON.stringify(args?.content)})`)
+    throw new Error(`[${cmd}] usage slot content required (got: ${JSON.stringify(args?.content)})`)
   }
   if (typeof content.show_claude !== 'boolean' || typeof content.show_codex !== 'boolean') {
-    throw new Error(`[${cmd}] content 의 show_claude·show_codex 는 둘 다 boolean 이어야 함(받음: ${JSON.stringify(content)})`)
+    throw new Error(`[${cmd}] content's show_claude·show_codex must both be booleans (got: ${JSON.stringify(content)})`)
   }
   return content as UsageContent
 }
@@ -53,22 +45,20 @@ register({
     const cmd = 'usageSlot.refresh'
     const content = requireUsageContent(args, cmd)
     const usage = useUsageStore.getState()
-    // Do not swallow it as a silent no-op — the caller would read it as 「됐다」 (done). Both ⟳ block the press when there is nowhere to send,
-    //   (`UsageSlot`) so what reaches here from there is only the gap where a rejection arrived after drawing and before the press, and that throw is
-    //   caught by the `fireAndForget` the button calls and left in the log.
+    // Not swallowed as a silent no-op — the caller would read it as "done". Both ⟳ block the press when there is nowhere to send (`UsageSlot`), so what reaches here is only the gap where a rejection arrived after drawing and before the press; that throw is caught by the `fireAndForget` the button calls and left in the log.
     const vendor = args?.vendor
     if (vendor !== undefined) {
       if (!isVendor(vendor)) {
-        throw new Error(`[${cmd}] vendor 는 ${Object.keys(SHOW_FIELD).join('·')} 중 하나(받음: ${JSON.stringify(vendor)})`)
+        throw new Error(`[${cmd}] vendor must be one of ${Object.keys(SHOW_FIELD).join('·')} (got: ${JSON.stringify(vendor)})`)
       }
-      if (!content[SHOW_FIELD[vendor]]) throw new Error(`[${cmd}] ${vendor} 는 이 슬롯에서 꺼져 있다`)
+      if (!content[SHOW_FIELD[vendor]]) throw new Error(`[${cmd}] ${vendor} is turned off in this slot`)
       if (blocksRefresh(usage.vendors[vendor]?.snapshot.state)) {
-        throw new Error(`[${cmd}] ${vendor} 는 거절 중이다 — 기한 안엔 새로고침하지 않는다`)
+        throw new Error(`[${cmd}] ${vendor} is being refused — no refresh before the deadline`)
       }
       return usage.refresh(vendor)
     }
     const targets = refreshableVendors(content, usage.vendors)
-    if (targets.length === 0) throw new Error(`[${cmd}] 새로고침할 회사가 없다 — 켠 회사가 없거나 전부 거절 중`)
+    if (targets.length === 0) throw new Error(`[${cmd}] no vendor to refresh — no vendor is on, or all are being refused`)
     return Promise.all(targets.map(target => usage.refresh(target))).then(() => undefined)
   },
 })
@@ -81,8 +71,8 @@ function registerToggle(id: string, vendor: AgentBackendKind): void {
     run: args => {
       const viewId = args?.viewId
       const slotId = args?.slotId
-      if (typeof viewId !== 'string' || viewId.length === 0) throw new Error(`[${id}] viewId 필요`)
-      if (typeof slotId !== 'string' || slotId.length === 0) throw new Error(`[${id}] slotId 필요`)
+      if (typeof viewId !== 'string' || viewId.length === 0) throw new Error(`[${id}] viewId required`)
+      if (typeof slotId !== 'string' || slotId.length === 0) throw new Error(`[${id}] slotId required`)
       const current = requireUsageContent(args, id)
       const shows = vendor === 'claude' ? { show_claude: !current.show_claude } : { show_codex: !current.show_codex }
       return useViewStore.getState().setUsageSlot(viewId, slotId, shows)

@@ -1,7 +1,7 @@
 # ADR-0343: Version-mismatched daemon gets a user-pressed restart action with a graceful stop
 
-- 상태: 확정 (2026-11-05, 근거: 사용자 위임 2026-11-05 「리서치해서 결정해」 + 조사 `docs/research/daemon-version-mismatch-restart-2026-11-05.md` (medium, 단독 family — cross-family 리뷰 생략은 사용자 합의)) · 부분 폐기 by ADR-0344 (결정 1 재시작 행동과 결정 4 새 데몬 자동 시작) · 부분 폐기 by ADR-0350 (결정 3 강제 종료 시점)
-- 관련: Amends ADR-0180 (거부한 대안 데몬 강제 종료 버튼) · Amends ADR-0178 (거부한 대안의 미결 재시작 버튼) · Amends ADR-0342 (결정 1 표시에 재시작 버튼 추가) · ADR-0158 결정 3 (no automatic kill — kept: the user presses it) · `crates/engram-dashboard-protocol/src/handshake.rs` (the "send your own compiled version" rule — exception below) · `crates/engram-dashboard-net/src/ws.rs` (token then version check) · `src-tauri/src/discovery/mod.rs` `daemon_stop` (identity-checked kill) · `src-tauri/src/daemon_client/stop.rs` (tray stop; `NoTarget` on mismatch) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-2 U5 · step-log S21 · Amended by ADR-0344 (결정 1 재시작 행동과 결정 4 새 데몬 자동 시작) · Amended by ADR-0350 (결정 3 강제 종료 시점)
+- 상태: 확정 (2026-11-05, basis: user delegation 2026-11-05 「리서치해서 결정해」 + survey `docs/research/daemon-version-mismatch-restart-2026-11-05.md` (medium, single family — skipping the cross-family review was agreed with the user)) · 부분 폐기 by ADR-0344 (the restart action in decision 1 and the automatic start of a new daemon in decision 4) · 부분 폐기 by ADR-0350 (the force-kill timing in decision 3)
+- 관련: Amends ADR-0180 (rejected alternative: daemon force-kill button) · Amends ADR-0178 (the open restart button in the rejected alternatives) · Amends ADR-0342 (adding a restart button to the display of decision 1) · ADR-0158 decision 3 (no automatic kill — kept: the user presses it) · `crates/engram-dashboard-protocol/src/handshake.rs` (the "send your own compiled version" rule — exception below) · `crates/engram-dashboard-net/src/ws.rs` (token then version check) · `src-tauri/src/discovery/mod.rs` `daemon_stop` (identity-checked kill) · `src-tauri/src/daemon_client/stop.rs` (tray stop; `NoTarget` on mismatch) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-2 U5 · step-log S21 · Amended by ADR-0344 (the restart action in decision 1 and the automatic start of a new daemon in decision 4) · Amended by ADR-0350 (the force-kill timing in decision 3)
 
 ## 맥락
 
@@ -21,10 +21,10 @@ The user rejected both "tell them to kill it in Task Manager" and "make the tray
 
 ## 거부한 대안
 
-- **Message only: "end `engram-dashboard-daemon` in Task Manager, then restart the app"** — works on every shipped daemon but skips `shutdown_all` and leaves the user to find the process. Rejected by the user 「둘다 별로」. 약함 — 사용자 직접 기각.
-- **Tray 「데몬 끄기」 force-kills a mismatched daemon after consent** — the kill path already exists (`daemon_stop`), but it skips the daemon's own shutdown and ADR-0180 rejected exactly this button. Rejected by the user 「둘다 별로」. 약함 — 사용자 직접 기각.
-- **Side-by-side generations (start the new daemon in a separate slot, let the old one drain)** — the only option that keeps old agents running, but the lock and the agent roster are per data folder, so the new daemon would start with an empty roster; a large redesign (kept as the long-term direction of ADR-0158). 근거 = 코드(per-data-folder lock and `agents.json`).
-- **Explain only** — leaves the user stuck with no in-app way out (the reason this ADR exists). 근거 = 코드 (`stop.rs` `NoTarget`).
+- **Message only: "end `engram-dashboard-daemon` in Task Manager, then restart the app"** — works on every shipped daemon but skips `shutdown_all` and leaves the user to find the process. Rejected by the user 「둘다 별로」. Weak — rejected directly by the user.
+- **Tray 「데몬 끄기」 force-kills a mismatched daemon after consent** — the kill path already exists (`daemon_stop`), but it skips the daemon's own shutdown and ADR-0180 rejected exactly this button. Rejected by the user 「둘다 별로」. Weak — rejected directly by the user.
+- **Side-by-side generations (start the new daemon in a separate slot, let the old one drain)** — the only option that keeps old agents running, but the lock and the agent roster are per data folder, so the new daemon would start with an empty roster; a large redesign (kept as the long-term direction of ADR-0158). Basis = code(per-data-folder lock and `agents.json`).
+- **Explain only** — leaves the user stuck with no in-app way out (the reason this ADR exists). Basis = code (`stop.rs` `NoTarget`).
 
 ## 근거
 

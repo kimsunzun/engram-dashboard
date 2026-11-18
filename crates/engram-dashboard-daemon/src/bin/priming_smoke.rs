@@ -1,9 +1,8 @@
-//! priming-smoke — ADR-0092 프라이밍 수용 baseline 스모크 드라이버(검증 전용 bin).
+//! priming-smoke — ADR-0092 priming acceptance baseline smoke driver (verification-only bin).
 //!
-//! 실 primed claude 1개에 **자연스러운 1:1 팀원 메시지**를 실 control 경로로 보내고 응답을 **PRINT** 한다.
+//! Sends a natural 1:1 teammate message to one real primed claude over the real control path and prints the reply.
 //!
-//! ★pass/fail 단언이 없다★ — 수용 여부는 오케스트레이터가 그 응답을 읽고 **정성 판정**한다(ADR-0092 수용
-//!   판정은 qualitative).
+//! ★No pass/fail assertion★ — whether it was accepted is decided qualitatively by the orchestrator reading the reply (the ADR-0092 acceptance decision is qualitative).
 // ADR-0092
 
 use std::path::PathBuf;
@@ -36,13 +35,13 @@ use engram_dashboard_messaging::envelope::Entrance;
 const SPAWN_APPEAR_TIMEOUT: Duration = Duration::from_secs(10);
 const TURN_WAIT_CAP: Duration = Duration::from_secs(180);
 
-/// ★자연 1:1 팀원 메시지(ADR-0092 — 코드워드/기억-보고 아님)★: primed 에이전트가 이걸 인젝션으로
-///   격리하는지, 팀원 메시지로 자연 수용하는지를 본다.
-const NATURAL_MESSAGE: &str = "모듈 auth 리뷰 끝냈어. 로그인 경로에 이슈 2개 발견 — 확인 부탁.";
+/// ★A natural 1:1 teammate message (ADR-0092 — not a codeword/recall report)★: watches whether the primed agent isolates it as an injection or naturally accepts it as a teammate message.
+const NATURAL_MESSAGE: &str =
+    "Finished reviewing the auth module. Found 2 issues on the login path — please take a look.";
 
-/// 에이전트가 뭔가 작업 중이도록 세우는 원과제 — 자연 메시지가 도착할 협업 맥락을 만든다.
+/// The original task keeping the agent busy — creates the collaboration context the natural message arrives in.
 const TASK_PROMPT: &str =
-    "너는 지금 auth 모듈 관련 작업을 맡고 있다. 시작 준비가 됐으면 한 줄로 알려줘.";
+    "You are now in charge of work on the auth module. When you are ready to start, tell me in one line.";
 
 fn main() {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -52,11 +51,10 @@ fn main() {
     std::process::exit(rt.block_on(run()));
 }
 
-/// ★loud skip★: claude 스폰 불가면 요란하게 스킵 — exit 0 이되 SKIPPED 라벨을 stdout+stderr **양쪽**에
-/// 남긴다(silent skip 금지).
+/// ★Loud skip★: if claude cannot be spawned, exit 0 but leave the SKIPPED label on both stdout and stderr (no silent skip).
 fn skip_no_claude(reason: &str) -> i32 {
     let line =
-        format!("SKIPPED [priming-smoke]: {reason} — 프라이밍 수용 실측 불가(claude 부재/인증).");
+        format!("SKIPPED [priming-smoke]: {reason} — priming acceptance cannot be measured (claude missing/auth).");
     println!("{line}");
     eprintln!("{line}");
     0
@@ -69,7 +67,7 @@ async fn run() -> i32 {
     match &priming_path {
         Some(p) => eprintln!("[smoke] priming file = {}", p.display()),
         None => eprintln!(
-            "[smoke] WARNING: 프라이밍 파일을 못 찾음(base={}) — 프라이밍 없이 스폰됨(수용 baseline 무의미)",
+            "[smoke] WARNING: priming file not found (base={}) — spawned without priming (the acceptance baseline is meaningless)",
             repo_root.display()
         ),
     }
@@ -77,15 +75,11 @@ async fn run() -> i32 {
     let registry = Arc::new(ControlRegistry::new());
     let slot = Arc::new(ManagerSlot::new());
     let messaging_slot = Arc::new(MessagingSlot::new());
-    // ★스모크/하네스에는 붙을 클라이언트가 없다★ — 명부 통지 팬아웃 슬롯은 빈 채로 표에 넘긴다
-    //   (통지 생략이 정상인 조립이다, ADR-0132). 표 자체는 채운다 — 비우면 `/control/agent` 가 503 만
-    //   내는 죽은 라우트가 되어, 이 bin 으로 그 계열을 태워 볼 수 없다.
+    // ★No client to attach★ — the roster notification fanout slot is handed to the table empty (skipping notifications is normal here, ADR-0132). The table itself is filled — left empty, `/control/agent` would only give 503.
     let broadcast_slot = Arc::new(RosterBroadcastSlot::new());
     let command_slot = Arc::new(CommandTableSlot::new());
-    // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
-    // ★1단계 표를 **아래 슬롯과 같은 부**로 물린다 — `without_commands()` 로 되돌리지 말 것★: 그러면 판정부가
-    //   보는 표와 버스가 보는 표가 다른 부가 되어, 이 서버의 `/control/call` 이 `agent.*` 를 자기 이름으로
-    //   알아보지 못한다(운영 조립 `lib.rs` 와 다른 모양이 된다).
+    // ★Hold the reaper★ — if dropped, the seat table closes and every later round trip is bounced.
+    // ★Attach the stage-1 table to the same copy as the slot below — do not revert to `without_commands()`★: the decider's and the bus's tables would differ and `/control/call` would not recognize `agent.*` (production `lib.rs` assembles it this way).
     let (relay_bus, _relay_sweeper) = engram_dashboard_daemon::command_delivery::CommandBus::new(
         engram_dashboard_daemon::command_roster::CommandRoster::new(),
         engram_dashboard_daemon::command_delivery::CommandDeliveries::new(),
@@ -101,15 +95,14 @@ async fn run() -> i32 {
         messaging_slot.clone(),
         command_slot.clone(),
         relay_bus,
-        // ADR-0285: 실 primed 에이전트는 프라이밍이 가르친 대로 `engram help` 를 칠 수 있다 — 원천이
-        //   없으면 그 help 가 반려돼 측정이 오염된다. 운영 조립과 같은 앵커를 쓴다.
+        // ADR-0285: a real primed agent may type `engram help`; without the source, that help is bounced and the measurement polluted. Same anchor as the production assembly.
         engram_dashboard_daemon::control::help::HelpSource::from_install_root(),
     )
     .await
     {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("[smoke] MCP 서버 기동 실패: {e}");
+            eprintln!("[smoke] MCP server startup failed: {e}");
             return 1;
         }
     };
@@ -160,7 +153,7 @@ async fn run() -> i32 {
     let messaging = Arc::new(messaging_for_manager(manager.clone(), registry.clone()));
     messaging_slot.set(messaging.clone());
 
-    // 모델 핀 — 첫 인자로 override, 기본은 sonnet(빠르고 저렴, 파일럿과 동일 계열).
+    // Model pin — override with the first argument, default is sonnet (fast and cheap, same family as the pilot).
     let model = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "sonnet".to_string());
@@ -180,7 +173,9 @@ async fn run() -> i32 {
         .map(|o| o.into_started())
     {
         Ok(None) => {
-            return skip_no_claude("spawn_agent: 이미 뜨는 중(moot) — 이 하네스에선 도달 불가")
+            return skip_no_claude(
+                "spawn_agent: already starting (moot) — unreachable in this harness",
+            )
         }
         Ok(Some(info)) => {
             let deadline = Instant::now() + SPAWN_APPEAR_TIMEOUT;
@@ -203,7 +198,7 @@ async fn run() -> i32 {
                 )
                 .await;
                 handle.shutdown().await;
-                return skip_no_claude("스폰 후 에이전트가 목록에 안 나타남");
+                return skip_no_claude("the agent did not appear in the list after spawn");
             }
             info
         }
@@ -218,7 +213,7 @@ async fn run() -> i32 {
             )
             .await;
             handle.shutdown().await;
-            return skip_no_claude(&format!("spawn_agent 실패: {e}"));
+            return skip_no_claude(&format!("spawn_agent failed: {e}"));
         }
     };
     eprintln!(
@@ -230,7 +225,7 @@ async fn run() -> i32 {
     let sink_id = manager.subscribe(agent.id, obs.clone()).ok();
 
     if !send_and_wait(&manager, agent.id, &obs, TASK_PROMPT) {
-        eprintln!("[smoke] WARNING: task 턴이 응답 없이 타임아웃(계속 진행)");
+        eprintln!("[smoke] WARNING: the task turn timed out with no reply (continuing)");
     } else {
         eprintln!(
             "[smoke] --- task turn response ---\n{}\n--- end ---",
@@ -249,7 +244,7 @@ async fn run() -> i32 {
     let baseline = obs.done_snapshot();
     let cmd = ControlCommand {
         from,
-        to: vec![agent.id.to_string()], // 이름 충돌 회피 — id 로 지목.
+        to: vec![agent.id.to_string()], // avoid name collisions — target by id.
         body: NATURAL_MESSAGE.to_string(),
         contract: Default::default(),
     };
@@ -281,12 +276,12 @@ async fn run() -> i32 {
     0
 }
 
-/// ★cwd 를 안 쓴다★ — cargo run 의 cwd 가 어디든 매니페스트 기준으로 결정적으로 repo 를 가리킨다.
+/// ★Does not use cwd★ — points to the repo deterministically from the manifest wherever cargo run's cwd is.
 fn repo_root_from_manifest() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // .../crates/engram-dashboard-daemon
     manifest
         .parent() // .../crates
-        .and_then(|p| p.parent()) // .../engram-dashboard (repo 루트)
+        .and_then(|p| p.parent()) // .../engram-dashboard (repo root)
         .map(|p| p.to_path_buf())
         .unwrap_or(manifest)
 }

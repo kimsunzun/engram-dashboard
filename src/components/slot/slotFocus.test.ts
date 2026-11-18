@@ -14,7 +14,7 @@ function mount(html: string): void {
 const el = (id: string): HTMLElement => document.getElementById(id) as HTMLElement
 
 describe('keepFocusInSlot', () => {
-  it('버튼이 쥔 포커스를 가장 가까운 tabindex -1 조상으로 옮긴다', () => {
+  it('moves the focus the button held to the nearest tabindex -1 ancestor', () => {
     mount(`
       <div id="root" tabindex="-1">
         <div id="viewport" tabindex="-1"><div><button id="b">b</button></div></div>
@@ -24,7 +24,7 @@ describe('keepFocusInSlot', () => {
     expect(document.activeElement).toBe(el('viewport'))
   })
 
-  it('버튼이 포커스를 쥐지 않았으면 옮기지 않는다 — 다른 칸의 포커스를 빼앗지 않는다', () => {
+  it('does not move the focus if the button did not hold focus', () => {
     mount(`
       <textarea id="other"></textarea>
       <div id="root" tabindex="-1"><button id="b">b</button></div>`)
@@ -33,7 +33,7 @@ describe('keepFocusInSlot', () => {
     expect(document.activeElement).toBe(el('other'))
   })
 
-  it('받을 조상이 없으면 아무것도 하지 않는다', () => {
+  it('if there is no ancestor to receive it does nothing', () => {
     mount(`<div tabindex="0"><button id="b">b</button></div>`)
     el('b').focus()
     keepFocusInSlot(el('b'))

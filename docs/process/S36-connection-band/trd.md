@@ -94,7 +94,7 @@ One coder, sequential; each unit ends with its tests and `tsc` green.
 Main:
 - Rebuild on master; parked hunks only for the pieces in §3 (parked predates ADR-0352 and ADR-0356).
 - `connection.reconnect` failure = rethrow (§3-6); PRD R8 wording follows.
-- `can_stop` stays on the wire, unread (ADR-0356 영향).
+- `can_stop` stays on the wire, unread (ADR-0356 Impact).
 - `kill_tree` kept (§3-7).
 - No clearing of `connectionError` on a stop result (PRD does not need it; it clears on `connected`, on the next start, and when ② or ① `refused` arrives).
 
@@ -108,4 +108,4 @@ User: see PRD §5; plus (2026-11-10, PRD+TRD review hold H1) boot start stays in
 
 ## 8. Review record
 
-- 2026-11-10 · PRD+TRD review · full (Claude reviewer + codex) · round 1: Claude FIX (M1 stale cause under ① → R21 guard taken; H1 boot start per window → user deferred, T-85; B1–B4 wording), codex PASS (one 권장 — no handle after a failed cold-boot start hides the band; not taken: the boot pulls create the handle, traced by the Claude reviewer) · round 2 (delta, Claude): PASS, N1–N2 wording fixed · PASS at `fb24339d` + wording.
+- 2026-11-10 · PRD+TRD review · full (Claude reviewer + codex) · round 1: Claude FIX (M1 stale cause under ① → R21 guard taken; H1 boot start per window → user deferred, T-85; B1–B4 wording), codex PASS (one recommended — no handle after a failed cold-boot start hides the band; not taken: the boot pulls create the handle, traced by the Claude reviewer) · round 2 (delta, Claude): PASS, N1–N2 wording fixed · PASS at `fb24339d` + wording.

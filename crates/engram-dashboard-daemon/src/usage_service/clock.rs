@@ -1,20 +1,15 @@
-//! The clock seam of usage decisions — cooldown · refusal wait · value age are measured with [`UsageClock::mono`], and reset comparison with
-//! [`UsageClock::wall`] (TRD §3 #28 · ADR-0250). The service's decisions are always measured by this clock — the time a wait timer woke it
-//! is not trusted.
+//! The clock seam of usage decisions — cooldown · refusal wait · value age are measured with [`UsageClock::mono`], reset comparison with [`UsageClock::wall`] (TRD §3 #28 · ADR-0250). The service's decisions are always measured by this clock — the time a wait timer woke it is not trusted.
 //!
-//! ★Not merged with base `time::Clock`★ (ADR-0275 decision 7) — `mono` is a `Duration` from the origin so it flows straight into the book's
-//! time type and tests measure the `Duration::MAX` · `ZERO` boundary values. `wall` is signed epoch seconds.
-//! A current-time read that returns `Instant` cannot hold both.
+//! ★Not merged with base `time::Clock`★ (ADR-0275 decision 7) — `mono` is a `Duration` from the origin so it flows straight into the book's time type and tests can measure `Duration::MAX` · `ZERO` boundaries; `wall` is signed epoch seconds. A current-time read returning `Instant` cannot hold both.
 
 // ADR-0275
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// ★An implementation does not call back into the service, registry or book★ — the service reads this clock while holding the book lock (in the first sheet of a subscription replacement, while holding the registry →
-/// book locks). Calling back is a deadlock.
+/// ★An implementation does not call back into the service, registry or book★ — the service reads this clock while holding the book lock (in a subscription replacement's first sheet, while holding registry → book). Calling back is a deadlock.
 pub trait UsageClock: Send + Sync + 'static {
-    /// Monotonic time elapsed since this clock's origin — it does not shrink even if the wall clock rewinds. Slept time counts as much as the OS counts it.
+    /// Monotonic time since this clock's origin — does not shrink if the wall clock rewinds. Slept time counts as much as the OS counts it.
     fn mono(&self) -> Duration;
-    /// Wall clock, epoch seconds. It can rewind. Before 1970 it is negative and does not panic.
+    /// Wall clock, epoch seconds. Can rewind. Before 1970 it is negative and does not panic.
     fn wall(&self) -> i64;
 }
 
@@ -39,9 +34,7 @@ impl Default for OsUsageClock {
 
 impl UsageClock for OsUsageClock {
     fn mono(&self) -> Duration {
-        // Whether `Instant` counts slept time is known to differ by OS — Windows QPC counts it while Linux
-        // `CLOCK_MONOTONIC` and macOS do not (unverified · TRD §6 #2). If it does not count, after resume the cooldown and value age run
-        // behind by the slept time. Splitting by OS is done only inside this function.
+        // Whether `Instant` counts slept time differs by OS — Windows QPC counts it, Linux `CLOCK_MONOTONIC` and macOS do not (unverified · TRD §6 #2). If it does not, after resume the cooldown and value age run behind by the slept time. The OS split lives only inside this function.
         // ADR-0230
         self.origin.elapsed()
     }
@@ -51,7 +44,7 @@ impl UsageClock for OsUsageClock {
     }
 }
 
-/// Seconds rounded down (floor) — 0.5 s before 1970 = -1, not 0. Past i64 it saturates at the positive and negative ends.
+/// Seconds rounded down (floor) — 0.5 s before 1970 = -1, not 0. Saturates at the i64 ends.
 fn epoch_secs(t: SystemTime) -> i64 {
     match t.duration_since(UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
@@ -65,7 +58,7 @@ fn epoch_secs(t: SystemTime) -> i64 {
     }
 }
 
-/// Hand-driven clock for tests. `mono` and `wall` can be moved separately — reproduces the wall clock rewinding alone and only monotonic time flowing.
+/// Hand-driven clock for tests. `mono` and `wall` move separately — reproduces the wall clock rewinding alone and only monotonic time flowing.
 #[cfg(test)]
 pub(crate) struct ManualUsageClock {
     state: std::sync::Mutex<ManualState>,
@@ -97,7 +90,7 @@ impl ManualUsageClock {
         s.mono = s.mono.saturating_add(by);
     }
 
-    /// Moves both together — `wall` gathers the sub-1-second share and moves in whole seconds.
+    /// Moves both — `wall` gathers the sub-1-second share and moves in whole seconds.
     pub(crate) fn advance_both(&self, by: Duration) {
         let mut s = self.lock();
         s.mono = s.mono.saturating_add(by);
@@ -107,7 +100,7 @@ impl ManualUsageClock {
         s.wall_carry = Duration::from_nanos(u64::from(carried.subsec_nanos()));
     }
 
-    /// Sets only `wall` to that value (including rewinding) — the gathered sub-1-second share is also discarded.
+    /// Sets only `wall` (including rewinding) — the gathered sub-1-second share is discarded too.
     pub(crate) fn set_wall(&self, wall: i64) {
         let mut s = self.lock();
         s.wall = wall;
@@ -190,7 +183,7 @@ mod tests {
         let held = clock.clone();
         let _ = std::thread::spawn(move || {
             let _guard = held.lock();
-            panic!("락을 쥔 채 죽는다");
+            panic!("dies while holding the lock");
         })
         .join();
         assert!(clock.state.is_poisoned());
@@ -212,7 +205,7 @@ mod tests {
         let clock = OsUsageClock::default();
         let expected = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("시험 기계의 벽시계는 1970 뒤다")
+            .expect("the test machine's wall clock is after 1970")
             .as_secs() as i64;
         let got = clock.wall();
         assert!((got - expected).abs() <= 5, "wall {got} vs {expected}");
@@ -224,15 +217,15 @@ mod tests {
         assert_eq!(epoch_secs(UNIX_EPOCH + Duration::from_secs(90)), 90);
         let before = UNIX_EPOCH
             .checked_sub(Duration::from_secs(5))
-            .expect("이 OS 의 SystemTime 은 1970 전 5초를 나타낸다");
+            .expect("this OS's SystemTime represents 5 seconds before 1970");
         assert_eq!(epoch_secs(before), -5);
         let half = UNIX_EPOCH
             .checked_sub(Duration::from_millis(500))
-            .expect("이 OS 의 SystemTime 은 1970 전 0.5초를 나타낸다");
+            .expect("this OS's SystemTime represents 0.5 seconds before 1970");
         assert_eq!(epoch_secs(half), -1);
         let past_five = before
             .checked_sub(Duration::from_millis(1))
-            .expect("1970 전 5.001초");
+            .expect("5.001 seconds before 1970");
         assert_eq!(epoch_secs(past_five), -6);
     }
 }

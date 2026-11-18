@@ -36,16 +36,16 @@ function mountHandle(slotId: string): FollowHandle & { pin: ReturnType<typeof vi
 }
 
 describe('slot.scrollToBottom', () => {
-  it('매니페스트(contributions)를 타고 레지스트리에 오른다', () => {
+  it('goes into the registry via the manifest (contributions)', () => {
     expect(list().map(c => c.id)).toContain(ID)
   })
 
   // ★Not on the bus (ADR-0167)★: scroll position is frontend state that exists separately per window — the reason is at the head of scrollCommands.ts.
-  it('help 가 없다 — 버스에 오르지 않고 이 창 안에만 남는다', () => {
+  it('has no help — does not go on the bus and stays inside this window only', () => {
     expect(list().find(c => c.id === ID)!.help).toBeUndefined()
   })
 
-  it('그 슬롯의 손잡이 pin 을 부르고 { pinned: true } 를 돌려준다', () => {
+  it("calls pin on that slot's handle and returns { pinned: true }", () => {
     const handle = mountHandle('s1')
     const other = mountHandle('s2')
     expect(run(ID, { slotId: 's1' })).toEqual({ pinned: true })
@@ -53,17 +53,17 @@ describe('slot.scrollToBottom', () => {
     expect(other.pin).not.toHaveBeenCalled()
   })
 
-  it('여분 칸(viewId 등)이 섞인 가방도 그대로 통과한다', () => {
+  it('a bag mixed with extra fields (viewId etc.) passes as is', () => {
     const handle = mountHandle('s1')
     run(ID, { viewId: 'v1', slotId: 's1' })
     expect(handle.pin).toHaveBeenCalledTimes(1)
   })
 
-  it('손잡이가 없으면 throw — 조용한 no-op 이 아니다', () => {
+  it('throws when there is no handle — not a silent no-op', () => {
     expect(() => run(ID, { slotId: 'nowhere' })).toThrow(/nowhere/)
   })
 
-  it('slotId 누락 · 빈 문자열 · 문자열 아님 → throw', () => {
+  it('slotId missing · empty string · not a string → throw', () => {
     mountHandle('s1')
     expect(() => run(ID, {})).toThrow(/slotId/)
     expect(() => run(ID, { slotId: '' })).toThrow(/slotId/)

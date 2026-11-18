@@ -2,30 +2,30 @@
 import type { UsageWindowWord } from "./UsageWindowWord";
 
 /**
- * 사용량 한도 창 하나.
+ * One usage limit window.
  */
 export type UsageWindowRow = { window: UsageWindowWord, 
 /**
- * `ModelWeekly` 만 싣는다(벤더가 준 표시용 이름) — 나머지는 `null`.
+ * Carried only for `ModelWeekly` (the display name the vendor gave) — otherwise `null`.
  */
 label?: string | null, 
 /**
- * **쓴** 양의 백분율 0–100(남은 양이 아니다). `null` = 모른다 — 0 이 아니다.
+ * Percentage 0–100 of the amount **used** (not the amount left). `null` = unknown — not 0.
  */
 used_pct?: number | null, 
 /**
- * 남은 양 — 화면과 같은 `floor(clamp(100 − used_pct, 0, 100))`. `used_pct` 가 `null` 이면 `null`.
+ * The amount left — the same `floor(clamp(100 − used_pct, 0, 100))` as the screen. `null` if `used_pct` is `null`.
  */
 left_pct?: bigint | null, 
 /**
- * 리셋 시각, epoch 초 — 이 행의 유일한 절대 시각이다.
+ * Reset time, epoch seconds — the only absolute time of this row.
  */
 resets_at?: bigint | null, 
 /**
- * 이 값을 관측한 뒤 흐른 초(답한 순간 기준).
+ * Seconds elapsed since this value was observed (as of the moment of answering).
  */
 age_secs: bigint, 
 /**
- * 데몬이 리셋 경과를 확인했다 — 값은 지난 창의 것이다.
+ * The daemon confirmed the reset has passed — the value is that of the previous window.
  */
 expired: boolean, };

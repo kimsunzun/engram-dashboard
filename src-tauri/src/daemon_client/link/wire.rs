@@ -1,13 +1,7 @@
 //! The shell ↔ daemon packet vocabulary as a transport [`Wire`] (TRD S21 trd-3 §3-3 D2 ① · §6-2 U2).
-//!
-//! - Out = [`AgentCommand`] · In = [`ShellIn`] — JSON text control frames decode to [`AgentEvent`]; binary output
-//!   frames pass through undecoded (the output relay keeps its own decode and epoch rules — `frame_relay`).
-//! - Pairing = the shell's two pairing functions ([`command_request_id`] · [`event_reply_request_id`]) — one pair, so a
-//!   request and its reply can never disagree about which variants pair (3-1 U4).
-//! - ★No stream layer★ (ADR-0310 decision 16) — replay→live, the gen fence, epoch filtering and seq continuity stay
-//!   with the daemon · `replay_flight` · the frontend. Turning the transport's stream layer on breaks three of them
-//!   (TRD §2-5). [`ShellWire`]'s stream key is [`Infallible`], so the crate can neither see a stream fragment nor build
-//!   a resume request — a `Subscribe` the gen fence did not issue cannot exist (`replay_flight` header).
+//! - Out = [`AgentCommand`] · In = [`ShellIn`] — JSON text control frames decode to [`AgentEvent`]; binary output frames pass through undecoded (the output relay keeps its own decode and epoch rules — `frame_relay`).
+//! - Pairing = the shell's two pairing functions ([`command_request_id`] · [`event_reply_request_id`]) — one pair, so a request and its reply can never disagree about which variants pair (3-1 U4).
+//! - No stream layer (ADR-0310 decision 16): replay→live, the gen fence, epoch filtering and seq continuity stay with the daemon · `replay_flight` · the frontend; turning the transport's stream layer on breaks three of them (TRD §2-5). [`ShellWire`]'s stream key is [`Infallible`], so the crate can neither see a stream fragment nor build a resume request — a `Subscribe` the gen fence did not issue cannot exist (`replay_flight` header).
 // ADR-0310
 
 use std::convert::Infallible;
@@ -18,16 +12,12 @@ use engram_dashboard_transport::{DecodeClass, Frame, StreamMark, Wire};
 
 use crate::daemon_client::protocol_state::{command_request_id, event_reply_request_id};
 
-/// What the shell receives from a daemon.
 pub enum ShellIn {
-    /// A JSON text control frame.
     Event(AgentEvent),
-    /// A binary output frame, byte for byte as received — not decoded here.
     Output(Vec<u8>),
 }
 
-/// Prints the variant and the byte length only — an output frame is terminal content, and events carry agent
-/// payloads (same rule as the transport's `Frame` `Debug` — TRD §5 5).
+/// Prints the variant and the byte length only — an output frame is terminal content, and events carry agent payloads (same rule as the transport's `Frame` `Debug` — TRD §5 5).
 impl fmt::Debug for ShellIn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -40,8 +30,7 @@ impl fmt::Debug for ShellIn {
     }
 }
 
-/// Why a text frame did not decode. Only its fixed class word reaches transport events
-/// (`TransportEvent::DecodeFailed`) — the parser's message can quote what the peer sent.
+/// Why a text frame did not decode. Only its fixed class word reaches transport events (`TransportEvent::DecodeFailed`) — the parser's message can quote what the peer sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShellDecodeError {
     class: &'static str,
@@ -53,7 +42,6 @@ impl DecodeClass for ShellDecodeError {
     }
 }
 
-/// The shell's [`Wire`] — stateless, one per registry.
 pub struct ShellWire;
 
 impl Wire for ShellWire {
@@ -64,8 +52,7 @@ impl Wire for ShellWire {
     type DecodeError = ShellDecodeError;
 
     fn encode(&self, out: &AgentCommand) -> Frame {
-        // Every field of `AgentCommand` serializes infallibly (no non-string map keys; raw slots are already JSON), so
-        //   this branch cannot occur.
+        // Every field of `AgentCommand` serializes infallibly (no non-string map keys; raw slots are already JSON), so this branch cannot occur.
         Frame::Text(serde_json::to_string(out).expect("AgentCommand always serializes to JSON"))
     }
 
@@ -108,7 +95,6 @@ impl Wire for ShellWire {
     }
 }
 
-/// A fixed class word for a JSON error — the parser's message can quote the input.
 pub(super) fn json_class(err: &serde_json::Error) -> &'static str {
     match err.classify() {
         serde_json::error::Category::Syntax => "json syntax",
@@ -268,8 +254,7 @@ mod tests {
         endpoint.push(text(&AgentEvent::AgentListUpdated { agents: vec![] }));
         endpoint.push(Frame::Binary(vec![9, 8, 7]));
         endpoint.push(text(&AgentEvent::Ack { request_id: rid }));
-        // Not a bare `task.await` — under the manual clock the request timeout never fires, so a reply that fails to
-        //   pair would hang the suite instead of failing it.
+        // Not a bare `task.await` — under the manual clock the request timeout never fires, so a reply that fails to pair would hang the suite instead of failing it.
         settle_until("the reply wakes the request", || task.is_finished()).await;
 
         let reply = task.await.unwrap().expect("the reply wakes the request");

@@ -1,6 +1,6 @@
-// serial-windows 0.4.0 의 crates.io 패키지에는 라이선스 본문 파일이 없다 — 상류 저장소의 파일을 손대지 않고 옮겼다.
-// 출처: https://github.com/dcuddeback/serial-rs/blob/7ed6540c2789b7c7365cd7a89fcb7bac7c567de8/LICENSE
-//   그 버전 패키지에 .cargo_vcs_info.json 이 없어 태그 v0.4.0 의 커밋을 쓴다 — 패키지의 LICENSE 는 이 루트 파일을 가리키던 링크(`../LICENSE`)가 깨진 것이다
+// The crates.io package of serial-windows 0.4.0 has no license text file — the file from the upstream repository was moved over unchanged.
+// Source: https://github.com/dcuddeback/serial-rs/blob/7ed6540c2789b7c7365cd7a89fcb7bac7c567de8/LICENSE
+//   that version's package has no .cargo_vcs_info.json, so the commit of tag v0.4.0 is used — the package's LICENSE is a broken link (`../LICENSE`) that pointed at this root file
 // crate: serial-windows 0.4.0
 Copyright (c) 2015 David Cuddeback
 

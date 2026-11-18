@@ -5,11 +5,11 @@
 - Date: 2026-11-14.
 - Starts from: `documentation-architecture-research-2026-06-24.md` (doc types, Diátaxis, SSoT, AGENTS.md sizing — not redone) and `design-doc-lifecycle-after-implementation-2026-11-13.md` (decided: reconcile the step TRD, then freeze it; current behavior lives in `docs/reference/`). This report answers what that decision left open: how the maintained reference set is structured, what goes into it, how TRD-time briefings roll into it, and how the two audiences are served.
 - New variable from the user: two audiences — the user reads Korean, picture-first HTML; agents read dense English markdown.
-- Confidence legend: 확실 (independent primary sources agree, or a primary rule read raw plus a second source) · 가능성 높음 (one primary source, grounded) · 불확실. Section 3 is main's inference — one level lower than the findings.
+- Confidence legend: certain (independent primary sources agree, or a primary rule read raw plus a second source) · likely (one primary source, grounded) · uncertain. Section 3 is main's inference — one level lower than the findings.
 
 ## 1. Findings
 
-### 1-1. Unit of a maintained reference set: a whole-system map plus one file per capability/component — 확실
+### 1-1. Unit of a maintained reference set: a whole-system map plus one file per capability/component — certain
 - **OpenSpec** ✔raw (`docs/concepts.md`): current behavior lives in `openspec/specs/<capability>/spec.md`; "A spec is a **behavior contract**, not an implementation plan." Collector-relayed: grouping by feature area, component or bounded context is allowed; "one spec per logical capability".
 - **Kiro steering** ✔raw (https://kiro.dev/docs/steering/): `product.md` · `tech.md` · `structure.md` "are included in every interaction by default, forming the baseline"; further topic files load conditionally (`fileMatch`), manually or automatically.
 - **arc42** (collector, summary): 12 fixed sections; the Building Block View is the system map, crosscutting concepts are per-topic sections.
@@ -17,20 +17,20 @@
 - **Rust Reference / Python Language & Library Reference**: unit = language concept / stdlib module (B1, summary).
 - No size norm per file was found (abstain). The unit differs by tool (capability · concern · view · component); what is shared is *one always-read map + per-unit detail*.
 
-### 1-2. What gets promoted: behavior others rely on, plus current structure — 가능성 높음
+### 1-2. What gets promoted: behavior others rely on, plus current structure — likely
 - **OpenSpec** ✔raw: "Observable behavior users or downstream systems rely on"; quick test: "If implementation can change without changing externally visible behavior, it likely does not belong in the spec." Internal names, library choices and step-by-step plans belong in `design.md` / `tasks.md`.
 - **Rust Reference** ✔raw (stabilization dev-guide): new features "usually require an update to the Reference"; exception — areas the Reference does not document ("changes to the details of type inference do not require an update to the Reference").
 - **Chromium** (collector, summary; reviewer re-read): a component README says "what that component is, how it is expected to be used and provides rough outline of the code's structure" — structural reference, outside OpenSpec's behavior-only test.
 - **Martraire, Living Documentation** (secondary summary, Hilton): document knowledge that is long-lived, read by many, or high-value; skip what is readily recreatable.
 
-### 1-3. Harvest: the change carries a delta; the implementer applies it at a gate; the design record freezes — 확실
+### 1-3. Harvest: the change carries a delta; the implementer applies it at a gate; the design record freezes — certain
 - **OpenSpec** ✔raw: each change folder holds delta specs (`ADDED` / `MODIFIED` / `REMOVED` requirements); at archive they are applied to `openspec/specs/…` ("✓ Synced specs to openspec/specs/auth/spec.md") and the change folder moves to `changes/archive/<date>-<name>/`. Collector-relayed: `MODIFIED` copies the whole requirement block. The sync is skippable ✔raw (`docs/workflows.md`): "Sync skipped … Archive without syncing"; the CLI `openspec archive` "still validates, then applies any delta specs" — the merge is a default, not a hard gate.
-- **Rust** ✔raw: the feature author writes the Reference PR — "This can be done at any time before stabilization, and it is usually better to prepare a PR early". Collector-relayed (snippet): lang-docs approval is required before the stabilization PR merges — 불확실.
+- **Rust** ✔raw: the feature author writes the Reference PR — "This can be done at any time before stabilization, and it is usually better to prepare a PR early". Collector-relayed (snippet): lang-docs approval is required before the stabilization PR merges — uncertain.
 - **Python PEP 1** (✔raw in the 11-13 report): a resolved PEP is "a historical document rather than a living specification"; expected behavior is "maintained elsewhere, such as the Language Reference".
 - **Kubernetes KEP** (collector, summary): the release-signoff checklist requires user-facing docs in kubernetes/website — a rewrite for users, not a merge of KEP text.
 - Spec Kit (`specs/NNN-feature/`) and Kiro per-feature specs showed no harvest step in the pages read — hypothesis, not a complete survey.
 
-### 1-4. Two audiences: one authored source; views may differ per audience — 가능성 높음
+### 1-4. Two audiences: one authored source; views may differ per audience — likely
 - **Mintlify** ✔raw: auto-generated `llms.txt` / `llms-full.txt` / per-page `.md` from the authored docs; "Adding a custom file overrides the automatically generated file of the same name."
 - **Vercel** (`Accept: text/markdown` on the same URL), **Stripe** (append `.md` to any docs URL), **Docusaurus plugins** (build-time `.md` / `llms-full.txt`) — collector, summary/snippet.
 - In these markdown (or MDX) is the source. The views are not always the same text: **Mintlify `Visibility`** ✔raw (`/docs/components/visibility`) shows "different content to humans, AI agents … on the same page" — `for="humans"` renders on the site, `for="agents"` only in the `.md` view; interactive components (calculators, charts) get a static agent-side stand-in. Shape = one source file, shared facts, audience-specific blocks.
@@ -40,12 +40,12 @@
 - **Diagrams as code** — **Structurizr** ✔raw (`docs.structurizr.com/as-code`): many diagrams from a single model; C4-PlantUML, Kroki, Asciidoctor (collector). The text model is canonical; humans get rendered pictures, agents can read the text.
 - Evidence that agents gain from diagram source over prose is thin: arXiv 2608.21747 (Canedo, 2026-08) ✔raw abstract — "On the strongest models (Sonnet 4.6, GPT-5), format barely matters (quality spread 0.17-0.92)"; it measures code generation from architecture specs, not reading reference docs.
 
-### 1-5. Two-language sets: pin the source revision in the derived file, per page — 확실
+### 1-5. Two-language sets: pin the source revision in the derived file, per page — certain
 - **MDN translated-content** ✔raw: "Add a new `l10n.sourceCommit` key, which contains the commit hash of the latest commit that modified the file." Adoption is partial and the update section of the guide is a placeholder (collector).
 - **OpenTelemetry** ✔raw: `default_lang_commit` front matter per localized page; `drifted_from_default` marks a page drifted — "the page displays an 'outdated' banner, and the link checker skips" it; `npm run check:i18n` lists pages to update.
 - **FSFE** (collector, opened): a `<version>` element compared between original and translation; outdated → yellow box.
 - **Kubernetes** ✔raw: timestamps mislead — "A localized page may look recently updated because of a small local edit while still missing an important upstream change." Its 2026 blog: "AI assistance should support human review, not create a new stream of unverified content."
-- **Regenerate instead of edit**: genaiscript continuous translation ✔raw (hash per markdown node, LLM-as-judge gate, skip when unsure); MDN's machine-translated Italian locale is regenerated on every English change and manual edits are overwritten (snippet — 불확실).
+- **Regenerate instead of edit**: genaiscript continuous translation ✔raw (hash per markdown node, LLM-as-judge gate, skip when unsure); MDN's machine-translated Italian locale is regenerated on every English change and manual edits are overwritten (snippet — uncertain).
 - The pin works for hand-maintained pages: OpenTelemetry's localized pages are written by contributors, and the pin + `check:i18n` + banner apply to them ✔raw. The pin needs a process that runs it — OpenTelemetry keeps drift status through its PR checks (reviewer; the housekeeping schedule was not re-read).
 - No practice was found for tracking staleness of a *non-literal* derived page (summary, explainer) — hypothesis. The nearest pattern is the same source-revision pin.
 
@@ -53,7 +53,7 @@
 - `docs/reference/architecture.md` = the whole map (modules, connections, runtime invariants); `docs/reference/structure/<topic>.md` = one file per topic ("one file = one topic", hub `docs/README.md`); convention files beside them.
 - One pair already exists: `structure/agent-backend.md` (English, canonical detail) + `structure/agent-backend.html` (Korean, visual), and the HTML says the md is canonical and some sections live only there.
 - `structure/session-path-ownership.md` is a dated code trace (2026-09-09) that calls itself not the source of truth — a snapshot inside the living folder.
-- TRD briefings are Korean HTML in the step folder (`docs/process/<task>/…html`, explain binding). Implement binding: "md 가 바뀌면 HTML 도 같이 고친다" — a hand-sync rule with no check.
+- TRD briefings are Korean HTML in the step folder (`docs/process/<task>/…html`, explain binding). Implement binding: "when md changes, fix the HTML together" — a hand-sync rule with no check.
 - Language rule (`CLAUDE.md`): `docs/` md in English; what the user reads (HTML reports) in Korean.
 
 ## 3. Mapping to this repo (main's inference — one confidence level lower)

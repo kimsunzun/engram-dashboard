@@ -1,24 +1,10 @@
-//! The recorder — the only one that writes `state.json` after the boot steps and the only one that deletes the crash copy `state.crash.json`
-//! (TRD S21-storage §6-4). One thread runs, and other threads only send requests through [`SaverHandle`] and wait for the answer
-//! — there is a single writer, so writes do not overlap.
-//!
-//! - **Periodic save:** every [`POLL_INTERVAL`] it reads the change number, and if it changed, it writes the whole snapshot when it has been
-//!   quiet for [`QUIET`] after the last change or [`MAX_DELAY`] has passed after the first change.
-//! - **A write failure = log only** (user decision D8). If the snapshot source fails · on a disk error, that change is left as not written
-//!   and the debounce writes again; a snapshot the codec rejected (a shape the next boot cannot read) waits for the next change. A clean-exit
-//!   write (`Final`) is not redone even on failure — the recorder just ends.
-//! - **Right before every write it decides again on the current `state.json`** (the base `file` rules — down to the header shape). If it is a
-//!   file written by a newer version, it does not write and, like a codec rejection, waits for the next change; if it could not read it, it decides again after the debounce, like a disk error.
-//!   A corrupt file · a usable file that was placed while this run had not yet written is copied aside as `state.json.corrupt` and then written — it writes
-//!   even if copying aside fails (D8).
-//! - **Resolved slot** = the hash of the crash copy that was answered. ★It stands when the recorder **takes out** `Resolve`★ — if the sender sets it, a snapshot
-//!   taken before it is taken out (one that does not yet hold the post-answer screen) carries the hash (I8). From then on it is carried by every snapshot written, and each time a write
-//!   succeeds it rereads the copy and deletes it only if the hash is the same (N1). If deleted · absent · a different copy, the slot is cleared.
-//! - **Closed** = a marker set when [`SaverHandle::finish`] misses its deadline. Once it stands, neither publishing (rename) nor deleting the copy nor
-//!   copying aside happens — the next boot reads the preceding `clean_exit:false` and asks.
-//!
-//! The recorder holds no lock — the snapshot source copies inside its own lock and hands it over, and serialization · disk happen outside it
-//! (§6-3).
+//! The recorder — the only writer of `state.json` after the boot steps and the only deleter of the crash copy `state.crash.json` (TRD S21-storage §6-4). One thread runs; other threads send requests through [`SaverHandle`] and wait for the answer, so writes never overlap.
+//! - Periodic save: every [`POLL_INTERVAL`] it reads the change number and, if changed, writes the whole snapshot once quiet for [`QUIET`] after the last change or [`MAX_DELAY`] after the first.
+//! - A write failure = log only (user decision D8). A snapshot-source failure · disk error leaves the change unwritten and the debounce writes again; a snapshot the codec rejected (a shape the next boot cannot read) waits for the next change. A clean-exit write (`Final`) is not redone on failure — the recorder just ends.
+//! - Right before every write it decides again on the current `state.json` (base `file` rules down to the header shape). A newer-version file is not written over and, like a codec rejection, waits for the next change; an unreadable one is decided again after the debounce, like a disk error. A corrupt file, or a usable file placed while this run had not yet written, is copied aside as `state.json.corrupt` and then written — even if copying aside fails (D8).
+//! - Resolved slot = the hash of the answered crash copy. It stands when the recorder takes out `Resolve` — if the sender set it, a snapshot taken before take-out (without the post-answer screen) would carry the hash (I8). From then on every written snapshot carries it, and after each successful write the recorder rereads the copy and deletes it only if the hash is the same (N1); deleted · absent · a different copy clears the slot.
+//! - Closed = a marker set when [`SaverHandle::finish`] misses its deadline. Once set, nothing is published (rename), deleted or copied aside — the next boot reads the preceding `clean_exit:false` and asks.
+//! The recorder holds no lock: the snapshot source copies inside its own lock and hands it over; serialization · disk happen outside (§6-3).
 
 use std::fmt;
 use std::io;
@@ -39,66 +25,43 @@ use crate::file_hooks::OS_HOOKS;
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub const QUIET: Duration = Duration::from_secs(1);
 pub const MAX_DELAY: Duration = Duration::from_secs(5);
-/// The deadline for which exit (`Final`) and restore settlement (`Resolve`) wait for the answer (TRD §6-4 · §6-7). ★The boot's shell-run lock wait (about
-/// 3 seconds — §6-5 ①) must be longer than this★ — if shorter, a new instance does not wait for the previous instance's clean-exit write.
+/// Deadline for which exit (`Final`) and restore settlement (`Resolve`) wait for the answer (TRD §6-4 · §6-7). The boot's shell-run lock wait (≈3 s — §6-5 ①) must be longer than this, or a new instance would not wait for the previous instance's clean-exit write.
 pub const REPLY_DEADLINE: Duration = Duration::from_secs(2);
 
 /// The snapshot source — production is `ViewManager` ([`super::boot_plugin::LiveSource`]). Called on the recorder thread.
-///
-/// - ★It does not panic★ — the shell isolates nothing, so a panic on this thread makes the hook end the whole app (ADR-0292).
-///   A poisoned lock is revived (`engram_dashboard_base::sync`) or [`Self::snapshot`] returns `Err`.
-/// - ★It does not wait for the thread that called [`SaverHandle::finish`] · [`SaverHandle::resolve`]★ — that thread is standing
-///   waiting for the answer. If it tries to take a lock that thread holds, the recorder stands until the deadline, and for `finish` a clean exit
-///   would miss the deadline every time and every clean exit would be read as an abnormal exit.
-/// - ★It does not call Tauri window getters (`outer_position` · `inner_size` · `is_maximized`, etc.)★ — called from off the main thread,
-///   it stands until the main thread answers, but `finish` is called by exactly that main thread in `RunEvent::Exit`, which then
-///   waits for the answer. Position · size are written into the model at `WindowEvent` (P3b) and here only the model is read.
+/// - Must not panic: the shell isolates nothing, so a panic on this thread ends the whole app via the hook (ADR-0292). A poisoned lock is revived (`engram_dashboard_base::sync`) or [`Self::snapshot`] returns `Err`.
+/// - Must not wait for the thread that called [`SaverHandle::finish`] · [`SaverHandle::resolve`] — it is waiting for the answer; taking a lock that thread holds would stall the recorder to the deadline, so `finish` would miss it every time and every clean exit read as abnormal.
+/// - Must not call Tauri window getters (`outer_position` · `inner_size` · `is_maximized`, …): off the main thread they wait for the main thread, which in `RunEvent::Exit` is exactly the one calling `finish` and waiting. Position · size are written into the model at `WindowEvent` (P3b); only the model is read here.
 pub trait SnapshotSource: Send + 'static {
-    /// The change number — the recorder only checks whether it is the same (it does not look at magnitude). ★Do not roll the number back or reset it★ — if it becomes the same again as
-    /// the value the recorder last saw, it misses the changes in between.
+    /// The change number — the recorder only checks equality, not magnitude. Never roll it back or reset it: becoming equal again to the value the recorder last saw would miss the changes in between.
     type Revision: Clone + PartialEq + Send + 'static;
 
-    /// Called every 0.5 seconds — it must finish quickly.
-    ///
-    /// ★The number must go up in the same critical section in which that change becomes visible to [`Self::snapshot`], or after it★ — the recorder
-    /// reads the number first, takes the snapshot, and then treats that number as 「쓴 것」 (written). If the number goes up before the change, a snapshot that missed that change
-    /// stays as the last state on disk until the next change.
+    /// Called every 0.5 s — must finish quickly. The number must rise in the same critical section in which the change becomes visible to [`Self::snapshot`], or after it: the recorder reads the number first, takes the snapshot, then treats that number as written; a number raised before the change would leave a snapshot that missed it as the last disk state until the next change.
     fn revision(&self) -> Self::Revision;
 
-    /// All windows — copied inside its own lock and returned as an owned value. The file header (`version` · `saved_at_ms` ·
-    /// `clean_exit` · `resolved_crash_copy`) is filled in by the recorder.
-    ///
-    /// `Err` = it cannot be taken this time (one reason line) — the recorder treats it as a failed write like a disk error and takes it again
-    /// after the debounce (for a clean-exit write it just ends).
+    /// All windows — copied inside its own lock and returned owned. The file header (`version` · `saved_at_ms` · `clean_exit` · `resolved_crash_copy`) is filled in by the recorder. `Err` = cannot be taken this time (one reason line): the recorder treats it as a failed write like a disk error and retries after the debounce (a clean-exit write just ends).
     fn snapshot(&self) -> Result<Vec<WindowEntry>, String>;
 }
 
-/// The two files the recorder touches — production is [`Fs`].
 pub trait StateFiles: Send + 'static {
-    /// Atomically swap `state.json` — ask `skip` before every rename, and if it says stand, do not publish and return
-    /// [`WriteOutcome::Skipped`] (the same contract as `file::write_atomic_unless`). Create the folder if it is missing.
+    /// Atomically swap `state.json` — ask `skip` before every rename and if it says stand, publish nothing and return [`WriteOutcome::Skipped`] (contract of `file::write_atomic_unless`). Creates a missing folder.
     fn write_state(&self, text: &str, skip: &dyn Fn() -> bool) -> io::Result<WriteOutcome>;
 
-    /// The original text of `state.json` — the source of the re-decision right before saving. The same contract as [`Self::read_crash_copy`].
+    /// The original text of `state.json` — source of the re-decision right before saving; same contract as [`Self::read_crash_copy`].
     // ADR-0291 R16
     fn read_state(&self) -> io::Result<String>;
 
-    /// Copy `state.json` aside as `state.json.corrupt` — returns the copy's location (`file::copy_aside`).
     fn copy_aside_state(&self) -> io::Result<PathBuf>;
 
-    /// The crash copy's original text — `NotFound` if absent, `InvalidData` if over the limit · not UTF-8
-    /// (the same contract as `file::read_file_capped`).
+    /// The crash copy's original text — `NotFound` if absent, `InvalidData` if over the limit · not UTF-8 (contract of `file::read_file_capped`).
     fn read_crash_copy(&self) -> io::Result<String>;
 
-    /// `NotFound` if absent.
     fn remove_crash_copy(&self) -> io::Result<()>;
 }
 
-/// The recorder's clock — the current read ([`Clock::now`]) only measures the debounce, and this trait adds the snapshot's `saved_at_ms`. The real one =
-/// [`SystemClock`].
+/// The recorder's clock — [`Clock::now`] only measures the debounce; this trait adds the snapshot's `saved_at_ms`. Real = [`SystemClock`].
 // ADR-0275 · ADR-0291
 pub trait SaverClock: Clock + 'static {
-    /// The snapshot's `saved_at_ms` — Unix time in ms.
     fn wall_ms(&self) -> u64;
 }
 
@@ -108,7 +71,6 @@ impl SaverClock for SystemClock {
     }
 }
 
-/// Production files — the caller decides the path (placement = [`super::boot_plugin`]).
 pub struct Fs {
     state: PathBuf,
     crash_copy: PathBuf,
@@ -143,30 +105,22 @@ impl StateFiles for Fs {
     }
 }
 
-/// The result of one recorder write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveOutcome {
-    /// Published (rename).
     Written,
-    /// Not published because it is closed — not a failure and not redone.
     Skipped,
-    /// Snapshot source failure · codec rejection ([`EncodeError`]) · rejection by the re-decision right before saving (newer version · unreadable) · disk error.
-    /// The resolved slot stays as is, so the next successful write carries it — after a failure of the clean-exit write (`Final`) there is no next write.
+    /// Snapshot source failure · codec rejection ([`EncodeError`]) · rejection by the pre-save re-decision (newer version · unreadable) · disk error. The resolved slot stays, so the next successful write carries it; after a failed `Final` there is no next write.
     Failed,
 }
 
-/// The result of sending a request and waiting until the deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestOutcome {
     Done(SaveOutcome),
-    /// No answer within the deadline — the request stays in the queue and may be processed later.
     TimedOut,
-    /// No answer will come — the recorder thread has already ended or died while processing.
     SaverGone,
 }
 
-/// The handle for sending requests to the recorder — cloned and shared. When all handles are gone, the recorder ends without a clean-exit
-/// write (the next boot reads it as an abnormal exit).
+/// Handle for sending requests to the recorder — cloned and shared. When all handles are gone the recorder ends without a clean-exit write (the next boot reads an abnormal exit).
 #[derive(Clone)]
 pub struct SaverHandle {
     requests: Sender<Request>,
@@ -174,11 +128,7 @@ pub struct SaverHandle {
 }
 
 impl SaverHandle {
-    /// Attach the hash of the answered crash copy to disk (TRD §6-7 ⑤). `Done(Written)` = a `state.json` carrying that hash
-    /// was published — it does not carry whether deleting the copy succeeded.
-    ///
-    /// ★While waiting, do not hold a lock (`ViewManager`) that [`SnapshotSource`] will take★ — if held, the recorder stands
-    /// at that lock until the deadline and the answer becomes `TimedOut`.
+    /// Attach the hash of the answered crash copy to disk (TRD §6-7 ⑤). `Done(Written)` = a `state.json` carrying that hash was published; it does not say whether deleting the copy succeeded. While waiting, do not hold a lock (`ViewManager`) that [`SnapshotSource`] will take — the recorder would stall at it to the deadline and the answer become `TimedOut`.
     pub fn resolve(&self, hash: String, deadline: Duration) -> RequestOutcome {
         match self.send(|reply| Request::Resolve { hash, reply }) {
             Some(answer) => wait(answer, deadline),
@@ -186,12 +136,7 @@ impl SaverHandle {
         }
     }
 
-    /// Write `clean_exit:true` and end the recorder. ★If the deadline is missed, set closed and return — it does not wait for the stuck
-    /// thread★. After that the recorder does not publish — except a write that passed rename just before closed was set has already been published
-    /// (its content is this `Final` or an earlier `clean_exit:false` — §12 R12).
-    ///
-    /// ★While waiting, do not hold a lock (`ViewManager`) that [`SnapshotSource`] will take★ — if held, `Final` always
-    /// misses the deadline and every clean exit is read as an abnormal exit.
+    /// Write `clean_exit:true` and end the recorder. If the deadline is missed, set closed and return — it does not wait for the stuck thread; after that nothing is published, except a write that passed rename just before closed was set (its content is this `Final` or an earlier `clean_exit:false` — §12 R12). While waiting, do not hold a lock (`ViewManager`) that [`SnapshotSource`] will take — `Final` would always miss the deadline and every clean exit read as abnormal.
     pub fn finish(&self, deadline: Duration) -> RequestOutcome {
         let outcome = match self.send(|reply| Request::Final { reply }) {
             Some(answer) => wait(answer, deadline),
@@ -202,14 +147,13 @@ impl SaverHandle {
             tracing::warn!(
                 module = "state",
                 deadline_ms = deadline.as_millis() as u64,
-                "정상 종료 쓰기가 마감 안에 끝나지 않아 기록기를 닫는다 — 다음 부팅은 비정상 종료로 읽는다"
+                "the normal exit write did not finish within the deadline, so the writer is closed — the next boot reads it as an abnormal exit"
             );
         }
         outcome
     }
 
-    /// Set closed — after that the recorder does not publish (writes · `Resolve` · `Final` are all `Skipped`). The thread ends when all
-    /// handles are gone.
+    /// Set closed — afterwards nothing is published (writes · `Resolve` · `Final` are all `Skipped`). The thread ends when all handles are gone.
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
     }
@@ -223,8 +167,7 @@ impl SaverHandle {
     }
 }
 
-/// The recorder's closed marker — made before [`spawn`] and shared with the side that starts it. When set, that recorder does not publish
-/// (the same marker as [`SaverHandle::close`]). The side that has no handle yet while starting (exit) can also close with it.
+/// The recorder's closed marker, made before [`spawn`] and shared with the starting side; once set that recorder publishes nothing (same marker as [`SaverHandle::close`]). A side with no handle yet (exit during start) can also close with it.
 #[derive(Clone, Default)]
 pub struct CloseFlag(Arc<AtomicBool>);
 
@@ -242,13 +185,7 @@ fn wait(answer: Receiver<SaveOutcome>, deadline: Duration) -> RequestOutcome {
     }
 }
 
-/// Start the recorder thread. `boot_revision` = the change number carried by the boot's first write (§6-5 ⑤) — the first period carries what changed after that.
-/// `carry_resolved` = the hash of the answered copy that boot could not delete — the first write already carried it, so retry the deletion
-/// after the next successful write. `claim` = whether this run has already claimed `state.json` as its own (boot decides —
-/// `boot::saver_claim`) — if `NotYet`, copy aside the usable file in that spot before the first write. `closed` = this recorder's
-/// closed marker — if set before starting, it does not publish from the start.
-///
-/// `Err` = the thread could not be started.
+/// Start the recorder thread. `boot_revision` = the change number carried by the boot's first write (§6-5 ⑤); the first period carries what changed after. `carry_resolved` = the hash of an answered copy boot could not delete — the first write already carried it, so deletion is retried after the next successful write. `claim` = whether this run already claimed `state.json` (boot decides — `boot::saver_claim`); if `NotYet`, the usable file there is copied aside before the first write. `closed` = this recorder's closed marker — if set before starting, nothing is ever published. `Err` = the thread could not be started.
 pub fn spawn<S, F, C>(
     source: S,
     files: F,
@@ -312,8 +249,8 @@ where
     C: SaverClock,
 {
     let _panic_note = PanicNote;
-    tracing::info!(module = "state", "기록기 시작");
-    // Measure by deadline time so that checks do not get pushed back even when requests are frequent.
+    tracing::info!(module = "state", "writer started");
+    // Measured by deadline time so checks are not pushed back when requests are frequent.
     let mut next_tick = saver.clock.now() + poll;
     loop {
         let wait = next_tick.saturating_duration_since(saver.clock.now());
@@ -328,7 +265,7 @@ where
                 tracing::info!(
                     module = "state",
                     ?outcome,
-                    "기록기 종료 — 정상 종료 쓰기 뒤"
+                    "writer stopped — after the normal exit write"
                 );
                 return;
             }
@@ -339,7 +276,7 @@ where
             Err(RecvTimeoutError::Disconnected) => {
                 tracing::warn!(
                     module = "state",
-                    "손잡이가 모두 사라져 기록기가 정상 종료 쓰기 없이 끝난다 — 다음 부팅은 비정상 종료로 읽는다"
+                    "all handles vanished, so the writer ends without the normal exit write — the next boot reads it as an abnormal exit"
                 );
                 return;
             }
@@ -347,8 +284,7 @@ where
     }
 }
 
-/// Leave one line when the recorder thread is released by a panic. ★It is reached only in test builds without the hook★ — in the shell the hook leaves
-/// a reason line and ends the whole process before unwinding, so it never gets to this line (ADR-0292).
+/// Leaves one line when the recorder thread is released by a panic. Reached only in test builds without the hook — in the shell the hook leaves a reason line and ends the process before unwinding (ADR-0292).
 struct PanicNote;
 
 impl Drop for PanicNote {
@@ -356,7 +292,7 @@ impl Drop for PanicNote {
         if std::thread::panicking() {
             tracing::error!(
                 module = "state",
-                "기록기 스레드가 패닉으로 죽었다 — 이 실행은 상태를 더 저장하지 않는다"
+                "the writer thread died with a panic — this run saves no more state"
             );
         }
     }
@@ -367,7 +303,7 @@ fn deliver(reply: Sender<SaveOutcome>, outcome: SaveOutcome) {
         tracing::debug!(
             module = "state",
             ?outcome,
-            "요청한 쪽이 마감을 넘겨 답을 받지 않았다"
+            "the requester passed the deadline and did not take the answer"
         );
     }
 }
@@ -383,11 +319,7 @@ enum Cause {
 enum Failure {
     Snapshot(String),
     Rejected(EncodeError),
-    /// Rejection by the re-decision right before saving — the current `state.json` was written by a version newer than this shell (that version).
-    Newer {
-        found: u64,
-    },
-    /// Rejection by the re-decision right before saving — the current `state.json` could not be read, so it is unknown whether overwriting is allowed.
+    Newer { found: u64 },
     Unreadable(io::Error),
     Disk(io::Error),
 }
@@ -411,9 +343,9 @@ impl fmt::Display for Failure {
             Failure::Rejected(error) => error.fmt(f),
             Failure::Newer { found } => write!(
                 f,
-                "state.json 이 이 셸보다 새 판(version {found} — 이 셸은 {STATE_VERSION} 까지)이 쓴 것이다"
+                "state.json was written by a newer version than this shell (version {found} — this shell goes up to {STATE_VERSION})"
             ),
-            Failure::Unreadable(error) => write!(f, "state.json 을 못 읽었다: {error}"),
+            Failure::Unreadable(error) => write!(f, "could not read state.json: {error}"),
             Failure::Disk(error) => error.fmt(f),
         }
     }
@@ -428,15 +360,13 @@ enum FailureKind {
     Disk,
 }
 
-/// The branch where cleaning up the answered copy (N1) failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CopyFailure {
     Read,
     Remove,
 }
 
-/// A failure that continues without a break. Only when the branch is the first or changes is it logged at its own level, and a repeat of the same branch is folded to debug
-/// — if a disk error continues it rewrites every second, so without folding the file log fills with that line.
+/// A failure that continues without a break: logged at its own level only when the branch is first or changes, a repeat folded to debug — a continuing disk error rewrites every second and would fill the file log.
 #[derive(Debug, PartialEq, Eq)]
 struct Streak<K> {
     current: Option<(K, u32)>,
@@ -449,7 +379,6 @@ impl<K> Default for Streak<K> {
 }
 
 impl<K: Copy + PartialEq> Streak<K> {
-    /// Count one failure — `true` = it is the turn to log at its own level.
     fn fail(&mut self, kind: K) -> bool {
         match &mut self.current {
             Some((current, failures)) => {
@@ -469,7 +398,6 @@ impl<K: Copy + PartialEq> Streak<K> {
         self.current.map_or(0, |(_, failures)| failures)
     }
 
-    /// `Some(n)` = the failure that was continuing ended after n times.
     fn end(&mut self) -> Option<u32> {
         self.current.take().map(|(_, failures)| failures)
     }
@@ -480,17 +408,13 @@ struct Saver<S: SnapshotSource, F: StateFiles, C: SaverClock> {
     files: F,
     clock: C,
     closed: Arc<AtomicBool>,
-    /// The last number seen — if different from this, it is a new change.
     seen: S::Revision,
-    /// The time something not yet on disk (a change · a failed write) arose — `None` = nothing to write.
     pending_since: Option<Instant>,
     last_change_at: Instant,
     resolved: Option<String>,
-    /// Has this run already claimed `state.json` as its own — `Adopted` after the first successful write.
     claim: Claim,
     write_failures: Streak<FailureKind>,
     copy_failures: Streak<CopyFailure>,
-    /// Continuation of copy-aside failures — the write still happens, so it is folded separately from the write-failure line.
     aside_failures: Streak<()>,
 }
 
@@ -555,8 +479,7 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
         if self.is_closed() {
             return SaveOutcome::Skipped;
         }
-        // Read the number before the snapshot — a change in between is in the snapshot but remains 「안 씀」 (not written) by number, so it is merely written one more time.
-        // The other way round, a change not in the snapshot would be treated as written.
+        // Read the number before the snapshot: a change in between is in the snapshot but stays "not written" by number (written once more); the other way round, a change not in the snapshot would count as written.
         let revision = self.source.revision();
         let windows = match self.source.snapshot() {
             Ok(windows) => windows,
@@ -593,20 +516,24 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                     tracing::info!(
                         module = "state",
                         failures,
-                        "상태 파일 쓰기가 실패 뒤 다시 성공했다"
+                        "the state file write succeeded again after a failure"
                     );
                 }
                 // ADR-0291 R15: once a write succeeds, the copy-aside failure count also restarts from the beginning (the next failure is error again).
                 self.aside_failures.end();
                 match cause {
                     Cause::Periodic => {
-                        tracing::debug!(module = "state", bytes = text.len(), "상태 파일을 썼다")
+                        tracing::debug!(
+                            module = "state",
+                            bytes = text.len(),
+                            "wrote the state file"
+                        )
                     }
                     Cause::Resolve | Cause::Final => tracing::info!(
                         module = "state",
                         ?cause,
                         resolved = self.resolved.is_some(),
-                        "상태 파일을 썼다"
+                        "wrote the state file"
                     ),
                 }
                 self.seen = revision;
@@ -619,7 +546,7 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 tracing::info!(
                     module = "state",
                     ?cause,
-                    "기록기가 닫혀 상태 파일을 발행하지 않았다"
+                    "the writer is closed, so the state file was not published"
                 );
                 SaveOutcome::Skipped
             }
@@ -630,19 +557,14 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
         }
     }
 
-    /// Right before writing, read the current `state.json` again and decide — `Ok` if overwriting is allowed (if it must be copied aside, after copying aside · `Ok` even if copying
-    /// aside fails), and if rejected, the reason.
-    ///
-    /// ★Do not hold the decision from load time★ — do not overwrite a file that changed to a newer version during the run, and after the first write do not
-    /// copy our own file aside on every write.
+    /// Right before writing, read the current `state.json` again and decide — `Ok` if overwriting is allowed (after copying aside if needed; `Ok` even if copying aside fails), else the rejection reason. Do not hold the load-time decision: a file that became a newer version during the run must not be overwritten, and after the first write our own file must not be copied aside on every write.
     // ADR-0291 R8 · R16 (D5 · D14 · E5)
     fn judge_state(&mut self) -> Result<(), Failure> {
         let current = file::classify(self.files.read_state(), &codec::STATE_SPEC);
         match current.write_policy(self.claim) {
             WritePolicy::Write => Ok(()),
             WritePolicy::CopyAsideFirst => {
-                // After closed, that write is not published, so there is no reason to copy aside — do not touch the file of a new instance that passed
-                //   the gate.
+                // After closed the write is not published, so no copy aside — do not touch the file of a new instance that passed the gate.
                 if !self.is_closed() {
                     self.copy_state_aside(&current);
                 }
@@ -651,19 +573,17 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
             WritePolicy::Refuse(Refused::Newer { found }) => Err(Failure::Newer { found }),
             WritePolicy::Refuse(Refused::ReadFailed) => Err(Failure::Unreadable(match current {
                 file::Loaded::Failed(error) => error,
-                // The decision table issues this rejection only for read failures.
-                _ => io::Error::other("state.json 을 못 읽었다"),
+                _ => io::Error::other("could not read state.json"),
             })),
         }
     }
 
-    /// Copy `state.json` aside before overwriting — the write is done even if it fails (D8 — for screen state, progress comes first).
     fn copy_state_aside(&mut self, current: &file::Loaded) {
         let what = match current {
             file::Loaded::Parsed(file::Parsed::Usable { .. }) => {
-                "이 실행이 아직 쓰지 않은 동안 놓인 state.json"
+                "a state.json placed while this run had not written yet"
             }
-            _ => "못 쓰는 state.json",
+            _ => "an unusable state.json",
         };
         match self.files.copy_aside_state() {
             Ok(to) => {
@@ -671,25 +591,22 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 tracing::info!(
                     module = "state",
                     to = %to.display(),
-                    "{what} 을 덮기 전에 떠 뒀다"
+                    "copied {what} aside before overwriting it"
                 );
             }
             Err(error) if self.aside_failures.fail(()) => tracing::error!(
                 module = "state",
-                "{what} 을 떠 두지 못했다 — 그래도 쓴다: 하나뿐인 원본을 백업 없이 덮는다(D8): {error}"
+                "could not copy {what} aside — writing anyway: overwrites the only original without a backup (D8): {error}"
             ),
             Err(error) => tracing::debug!(
                 module = "state",
                 failures = self.aside_failures.failures(),
-                "{what} 을 또 떠 두지 못했다 — 그래도 쓴다: {error}"
+                "could not copy {what} aside again — writing anyway: {error}"
             ),
         }
     }
 
-    /// Decide when to write again. For snapshot · disk failures and a rejection where the current file could not be read, the debounce is measured again from now and it writes again
-    /// after [`QUIET`] (deciding again then). A codec rejection and a newer-version rejection would be the same if retried with the same number, so treat
-    /// that number as seen and wait for the next change — the newer-version file is not reread every period. For `Final` the thread
-    /// ends soon and neither comes.
+    /// Decide when to write again. After snapshot · disk failures and an unreadable-file rejection, the debounce is measured again from now and it writes after [`QUIET`] (re-deciding then). A codec rejection and a newer-version rejection would repeat with the same number, so treat the number as seen and wait for the next change (the newer-version file is not reread every period). For `Final` the thread ends soon and neither comes.
     // ADR-0291 (D5)
     fn failed(&mut self, cause: Cause, failure: Failure, revision: S::Revision) {
         match failure {
@@ -708,7 +625,7 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 module = "state",
                 ?cause,
                 failures = self.write_failures.failures(),
-                "상태 파일 쓰기가 같은 사유로 또 실패했다: {failure}"
+                "the state file write failed again for the same reason: {failure}"
             );
             return;
         }
@@ -716,36 +633,32 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
             Failure::Snapshot(_) => tracing::error!(
                 module = "state",
                 ?cause,
-                "상태 스냅숏을 못 떴다 — 주기 저장이 다시 뜬다(정상 종료 쓰기면 그대로 끝난다): {failure}"
+                "could not take the state snapshot — the periodic save takes it again (a normal exit write just ends): {failure}"
             ),
             Failure::Rejected(_) => tracing::error!(
                 module = "state",
                 ?cause,
-                "상태 스냅숏을 다음 부팅이 못 읽을 모양이라 쓰지 않았다 — 화면이 바뀌어 풀릴 때까지 메모리에만 있다: {failure}"
+                "the state snapshot has a shape the next boot cannot read, so it was not written — it stays only in memory until the screen changes and clears it: {failure}"
             ),
             Failure::Newer { .. } => tracing::error!(
                 module = "state",
                 ?cause,
-                "덮지 않고 쓰지 않았다 — 화면이 바뀌면 다시 판정한다: {failure}"
+                "not overwritten and not written — decided again when the screen changes: {failure}"
             ),
             Failure::Unreadable(_) => tracing::error!(
                 module = "state",
                 ?cause,
-                "덮어도 되는지 몰라 쓰지 않았다 — 주기 저장이 다시 판정한다(정상 종료 쓰기면 그대로 끝난다): {failure}"
+                "not written because it is unknown whether overwriting is fine — the periodic save decides again (a normal exit write just ends): {failure}"
             ),
             Failure::Disk(_) => tracing::warn!(
                 module = "state",
                 ?cause,
-                "상태 파일을 못 썼다 — 주기 저장이 다시 쓴다(정상 종료 쓰기면 그대로 끝난다): {failure}"
+                "could not write the state file — the periodic save writes again (a normal exit write just ends): {failure}"
             ),
         }
     }
 
-    /// N1 — reread the copy and delete it only if it equals the hash in the resolved slot. This keeps a stale recorder from deleting a new copy that a new
-    /// instance made, in a boot that went on without the lock or in a deadline race.
-    ///
-    /// ★Between the read and the delete is not atomic★ — if a new copy comes in in that gap, it is deleted. What blocks it is the shell-run lock (I1) and
-    /// the closed check right before deleting, and that check only narrows the path where those two are missing.
+    /// N1 — reread the copy and delete it only if it equals the hash in the resolved slot, so a stale recorder cannot delete a new copy a new instance made (a boot without the lock, or a deadline race). The gap between read and delete is not atomic — a copy arriving in it is deleted; the shell-run lock (I1) and the closed check right before deleting only narrow that path.
     fn drop_answered_copy(&mut self) {
         let Some(hash) = self.resolved.clone() else {
             return;
@@ -757,11 +670,11 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 }
                 match self.files.remove_crash_copy() {
                     Ok(()) => {
-                        tracing::info!(module = "state", hash = %hash, "답한 크래시 사본을 지웠다");
+                        tracing::info!(module = "state", hash = %hash, "removed the answered crash copy");
                         true
                     }
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        tracing::info!(module = "state", hash = %hash, "답한 크래시 사본이 이미 없다");
+                        tracing::info!(module = "state", hash = %hash, "the answered crash copy is already gone");
                         true
                     }
                     Err(error) => {
@@ -774,23 +687,21 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 tracing::warn!(
                     module = "state",
                     hash = %hash,
-                    "크래시 사본이 답한 것과 다르다 — 새 사본이라 지우지 않는다"
+                    "the crash copy differs from the answered one — it is a new copy, so it is not removed"
                 );
                 true
             }
-            // The classification of read errors is a single base decision.
             Err(error) => match file::classify(Err(error), &codec::STATE_SPEC) {
                 file::Loaded::Missing => {
-                    tracing::info!(module = "state", hash = %hash, "답한 크래시 사본이 이미 없다");
+                    tracing::info!(module = "state", hash = %hash, "the answered crash copy is already gone");
                     true
                 }
-                // The answered copy was UTF-8 within the limit — a copy that is not is a different copy.
                 file::Loaded::Parsed(parsed) => {
                     tracing::warn!(
                         module = "state",
                         hash = %hash,
                         parsed = ?parsed,
-                        "크래시 사본이 답한 것과 다르다(못 쓰는 내용) — 지우지 않는다"
+                        "the crash copy differs from the answered one (unusable content) — not removed"
                     );
                     true
                 }
@@ -807,7 +718,7 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                     module = "state",
                     hash = %hash,
                     failures,
-                    "답한 크래시 사본 정리가 실패 뒤 끝났다"
+                    "the answered crash copy cleanup finished after a failure"
                 );
             }
         }
@@ -820,7 +731,7 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 hash = %hash,
                 ?kind,
                 failures = self.copy_failures.failures(),
-                "답한 크래시 사본 정리가 같은 사유로 또 실패했다: {error}"
+                "the answered crash copy cleanup failed again for the same reason: {error}"
             );
             return;
         }
@@ -828,12 +739,12 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
             CopyFailure::Remove => tracing::warn!(
                 module = "state",
                 hash = %hash,
-                "답한 크래시 사본을 못 지웠다 — 다음 성공 쓰기 뒤 다시 지운다: {error}"
+                "could not remove the answered crash copy — removing again after the next successful write: {error}"
             ),
             CopyFailure::Read => tracing::warn!(
                 module = "state",
                 hash = %hash,
-                "크래시 사본을 못 읽어 답한 사본인지 모른다 — 다음 성공 쓰기 뒤 다시 본다: {error}"
+                "could not read the crash copy, so it is unknown whether it is the answered copy — looking again after the next successful write: {error}"
             ),
         }
     }
@@ -870,11 +781,10 @@ mod tests {
             self.revision.load(Ordering::SeqCst)
         }
 
-        /// Carry a number in the window id so the test can read which moment's snapshot it is.
         fn snapshot(&self) -> Result<Vec<WindowEntry>, String> {
             self.snapshots.fetch_add(1, Ordering::SeqCst);
             if self.fail_snapshot.load(Ordering::SeqCst) {
-                return Err("독 든 락".into());
+                return Err("poisoned lock".into());
             }
             let id = if self.oversized.load(Ordering::SeqCst) {
                 "x".repeat(STATE_READ_CAP as usize + 1)
@@ -905,12 +815,9 @@ mod tests {
         published: Vec<StateFile>,
         write_calls: usize,
         fail_writes: bool,
-        /// The current `state.json` original text — if published it becomes that text. `None` = absent.
         state: Option<String>,
-        /// If set, `read_state` fails with this kind.
         fail_state_read: Option<io::ErrorKind>,
         state_reads: usize,
-        /// The original text of the copied-aside `state.json.corrupt` — there is only one, so it is overwritten each time it is copied.
         state_aside: Option<String>,
         aside_calls: usize,
         fail_aside: bool,
@@ -918,7 +825,7 @@ mod tests {
         fail_read: Option<io::ErrorKind>,
         fail_remove: bool,
         remove_calls: usize,
-        /// Set right after publishing — imitates a race where closed was set after passing rename.
+        /// Set right after publishing — imitates a race where closed is set after passing rename.
         close_after_publish: Option<Arc<AtomicBool>>,
     }
 
@@ -944,13 +851,11 @@ mod tests {
             self.disk.lock().unwrap()
         }
 
-        /// The counts of (`state.json` reads, `write_state` calls, copy-aside calls).
         fn counts(&self) -> (usize, usize, usize) {
             let disk = self.disk();
             (disk.state_reads, disk.write_calls, disk.aside_calls)
         }
 
-        /// Stop the next `write_state` before rename — see from the returned receiver that it has stepped in, and release it with the sender.
         fn arm_gate(&self) -> (Receiver<()>, Sender<()>) {
             let (entered, entered_rx) = mpsc::channel();
             let (release_tx, release) = mpsc::channel();
@@ -969,12 +874,12 @@ mod tests {
             let mut disk = self.disk();
             disk.write_calls += 1;
             if disk.fail_writes {
-                return Err(io::Error::other("디스크 가득"));
+                return Err(io::Error::other("disk full"));
             }
             if skip() {
                 return Ok(WriteOutcome::Skipped);
             }
-            let (state, _) = codec::decode(text).expect("기록기가 쓴 글은 다시 읽힌다");
+            let (state, _) = codec::decode(text).expect("text the writer wrote reads back");
             disk.published.push(state);
             disk.state = Some(text.to_owned());
             if let Some(closed) = &disk.close_after_publish {
@@ -1093,7 +998,6 @@ mod tests {
     }
 
     impl Rig {
-        /// Check once after [`POLL_INTERVAL`] like the production thread.
         fn tick(&mut self) {
             self.clock.advance(POLL_INTERVAL);
             self.saver.tick();
@@ -1110,10 +1014,11 @@ mod tests {
         }
 
         fn last(&self) -> StateFile {
-            self.published().pop().expect("발행된 스냅숏이 있다")
+            self.published()
+                .pop()
+                .expect("there is a published snapshot")
         }
 
-        /// Check until 1 second has passed quietly after a change — one periodic write.
         fn change_and_settle(&mut self) {
             self.source.change();
             self.ticks(3);
@@ -1151,7 +1056,7 @@ mod tests {
         assert_eq!(
             rig.files.disk().write_calls,
             1,
-            "새 변경이 없으면 다시 쓰지 않는다"
+            "no rewrite without a new change"
         );
     }
 
@@ -1162,10 +1067,14 @@ mod tests {
             rig.source.change();
             rig.tick();
         }
-        assert_eq!(rig.files.disk().write_calls, 0, "첫 변경(0.5초) 뒤 4.5초");
+        assert_eq!(
+            rig.files.disk().write_calls,
+            0,
+            "4.5 s after the first change (0.5 s)"
+        );
         rig.source.change();
         rig.tick();
-        assert_eq!(rig.published().len(), 1, "첫 변경 뒤 5초");
+        assert_eq!(rig.published().len(), 1, "5 s after the first change");
         assert_eq!(rig.last().windows[0].id, "rev-11");
     }
 
@@ -1180,7 +1089,7 @@ mod tests {
         assert_eq!(
             rig.files.disk().write_calls,
             1,
-            "실패 뒤 0.5초 — 아직 조용하지 않다"
+            "0.5 s after the failure — not quiet yet"
         );
         rig.tick();
         assert_eq!(rig.published().len(), 1);
@@ -1197,7 +1106,7 @@ mod tests {
         assert_eq!(
             rig.source.snapshots.load(Ordering::SeqCst),
             1,
-            "같은 스냅숏은 또 거절되므로 다시 뜨지 않는다"
+            "the same snapshot is refused again, so it is not taken again"
         );
         assert_eq!(rig.saver.resolve(hash(COPY)), SaveOutcome::Failed);
         assert_eq!(rig.files.disk().write_calls, 0);
@@ -1207,7 +1116,7 @@ mod tests {
         assert_eq!(
             rig.last().resolved_crash_copy,
             Some(hash(COPY)),
-            "거절된 답은 다음 성공 쓰기가 싣는다"
+            "the refused answer is carried by the next successful write"
         );
     }
 
@@ -1240,7 +1149,7 @@ mod tests {
         assert!(!streak.fail(FailureKind::Disk));
         assert!(
             streak.fail(FailureKind::Rejected),
-            "갈래가 바뀌면 다시 제 레벨"
+            "when the branch changes, back to its own level"
         );
         assert!(!streak.fail(FailureKind::Rejected));
         assert!(streak.fail(FailureKind::Disk));
@@ -1248,7 +1157,7 @@ mod tests {
         assert_eq!(streak.end(), None);
         assert!(
             streak.fail(FailureKind::Disk),
-            "끝난 뒤 첫 실패는 다시 제 레벨"
+            "the first failure after it ended is back to its own level"
         );
     }
 
@@ -1303,7 +1212,7 @@ mod tests {
         assert_eq!(
             rig.files.counts(),
             (1, 0, 0),
-            "같은 변경 번호로는 다시 읽지 않는다"
+            "not read again with the same change number"
         );
 
         rig.change_and_settle();
@@ -1316,7 +1225,7 @@ mod tests {
         assert_eq!(
             rig.published().len(),
             1,
-            "새 판 파일이 치워지면 다음 변경이 쓴다"
+            "once the newer version's file is cleared, the next change writes"
         );
     }
 
@@ -1331,10 +1240,14 @@ mod tests {
         assert_eq!(
             rig.files.counts(),
             (1, 0, 0),
-            "실패 뒤 0.5초 — 아직 조용하지 않다"
+            "0.5 s after the failure — not quiet yet"
         );
         rig.tick();
-        assert_eq!(rig.files.counts(), (2, 0, 0), "디바운스 뒤 다시 판정한다");
+        assert_eq!(
+            rig.files.counts(),
+            (2, 0, 0),
+            "decides again after the debounce"
+        );
 
         rig.files.disk().fail_state_read = None;
         rig.ticks(2);
@@ -1342,7 +1255,7 @@ mod tests {
         assert_eq!(
             rig.files.disk().aside_calls,
             0,
-            "못 읽은 파일은 떠 두지 않는다"
+            "an unreadable file is not copied aside"
         );
     }
 
@@ -1364,7 +1277,7 @@ mod tests {
             assert_eq!(
                 rig.files.disk().aside_calls,
                 1,
-                "갈아끼운 뒤엔 우리 파일이라 떠 두지 않는다 — {broken}"
+                "after replacing it, it is our file, so it is not copied aside — {broken}"
             );
             assert_eq!(rig.published().len(), 2, "{broken}");
         }
@@ -1378,7 +1291,11 @@ mod tests {
         let mut adopted = rig(FakeFiles::default(), None);
         adopted.files.disk().state = Some(placed.clone());
         adopted.change_and_settle();
-        assert_eq!(adopted.files.counts(), (1, 1, 0), "잡은 파일은 그냥 쓴다");
+        assert_eq!(
+            adopted.files.counts(),
+            (1, 1, 0),
+            "a held file is just written"
+        );
 
         let mut rig = rig_claiming(FakeFiles::default(), None, Claim::NotYet);
         rig.files.disk().state = Some(placed.clone());
@@ -1393,7 +1310,7 @@ mod tests {
         assert_eq!(
             rig.files.disk().aside_calls,
             1,
-            "첫 쓰기 뒤엔 이 실행의 것이다"
+            "after the first write it belongs to this run"
         );
     }
 
@@ -1410,11 +1327,14 @@ mod tests {
         let disk = rig.files.disk();
         assert_eq!((disk.aside_calls, disk.write_calls), (1, 1));
         assert_eq!(disk.state_aside, None);
-        assert_eq!(disk.published.len(), 1, "떠 두기가 실패해도 쓴다");
+        assert_eq!(
+            disk.published.len(),
+            1,
+            "writes even if the copy-aside fails"
+        );
     }
 
-    /// R15: once a write succeeds, the continuation of copy-aside failures ends too — a copy-aside failure after that is the first failure of a new continuation, so
-    /// it is logged at error again.
+    /// R15: once a write succeeds the copy-aside failure continuation ends too — the next copy-aside failure is the first of a new continuation and logs at error again.
     #[test]
     fn a_successful_write_ends_the_copy_aside_failure_streak() {
         let mut rig = rig(FakeFiles::default(), None);
@@ -1425,7 +1345,10 @@ mod tests {
         }
         rig.change_and_settle();
         assert_eq!(rig.published().len(), 1);
-        assert_eq!(rig.saver.aside_failures.current, None, "쓰기가 성공했다");
+        assert_eq!(
+            rig.saver.aside_failures.current, None,
+            "the write succeeded"
+        );
 
         {
             let mut disk = rig.files.disk();
@@ -1437,7 +1360,7 @@ mod tests {
         assert_eq!(
             rig.saver.aside_failures.current,
             Some(((), 1)),
-            "앞 실패를 잇지 않는다 — 제 레벨(error)로 남을 차례였다"
+            "does not continue the previous failure — it was its turn to stay at its own level (error)"
         );
     }
 
@@ -1450,14 +1373,18 @@ mod tests {
         assert_eq!(
             rig.last().resolved_crash_copy,
             None,
-            "꺼내기 전 쓰기엔 해시가 없다"
+            "a write before taking it out has no hash"
         );
 
         assert_eq!(rig.saver.resolve("abc".into()), SaveOutcome::Written);
         let state = rig.last();
         assert_eq!(state.resolved_crash_copy.as_deref(), Some("abc"));
         assert!(!state.clean_exit);
-        assert_eq!(rig.published().len(), 2, "번호가 그대로여도 곧바로 쓴다");
+        assert_eq!(
+            rig.published().len(),
+            2,
+            "writes right away even if the number is unchanged"
+        );
     }
 
     #[test]
@@ -1470,19 +1397,22 @@ mod tests {
         assert_eq!(
             rig.last().resolved_crash_copy,
             None,
-            "지운 뒤엔 해시를 싣지 않는다"
+            "after removing, the hash is not carried"
         );
         assert_eq!(rig.files.disk().remove_calls, 1);
     }
 
     #[test]
     fn a_different_copy_is_kept_and_the_slot_cleared() {
-        let mut rig = rig(FakeFiles::with_copy("새 인스턴스가 뜬 사본"), None);
+        let mut rig = rig(
+            FakeFiles::with_copy("copy captured by a new instance"),
+            None,
+        );
         assert_eq!(rig.saver.resolve(hash(COPY)), SaveOutcome::Written);
         assert_eq!(rig.files.disk().remove_calls, 0);
         assert_eq!(
             rig.files.disk().crash_copy.as_deref(),
-            Some("새 인스턴스가 뜬 사본")
+            Some("copy captured by a new instance")
         );
 
         rig.change_and_settle();
@@ -1521,14 +1451,14 @@ mod tests {
         assert_eq!(
             rig.files.disk().remove_calls,
             1,
-            "쓰기 없이는 다시 지우지 않는다"
+            "not removed again without a write"
         );
 
         rig.change_and_settle();
         assert_eq!(
             rig.last().resolved_crash_copy,
             Some(hash(COPY)),
-            "못 지운 동안은 해시를 싣는다"
+            "the hash is carried while it could not be removed"
         );
         assert_eq!(rig.files.disk().remove_calls, 2);
 
@@ -1567,7 +1497,7 @@ mod tests {
         assert_eq!(
             rig.published().len(),
             1,
-            "번호가 그대로여도 실패한 답을 다시 쓴다"
+            "the failed answer is written again even if the number is unchanged"
         );
         assert_eq!(rig.last().resolved_crash_copy, Some(hash(COPY)));
         assert_eq!(rig.files.disk().crash_copy, None);
@@ -1593,7 +1523,7 @@ mod tests {
         assert_eq!(
             rig.files.disk().remove_calls,
             0,
-            "D6 — 정상 종료는 사본을 지우지 않는다"
+            "D6 — a normal exit does not remove the copy"
         );
         assert_eq!(rig.files.disk().crash_copy.as_deref(), Some(COPY));
     }
@@ -1697,11 +1627,11 @@ mod tests {
         let disk = files.disk();
         assert_eq!(
             disk.write_calls, 1,
-            "닫힌 뒤 꺼낸 Final 은 디스크를 건드리지 않는다"
+            "a Final taken out after closing does not touch the disk"
         );
         assert!(
             disk.published.is_empty(),
-            "풀려난 rename 은 발행하지 않는다"
+            "a released rename does not publish"
         );
         assert_eq!(disk.remove_calls, 0);
         assert_eq!(disk.crash_copy.as_deref(), Some(COPY));
@@ -1729,7 +1659,7 @@ mod tests {
         let mut attempts = 0;
         while entered.recv_timeout(Duration::from_millis(20)).is_err() {
             attempts += 1;
-            assert!(attempts < 500, "주기 쓰기가 시작되지 않았다");
+            assert!(attempts < 500, "the periodic write did not start");
             clock.advance(QUIET);
         }
         // Send it while a periodic write is standing before rename — it has not been taken out yet.
@@ -1765,7 +1695,7 @@ mod tests {
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .expect("시계")
+                .expect("clock")
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1780,14 +1710,14 @@ mod tests {
         let fs = Fs::new(state_path.clone(), crash_path.clone());
 
         assert_eq!(
-            fs.write_state("첫 글", &|| false).unwrap(),
+            fs.write_state("first text", &|| false).unwrap(),
             WriteOutcome::Written
         );
         assert_eq!(
-            fs.write_state("닫힌 뒤 글", &|| true).unwrap(),
+            fs.write_state("text after closing", &|| true).unwrap(),
             WriteOutcome::Skipped
         );
-        assert_eq!(std::fs::read_to_string(&state_path).unwrap(), "첫 글");
+        assert_eq!(std::fs::read_to_string(&state_path).unwrap(), "first text");
 
         assert_eq!(
             fs.read_crash_copy().unwrap_err().kind(),
@@ -1814,14 +1744,18 @@ mod tests {
 
         assert_eq!(fs.read_state().unwrap_err().kind(), io::ErrorKind::NotFound);
         assert_eq!(
-            fs.write_state("글", &|| false).unwrap(),
+            fs.write_state("text", &|| false).unwrap(),
             WriteOutcome::Written
         );
-        assert_eq!(fs.read_state().unwrap(), "글");
+        assert_eq!(fs.read_state().unwrap(), "text");
         let to = fs.copy_aside_state().unwrap();
         assert_eq!(to, dir.join("state.json.corrupt"));
-        assert_eq!(std::fs::read_to_string(&to).unwrap(), "글");
-        assert_eq!(fs.read_state().unwrap(), "글", "원본은 그 자리에 남는다");
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "text");
+        assert_eq!(
+            fs.read_state().unwrap(),
+            "text",
+            "the original stays in place"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }

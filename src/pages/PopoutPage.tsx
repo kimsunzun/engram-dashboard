@@ -5,7 +5,7 @@
 //   tab bar · slot canvas · tab state learning · self-close at 0 tabs are all owned by that component (§7-1). PopoutPage is
 //   a shell that only extracts the label and passes it on.
 //
-// ★view:closed retirement (G2)★: the old "window self-exit when its own view closes" (view:closed listener) was removed. Window closing
+// ★view:closed retirement (G2)★: no window self-exit when its own view closes (no view:closed listener). Window closing
 //   is the shell's job (closing the last tab · invoke `window_control` · bus `window.close` — TRD S26-window-chrome §5-4 · §5-5),
 //   and the frontend's self-close is only asking the shell via WindowLayout's window:tabs-updated{tabs:[]} (0 tabs) signal (prevents double firing · re-entry).
 //   This page has no self-exit logic.

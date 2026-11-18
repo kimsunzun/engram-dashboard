@@ -49,8 +49,8 @@ function profile(
   }
 }
 
-describe('runningAgents — 실행중만', () => {
-  it('status.type==="Running" 만 남기고 종료/실패/전이는 제외한다', () => {
+describe('runningAgents — running only', () => {
+  it('keeps only status.type==="Running" and excludes exited/failed/transitional', () => {
     const list = [
       agent('a', 'C:/work/alpha', { type: 'Running' }),
       agent('b', 'C:/work/beta', { type: 'Exited', code: 0 }),
@@ -63,8 +63,8 @@ describe('runningAgents — 실행중만', () => {
   })
 })
 
-describe('filterMonitoringCandidates — 실행중 ∩ 검색어', () => {
-  it('빈 검색어 → 실행중 전체(프로필 없으면 표시명 = cwd basename)', () => {
+describe('filterMonitoringCandidates — running ∩ query', () => {
+  it('empty query → all running (display name = cwd basename if no profile)', () => {
     const list = [
       agent('a', 'C:/work/alpha'),
       agent('b', 'C:/work/beta', { type: 'Exited', code: 0 }),
@@ -75,7 +75,7 @@ describe('filterMonitoringCandidates — 실행중 ∩ 검색어', () => {
     expect(out.map(c => c.name)).toEqual(['alpha', 'gamma'])
   })
 
-  it('검색어는 표시명·cwd 부분일치(대소문자 무시)', () => {
+  it('the query is a partial match on display name · cwd (case-insensitive)', () => {
     const list = [
       agent('a', 'C:/work/alpha'),
       agent('b', 'C:/work/beta'),
@@ -86,19 +86,19 @@ describe('filterMonitoringCandidates — 실행중 ∩ 검색어', () => {
     expect(filterMonitoringCandidates(list, [], 'zzz')).toEqual([])
   })
 
-  it('실행중 없으면 빈 배열(검색어 무관)', () => {
+  it('with none running an empty array (regardless of query)', () => {
     const list = [agent('a', 'C:/x', { type: 'Killed' })]
     expect(filterMonitoringCandidates(list, [], '')).toEqual([])
     expect(filterMonitoringCandidates(list, [], 'x')).toEqual([])
   })
 
-  it('입력 순서를 보존한다(재정렬 없음)', () => {
+  it('preserves input order (no re-sorting)', () => {
     const list = [agent('z', 'C:/work/zed'), agent('a', 'C:/work/apex')]
     expect(filterMonitoringCandidates(list, [], '').map(c => c.id)).toEqual(['z', 'a'])
   })
 
   // ADR-0061: the display name is derived from the profile the same as the tree (mergeTreeNodes).
-  it('프로필의 display_name 이 있으면 그 이름을 쓴다(cwd basename 아님)', () => {
+  it('if the profile has display_name that name is used (not the cwd basename)', () => {
     // rename scenario.
     const list = [agent('a', 'C:/repos/Filter Library')]
     const profiles = [profile('a', { display_name: 'ABC', name: 'orig', cwd: 'C:/repos/Filter Library' })]
@@ -106,7 +106,7 @@ describe('filterMonitoringCandidates — 실행중 ∩ 검색어', () => {
     expect(filterMonitoringCandidates(list, profiles, 'abc').map(c => c.id)).toEqual(['a'])
   })
 
-  it('display_name 이 없으면 cwd basename 폴백(profile.name 은 cwd 문자열이라 미사용 — 트리와 동일)', () => {
+  it('without display_name cwd basename fallback (profile.name is a cwd string so unused — same as the tree)', () => {
     const list = [
       agent('a', 'C:/work/alpha'), // Has a profile but display_name=null
       agent('b', 'C:/work/beta'), // ad-hoc with no matching profile

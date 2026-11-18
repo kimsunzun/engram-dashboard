@@ -34,7 +34,7 @@ pub struct PhysPoint {
     pub y: i32,
 }
 
-/// A screen rectangle in physical px — top-left `(x, y)` and size. Whether it contains a point is half-open (`x ≤ 점 < x + width`).
+/// A screen rectangle in physical px — top-left `(x, y)` and size. Whether it contains a point is half-open (`x ≤ point < x + width`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PhysRect {
     pub x: i32,
@@ -46,8 +46,7 @@ pub struct PhysRect {
 /// Window identity — compare whether it is the same window (the answer of [`top_level_at`]) · used as the reference of [`ZOrder::After`]. The caller does not
 /// know the inside (Windows = the HWND value).
 ///
-/// ★The value remains even after the window is gone★ — the OS may give the same value again to a new window, so equality between long-held values does not guarantee 「같은
-/// 창」 (the same window).
+/// ★The value remains even after the window is gone★ — the OS may give the same value again to a new window, so equality between long-held values does not guarantee 「the same window」.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NativeWindow(isize);
 
@@ -93,9 +92,9 @@ pub enum WindowError {
 impl fmt::Display for WindowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unsupported => f.write_str("이 OS 에서는 창 함수가 없다"),
-            Self::NoWindow => f.write_str("창이 없다"),
-            Self::Os(e) => write!(f, "창 OS 호출 실패: {e}"),
+            Self::Unsupported => f.write_str("there are no window functions on this OS"),
+            Self::NoWindow => f.write_str("there is no window"),
+            Self::Os(e) => write!(f, "window OS call failed: {e}"),
         }
     }
 }
@@ -151,7 +150,7 @@ pub fn place_window(
 /// window is compared by the caller with [`NativeWindow::of`] — the drop command reads another app's window or the desktop as a new window
 /// (TRD S21-slot-docking §3-5 ④ · PRD R22).
 ///
-/// 「품는다」 (contains) means the OS outer rectangle (`GetWindowRect` — including the invisible resize border). The OS hit test also counts that
+/// 「contains」 means the OS outer rectangle (`GetWindowRect` — including the invisible resize border). The OS hit test also counts that
 /// border as that window. But for a window with a window shape (`SetWindowRgn`), the point must be inside that shape. `None` = no window
 /// contains it · outside Windows.
 // ADR-0295
@@ -244,7 +243,7 @@ pub fn restore_placement(
 }
 
 /// Is the current foreground window this process's. `None` = this crate has no means to answer on this OS — the caller decides with its own
-/// means (the window toolkit's focus getter and the like) (lib.rs 「들이는 규칙」 3 — the branch outside Windows is a placeholder).
+/// means (the window toolkit's focus getter and the like) (lib.rs 「Rules for taking things in」 3 — the branch outside Windows is a placeholder).
 ///
 /// Windows = is the PID of the thread that created the window of `GetForegroundWindow` the same as this process's PID. If there is no foreground window or it
 /// vanished in the meantime, `Some(false)`.
@@ -272,7 +271,7 @@ pub fn foreground_is_current_process() -> Option<bool> {
 ///
 /// Windows = is `GetForegroundWindow` that top-level window. If the handle could not be obtained or that window is already gone, `Some(false)`. It may
 /// differ from the window toolkit's focus getter — for a window that hosts WebView2, that getter is false while the webview holds keyboard focus
-/// (TRD S26-window-chrome §6-2 「앞 창 판정」).
+/// (TRD S26-window-chrome §6-2 「front window decision」).
 // ADR-0302 — window state command (foreground window decision)
 pub fn is_foreground(w: &impl HasWindowHandle) -> Option<bool> {
     #[cfg(windows)]
@@ -297,7 +296,7 @@ pub struct CaptionStyle {
 }
 
 /// The title-bar chrome shape of this OS (TRD S26-window-chrome §7-11) — always `{ drawn_buttons: true, leading_inset: 0 }`. On macOS
-/// the OS draws the traffic-light buttons, so it should be `{ false, <신호등 폭> }`, but that width was not measured and macOS is not built, so that
+/// the OS draws the traffic-light buttons, so it should be `{ false, <traffic-light width> }`, but that width was not measured and macOS is not built, so that
 /// branch was not added — add it inside this function when building macOS.
 // ADR-0303 — chrome-style title bar
 pub fn caption_style() -> CaptionStyle {
@@ -516,7 +515,7 @@ mod win {
                 GetMonitorInfoW(monitor, &mut mi)
             };
             if !ok.as_bool() {
-                return Err(WindowError::Os(io::Error::other("GetMonitorInfoW 실패")));
+                return Err(WindowError::Os(io::Error::other("GetMonitorInfoW failed")));
             }
             screen_to_workspace(normal, to_rect(mi.rcMonitor), to_rect(mi.rcWork))
         };
@@ -918,7 +917,7 @@ mod tests {
                         None,
                     )
                 }
-                .expect("시험 창 짓기");
+                .expect("build test window");
                 let w = Self(hwnd);
                 // SAFETY: a live window this value built and value arguments.
                 unsafe {
@@ -932,7 +931,7 @@ mod tests {
                         SWP_SHOWWINDOW | SWP_NOACTIVATE,
                     )
                 }
-                .expect("시험 창 보이기");
+                .expect("show test window");
                 w
             }
 
@@ -951,7 +950,7 @@ mod tests {
         #[test]
         fn native_window_of_reads_the_win32_handle() {
             let w = TestWindow::new(false);
-            let n = NativeWindow::of(&w).expect("Win32 핸들");
+            let n = NativeWindow::of(&w).expect("Win32 handle");
             assert_eq!(n, NativeWindow(w.hwnd().0 as isize));
         }
 
@@ -961,10 +960,10 @@ mod tests {
         fn is_foreground_is_true_only_for_the_foreground_window() {
             use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
             let w = TestWindow::new(true);
-            assert_eq!(is_foreground(&w), Some(false), "숨은 창");
+            assert_eq!(is_foreground(&w), Some(false), "hidden window");
             let gone = w.handle_only();
             drop(w);
-            assert_eq!(is_foreground(&gone), Some(false), "사라진 창");
+            assert_eq!(is_foreground(&gone), Some(false), "vanished window");
             // SAFETY: two queries with no arguments.
             let (before, answer, after) = unsafe {
                 let before = GetForegroundWindow();
@@ -972,7 +971,7 @@ mod tests {
                 (before, answer, GetForegroundWindow())
             };
             if !before.is_invalid() && before == after {
-                assert_eq!(answer, Some(true), "지금 전경 창");
+                assert_eq!(answer, Some(true), "the foreground window now");
             }
         }
 
@@ -1001,7 +1000,7 @@ mod tests {
                 height: 180,
             };
             place_window(&w, Some(rect), ZOrder::Keep, false, false).unwrap();
-            assert!(!visible(&w), "show 거짓이면 보이지 않는다");
+            assert!(!visible(&w), "with show false it is not visible");
             place_window(&w, None, ZOrder::Keep, true, false).unwrap();
             assert!(visible(&w));
             assert_eq!(w.outer(), rect);
@@ -1047,9 +1046,9 @@ mod tests {
                 x: rect.x + rect.width,
                 y: p.y,
             };
-            assert_eq!(top_level_at(right_edge), None, "오른쪽 변은 밖이다");
+            assert_eq!(top_level_at(right_edge), None, "the right edge is outside");
             hide(&above);
-            assert_eq!(top_level_at(p), Some(b), "숨은 창은 대상이 아니다");
+            assert_eq!(top_level_at(p), Some(b), "a hidden window is not a target");
             // SAFETY: a live window held by this test — minimize without activation.
             unsafe {
                 let _ = ShowWindow(below.hwnd(), SW_SHOWMINNOACTIVE);
@@ -1064,7 +1063,7 @@ mod tests {
             assert_ne!(
                 top_level_at(in_icon),
                 Some(b),
-                "최소화된 창은 대상이 아니다"
+                "a minimized window is not a target"
             );
             // SAFETY: same as above.
             unsafe {
@@ -1104,8 +1103,12 @@ mod tests {
                 x: rect.x + 150,
                 y: rect.y + 150,
             };
-            assert_eq!(top_level_at(inside), Some(a), "모양 안");
-            assert_eq!(top_level_at(outside), Some(b), "모양 밖이면 밑 창");
+            assert_eq!(top_level_at(inside), Some(a), "inside the shape");
+            assert_eq!(
+                top_level_at(outside),
+                Some(b),
+                "outside the shape, the window below"
+            );
             let facts = describe_window(a).unwrap();
             assert!(facts.has_region);
             assert_eq!(facts.pid, std::process::id());
@@ -1143,7 +1146,7 @@ mod tests {
                     let want = (dx < 100) != rtl;
                     // SAFETY: a value-argument query.
                     let os_hit = unsafe { WindowFromPoint(POINT { x: p.x, y: p.y }) } == w.0;
-                    assert_eq!(os_hit, want, "OS 적중 판정 rtl={rtl} dx={dx}");
+                    assert_eq!(os_hit, want, "OS hit test rtl={rtl} dx={dx}");
                     assert_eq!(
                         top_level_at(p) == Some(w.native()),
                         want,
@@ -1170,7 +1173,7 @@ mod tests {
             };
             // SAFETY: a value-argument query.
             let os_hit = unsafe { WindowFromPoint(POINT { x: p.x, y: p.y }) } == w.0;
-            assert!(os_hit, "OS 적중 판정");
+            assert!(os_hit, "OS hit test");
             assert_eq!(top_level_at(p), Some(w.native()));
         }
 
@@ -1197,7 +1200,7 @@ mod tests {
             assert_eq!(
                 describe_window(w.native()).unwrap().layered,
                 LayeredKind::PerPixel,
-                "속성을 아직 안 준 layered 창"
+                "a layered window not yet given its attributes"
             );
             let cases = [
                 (LWA_ALPHA, 0, LayeredKind::Alpha(0)),
@@ -1213,7 +1216,7 @@ mod tests {
             for (flags, alpha, want) in cases {
                 // SAFETY: a live layered window held by this test and value arguments.
                 unsafe { SetLayeredWindowAttributes(w.0, COLORREF(0), alpha, flags) }
-                    .expect("layered 속성");
+                    .expect("layered attributes");
                 assert_eq!(
                     describe_window(w.native()).unwrap().layered,
                     want,
@@ -1230,7 +1233,7 @@ mod tests {
 
         /// It shows an ordinary (non-tool) window on screen, so it briefly appears on the viewer's screen — run it by hand in a desktop session.
         #[test]
-        #[ignore = "화면 안에 창을 잠깐 보인다 — 데스크톱 세션에서 손으로"]
+        #[ignore = "briefly shows a window on screen — by hand in a desktop session"]
         fn restore_placement_round_trips_screen_coordinates() {
             let w = TestWindow::new(false);
             let normal = PhysRect {

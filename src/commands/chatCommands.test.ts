@@ -31,16 +31,16 @@ beforeEach(() => {
 })
 
 describe('chat.toolGroup.setExpanded', () => {
-  it('매니페스트(contributions)를 타고 레지스트리에 오른다', () => {
+  it('goes into the registry via the manifest (contributions)', () => {
     expect(list().map(c => c.id)).toContain(ID)
   })
 
   // ★Not on the bus (ADR-0167)★: expanded state is frontend state that exists separately per window — the reason is at the head of chatCommands.ts.
-  it('help 가 없다 — 버스에 오르지 않고 이 창 안에만 남는다', () => {
+  it('has no help — does not go on the bus and stays inside this window only', () => {
     expect(list().find(c => c.id === ID)!.help).toBeUndefined()
   })
 
-  it('그 슬롯의 그 묶음 펼침을 고르고 { expanded } 를 돌려준다 — 두 방향', () => {
+  it('picks the expansion of that group of that slot and returns { expanded } — both directions', () => {
     expect(run(ID, { slotId: 's1', groupKey: 'tool:call_1', expanded: true })).toEqual({ expanded: true })
     expect(effectiveOpen(useToolGroupStore.getState(), 's1', 'tool:call_1')).toBe(true)
     expect(run(ID, { slotId: 's1', groupKey: 'item:7', expanded: false })).toEqual({ expanded: false })
@@ -48,41 +48,41 @@ describe('chat.toolGroup.setExpanded', () => {
     expect(bySlot().s1.open).toEqual({ 'tool:call_1': true, 'item:7': false }) // A collapse is also recorded as the chosen value.
   })
 
-  it('여분 칸(viewId 등)이 섞인 가방도 그대로 통과한다', () => {
+  it('a bag mixed with extra fields (viewId etc.) passes as is', () => {
     run(ID, { viewId: 'v1', slotId: 's1', groupKey: 'tool:call_1', expanded: true })
     expect(bySlot().s1.open).toEqual({ 'tool:call_1': true })
   })
 
   it.each([
-    ['slotId 없음', { groupKey: 'tool:x', expanded: true }, /slotId 필요/],
-    ['slotId 빈 문자열', { slotId: '', groupKey: 'tool:x', expanded: true }, /slotId 필요/],
-    ['groupKey 없음', { slotId: 's1', expanded: true }, /groupKey/],
-    ['groupKey 가 백엔드 id 그대로', { slotId: 's1', groupKey: 'call_1', expanded: true }, /groupKey/],
-    ['groupKey 가 문자열 아님', { slotId: 's1', groupKey: 3, expanded: true }, /groupKey/],
-    ['expanded 없음', { slotId: 's1', groupKey: 'tool:x' }, /expanded/],
-    ['expanded 가 문자열', { slotId: 's1', groupKey: 'tool:x', expanded: 'true' }, /expanded/],
-  ] as const)('무효 인자는 throw 하고 상태를 안 바꾼다 — %s', (_label, args, message) => {
+    ['slotId missing', { groupKey: 'tool:x', expanded: true }, /slotId required/],
+    ['slotId empty string', { slotId: '', groupKey: 'tool:x', expanded: true }, /slotId required/],
+    ['groupKey missing', { slotId: 's1', expanded: true }, /groupKey/],
+    ['groupKey is the backend id as is', { slotId: 's1', groupKey: 'call_1', expanded: true }, /groupKey/],
+    ['groupKey is not a string', { slotId: 's1', groupKey: 3, expanded: true }, /groupKey/],
+    ['expanded missing', { slotId: 's1', groupKey: 'tool:x' }, /expanded/],
+    ['expanded is a string', { slotId: 's1', groupKey: 'tool:x', expanded: 'true' }, /expanded/],
+  ] as const)('invalid arguments throw and leave the state unchanged — %s', (_label, args, message) => {
     const before = bySlot()
     expect(() => run(ID, { ...args })).toThrow(message)
     expect(bySlot()).toBe(before)
   })
 
-  it('인자가 없으면 throw', () => {
-    expect(() => run(ID)).toThrow(/slotId 필요/)
+  it('throws without arguments', () => {
+    expect(() => run(ID)).toThrow(/slotId required/)
   })
 
-  it('이 창에 그 슬롯의 대화 뷰가 없으면(한 번도 안 묶임) throw 하고 아무것도 적지 않는다', () => {
+  it('if this window has no conversation view of that slot (never bound), throws and writes nothing', () => {
     const before = bySlot()
-    expect(() => run(ID, { slotId: 's9', groupKey: 'tool:x', expanded: true })).toThrow(/대화 뷰가 없다/)
+    expect(() => run(ID, { slotId: 's9', groupKey: 'tool:x', expanded: true })).toThrow(/no conversation view/)
     expect(bySlot()).toBe(before)
   })
 
   // After the view is unmounted by a render mode swap · a popout move — answering success would leave the screen unchanged while the caller reads it as changed.
-  it('뷰가 마운트 해제된 슬롯이면 throw 하고 아무것도 적지 않는다 — 다시 마운트되면 먹힌다', () => {
+  it('for a slot whose view was unmounted, throws and writes nothing — takes effect once mounted again', () => {
     const release = useToolGroupStore.getState().bind('s2', 'a1')
     release()
     const before = bySlot()
-    expect(() => run(ID, { slotId: 's2', groupKey: 'tool:x', expanded: true })).toThrow(/대화 뷰가 없다/)
+    expect(() => run(ID, { slotId: 's2', groupKey: 'tool:x', expanded: true })).toThrow(/no conversation view/)
     expect(bySlot()).toBe(before)
     useToolGroupStore.getState().bind('s2', 'a1')
     expect(run(ID, { slotId: 's2', groupKey: 'tool:x', expanded: true })).toEqual({ expanded: true })

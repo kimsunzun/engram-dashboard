@@ -1,6 +1,6 @@
 //! Pickup block — does not let through the usage observations emitted by the decoder of an agent that is not the default account.
 //!
-//! ★Why block it★: the receiving side's usage entry is the single `(벤더, 기본 계정)`. If observations of an agent spawned with another account
+//! ★Why block it★: the receiving side's usage entry is the single `(vendor, default account)`. If observations of an agent spawned with another account
 //!   were let through, that account's values would mix into the default-account entry. Which env tells accounts apart is vendor knowledge, so the decision is made by
 //!   each vendor backend, and this module has only the wrapper that applies that decision and the env comparison.
 
@@ -54,9 +54,9 @@ impl OutputDecoder for UsageGate {
 /// - Result: `false` if the spec has no such key (inherited) · `false` if present and equal to the daemon value · `true` if absent from the daemon but
 ///   present in the spec, or the value differs.
 ///
-/// ★Keys are compared ASCII case-insensitively and values byte for byte★ — if it errs, we chose to err toward 「다르다」
-///   (different). The cost on that side is only not picking up a few observations of that agent, but on the other side another account's
-///   values mix into the default entry. So we do neither path normalization (trailing separator · case) nor folding an empty value into 「없음」 (absent).
+/// ★Keys are compared ASCII case-insensitively and values byte for byte★ — if it errs, we chose to err toward 「different」.
+///   The cost on that side is only not picking up a few observations of that agent, but on the other side another account's
+///   values mix into the default entry. So we do neither path normalization (trailing separator · case) nor folding an empty value into 「absent」.
 ///   (On Windows env names are case-insensitive — on POSIX this comparison just catches more.)
 pub fn env_overrides_daemon(
     spec_env: &[(String, String)],
@@ -133,7 +133,7 @@ mod tests {
             .iter()
             .map(|e| match e {
                 OutputEvent::Error(s) => s.as_str(),
-                other => panic!("예상 밖 이벤트: {other:?}"),
+                other => panic!("unexpected event: {other:?}"),
             })
             .collect()
     }
@@ -150,7 +150,7 @@ mod tests {
         assert!(g.take_usage().is_empty());
         assert!(
             pending.lock().unwrap().is_empty(),
-            "take_usage 를 안쪽으로 안 넘기면 trait 기본(빈 벡터)이 되고 안쪽은 안 비워진다"
+            "if take_usage is not passed through to the inner one, it becomes the trait default (empty vector) and the inner one is not drained"
         );
     }
 
@@ -163,7 +163,7 @@ mod tests {
             assert!(g.take_usage().is_empty());
             assert!(
                 pending.lock().unwrap().is_empty(),
-                "막는 동안 버린 관측이 안쪽에 남아 있으면 안 된다"
+                "observations discarded while blocking must not remain in the inner one"
             );
         }
     }
@@ -210,7 +210,7 @@ mod tests {
         ));
         assert!(
             env_overrides_daemon(&env(&[("ACCOUNT_DIR", "")]), "ACCOUNT_DIR", None),
-            "빈 값도 「있다」로 본다"
+            "an empty value also counts as present"
         );
         assert!(
             env_overrides_daemon(
@@ -218,7 +218,7 @@ mod tests {
                 "ACCOUNT_DIR",
                 Some(OsStr::new("C:\\a"))
             ),
-            "경로 정규화를 하지 않는다 — 다르다 쪽으로 틀린다"
+            "does not normalize paths — errs on the side of different"
         );
     }
 

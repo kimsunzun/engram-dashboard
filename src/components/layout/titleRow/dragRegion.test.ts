@@ -8,11 +8,11 @@ import popupCapability from '../../../../src-tauri/capabilities/popup.json?raw'
 import { dragProps } from './dragRegion'
 
 describe('dragRegion', () => {
-  it('속성은 값 없는 data-tauri-drag-region 하나 — `drag.js` 의 「자기 자신만」 꼴', () => {
+  it('the attribute is just one valueless data-tauri-drag-region — the shape of `drag.js`\'s 「itself only」', () => {
     expect(dragProps()).toEqual({ 'data-tauri-drag-region': '' })
   })
 
-  it('끌 자리를 그리는 두 창(main · 팝아웃)의 capability 가 core:window:allow-start-dragging 을 준다', () => {
+  it('the two windows that draw a drag spot (main · popout) have capabilities that grant core:window:allow-start-dragging', () => {
     for (const [name, raw, windows] of [
       ['default.json', mainCapability, ['main']],
       ['popup.json', popupCapability, ['slot-popup-*']],

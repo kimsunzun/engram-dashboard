@@ -90,13 +90,13 @@ function findPortfile() {
   // reason = why this portfile was chosen (used to explain to the user when the connection fails).
   if (live) return { path: live.path, reason: 'live-pid-match', candidates: diagnostics }
   if (existing.length) return { path: existing[0].path, reason: 'fallback-no-live-candidate', candidates: diagnostics } // If none is alive, use the first candidate (attempt to connect → a clear error)
-  throw new Error('daemon.json not found. 데몬이 떠 있나요? tried:\n  ' + candidates.join('\n  '))
+  throw new Error('daemon.json not found. Is the daemon running? tried:\n  ' + candidates.join('\n  '))
 }
 
 function reasonText(found) {
   return found.reason === 'live-pid-match'
-    ? '기록된 pid 가 살아있어 선택됨'
-    : '살아있는 후보가 없어 첫 존재 후보로 fallback'
+    ? 'chosen because the recorded pid is alive'
+    : 'no live candidate, so fell back to the first existing candidate'
 }
 
 function formatCandidateLine(c) {
@@ -119,7 +119,7 @@ function dedupeForDisplay(candidates) {
 
 // Attaches the portfile selection info (found) to the failure message — which portfile was chosen and why, and how the other candidates fared.
 function withCandidateDiagnostics(headerLines, found) {
-  return [...headerLines, `사용한 portfile: ${found.path} (${reasonText(found)})`, 'candidates:', dedupeForDisplay(found.candidates).map(formatCandidateLine).join('\n')].join('\n')
+  return [...headerLines, `portfile used: ${found.path} (${reasonText(found)})`, 'candidates:', dedupeForDisplay(found.candidates).map(formatCandidateLine).join('\n')].join('\n')
 }
 
 // ★Supplement the cause with raw TCP★: a WHATWG ErrorEvent (.error, undici-based) has an empty message (measured,
@@ -155,8 +155,8 @@ async function describeWsError(e, host, port) {
   const code = err?.code
   if (msg) return code ? `${msg} (${code})` : msg
   const probed = await probeTcpReason(host, port)
-  if (probed.kind === 'connected') return 'TCP 연결은 됐지만 WebSocket 핸드셰이크가 거부됨(Origin 검사·HTTP 4xx 등 의심 — ErrorEvent 는 그 이상을 안 줌)'
-  if (probed.kind === 'timeout') return `TCP 연결도 응답 없음(${host}:${port})`
+  if (probed.kind === 'connected') return 'TCP connected, but the WebSocket handshake was refused (suspect the Origin check · HTTP 4xx etc. — ErrorEvent gives nothing more)'
+  if (probed.kind === 'timeout') return `no response even to a TCP connection (${host}:${port})`
   return probed.text || String(e)
 }
 
@@ -169,7 +169,7 @@ async function connect() {
   const info = readPortfile(portfile)
   if (!info) {
     throw new Error(withCandidateDiagnostics(
-      [`daemon.json 을 온전히 읽지 못했습니다(쓰는 중이거나 다른 프로그램이 붙들고 있음)`],
+      [`could not read daemon.json completely (it is being written, or another program is holding it)`],
       chosen,
     ))
   }
@@ -196,10 +196,10 @@ async function connect() {
       } catch (probeErr) {
         // Whatever the diagnosis path itself throws (including a synchronous throw), this promise must settle as a reject
         // — otherwise onerror dies inside and connect() never finishes.
-        reason = `${String(e)} (원인 진단 실패: ${probeErr.message})`
+        reason = `${String(e)} (cause diagnosis failed: ${probeErr.message})`
       }
       rej(new Error(withCandidateDiagnostics(
-        [`daemon 연결 실패: ${endpoint}`, `원인: ${reason}`],
+        [`daemon connection failed: ${endpoint}`, `cause: ${reason}`],
         chosen,
       )))
     }
@@ -256,10 +256,10 @@ function resolveAgent(list, needle) {
   if (byId) return byId
   const byLabel = list.filter((a) => (a.label || '').toLowerCase() === needle.toLowerCase())
   if (byLabel.length === 1) return byLabel[0]
-  if (byLabel.length > 1) throw new Error(`이름 모호 "${needle}" — ${byLabel.length}명 매칭. id 로 지목하세요.`)
+  if (byLabel.length > 1) throw new Error(`ambiguous name "${needle}" — ${byLabel.length} agents match. Point at one by id.`)
   const byPrefix = list.filter((a) => a.id.startsWith(needle))
   if (byPrefix.length === 1) return byPrefix[0]
-  if (byPrefix.length > 1) throw new Error(`id 접두사 모호 "${needle}" — ${byPrefix.length}명.`)
+  if (byPrefix.length > 1) throw new Error(`ambiguous id prefix "${needle}" — ${byPrefix.length} agents.`)
   throw new Error(`agent not found: "${needle}"`)
 }
 
@@ -312,7 +312,7 @@ try {
     conn.send({ WriteStdin: { agent_id: agent.id, data, request_id } })
     // ★Do not say success without an ack★: a timeout or disconnect means "do not know whether it went", not "it went".
     const reply = await conn.waitFor((m) => (m.Ack && m.Ack.request_id === request_id) || (m.Error && m.Error.request_id === request_id), 3000).catch(() => null)
-    if (!reply) throw new Error(`WriteStdin: 3s 안에 응답 없음 — 전달 여부 미확인 (${agent.label})`)
+    if (!reply) throw new Error(`WriteStdin: no reply within 3s — delivery unconfirmed (${agent.label})`)
     if (reply.Error) throw new Error('WriteStdin failed: ' + (reply.Error.message ?? JSON.stringify(reply.Error)))
     console.log('sent →', agent.label, `(${agent.id})`)
   } else if (op === 'reparent') {

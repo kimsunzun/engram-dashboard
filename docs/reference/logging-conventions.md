@@ -29,9 +29,9 @@ One-line reading: **data at risk/unrecoverable (error) → odd but safe fallback
 
 ## Format
 
-- **Message = one line in Korean** (what happened).
+- **Message = one line in English (what happened)**.
 - **Identifiers and numbers go into structured fields (key=val)** — they become filter and search keys, so do not interpolate them into the message. `%`=Display, `?`=Debug.
-  - Example: `tracing::info!(agent = %profile.id, epoch, ?mode, "에이전트 spawn");`
+  - Example: `tracing::info!(agent = %profile.id, epoch, ?mode, "agent spawned");`
 - **Error detail (`: {e}`) may be interpolated at the end of the message** (de-facto) — "no interpolation" applies only to *identifiers and numbers* (agent · epoch · pid · conn), and `{e}` is the exception.
 - **The `[component]` prefix** (`[tray]`/`[layout]`) is a practice of **only some src-tauri modules**, not a crate-wide rule. New code should prefer a **field** (`module=`) over a prefix (unification is undecided).
 - **span/`#[instrument]` unused** (currently 0 cases, flat event). If introduced, update this document.

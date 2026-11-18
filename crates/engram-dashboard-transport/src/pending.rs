@@ -38,7 +38,7 @@ pub enum RequestError {
     QueueFull,
     /// An old request with the same number is still waiting for its answer and a new request reused that number — the old waiter wakes with this.
     /// ★The new request does not inherit the slot and is rejected as [`RequestError::TagRetired`] (both fail)★ — the correlation key is that number
-    /// alone, so the late reply of the request that went out first cannot be told apart from the new request's counterpart (`lib.rs` 「알려진 한계」 (known limits) ·
+    /// alone, so the late reply of the request that went out first cannot be told apart from the new request's counterpart (`lib.rs` 「known limits」 ·
     /// [`Insert::Collided`]).
     Superseded,
     /// This command takes no reply ([`crate::Wire::request_tag`] is `None`). It means use `notify`.
@@ -159,11 +159,10 @@ struct Waiter<S> {
 ///   The correlation key is that number alone, so there is nothing on the wire to tell the two replies apart.
 ///
 /// ★**Forgetting is not a defect but half of what this ring does**★ — if it did not forget, **legitimately**
-/// reusing that number would be blocked forever too. That is, 「오배달 완전 차단」 (blocking misdelivery completely) and 「정당한 재사용 허용」 (allowing legitimate reuse) are the two
+/// reusing that number would be blocked forever too. That is, 「blocking misdelivery completely」 and 「allowing legitimate reuse」 are the two
 /// ends of the same knob, and unbounded memory is impossible from the start (it grows without limit).
 ///
-/// ★The two reviewers split here and the split itself is the record★ — one read it as 「누수 없음, 잊는 것이 정당한
-/// 재사용을 가능케 한다」 (no leak; forgetting makes legitimate reuse possible), the other as 「그 잊음이 원래 답장을 새 대기자에게 보낸다」 (that forgetting sends the original reply to a new waiter). Both are
+/// ★The two reviewers split here and the split itself is the record★ — one read it as 「no leak; forgetting makes legitimate reuse possible」, the other as 「that forgetting sends the original reply to a new waiter」. Both are
 /// right, and **leaving the bounded ring exactly as it is now is the user's decision** (2026-09-06). Basis: our real
 /// `Tag` is a UUID so **a legitimate collision never occurs in the first place**. The remaining hole needs ★a consumer bug (reusing numbers)★ and
 /// ★a reply that arrives only after more retirements than fill one ring (default 256 times)★ **at the same time**.
@@ -312,8 +311,11 @@ mod tests {
         assert!(p.is_retired(&7));
 
         match p.insert(7, "b", t0 + Duration::from_secs(20)) {
-            Insert::Retired(slot) => assert_eq!(slot, "b", "슬롯을 돌려줘야 호출자가 깨울 수 있다"),
-            other => panic!("만료된 번호가 그대로 다시 들어갔다: {other:?}"),
+            Insert::Retired(slot) => assert_eq!(
+                slot, "b",
+                "the slot must be returned for the caller to be able to wake it"
+            ),
+            other => panic!("an expired number went in again as is: {other:?}"),
         }
         assert!(p.is_empty());
     }
@@ -334,7 +336,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert!(p.is_empty(), "어느 쪽도 표에 남지 않는다");
+        assert!(p.is_empty(), "neither stays in the table");
         assert!(p.is_retired(&9));
     }
 
@@ -347,7 +349,7 @@ mod tests {
         assert_eq!(
             p.take(&9),
             None,
-            "먼저 나간 요청의 늦은 답장이 나중 요청의 짝으로 배달되면 안 된다"
+            "a late reply to an earlier request must not be delivered as the pair of a later request"
         );
     }
 
@@ -378,7 +380,7 @@ mod tests {
             p.expire(t0);
         }
         assert_eq!(p.retired_len(), 2);
-        assert!(!p.is_retired(&1), "가장 오래된 것은 조용히 잊는다");
+        assert!(!p.is_retired(&1), "the oldest is silently forgotten");
         assert!(p.is_retired(&2));
         assert!(p.is_retired(&3));
         assert!(
@@ -386,7 +388,7 @@ mod tests {
                 p.insert(1, "reused", t0 + Duration::from_secs(8)),
                 Insert::Placed
             ),
-            "잊힌 번호는 다시 쓸 수 있게 된다 — 이 링은 보증이 아니다"
+            "a forgotten number becomes usable again — this ring is not a guarantee"
         );
     }
 

@@ -1,25 +1,14 @@
 // WebGL seat visibility-linked lifecycle (ADR-0056) regression — only a visible slot holds a WebGL seat.
-//
-// Background: every terminal tab keeps its mount with keep-alive (WindowLayout puts hidden tabs at display:none).
-//   The browser (WebView2/Chromium) limits concurrently active WebGL contexts with a hard cap (measured 16), so
-//   if every mounted slot held WebGL the cap would be exceeded and old contexts lost. So the WebGL addon is tied to
-//   visibility — attach when visible, return when hidden (loseContext→dispose). The Terminal instance (buffer) always lives.
-//
-// ★Verification core★: jsdom has no real WebGL/IntersectionObserver, so only the logic layer is checked.
-//
-// Strategy: lay down IntersectionObserver as a controllable mock so the test fires visible/hidden callbacks directly.
-//   Stub xterm Terminal / FitAddon / WebglAddon and observe calls via a static holder. loseContext:
-//   TerminalSlot scans canvases inside the container at attach time and grabs the context via getContext('webgl2'|'webgl')
-//   (unmount ref-null defense), so *before* it becomes visible, plant a canvas in the container and spy on that canvas's getContext
-//   to check the loseContext call and order on the grabbed context.
+// Why: terminal tabs keep their mount (keep-alive, hidden = display:none) and WebView2/Chromium caps concurrently active WebGL contexts (measured 16), so the addon attaches when visible and returns when hidden (loseContext→dispose); the Terminal instance (buffer) always lives.
+// ★jsdom has no real WebGL/IntersectionObserver★ — only the logic layer is checked, with a controllable IntersectionObserver mock and xterm Terminal / FitAddon / WebglAddon stubs observed via a static holder.
+// loseContext: TerminalSlot scans canvases in the container at attach time and grabs the context via getContext('webgl2'|'webgl') (unmount ref-null defense), so plant a canvas *before* visible and spy on its getContext.
 
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { OutputChunk } from '../../api/agentClient'
 
-// jsdom does not provide ResizeObserver — TerminalSlot does new ResizeObserver on mount.
-//   For the Fix 3 check (skip fit/resize while hidden) the callback is captured so the test can fire it directly.
+// jsdom has no ResizeObserver — the callback is captured so the Fix 3 check (skip fit/resize while hidden) can fire it.
 type ROEntry = { contentRect: { width: number; height: number } }
 const roState = vi.hoisted(() => ({
   instances: [] as Array<{ cb: (entries: ROEntry[]) => void }>,
@@ -41,9 +30,7 @@ function fireResize(width: number, height: number): void {
   act(() => ro.cb([{ contentRect: { width, height } }]))
 }
 
-// ── Controllable IntersectionObserver mock ────────────────────────────────────────────
-// A real IO fires the callback immediately on observation (reflecting current visibility) + on every transition. Here the test drives firing directly
-//   to reproduce initial-hidden/visible/hidden transitions.
+// ── Controllable IntersectionObserver mock (a real IO fires on observation and on each transition; the test drives firing directly) ──
 type IOEntry = { isIntersecting: boolean; intersectionRatio: number }
 const ioState = vi.hoisted(() => ({
   instances: [] as Array<{ cb: (entries: IOEntry[]) => void; disconnected: boolean }>,
@@ -72,9 +59,7 @@ function fireVisibility(visible: boolean): void {
   act(() => io.cb([{ isIntersecting: visible, intersectionRatio: visible ? 1 : 0 }]))
 }
 
-// ── xterm/addon stub — observe construction and calls via a static holder. ──────────────────────────────
-// A WebglAddon instance is created anew on every attach, so the creation list · dispose · onContextLoss are gathered in a hoisted holder
-//   for the test to check count/order. The call log (order) is shared for the loseContext order check.
+// ── xterm/addon stub — a WebglAddon is created anew on every attach, so creation list · dispose · onContextLoss and the shared call log (order) live in a hoisted holder. ──
 const order = vi.hoisted(() => ({ log: [] as string[] }))
 const webglState = vi.hoisted(() => ({
   instances: [] as Array<{ dispose: ReturnType<typeof vi.fn>; onContextLoss: ReturnType<typeof vi.fn> }>,
@@ -135,8 +120,7 @@ const captured = vi.hoisted(() => ({
   onChunk: null as ((c: OutputChunk) => void) | null,
   unsubscribe: null as ReturnType<typeof vi.fn> | null,
 }))
-// Connection state surface — holds subscribers the same as the real one and notifies them on transitions (including one notification on registration).
-//   The test must be able to drive transitions to reproduce the "connection-only" absence (the agent is still alive in the registry).
+// Connection state surface — real-like subscribers (one notification on registration); the test drives transitions to reproduce the connection-only absence (agent still alive in the registry).
 const conn = vi.hoisted(() => ({
   state: 'connected' as 'connected' | 'reconnecting' | 'down',
   cbs: new Set<(s: string) => void>(),
@@ -156,7 +140,6 @@ vi.mock('../../api/clientFactory', () => ({
     get connectionState() {
       return conn.state
     },
-    // The slot reads it to decide the absent curtain (one notification on registration + returns a disposer).
     onConnectionStateChange: (cb: (s: string) => void) => {
       conn.cbs.add(cb)
       cb(conn.state)
@@ -166,8 +149,7 @@ vi.mock('../../api/clientFactory', () => ({
   getAgentClient: vi.fn(),
 }))
 
-// ── agentStore stub — the slot queries useAgentStore(s => s.agents) for the exit decision. Empty list = alive. ──
-// agentsLoaded=false by default = authoritative registry not received → an empty list is not mistaken for absent (ADR-0148 guard).
+// ── agentStore stub — empty list = alive; agentsLoaded=false (default) = registry not received, so an empty list is not mistaken for absent (ADR-0148 guard). ──
 const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[], agentsLoaded: false }))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
@@ -187,12 +169,8 @@ async function flushSubscribe(): Promise<void> {
 }
 
 /**
- * Plants a WebGL canvas inside the container so TerminalSlot grabs the GL context at attach time, and exposes its
- * getContext/loseContext as spies. A stand-in for the canvas a real WebglAddon appends — TerminalSlot gets the context by scanning the DOM canvas,
- * not the addon (version-robust path), so this stand-in reproduces that path.
- *
- * ★Call timing★: the context capture happens in attachWebgl (= the visible transition), so this canvas must be planted
- *   *before* fireVisibility(true) to be captured. (Structurally, returning with the captured context even if containerRef is null after unmount is Fix 1.)
+ * Plants a WebGL canvas in the container so TerminalSlot grabs the GL context at attach time; exposes getContext/loseContext as spies. TerminalSlot gets the context by scanning the DOM canvas, not the addon (version-robust), so this stand-in reproduces that path.
+ * ★Call before fireVisibility(true)★: the capture happens in attachWebgl (the visible transition). (Returning with the captured context even if containerRef is null after unmount is Fix 1.)
  */
 function installWebglCanvas(): { loseContext: ReturnType<typeof vi.fn> } {
   const loseContext = vi.fn(() => {
@@ -200,11 +178,8 @@ function installWebglCanvas(): { loseContext: ReturnType<typeof vi.fn> } {
   })
   const gl = { getExtension: vi.fn((name: string) => (name === 'WEBGL_lose_context' ? { loseContext } : null)) }
   const canvas = document.createElement('canvas')
-  // Override so getContext('webgl2') returns our stand-in gl (jsdom returns null).
   canvas.getContext = vi.fn((type: string) => (type === 'webgl2' ? gl : null)) as unknown as typeof canvas.getContext
-  // The container is TerminalSlot's containerRef div = a child div (a leaf with no children) inside the outer (padding) div.
-  //   A real WebglAddon appends the canvas to this div, so the stand-in plants it in exactly the same place —
-  //   attachWebgl scans for canvases only inside containerRef.current, so if the place is wrong the context cannot be grabbed.
+  // The container is TerminalSlot's containerRef div (a childless leaf inside the outer padding div); attachWebgl scans only containerRef.current, so plant the canvas in exactly that place.
   const outer = document.querySelector('div[style*="padding"]')
   const container = outer?.querySelector('div')
   if (!container) throw new Error('containerRef div not found')
@@ -238,8 +213,8 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
-  it('마운트만으론 WebGL 을 만들지 않는다 — 첫 "보임" 콜백 전까지 좌석 미점유(초기-숨김 안전)', async () => {
+describe('TerminalSlot — WebGL seat visibility coupling (ADR-0056)', () => {
+  it('mounting alone does not create WebGL — the seat is unoccupied until the first "visible" callback (initial-hidden safe)', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
@@ -247,7 +222,7 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     expect(ioState.instances.length).toBeGreaterThan(0)
   })
 
-  it('보임 전이 → WebglAddon 생성 + loadAddon + fit() + refresh()', async () => {
+  it('visible transition → WebglAddon created + loadAddon + fit() + refresh()', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
@@ -259,11 +234,10 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     expect(termState.refresh).toHaveBeenCalledWith(0, 23) // rows(24) - 1
   })
 
-  it('숨김 전이 → loseContext() 를 먼저, addon.dispose() 를 다음 순서로 호출 + 새 addon 미생성 + fit() 미호출', async () => {
+  it('hidden transition → loseContext() first, then addon.dispose() in that order + no new addon + fit() not called', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
-    // Capture is at attach time → the canvas must be planted *before* it becomes visible for the context to be grabbed.
     const { loseContext } = installWebglCanvas()
     fireVisibility(true)
     expect(webglState.instances).toHaveLength(1)
@@ -277,11 +251,10 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     expect(loseContext).toHaveBeenCalled()
     expect(order.log).toEqual(['loseContext', 'dispose'])
     expect(webglState.instances).toHaveLength(1)
-    // It cannot be measured while hidden, so fit() is not called (prevents garbage dimensions).
     expect(fitState.fit).not.toHaveBeenCalled()
   })
 
-  it('가시성 토글이 Terminal 을 dispose 하거나 출력 구독을 끊지 않는다(언마운트에서만)', async () => {
+  it('a visibility toggle does not dispose the Terminal or cut the output subscription (only on unmount)', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
     expect(captured.unsubscribe).toBeTruthy()
@@ -295,25 +268,23 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     expect(captured.unsubscribe).not.toHaveBeenCalled()
   })
 
-  it('보임 → 숨김 → 보임 재부착 → 두 번째 WebglAddon 이 새로 생성된다(좌석 재획득)', async () => {
+  it('visible → hidden → visible re-attach → a second WebglAddon is newly created (seat re-acquired)', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
     installWebglCanvas()
     fireVisibility(true)
     fireVisibility(false)
-    // After hiding the addon ref is empty, so a new one is made at the next visible.
     fireVisibility(true)
 
     expect(webglState.instances).toHaveLength(2)
   })
 
-  // ── Fix 1 (HIGH): return the seat on unmount too ──────────────────────────────────────────
-  it('언마운트 → 잡아둔 GL 컨텍스트로 loseContext 호출(containerRef 가 null 이 돼도 반납된다)', async () => {
+  // ── Fix 1: return the seat on unmount too ──
+  it('unmount → calls loseContext on the held GL context (it is returned even if containerRef becomes null)', async () => {
     const { unmount } = render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
-    // Plant the canvas before visible to capture at attach time → even if containerRef is null at unmount, return with this context.
     const { loseContext } = installWebglCanvas()
     fireVisibility(true)
     expect(webglState.instances).toHaveLength(1)
@@ -327,13 +298,12 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     expect(termState.dispose).toHaveBeenCalled()
   })
 
-  // ── Fix 2 (HIGH): loadAddon throw → dispose the partially created addon + ref null + no duplicate attach ──
-  it('보임 시 loadAddon 이 throw → 생성된 addon 을 catch 에서 dispose, ref 는 비고, 다음 보임에서 새 addon 1개만 부착', async () => {
+  // ── Fix 2: loadAddon throw → dispose the partial addon + ref null + no duplicate attach ──
+  it('if loadAddon throws on visible → the created addon is disposed in catch, the ref is empty, and on the next visible only 1 new addon is attached', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
     installWebglCanvas()
-    // Make loadAddon throw at the first visible (reproduces the partial-creation path).
     termState.loadAddon.mockImplementationOnce(() => {
       throw new Error('loadAddon boom')
     })
@@ -343,15 +313,14 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     expect(webglState.instances).toHaveLength(1)
     expect(webglState.instances[0].dispose).toHaveBeenCalled()
 
-    // At the next visible (normal loadAddon) exactly one new addon attaches — if the earlier failed one had stayed in the ref, the guard at the start of attach
-    //   (webglAddonRef.current) would keep a new one from attaching. So the second one attaching = the ref was empty.
+    // The second attach proves the ref was empty — a failed addon left in webglAddonRef.current would trip the attach guard.
     fireVisibility(true)
     expect(webglState.instances).toHaveLength(2)
     expect(termState.loadAddon).toHaveBeenLastCalledWith(webglState.instances[1])
   })
 
-  // ── Fix 3 (MEDIUM): RO fires while hidden → fit()/resizePty skipped ─────────────────────
-  it('ResizeObserver 가 0 크기(숨김)에서 발화 → fit() 과 resizePty 를 호출하지 않는다', async () => {
+  // ── Fix 3: RO fires while hidden → fit()/resizePty skipped ──
+  it('ResizeObserver fires at 0 size (hidden) → does not call fit() and resizePty', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
@@ -368,18 +337,12 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
 })
 
 // ★ADR-0148: absent = found in terminal state ∪ unresolved even after the registry is received★
-//
-// The real outcome of a kill is that the reaper collects the session and **removes it from the registry**. Deciding by status alone
-// releases the absent flag at that moment, so input goes out to a dead agent (the refusal is quietly swallowed and seen only as no response)
-// and the absent curtain vanishes too.
-//
-// ★The curtain is shared by three slots and has no text (ADR-0148 decision 4, user decision 2026-08-20)★ — so the presence decision is made by
-// a shared marker, not by text.
+// A kill is collected by the reaper and **removed from the registry**; deciding by status alone would release the absent flag then, sending input to a dead agent (refusal swallowed, seen only as no response) and dropping the curtain.
+// ★The curtain is shared by three slots and has no text (ADR-0148 decision 4)★ — presence is decided by a shared marker, not text.
 function veil(): HTMLElement | null {
   return document.querySelector('[data-slot-dead="1"]')
 }
 
-/** Connection state transition (same shape as the path where the real ProtocolClient notifies all subscribers). */
 function setConnection(state: 'connected' | 'reconnecting' | 'down'): void {
   act(() => {
     conn.state = state
@@ -387,8 +350,8 @@ function setConnection(state: 'connected' | 'reconnecting' | 'down'): void {
   })
 }
 
-describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
-  it('명부 수신 후 해석 안 되는 에이전트면 입력을 막고 부재 막을 유지한다', async () => {
+describe('TerminalSlot — agent absence verdict (ADR-0148)', () => {
+  it('an agent that cannot be resolved after the roster is received blocks input and keeps the absence veil', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     agentStoreState.agents = []
     agentStoreState.agentsLoaded = true
@@ -402,9 +365,8 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     expect(agentClient.writeStdin).not.toHaveBeenCalled()
   })
 
-  // ★Actually carry the live → absent transition★: rendering only in the never-there state hooks the subscription just once, so
-  //   "does collection call a resubscribe" cannot be measured. Mount alive, consume the subscription · reset, then reproduce the collection.
-  it('마운트된 뒤 수거되면 입력이 막히고, 재구독·reset 이 다시 돌지 않는다', async () => {
+  // ★Carry a real live → absent transition★: rendering only the never-there state hooks the subscription once, so "does collection resubscribe" cannot be measured. Mount alive, consume subscription · reset, then reproduce the collection.
+  it('if reaped after mounting, input is blocked and resubscribe · reset do not run again', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 2 }]
     agentStoreState.agentsLoaded = true
@@ -415,7 +377,6 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     const subCalls = (agentClient.subscribeOutput as ReturnType<typeof vi.fn>).mock.calls.length
     const resetCalls = termState.reset.mock.calls.length
 
-    // Collection = gone from the registry. The props the parent passes (viewId·agentId) are unchanged.
     agentStoreState.agents = []
     rerender(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
@@ -429,11 +390,8 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     expect(termState.reset.mock.calls.length).toBe(resetCalls)
   })
 
-  // ★Every condition for raising the curtain is a condition for blocking input (ADR-0148 decision 1 / ADR-0149 decision 4)★: the curtain is
-  //   pointer-events-none, so an xterm that kept focus keeps eating keys even with the curtain up. Blocking on exit alone sends input
-  //   from a disconnected slot behind a screen that says "없다" (it is gone), and that failure is quietly swallowed and seen by the user only as
-  //   no response. Here the agent is **kept alive** in the registry and only the connection is cut, to measure that branch.
-  it('연결이 끊겨 막이 뜬 동안은 에이전트가 살아 있어도 입력이 나가지 않는다', async () => {
+  // ★Every condition for raising the curtain is a condition for blocking input (ADR-0148 decision 1 / ADR-0149 decision 4)★: the curtain is pointer-events-none, so an xterm that kept focus keeps eating keys behind it, and the failure is swallowed (seen only as no response). Here the agent stays alive and only the connection is cut.
+  it('while the veil is up due to a dropped connection, input does not go out even if the agent is alive', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 0 }]
     agentStoreState.agentsLoaded = true
@@ -459,7 +417,7 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     expect(agentClient.writeStdin).toHaveBeenCalledTimes(1)
   })
 
-  it('명부를 아직 못 받은 구간은 부재로 보지 않는다 — 입력이 그대로 나간다', async () => {
+  it('the span where the roster is not yet received is not seen as absent — input goes out as is', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     agentStoreState.agents = []
     agentStoreState.agentsLoaded = false
@@ -474,11 +432,9 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
   })
 })
 
-describe('TerminalSlot — 커서 기본값', () => {
-  // User decision 2026-09-25 — the cursor becomes a blinking white bar and the thickness is left as it is.
-  // The inactive cursor is also a bar to fit that choice — the xterm default 'outline' draws an entire empty box
-  //   over the whole cell in an unfocused slot.
-  it('흰 막대·깜빡임 커서로 만들고 비활성도 막대, 굵기는 xterm 기본값을 쓴다', async () => {
+describe('TerminalSlot — cursor default', () => {
+  // The cursor is a blinking white bar (thickness left as is); the inactive cursor is also a bar, since xterm's default 'outline' draws an empty box over the whole cell in an unfocused slot.
+  it('built with a white bar · blinking cursor, inactive is also a bar, thickness uses the xterm default', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 

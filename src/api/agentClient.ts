@@ -1,10 +1,7 @@
-// AgentClient — 프론트가 의존하는 단일 제어 표면(S12, daemon-design §3-a).
+// AgentClient — the single control surface the frontend depends on (daemon-design §3-a).
 //
-// 컴포넌트·스토어는 invoke/Channel/WS 를 직접 부르지 않고 이 인터페이스만 의존한다.
-// 단일 구현 ProtocolClient(프로토콜 의미론 1벌) + carrier(TauriTransport, ADR-0020) —
-// embedded/InProc 표면은 제거됐다(ADR-0029: daemon-only).
-// transport(Tauri Channel / WS binary frame)와 base64/디코딩은 transport 내부에 숨긴다 —
-// 인터페이스는 "디코드된 바이트 청크"만 노출(§3-a 손발/두뇌 분리: 프론트=순수 I/O).
+// Components and stores do not call invoke/Channel/WS directly. Single implementation: ProtocolClient (protocol semantics) + a carrier (TauriTransport, ADR-0020); daemon-only (ADR-0029).
+// Transport and base64/decoding stay inside the transport — the interface exposes only decoded byte chunks.
 
 import type { QueuedInputRow } from '../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
 import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
@@ -20,11 +17,10 @@ import type {
 } from './types'
 
 /**
- * 대기 입력 목록 조회 답(ADR-0231) — 버스 `agent.listQueuedInputs` 의 답과 같은 모양·낱말이다(두 표면이 같은
- * 동사). `inputs` 는 결말 전 항목만, 든 순서(가장 오래된 것이 앞). ★낱말 칸(`state` · `cancel.answer`)은
- * 문자열이다★ — 더 새 데몬의 낱말이 올 수 있으니 모르는 값은 그 행만 건너뛴다.
- * `as_of_seq` = 행이 환원한 마지막 목록 사건의 seq(`null` = 없다) — 재부착 대조가 라이브 사건과 맞추는 값이고
- * `epoch` 화신 안에서만 견준다. `stopped_after_error` = 그 화신이 오류 뒤 멈춤 중(우편이 멈춰 있다).
+ * Answer of the queued input list query (ADR-0231) — same shape and words as the bus `agent.listQueuedInputs`. `inputs` = entries before their outcome, oldest first.
+ * Word fields (`state` · `cancel.answer`) are strings — a newer daemon's words may come; an unknown value skips only that row.
+ * `as_of_seq` = seq of the last list event the row reduced (`null` = none), matched against live events by the re-attach check and compared only within the `epoch` incarnation.
+ * `stopped_after_error` = that incarnation is stopped after an error (mail is stopped).
  */
 export interface QueuedInputListing {
   inputs: QueuedInputRow[]
@@ -34,9 +30,8 @@ export interface QueuedInputListing {
 }
 
 /**
- * 입력 임대 거절 문구 — 데몬 `connection_core.rs` 의 `INPUT_LOCKED_REFUSAL` 과 **바이트 같다**(시험이 잰다).
- * ★`CODE:` 접두가 없다★(`WriteStdin` 거절과 같은 문구라서) — 그래서 이 문구 자체로 알아본다. 버스 쪽 같은
- * 거절의 코드는 `CONFLICT` 다.
+ * Input lease refusal text — **byte-identical** to `INPUT_LOCKED_REFUSAL` in the daemon `connection_core.rs` (a test measures it).
+ * No `CODE:` prefix (same text as the `WriteStdin` refusal), so it is recognized by the text itself; the bus-side code of the same refusal is `CONFLICT`.
  */
 // ADR-0231
 export const INPUT_LOCKED_REFUSAL = 'input locked by another viewer; acquire first'
@@ -44,171 +39,127 @@ export const INPUT_LOCKED_REFUSAL = 'input locked by another viewer; acquire fir
 export type ConnectionState = 'connected' | 'reconnecting' | 'down'
 
 /**
- * 셸 사용량 캐시 한 벌(TRD S21 usage-limit-slot §1-8) — 셸이 지금 소켓에서 받은 회사별 최고 revision 한 장씩,
- * 받은 뒤 흐른 만큼 상대 시간 칸을 옮긴 것.
- * `socketEpoch` = 그 소켓의 표식(ADR-0195 — 셸 프로세스 안에서 되감기지 않아 대소가 곧 소켓 순서다). ★`0` = 셸에
- * 소켓이 없다★ — 그때 `snapshots` 는 비고, 받는 쪽은 들고 있는 표식을 바꾸지 않는다. 화신 표식(ADR-0163)과 달리
- * 대소 비교가 성립한다.
+ * One copy of the shell usage cache (TRD S21 usage-limit-slot §1-8) — one highest revision per vendor received on the current socket, relative time fields moved by the time elapsed since receipt.
+ * `socketEpoch` = that socket's marker (ADR-0195 — does not rewind within the shell process, so magnitude is socket order; unlike the incarnation marker, ADR-0163).
+ * `0` = the shell has no socket: `snapshots` is empty and the receiver keeps the marker it holds.
  */
 export interface UsageSnapshotPull {
   socketEpoch: number
   snapshots: UsageLimitSnapshot[]
 }
 
-/** 디코드된 출력 청크 — transport 무관(base64/binary frame 은 클라 내부에서 이미 풀림). */
+/** A decoded output chunk — transport-independent (base64/binary frames are already unpacked inside the client). */
 export interface OutputChunk {
-  /** agent OutputCore 발급 seq(단조 증가). */
+  /** seq issued by the agent OutputCore (monotonically increasing). */
   seq: number
   /**
-   * frame 종류(wsFrame.ts): 0=터미널 raw 바이트(xterm write) / 1=StructuredEvent JSON(ADR-0045 tag1).
-   * 별도 콜백 대신 tag 필드로 통합한 이유: seq dedup·epoch 가드·pre-subscribe
-   * 버퍼가 tag 를 몰라도 되게(한 seq 공간·한 배달 경로) — 콜백 이중화는 그 규율을 두 벌로 쪼갠다.
+   * frame kind (wsFrame.ts): 0=terminal raw bytes (xterm write) / 1=StructuredEvent JSON (ADR-0045 tag1).
+   * A tag field, not a separate callback: seq dedup, the epoch guard and the pre-subscribe buffer then need not know the tag (one seq space, one delivery path).
    */
   tag: number
-  /** raw payload — tag0 이면 터미널 바이트, tag1 이면 StructuredEvent JSON UTF-8 바이트. */
+  /** raw payload — terminal bytes for tag0, StructuredEvent JSON UTF-8 bytes for tag1. */
   bytes: Uint8Array
 }
 
-/** 구독 해제 핸들 — 반드시 호출(unmount/재구독 시). 내부에서 transport 정리까지 수행. */
+/** Unsubscribe handle — must be called (on unmount/resubscribe). Internally it also cleans up the transport. */
 export interface OutputSubscription {
   unsubscribe: () => void
 }
 
 /**
- * 뷰 출력 국면 — `onState` 통지값이자 [`ViewOutputState.phase`] 의 값 집합(둘은 같은 어휘다).
+ * View output phase — the `onState` notification value and the value set of [`ViewOutputState.phase`].
  *
- * - `detached` — **붙을 에이전트가 없다**. 내는 자리는 둘뿐이다: 연결이 끊겼거나, 알려진 명부에 그 id 가
- *   없거나. 요청을 내지 않고 기다린다. 화면에 그려 둔 내용은 **지우지 않는다**("이 슬롯이 이 에이전트를
- *   본다"는 사용자 의도는 연결보다 오래 산다).
- *   ★"명부 자체를 아직 모른다" 는 이 값이 아니다★ — 부팅·웹뷰 리로드·명부 조회 실패가 그 구간이고,
- *   거기선 통지 없이 그냥 요청을 낸다(모름 ≠ 부재 — 합치면 조회 한 번 실패에 출력이 통째로 막힌다).
- *   그래서 **연결이 살아 있는 채로 이 값을 받았다면 명부가 "그 에이전트는 없다" 고 말한 것**이다.
- * - `buffering` — 축적 중(replay 경계 대기). ★비우면 안 된다★ — 무슨 이력이 올지 아직 모르는 구간이다.
- *   같은 화신이면 겹치는 앞부분을 dedup 이 흡수하고, 다른 화신이면 비우기는 `onReset` 이 따로 낸다.
- * - `live` — 직행 배달.
- * - `error` — 재요청 사다리 소진. `detached` 와 마찬가지로 **아무것도 오지 않는 상태**라, 소비자는 이걸
- *   화면에 드러내야 한다 — 안 그러면 명부에도 있고 연결도 붙은 슬롯이 신호 없는 빈 판으로 남는다.
- *   화면 내용은 여기서도 지우지 않는다(비우기는 `onReset` 단독).
+ * - `detached` — **no agent to attach to**: the connection dropped, or the known roster does not have that id. Waits without sending requests; drawn content is **not erased**
+ *   (the intent "this slot watches this agent" outlives the connection). "The roster itself is not known yet" (boot · webview reload · roster query failure) is not this value —
+ *   there it just sends requests without a notification (unknown ≠ absent; merging them blocks output on one failed query).
+ *   So receiving this while connected means the roster said that agent does not exist.
+ * - `buffering` — accumulating (waiting for the replay boundary). Must not clear: it is not yet known what history will come. The same incarnation's overlap is absorbed by dedup;
+ *   for a different incarnation the clear is issued separately by `onReset`.
+ * - `live` — direct delivery.
+ * - `error` — the re-request ladder is exhausted. Like `detached`, **nothing comes**, so the consumer must show it on screen — otherwise the slot stays a blank board with no signal.
+ *   The screen content is not erased here either (clearing is `onReset` alone).
  */
 export type ViewPhase = 'detached' | 'buffering' | 'live' | 'error'
 
-/**
- * `'live'` 통지에만 딸려 오는 부가 사실(ADR-0226). 다른 국면엔 오지 않고, `'live'` 에서도 없으면
- * `continuesConversation: false` 로 읽는다.
- */
+/** An extra fact that comes only with the `'live'` notification (ADR-0226); when absent it reads as `continuesConversation: false`. */
 export interface ReplayLiveInfo {
   /**
-   * 이 화신은 저장된 대화를 이어받으려고 떴다 — 이어받기가 **성공했다는 뜻이 아니다**. 참이어도 이력이
-   * 0건일 수 있다(이어받기가 실패했거나 이력이 늦게 온다). 옛 데몬·셸은 이 사실을 안 실어 늘 false 다.
+   * This incarnation was launched to resume a saved conversation — **not** that the resume succeeded (history may be 0 entries). Old daemons and shells do not carry it, so it is false.
    */
   continuesConversation: boolean
   /**
-   * 이 replay 를 채택한 화신의 표식(불투명 — 일치/불일치만 본다). ProtocolClient 는 늘 싣는다. 없으면 그 뷰는
-   * 대기 입력 재부착 대조를 하지 않는다(답이 어느 화신 것인지 가를 수 없다 — ADR-0231).
+   * Marker of the incarnation that adopted this replay (opaque — match/mismatch only). ProtocolClient always carries it; without it the view skips the queued input re-attach check (ADR-0231).
    */
   epoch?: number
 }
 
 /**
- * 뷰 비우기 신호 — **다른 화신의 이력이 지금부터 배달된다**.
+ * View clear signal — **another incarnation's history is delivered from now on**.
  *
- * 받는 쪽 의무: 그려 둔 것을 지우고 **자기 seq 가드도 함께** 되돌린다. 하나만 하면 겹쳐 그리거나(가드만
- * 되돌림) 새 프레임이 전부 탈락한다(화면만 지움 — 새 화신은 번호를 0 부터 다시 매긴다).
+ * Receiver's duty: erase what is drawn and reset **its own seq guard too** — only the guard reset draws over, only the screen erased drops every new frame (a new incarnation numbers from 0 again).
  *
- * ★요청이 아니라 **도착** 시점에 온다★ — 바로 뒤에 그 이력이 같은 틱으로 배달되므로 빈 화면이 비치는
- * 구간이 없다. 뒤집어 말하면 replay 가 거절·타임아웃되면 이 신호는 **오지 않고** 앞 화신의 화면이
- * 그대로 남는다(그게 의도다 — 데몬 재기동 직후가 정확히 그 경우다).
+ * It comes at **arrival** time, not request time: the history follows on the same tick, so no empty screen shows. When the replay is refused or times out it does **not** come and the
+ * previous incarnation's screen stays (intended — right after a daemon restart).
  */
 export type ViewResetFn = () => void
 
 /**
- * 뷰별 replay 상태 스냅샷(§5 LLM 제어 표면 — ADR-0046).
- * error(재요청 사다리 소진)·detached(붙을 에이전트 부재) 등을 LLM/자동화가 타입으로 발견·재구동 판단에
- * 쓴다. 최소 노출.
+ * Per-view replay state snapshot (§5 LLM control surface — ADR-0046): lets the LLM/automation find error (ladder exhausted), detached etc. by type and decide on restarting. Minimal exposure.
  */
 export interface ViewOutputState {
   agentId: string
   phase: ViewPhase
-  /** buffering 중 축적 프레임 수(디버그·관측). */
+  /** Number of frames accumulated while buffering (debug · observation). */
   buffered: number
-  /**
-   * live 에서 구멍 뒤에 붙들고 있는 프레임 수(ADR-0231). 0 이 아닌 채 머물면 그 뷰는 아직 안 온 seq 를
-   * 기다리며 뒤를 그리지 않는 중이다 — 기다림에 시한이 없으므로 이 값이 멈춤을 보는 유일한 창이다.
-   */
+  /** Frames held after a gap in live (ADR-0231). Non-zero = the view waits for a seq that has not come and draws nothing after it; the wait has no time limit, so this is the only window onto the stall. */
   held: number
-  /** 재요청 사다리 시도 횟수(0=아직 재요청 안 함). */
+  /** Number of re-request ladder attempts (0 = no re-request yet). */
   attempts: number
 }
 
-/**
- * 에이전트 제어/구독 단일 표면. 사람 UI 클릭과 (미래) LLM 호출이 같은 진입점을 거친다(§5).
- * 모든 side-effect 메서드는 idempotency·재시도 정책을 구현체가 책임진다.
- */
+/** The single surface for agent control/subscription: human UI clicks and (future) LLM calls share one entry point (§5). The implementation owns idempotency and retry policy of every side-effect method. */
 export interface AgentClient {
-  // ── 연결 상태 ──────────────────────────────────────────────────────────────
+  // ── connection state ──────────────────────────────────────────────────────────────
   readonly connectionState: ConnectionState
-  /**
-   * The shell's connection band (TRD S21 trd-3-2-u5 §4-1) — `null` = none. The shell decides it; the frontend only
-   * renders it. A carrier without a shell never has one.
-   */
+  /** The shell's connection band (TRD S21 trd-3-2-u5 §4-1) — `null` = none. The shell decides it; the frontend only renders it. A carrier without a shell never has one. */
   readonly connectionBand: Band | null
   /**
-   * The cause text of one failed start attempt (a human-readable sentence, e.g. the unwritable data folder of
-   * ADR-0134), or null. It is only a cause shown under band ① (TRD S21 trd-3-2-u5 R14): it never raises a band.
-   *
-   * ★Why it sits on the state surface (ADR-0134)★: a daemon that cannot start because its data folder is not writable
-   * is otherwise indistinguishable from a causeless timeout. The cause rides the existing connection state surface so
-   * the renderer gets it through the same subscription (§5 LLM-first control — one control surface).
-   *
+   * Cause text of one failed start attempt (human-readable, e.g. the unwritable data folder of ADR-0134), or null. Only a cause shown under band ① (TRD S21 trd-3-2-u5 R14): it never raises a band.
+   * It rides the connection state surface because a daemon that cannot start (data folder not writable) is otherwise indistinguishable from a causeless timeout (ADR-0134; §5 one control surface).
    * Cleared on `connected`, when band ② (`version`) or band ① `refused` arrives, and when a new start attempt begins.
    */
   readonly connectionError: string | null
   /**
-   * Subscribes to state changes; returns the release function.
-   * ★Also notified when [`connectionBand`] or [`connectionError`] changes★ — with the state word unchanged (e.g. still
-   * 'down' with only the cause found), the subscriber must still be able to redraw.
+   * Subscribes to state changes; returns the release function. Also notified when [`connectionBand`] or [`connectionError`] changes with the state word unchanged, so the subscriber can redraw.
    */
   onConnectionStateChange(cb: (state: ConnectionState) => void): () => void
   /**
-   * Records the cause of a failed start (null = clear).
+   * Records the cause of a failed start (null = clear). Ignored while connected, under band ② and under band ① `refused` (TRD S21 trd-3-2-u5 R21): those arrivals are the automatic clears, so a cause written
+   * while one holds would never be cleared and would surface later as a stale cause of an unrelated ① (e.g. after a tray stop). Public on `window.__ENGRAM_AGENT__`, so the LLM and cdp reach it too.
    *
-   * ★Ignored while connected, under band ② and under band ① `refused`★ (TRD S21 trd-3-2-u5 R21): the automatic clears
-   * are the arrivals of those states, so a cause written while one already holds would never be cleared and would
-   * surface later as a stale cause of an unrelated ① (e.g. after a tray stop). This surface is public on
-   * `window.__ENGRAM_AGENT__`, so the LLM and cdp reach it too.
-   *
-   * ★Exactly one writer★ — `DaemonControl.start()`. Boot bootstrap, `window.__ENGRAM_DAEMON__.start()`, the band's
-   * 「다시 연결」 and the LLM `connection.reconnect` all go through it.
-   *
-   * ★Paths **not** covered (known gaps — do not describe them as wider)★:
-   * - `AgentClient.connect()` — a public surface that goes as far as a spawn but does not pass through
-   *   `DaemonControl`. If the LLM or cdp calls it directly, the failure reason does not reach the screen.
-   * - The native tray's "start daemon" — Rust calls `discovery::ensure_daemon` directly, so it never
-   *   passes through the frontend (the tray shows it with its own icon state).
+   * Exactly one writer — `DaemonControl.start()` (boot bootstrap, `window.__ENGRAM_DAEMON__.start()`, the band's 「Reconnect」 and the LLM `connection.reconnect` all go through it).
+   * Known gaps — paths not covered:
+   * - `AgentClient.connect()` — goes as far as a spawn but not through `DaemonControl`; a direct LLM/cdp call does not surface the failure reason.
+   * - The native tray's "start daemon" — Rust calls `discovery::ensure_daemon` directly (the tray shows it with its own icon state).
    */
   reportConnectionError(reason: string | null): void
 
   /**
-   * **명시 연결(spawn 허용)** — ADR-0021 §1. 부팅 1회 / 사용자 daemon_start 가
-   * 부른다(DaemonControl.start). 데몬이 없으면 여기서만 spawn 한다. 명령 경로(ensureReady)는
-   * attach-only 라 spawn 못 하므로, 데몬을 띄우는 유일한 의도적 진입점이다.
-   * 재연결로 멈췄던 상태(closedByUser/attempt)를 리셋.
+   * **Explicit connection (spawn allowed)** — ADR-0021 §1. Called once at boot / by the user's daemon_start (DaemonControl.start). The only place the daemon is spawned when absent
+   * (the command path `ensureReady` is attach-only). Resets the state stopped by reconnecting (closedByUser/attempt).
    */
   connect(): Promise<void>
   /**
-   * **Explicit disconnect (stops reconnecting, ADR-0021 note3)** —
-   * closedByUser=true settles on 'down' at once, so the transport does not keep retrying a daemon that is gone
-   * (the shell link retries without limit — ADR-0346). The ProtocolClient itself (subscription router, callback
-   * registry) stays, so a later connect revives it (unlike close).
+   * **Explicit disconnect (stops reconnecting, ADR-0021 note3)** — closedByUser=true settles on 'down' at once so the transport does not keep retrying a gone daemon (the shell link retries
+   * without limit — ADR-0346). ProtocolClient itself (subscription router, callback registry) stays, so a later connect revives it (unlike close).
    */
   disconnect(): void
 
-  // ── 출력 구독 ──────────────────────────────────────────────────────────────
+  // ── output subscription ──────────────────────────────────────────────────────────────
   /**
-   * 뷰(slot) 단위 출력 구독(ADR-0046). viewId = 슬롯 id — 같은 agentId 를 N 뷰가 봐도 각자 독립 진도
-   * (버그 B 구조 해소). onChunk 로 디코드된 바이트 전달. onState(옵션)는 국면 통지([`ViewPhase`]) —
-   * `'live'` 에만 둘째 인자 [`ReplayLiveInfo`] 가 온다. onReset(옵션)은 비우기 신호([`ViewResetFn`]) —
-   * 값별 소비자 의무는 각 타입에 있다. 반환 핸들의 unsubscribe 로 해제.
+   * Per-view (slot) output subscription (ADR-0046). viewId = slot id — N views on the same agentId each have independent progress. Decoded bytes go to onChunk.
+   * onState (optional) = phase notification ([`ViewPhase`]), with [`ReplayLiveInfo`] as the second argument only for `'live'`. onReset (optional) = clear signal ([`ViewResetFn`]).
+   * Released with the returned handle's unsubscribe.
    */
   subscribeOutput(
     viewId: string,
@@ -218,55 +169,40 @@ export interface AgentClient {
     onReset?: ViewResetFn,
   ): Promise<OutputSubscription>
 
-  /**
-   * 뷰(slot)별 replay 상태 조회(§5 LLM 제어 표면 — ADR-0046). error 소진(재요청 3회 실패)·buffering
-   * 고착 등을 LLM/자동화가 관측·재구동 판단에 쓴다. 없는 viewId 면 null.
-   */
+  /** Per-view replay state query (§5 LLM control surface — ADR-0046), to observe error exhaustion (3 failed re-requests), stuck buffering etc. null for an unknown viewId. */
   getViewOutputState(viewId: string): ViewOutputState | null
 
-  // ── 상태/목록/복원 이벤트 ─────────────────────────────────────────────────────
-  /** 권위 있는 에이전트 목록 교체(존재/제거 판정 기준). */
+  // ── status/list/restore events ─────────────────────────────────────────────────────
+  /** Replaces the authoritative agent list (the basis for existence/removal decisions). */
   onAgentListUpdated(cb: (agents: AgentInfo[]) => void): () => void
-  /** 개별 status 갱신(목록 제거 안 함). */
+  /** Individual status update (does not remove from the list). */
   onStatusChanged(cb: (id: string, status: AgentStatus, epoch: number) => void): () => void
-  /** 부팅 복원 결과(S9). */
+  /** Boot restore result (S9). */
   onRestoreResult(cb: (report: RestoreReport) => void): () => void
-  /**
-   * 프로필 목록 라이브 갱신(깡통/예약 에이전트 — ADR-0018 후속, §5).
-   * 백엔드가 프로필 변경(create/delete/activate)을 broadcast 하면 store 미러를 갱신한다
-   * (AgentEvent::ProfileListUpdated 라우팅).
-   */
+  /** Live update of the profile list (create/delete/activate broadcast, AgentEvent::ProfileListUpdated routing); the store mirror is updated. */
   onProfileListUpdated(cb: (profiles: AgentProfile[]) => void): () => void
-  /**
-   * 프리셋 목록 라이브 갱신(ADR-0061 — 프로필판과 동형, §5). 백엔드가 프리셋 CRUD(create/delete)를
-   * broadcast 하면 store 미러를 갱신한다(AgentEvent::PresetListUpdated 라우팅).
-   */
+  /** Live update of the preset list (ADR-0061 — same shape as the profile version); the store mirror is updated (AgentEvent::PresetListUpdated routing). */
   onPresetListUpdated(cb: (presets: Preset[]) => void): () => void
   /**
-   * 사용량 스냅숏 방송(TRD S21 usage-limit-slot §1-8). 셸이 이 창을 대상으로 고른 것만 온다. `socketEpoch` =
-   * [`UsageSnapshotPull`] 의 그것 — 셸을 거치지 않는 직결 carrier 의 데몬 프레임에는 표식이 없어 `0` 으로 온다.
-   * 같은 회사의 옛 사본이 늦게 올 수 있다(pull 과 서로 순서를 보장하지 않는다) — 가르는 것은 받는 쪽이다.
+   * Usage snapshot broadcast (TRD S21 usage-limit-slot §1-8). Only the ones the shell picked for this window come. `socketEpoch` = that of [`UsageSnapshotPull`]; daemon frames of the direct carrier (no shell) carry none and come as `0`.
+   * An old copy of the same vendor can come late (no ordering guarantee vs the pull) — telling them apart is the receiver's job.
    */
   onUsageLimitsUpdated(cb: (snapshot: UsageLimitSnapshot, socketEpoch: number) => void): () => void
 
-  // ── 사용량 ────────────────────────────────────────────────────────────────
+  // ── usage ────────────────────────────────────────────────────────────────
   /**
-   * ⟳ — 그 회사의 사용량을 지금 다시 조회하게 한다. resolve = 데몬이 받았다(`Ack`)이지 값이 왔다가 아니다 — 값은
-   * [`onUsageLimitsUpdated`] 방송으로 온다. 진행 중인 조회와 겹친 요청은 데몬이 하나로 모으고, 거절(429) 기한 안엔
-   * 조회하지 않는다. 연결이 끊기면 reject.
+   * ⟳ — makes that vendor's usage be queried again now. resolve = the daemon received it (`Ack`), not that a value came (it comes via [`onUsageLimitsUpdated`]).
+   * The daemon merges overlapping requests into one and does not query within a refusal (429) deadline. Rejects when the connection drops.
    */
   refreshUsageLimits(vendor: AgentBackendKind): Promise<void>
   /**
-   * 셸 사용량 캐시를 당긴다(데몬 왕복 없음). ★방송 수신([`onUsageLimitsUpdated`])을 건 **뒤에** 부른다★ — 먼저
-   * 부르면 그 사이의 방송을 놓친다. 셸이 없는 carrier 에서는 늘 `{socketEpoch: 0, snapshots: []}`.
+   * Pulls the shell usage cache (no daemon round trip). Call it **after** setting up [`onUsageLimitsUpdated`] — calling first misses the broadcasts in between.
+   * On a carrier without a shell, always `{socketEpoch: 0, snapshots: []}`.
    */
   getUsageSnapshot(): Promise<UsageSnapshotPull>
 
-  // ── 명령 ──────────────────────────────────────────────────────────────────
-  /**
-   * ad-hoc 스폰 — 프로필을 미리 만들지 않고 cwd 와 백엔드만으로 띄운다(데몬이 프로필을 즉석 생성해
-   * 명부에 올린다). `backend` 는 **필수다** — 안 실으면 데몬이 거절한다(기본값 없음).
-   */
+  // ── commands ──────────────────────────────────────────────────────────────────
+  /** ad-hoc spawn — only cwd and backend, no profile beforehand (the daemon makes a profile on the spot and puts it on the roster). `backend` is **required** — without it the daemon refuses (no default). */
   spawnAgent(cwd: string, backend: AgentBackendKind): Promise<AgentInfo>
   killAgent(agentId: string): Promise<void>
   interruptAgent(agentId: string): Promise<void>
@@ -274,25 +210,20 @@ export interface AgentClient {
   resizePty(agentId: string, cols: number, rows: number): Promise<void>
   getAgents(): Promise<AgentInfo[]>
   getSnapshot(agentId: string): Promise<unknown[]>
-  /**
-   * 대기 입력 목록 조회(ADR-0231 — WS `ListQueuedInputs`). 입력 임대를 보지 않는다. 잠든 에이전트는
-   * `NOT_FOUND: …` 로 reject 된다.
-   */
+  /** Queued input list query (ADR-0231 — WS `ListQueuedInputs`). Does not look at the input lease. A sleeping agent rejects with `NOT_FOUND: …`. */
   listQueuedInputs(agentId: string): Promise<QueuedInputListing>
   /**
-   * 대기 입력 하나를 취소한다 — 화면 ✕ 와 같은 명령(WS `CancelQueuedInput`). resolve 값 = 결말 낱말
-   * (`requested` = 요청을 넘겼고 결말은 목록 사건으로 온다 · `cancelled` = 곧바로 취소됐다 · 더 새 데몬이면
-   * 모르는 낱말일 수 있다). reject = `NOT_FOUND: …`(모르는·이미 결말 난 id) · `INTERNAL: …` · 입력 임대
-   * 거절은 ★코드 접두 없는★ [`INPUT_LOCKED_REFUSAL`] 문구 그대로다(`WriteStdin` 과 같다).
+   * Cancels one queued input — same command as the on-screen ✕ (WS `CancelQueuedInput`). resolve = outcome word (`requested` = passed on, the outcome comes as a list event ·
+   * `cancelled` = cancelled right away · a newer daemon may send an unknown word). reject = `NOT_FOUND: …` (unknown or already settled id) · `INTERNAL: …` ·
+   * the input lease refusal is the [`INPUT_LOCKED_REFUSAL`] text as is, with no code prefix (same as `WriteStdin`).
    */
   cancelQueuedInput(agentId: string, inputId: string): Promise<string>
 
-  // ── 프로필 CRUD ────────────────────────────────────────────────────────────
+  // ── profile CRUD ────────────────────────────────────────────────────────────
   listProfiles(): Promise<AgentProfile[]>
   /**
-   * claude 프로필 생성. outputFormat 은 렌더 모드를 가른다(ADR-0044): 'Terminal'=PTY(xterm),
-   * 'StreamJson'=헤드리스 NDJSON(RichSlot). 기본 'Terminal'(기존 호출자 동작 불변 — wire 는
-   * `#[serde(default)]`). §5 제어 표면(cdp/console)이 이 인자로 json 에이전트를 스폰한다.
+   * claude profile creation. outputFormat picks the render mode (ADR-0044): 'Terminal'=PTY (xterm), 'StreamJson'=headless NDJSON (RichSlot). Default 'Terminal' (wire is `#[serde(default)]`).
+   * The §5 control surface (cdp/console) spawns json agents with this argument.
    */
   createClaudeProfile(
     name: string,
@@ -303,9 +234,7 @@ export interface AgentClient {
     outputFormat?: AgentOutputFormat,
   ): Promise<AgentProfile>
   /**
-   * codex 프로필 생성 — 형제 `createClaudeProfile` 과 같은 자리에 등록만 하고 스폰하지 않는다.
-   * outputFormat 은 codex 를 어느 모양으로 띄우나를 가른다: 'Terminal'=대화형 TUI,
-   * 'StreamJson'=상주 JSON 서버(codex app-server). 기본 'Terminal'(기존 호출자 동작 불변).
+   * codex profile creation — like `createClaudeProfile`, only registers, does not spawn. outputFormat: 'Terminal'=interactive TUI, 'StreamJson'=resident JSON server (codex app-server). Default 'Terminal'.
    */
   createCodexProfile(
     name: string,
@@ -319,36 +248,29 @@ export interface AgentClient {
   spawnProfile(agentId: string, resume: boolean): Promise<AgentInfo>
   setProfileAutoRestore(agentId: string, autoRestore: boolean): Promise<void>
   /**
-   * 프로필 표시명 override 설정/해제(ADR-0061 리치화 — 트리 rename, §5). name=문자열 → override 저장,
-   * null → 해제(cwd basename 파생 복귀). trim·빈문자열 거부·미변경 스킵은 호출부(UI)가 확정 직전 처리 —
-   * 여기엔 유효 값 또는 명시 null 만 온다. 백엔드 reply=Ack(void), 표시명 반영은 뒤이은 ProfileListUpdated
-   * broadcast(낙관 갱신 X). 없는 id 면 Error(setProfileAutoRestore 와 동형).
+   * Set/clear the profile display-name override (ADR-0061, §5): string → store, null → clear (back to the cwd basename). trim, empty-string refusal and unchanged-value skipping are the caller's (UI)
+   * job — only a valid value or explicit null comes here. Reply=Ack(void); the display name update comes with the next ProfileListUpdated broadcast (no optimistic update). Error for an unknown id.
    */
   renameProfile(agentId: string, name: string | null): Promise<void>
   /**
-   * 프로필 부모 재지정(ADR-0072 트리 계층, §5 LLM 제어 표면). childId 를 parentId 밑으로 이동
-   * (null → 루트로 승격). 1단 중첩만 — 백엔드가 cycle/self/2단/존재하지 않는 parent 를 거부(Error).
-   * renameProfile 과 동형 additive: reply=Ack(void), 계층 반영은 뒤이은 ProfileListUpdated broadcast
-   * (낙관 갱신 X). 사람 드래그와 LLM 호출이 같은 진입점(§5 손발/두뇌 분리 — 트리 구성은 두뇌가 쥐는 핸들).
+   * Re-parent a profile (ADR-0072, §5). Moves childId under parentId (null → root). One level only — the backend refuses cycle/self/2 levels/non-existent parent (Error).
+   * Reply=Ack(void); the hierarchy update comes with the next ProfileListUpdated broadcast (no optimistic update). Human drag and LLM calls share the entry point.
    */
   reparentProfile(childId: string, parentId: string | null): Promise<void>
 
-  // ── 프리셋 CRUD(ADR-0061 — cwd 북마크, 스폰 안 함) ─────────────────────────────
-  /** 저장된 프리셋 전체 조회. PresetList 전용 reply(request_id echo)로 회수. */
+  // ── preset CRUD (ADR-0061 — cwd bookmarks, no spawn) ─────────────────────────────
+  /** Queries all saved presets. Collected through the PresetList-only reply (request_id echo). */
   listPresets(): Promise<Preset[]>
   /**
-   * 프리셋 생성(cwd 북마크). ★이름은 넘기지 않는다★ — 백엔드는 {id,cwd}만 저장하고 표시명은 프론트가
-   * cwd basename 으로 파생한다(ADR-0061). 백엔드 reply=Ack(void) — 생성된 Preset 은 뒤이은
-   * PresetListUpdated broadcast 로 store 에 반영된다(프로필 CreateProfile 이 Created{profile} 를 돌려주는
-   * 것과 다름 — 프리셋은 broadcast 로만 목록에 들어온다).
+   * Preset creation (cwd bookmark). The name is not passed — the backend stores only {id,cwd}; the frontend derives the display name from the cwd basename (ADR-0061).
+   * Reply=Ack(void); the created Preset reaches the store only through the PresetListUpdated broadcast (unlike CreateProfile returning Created{profile}).
    */
   createPreset(cwd: string): Promise<void>
-  /** 프리셋 삭제(에이전트는 무관하게 산다 — ADR-0061). 없는 id 면 no-op(Ack). */
+  /** Preset deletion (agents live on regardless — ADR-0061). no-op (Ack) for an unknown id. */
   deletePreset(id: string): Promise<void>
   /**
-   * 프리셋 표시명 override 설정/해제(ADR-0061 리치화, §5). name=문자열 → override 저장, null → 해제
-   * (cwd basename 파생 복귀). trim·빈문자열 거부·미변경 스킵은 호출부(UI)가 확정 직전 처리. 백엔드
-   * reply=Ack(void), 표시명 반영은 뒤이은 PresetListUpdated broadcast(낙관 갱신 X). 없는 id 면 no-op(Ack).
+   * Set/clear the preset display-name override (ADR-0061, §5): string → store, null → clear. trim, empty-string refusal and unchanged-value skipping are the caller's (UI) job.
+   * Reply=Ack(void); the update comes with the next PresetListUpdated broadcast (no optimistic update). no-op (Ack) for an unknown id.
    */
   renamePreset(id: string, name: string | null): Promise<void>
 }

@@ -1,6 +1,6 @@
-// ADR-0055 / ADR-0011: agentClient(단일 제어 표면) 스폰 경로에 라우팅만 한다(새 상태 경로 0).
+// ADR-0055 / ADR-0011: only routes to the agentClient (single control surface) spawn path (zero new state paths).
 //
-// ★ADR-0064 슬롯 메뉴 기여 co-location★: 트리(agent_list) 콘텐츠 지식이 이 모듈에 응집(공통은 '*'이 소유).
+// ★ADR-0064 slot menu contribution co-location★: knowledge of the tree (agent_list) content is gathered in this module (the common part is owned by '*').
 
 import { open } from '@tauri-apps/plugin-dialog'
 
@@ -15,16 +15,16 @@ import { matchDeclaredSpelling } from './enumArg'
 import { register } from './registry'
 import { registerSlotMenu } from './slotMenu'
 
-// ★ADR-0078★: 렌더 모드(Terminal=xterm PTY / StreamJson=headless NDJSON→RichSlot)는 생성 시점에 고정하고
-//   이후 불변이다 — pane "에이전트 생성" 서브메뉴에서 모드를 골라 예약 프로필을 만든다(활성화-시점 override 는
-//   거부됨: 활성화 행 메뉴는 단일 "활성화" 유지). claude reserved(비활성) 프로필을 등록만 한다(스폰하지 않음).
+// ★ADR-0078★: the render mode (Terminal=xterm PTY / StreamJson=headless NDJSON→RichSlot) is fixed at creation time and
+//   immutable afterwards — the mode is picked in the pane "Create agent" submenu, which makes a reserved profile (an activation-time override
+//   was rejected: the activation row menu keeps a single "Activate"). Only registers a claude reserved (inactive) profile (does not spawn).
 async function createReserved(make: (cwd: string) => Promise<AgentProfile>) {
   const picked = await open({ directory: true, multiple: false, title: t('dialog.pickAgentCwd') })
   const cwd = typeof picked === 'string' ? picked : null
-  if (!cwd) return // 취소 — no-op
+  if (!cwd) return // cancelled — no-op
   const profile = await make(cwd)
-  // broadcast 는 유실 가능(ws 큐 포화, ws.rs:145)·구독이 레이아웃 초기화 이후(eventBus.ts)라, 생성 직후
-  // 명시 refetch 로 예약 노드 표시를 보장한다(activateReserved 의 .then(refreshProfiles) 와 동형
+  // broadcast can be lost (ws queue full, ws.rs:145) and the subscription comes after layout init (eventBus.ts), so right after creation
+  // an explicit refetch guarantees the reserved node shows (same shape as activateReserved's .then(refreshProfiles)
   // belt-and-suspenders).
   await refreshProfiles()
   return profile
@@ -38,56 +38,54 @@ async function createReservedCodexProfile(outputFormat: AgentOutputFormat) {
   return createReserved(cwd => agentClient.createCodexProfile(cwd, cwd, [], [], false, outputFormat))
 }
 
-// ★codex 생성 문 둘의 `humanOnly` 게이트는 2026-09-22 에 걷혔다★ — 그 게이트가 세워진 전제(「처음 보는
-//   폴더에서 codex 가 신뢰 확인 모달을 띄우고 사람이 아닌 호출자는 못 지난다」)가 실측으로 뒤집혔기
-//   때문이다: codex 의 `app-server` 경로는 한 번도 본 적 없는 폴더에 성공으로 답하고 그 폴더를 스스로
-//   신뢰 목록에 적는다. 폴더 신뢰 모달은 TUI 전용 장치였다.
-// ★사유·근거의 정본은 여기가 아니다★ — `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY` 의
-//   codex 줄이고, 그 표를 보는 문은 `agent.new` 와 데몬 `SpawnByCwd` 처리부(`agent.spawnInto` 의 스폰
-//   패킷이 거기로 간다 · ADR-0279) 둘이다. 이 파일에 있던 사본 문자열(`CODEX_HUMAN_ONLY`)은 그 표가
-//   codex 를 열면서 함께 지웠다 — 두 문장을 맞춰 주는 게이트가 없었으므로 남겨 두면 표와 어긋난 채
-//   살아남는다.
-// ★되돌리려거든 여기가 아니라 그 표부터★ — 이 문들을 다시 닫는 편집은 `humanOnly` 를 되살리기 전에
-//   그 표의 codex 줄을 닫아야 한다(안 그러면 같은 백엔드를 `agent.new` 로는 만들고 이 문으로는 못
-//   만드는 어긋남이 생기고, 그것을 재는 자리가 `agentCommands.test.ts` 와 agent `commands.rs` · 데몬
-//   `connection_core.rs` 의 정책 시험이다).
+// ★the `humanOnly` gate on the two codex creation doors was lifted on 2026-09-22★ — the premise the gate was built on (「in a folder it has
+//   never seen, codex shows a trust confirmation modal and a non-human caller cannot get past it」) was overturned by measurement,
+//   because codex's `app-server` path answers with success for a folder it has never seen and writes that folder into
+//   its trust list by itself. The folder trust modal was a TUI-only device.
+// ★The canonical place for the reason and the rationale is not here★ — it is the codex row of `commands::LLM_BACKEND_POLICY` in
+//   `engram-dashboard-agent`, and the doors that look at that table are two: `agent.new` and the daemon's `SpawnByCwd` handler (the spawn
+//   packet of `agent.spawnInto` goes there · ADR-0279). Do not copy that text here — no gate keeps a copy in sync with the table.
+// ★To revert, start from that table, not here★ — an edit that closes these doors again must close the codex row of that table
+//   before reviving `humanOnly` (otherwise the same backend can be made through `agent.new` but not through this door, a
+//   mismatch; the places that measure it are `agentCommands.test.ts` and the policy tests in agent `commands.rs` and the daemon's
+//   `connection_core.rs`).
 
-// ★ADR-0078★: AgentOutputFormat 경계 검증기 — 컴파일타임 union 은 런타임 방어가 안 되므로 유효값
-//   allowlist 로 좁힌다. 미지정(undefined/null)이면 'StreamJson' 기본(back-compat). 지정됐지만 두 유효값이
-//   아니면 조용한 no-op·백엔드 전달 대신 명시 throw(잘못된 값 포함 — §5 LLM/cdp 디버깅).
-// ★대소문자는 호출자 자유이고 나가는 값은 아니다★: 같은 낱말이 CLI 로는 되고 이 표면으로는 안 되는
-//   어긋남을 없앤다(사용자 결정 2026-09-23 — Rust 쪽 `AgentBackendKind` 역직렬화·명령 버스 enum 접기와
-//   같은 결정). 여기서 접은 뒤 나가는 것은 언제나 아래 선언 철자라 wire 값은 종전과 바이트 동일하다.
+// ★ADR-0078★: AgentOutputFormat boundary validator — a compile-time union is no runtime defence, so narrow to an allowlist
+//   of valid values. Unspecified (undefined/null) defaults to 'StreamJson' (back-compat). Specified but neither of the two valid values
+//   → an explicit throw instead of a silent no-op or passing it to the backend (includes the bad value — §5 LLM/cdp debugging).
+// ★Callers may use any letter case; the outgoing value may not★: removes the mismatch where the same word works via the CLI
+//   but not via this surface (user decision 2026-09-23 — the same decision as the Rust-side `AgentBackendKind` deserialization and the command bus enum
+//   folding). What goes out after folding here is always the declared spelling below, so the wire value is byte-identical to before.
 const VALID_OUTPUT_FORMATS: readonly AgentOutputFormat[] = ['Terminal', 'StreamJson']
 function coerceOutputFormat(raw: unknown): AgentOutputFormat {
   if (raw === undefined || raw === null) return 'StreamJson'
   const matched = matchDeclaredSpelling(raw, VALID_OUTPUT_FORMATS)
   if (matched) return matched
-  throw new Error(`agentlist.createAgent: 잘못된 outputFormat: ${String(raw)} (유효: 'Terminal' | 'StreamJson')`)
+  throw new Error(`agentlist.createAgent: invalid outputFormat: ${String(raw)} (valid: 'Terminal' | 'StreamJson')`)
 }
 
 register({
   id: 'agent.spawn',
   title: () => t('agent.spawn'),
   category: 'agent',
-  //   - preset(id) 주어지면 store.presets 에서 cwd 를 해소(프리셋 = cwd 북마크, ADR-0061). 최종적으로
-  //     agentClient.spawnAgent(cwd)(데몬 SpawnByCwd)로 흐른다.
-  //   - parent 는 SIGNATURE-ONLY: 중첩(부모 아래 스폰)은 아직 미지원 — 세팅되면 명시 throw(조용한
-  //     무시 금지, LLM/cdp 디버깅 위해). 향후 트리 중첩 도입 시 여기서 배선한다.
+  //   - when preset(id) is given, cwd is resolved from store.presets (preset = cwd bookmark, ADR-0061). In the end it
+  //     flows to agentClient.spawnAgent(cwd) (daemon SpawnByCwd).
+  //   - parent is SIGNATURE-ONLY: nesting (spawning under a parent) is not supported yet — when set, an explicit throw (no silent
+  //     ignoring, for LLM/cdp debugging). Wire it here when tree nesting is introduced.
   run: (args) => {
     const preset = args?.preset as string | undefined
     const rawCwd = args?.cwd as string | undefined
     const parent = args?.parent as string | undefined
 
     if (parent !== undefined && parent !== null) {
-      throw new Error('agent.spawn: parent nesting 미지원')
+      throw new Error('agent.spawn: parent nesting not supported')
     }
 
     let cwd: string | undefined
     if (preset) {
       const found = useAgentStore.getState().presets.find(p => p.id === preset)
       if (!found) {
-        throw new Error(`agent.spawn: 알 수 없는 preset id: '${preset}'`)
+        throw new Error(`agent.spawn: unknown preset id: '${preset}'`)
       }
       cwd = found.cwd
     } else {
@@ -95,14 +93,14 @@ register({
     }
 
     if (!cwd || !cwd.trim()) {
-      throw new Error(`agent.spawn: cwd 가 비어 있음: ${String(cwd)}`)
+      throw new Error(`agent.spawn: cwd is empty: ${String(cwd)}`)
     }
-    // ★이 문은 claude 만 낸다 — 2026-09-22 에 **사유가 갈렸다**★. 옛 사유(「codex 는 신뢰 확인 모달을
-    //   띄우고 LLM 은 그것을 못 지난다」)는 실측으로 죽었다(그 근거의 자리 = 이 파일 머리 주석). 지금
-    //   남는 사유는 **인자 표면을 늘리지 않는다**는 것 하나다: 이 command 에 backend 인자를 내면
-    //   같은 id 의 백엔드 문(`engram-dashboard-agent` 의 `agent.spawn`)과 어휘가 갈린다 — 그쪽도 같은
-    //   이유로 claude 에 박혀 있다(`commands.rs` 의 `create_and_start`).
-    // ★codex 를 만드는 LLM 경로는 `agent.new` 다★ — backend 와 output_format 을 거기서 함께 고른다.
+    // ★This door emits only claude — on 2026-09-22 **the reason changed**★. The old reason (「codex shows a trust confirmation modal
+    //   and the LLM cannot get past it」) died by measurement (where that rationale lives = this file's head comment). The one
+    //   remaining reason is **not widening the argument surface**: exposing a backend argument on this command would
+    //   split its vocabulary from the backend door with the same id (`agent.spawn` in `engram-dashboard-agent`) — that one is also pinned
+    //   to claude for the same reason (`create_and_start` in `commands.rs`).
+    // ★The LLM path that makes codex is `agent.new`★ — backend and output_format are picked there together.
     return agentClient.spawnAgent(cwd.trim(), 'claude')
   },
 })
@@ -111,14 +109,14 @@ register({
   id: 'agent.rename',
   title: () => t('agent.rename'),
   category: 'agent',
-  // ADR-0061 리치화(§5 LLM 제어): 에이전트(프로필) 표시명 override set/clear.
-  //   - name 문자열 → override 저장. name 이 null/빈문자열/미지정 → override 해제(cwd basename 파생 복귀).
-  //   반영은 ProfileListUpdated broadcast(낙관 갱신 X). 없는 id 는 백엔드 Error. 이것이 rename 을 프론트
-  //   전용이 아니라 백엔드 저장으로 두는 이유 — LLM 이 같은 표면(command)으로 트리 표시명을 바꿀 수 있다.
+  // ADR-0061 enrichment (§5 LLM control): set/clear the agent (profile) display-name override.
+  //   - name string → store the override. name null/empty string/unspecified → clear the override (back to the cwd basename derivation).
+  //   Reflected through the ProfileListUpdated broadcast (no optimistic update). An unknown id is a backend Error. This is why rename is
+  //   a backend save rather than frontend-only — the LLM can change the tree display name through the same surface (command).
   run: (args) => {
     const id = args?.id as string | undefined
     if (!id || !id.trim()) {
-      throw new Error(`[agent.rename] id 가 비어 있음: ${String(id)}`)
+      throw new Error(`[agent.rename] id is empty: ${String(id)}`)
     }
     const raw = args?.name
     const name = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
@@ -126,12 +124,12 @@ register({
   },
 })
 
-// ADR-0231 · ADR-0237: 입력에 영향을 주는 WS 명령(대기 입력 취소 · 끊기)을 부르고, 그 거절을 버스 쪽 같은 거절과
-//   같은 코드로 편다. ★입력 임대 거절만 코드가 없이 온다★(WS 문구가 `WriteStdin` 거절과 같다) — 그것만 `CONFLICT`
-//   를 붙인다. 문구로 알아본다: 접두 유무로 가르면 끊김 같은 코드 없는 실패도 걸린다.
-// ★운영 carrier(셸 `forward_daemon_command`)는 거절을 `Error` 가 아니라 맨 문자열로 돌려준다★ — `instanceof
-//   Error` 로만 가르면 운영에서 한 번도 안 걸린다. 둘 다 문구로 편 뒤 비교하고, 나머지는 원래 모양 그대로 던진다.
-// 인자가 promise 가 아니라 함수인 것은 부르는 쪽의 동기 throw 도 같은 매핑을 지나게 하려는 것이다.
+// ADR-0231 · ADR-0237: calls the WS commands that affect input (cancel queued input · interrupt) and unfolds their refusals into
+//   the same code as the same refusal on the bus side. ★Only the input lease refusal comes without a code★ (the WS text is the same as the `WriteStdin` refusal) — only that one gets
+//   `CONFLICT`. It is recognized by the text: telling them apart by the presence of a prefix would also catch code-less failures such as a disconnect.
+// ★The operating carrier (the shell's `forward_daemon_command`) returns refusals as bare strings, not `Error`★ — telling them apart only by `instanceof
+//   Error` never matches in operation. Both are unfolded to text and then compared; the rest is thrown in its original shape.
+// The argument is a function rather than a promise so that a synchronous throw on the caller side passes the same mapping too.
 async function withLeaseConflict<T>(call: () => Promise<T>): Promise<T> {
   try {
     return await call()
@@ -148,20 +146,20 @@ register({
   id: 'agent.cancelQueuedInput',
   title: () => t('agent.cancelQueuedInput'),
   category: 'agent',
-  // ★`help` 를 달지 말 것★ — 같은 이름을 데몬이 이미 버스에서 답한다(`engram-dashboard-agent` 의 선언). help 가
-  //   있으면 셸이 이 이름을 창 command 등록 묶음에 싣고, 그 이름 충돌 검사가 **묶음 전체**를 거절해 이 창의 모든
-  //   command 가 버스에서 빠진다. 창 안(✕ · `window.__engramCmd`) 전용이다.
-  // ADR-0231: 목록 ✕ 와 LLM 이 같은 핸들을 흔든다. 스스로 감추지 않는다 — 결말은 링 사건으로 목록에 돌아온다.
+  // ★Do not attach `help`★ — the daemon already answers the same name on the bus (the declaration in `engram-dashboard-agent`). With help
+  //   the shell puts this name into the window command registration bundle, and its name collision check refuses **the whole bundle**, so every
+  //   command of this window drops off the bus. It is for inside the window only (✕ · `window.__engramCmd`).
+  // ADR-0231: the list ✕ and the LLM shake the same handle. It does not hide itself — the outcome comes back to the list as a ring event.
   run: async (args) => {
     const agentId = args?.agentId
     const inputId = args?.inputId
     if (typeof agentId !== 'string' || !agentId.trim()) {
-      throw new Error(`[agent.cancelQueuedInput] agentId 가 비어 있음: ${String(agentId)}`)
+      throw new Error(`[agent.cancelQueuedInput] agentId is empty: ${String(agentId)}`)
     }
     if (typeof inputId !== 'string' || !inputId) {
-      throw new Error(`[agent.cancelQueuedInput] inputId 가 비어 있음: ${String(inputId)}`)
+      throw new Error(`[agent.cancelQueuedInput] inputId is empty: ${String(inputId)}`)
     }
-    // 결말 낱말은 문자열 그대로 돌려준다 — 더 새 데몬의 낱말도 버리지 않는다.
+    // The outcome word is returned as a string as is — a newer daemon's words are not dropped either.
     return { outcome: await withLeaseConflict(() => agentClient.cancelQueuedInput(agentId.trim(), inputId)) }
   },
 })
@@ -170,18 +168,18 @@ register({
   id: 'agent.interrupt',
   title: () => t('agent.interrupt'),
   category: 'agent',
-  // ★`help` 를 달지 말 것★ — 사유는 위 `agent.cancelQueuedInput` 과 같다(데몬이 같은 이름을 버스에서 답한다).
-  // ADR-0237: 채팅 칸 Esc 와 LLM 이 같은 핸들을 흔든다. `requested` = 끊기를 보냈다 — 턴이 실제로 멈췄는지는 턴 끝
-  //   사건이 알린다(버스 쪽 같은 이름의 결말 낱말과 같다).
-  // ADR-0244: 보내는 즉시 그 에이전트를 「중단하는 중」으로 세운다 — 칸이 그것을 그리고 그동안 Esc 를 무시한다. 거절되면
-  //   여기서 걷고, 턴 끝에 걷는 것은 칸이다(`store/interruptStore.ts`).
-  //   ★중단하는 중이면 다시 보내지 않고 쥔 요청의 결말을 돌려준다★ — 두 번째 끊기는 대기 중이던 다음 글이 연 턴에 떨어질
-  //   수 있다. 거절로 답하지 않는 것은 끊기가 이미 나가 있어 `requested` 가 참이기 때문이다. 그 요청이 아직 답을 기다리면
-  //   그 결말(거절 포함)을 그대로 따른다.
+  // ★Do not attach `help`★ — same reason as `agent.cancelQueuedInput` above (the daemon answers the same name on the bus).
+  // ADR-0237: the chat area's Esc and the LLM shake the same handle. `requested` = the interrupt was sent — whether the turn actually stopped is told by the turn-end
+  //   event (the same as the outcome word of the bus-side command with the same name).
+  // ADR-0244: as soon as it sends, it marks that agent as 「interrupting」 — the area draws that and ignores Esc meanwhile. If refused,
+  //   it is cleared here; clearing it at turn end is the area's job (`store/interruptStore.ts`).
+  //   ★While interrupting, it does not send again and returns the outcome of the held request★ — a second interrupt could land on the turn opened by
+  //   the next queued message. It does not answer with a refusal because the interrupt is already out, so `requested` is true. If that request is still waiting for an answer,
+  //   it follows that outcome (refusal included) as is.
   run: async (args) => {
     const agentId = args?.agentId
     if (typeof agentId !== 'string' || !agentId.trim()) {
-      throw new Error(`[agent.interrupt] agentId 가 비어 있음: ${String(agentId)}`)
+      throw new Error(`[agent.interrupt] agentId is empty: ${String(agentId)}`)
     }
     const id = agentId.trim()
     const inFlight = pendingInterrupt(useInterruptStore.getState(), id)
@@ -205,20 +203,20 @@ register({
   id: 'agentlist.createAgent',
   title: () => t('agent.create'),
   category: 'agent',
-  // ★ADR-0064★: agent_list(트리) 슬롯 pane 메뉴 "에이전트 생성" 계열의 파라미터형 §5 LLM 프리미티브 —
-  //   폴더 다이얼로그로 cwd 를 고른 뒤 claude reserved(비활성) 프로필을 등록한다(스폰하지 않음). 트리에 예약
-  //   노드로 뜨고, 활성화(더블클릭/우클릭 활성화 → spawnProfile)에서 비로소 claude 를 spawn 한다.
-  // ★동작 변경(WHY)★: 옛 흐름은 agent.spawn({cwd}) → SpawnByCwd 로 *즉시* 셸(cmd.exe) 에이전트를 띄웠다
-  //   (kind='running', claude 아님·예약 아님) — 사용자 확정 의도(생성=claude reserved, 활성화=claude spawn)와
-  //   어긋났다. 그래서 여기서 즉시 스폰 대신 createReservedProfile 로 등록만 한다. agent.spawn 원시명령은
-  //   그대로 둔다(LLM/cdp 즉시-스폰 프리미티브로 유효 — 별개 관심사).
-  // ★ADR-0078★: outputFormat 은 args.outputFormat 으로 받되 미지정 시 'StreamJson' 기본(back-compat — 옛
-  //   호출·테스트·LLM 참조가 인자 없이 부르면 종전 동작 유지). 사람 메뉴 경로는 아래 두 leaf command
-  //   (createTerminal/createJson)가 모드를 명시 고정한다. command id 는 보존(하위호환).
-  //   ★경계 검증(§5 LLM/cdp 프리미티브)★: outputFormat 은 외부 입력이라 무검증 캐스트 금지 — 런타임
-  //   allowlist(AgentOutputFormat 은 컴파일타임 union 이라 런타임 enum 없음)로 걸러, 미지정이면 기본,
-  //   잘못된 값이면 조용히 백엔드로 흘리지 않고 명시 throw(agent.spawn/rename 과 동일 fail-loud — LLM/cdp
-  //   디버깅 위해 잘못된 값 포함).
+  // ★ADR-0064★: parametric §5 LLM primitive of the agent_list (tree) slot pane menu "Create agent" family —
+  //   picks a cwd with the folder dialog, then registers a claude reserved (inactive) profile (does not spawn). It shows in the tree as a reserved
+  //   node, and only activation (double click / right-click Activate → spawnProfile) spawns claude.
+  // ★Behaviour change (WHY)★: the old flow launched a shell (cmd.exe) agent *immediately* via agent.spawn({cwd}) → SpawnByCwd
+  //   (kind='running', not claude, not reserved) — it was off from the user's confirmed intent (create = claude reserved, activate = claude spawn).
+  //   So instead of spawning immediately here, it only registers through createReservedProfile. The agent.spawn primitive
+  //   stays as is (valid as the LLM/cdp immediate-spawn primitive — a separate concern).
+  // ★ADR-0078★: outputFormat is taken from args.outputFormat, defaulting to 'StreamJson' when unspecified (back-compat — old
+  //   calls, tests and LLM references calling without the argument keep the previous behaviour). The human menu path has the two leaf commands below
+  //   (createTerminal/createJson) fix the mode explicitly. The command id is preserved (backward compatibility).
+  //   ★Boundary validation (§5 LLM/cdp primitive)★: outputFormat is external input, so no unvalidated cast — it is filtered by a runtime
+  //   allowlist (AgentOutputFormat is a compile-time union, no runtime enum): unspecified → default,
+  //   a bad value → an explicit throw instead of silently flowing to the backend (the same fail-loud as agent.spawn/rename — includes the bad value
+  //   for LLM/cdp debugging).
   run: async (args) => createReservedProfile(coerceOutputFormat(args?.outputFormat)),
 })
 
@@ -226,7 +224,7 @@ register({
   id: 'agentlist.createTerminal',
   title: () => t('agent.createTerminal'),
   category: 'agent',
-  // ★ADR-0078★: 렌더 모드 Terminal(xterm PTY) 고정 생성 — 서브메뉴 leaf. 생성 시점에 모드 확정·이후 불변.
+  // ★ADR-0078★: creation with the render mode fixed to Terminal (xterm PTY) — submenu leaf. The mode is settled at creation time and immutable afterwards.
   run: async () => createReservedProfile('Terminal'),
 })
 
@@ -234,11 +232,11 @@ register({
   id: 'agentlist.createCodex',
   title: () => t('agent.createCodex'),
   category: 'agent',
-  // ★사람이 codex 대화형 TUI 를 고르는 문★ — 여기서 만들어진 예약 노드를 활성화하면 codex 가 그
-  //   폴더에서 뜬다. ★첫 방문 폴더에서는 codex 자신의 신뢰 확인 모달이 화면에 그대로 뜨고 사람이
-  //   지나간다(사용자 결정 2026-09-07 — 우리가 미리 신뢰를 심어 우회하지 않는다). 그 모달은 **TUI
-  //   경로에만** 있다 — 그래서 이 문이 LLM 에게 닫혀 있을 이유가 되지 못했고, 2026-09-22 에
-  //   `humanOnly` 를 걷었다(위 머리 주석이 근거의 자리를 가리킨다).
+  // ★The door where a human picks the codex interactive TUI★ — activating the reserved node made here launches codex in that
+  //   folder. ★In a first-visit folder, codex's own trust confirmation modal shows on screen as is and the human
+  //   gets past it (user decision 2026-09-07 — we do not plant trust ahead to bypass it). That modal exists **only on the TUI
+  //   path** — so it was no reason to keep this door closed to the LLM, and on 2026-09-22
+  //   `humanOnly` was lifted (the head comment above points to where the rationale lives).
   run: async () => createReservedCodexProfile('Terminal'),
 })
 
@@ -246,12 +244,12 @@ register({
   id: 'agentlist.createCodexJson',
   title: () => t('agent.createCodexJson'),
   category: 'agent',
-  // ★사람이 codex 상주 JSON 서버(`codex app-server`)를 고르는 문★ — 형제 `createCodex` 와 같은
-  //   백엔드이고 가르는 것은 출력 모드 하나다. 그 모드가 통로·입력 인코딩·출력 decoder 를 함께
-  //   가르는 자리는 `engram-dashboard-agent` 의 `backend::codex::is_app_server` 다.
-  // ★ADR-0078 과 같은 계약★: 모드는 생성 시점에 고정되고 이후 불변이다(활성화-시점 override 없음).
-  // ★형제 `createCodex` 와 같은 날 `humanOnly` 를 걷었다(2026-09-22)★ — 두 문은 같은 게이트를 지므로
-  //   한쪽만 열면 그 자체가 회귀다(그것을 재는 자리 = `agentCommands.test.ts`).
+  // ★The door where a human picks the codex resident JSON server (`codex app-server`)★ — the same backend as the sibling `createCodex`;
+  //   only the output mode tells them apart. The place where that mode also decides the link, the input encoding and the output decoder
+  //   is `backend::codex::is_app_server` in `engram-dashboard-agent`.
+  // ★Same contract as ADR-0078★: the mode is fixed at creation time and immutable afterwards (no activation-time override).
+  // ★`humanOnly` was lifted the same day as the sibling `createCodex` (2026-09-22)★ — the two doors carry the same gate, so
+  //   opening only one of them is itself a regression (where that is measured = `agentCommands.test.ts`).
   run: async () => createReservedCodexProfile('StreamJson'),
 })
 
@@ -259,13 +257,13 @@ register({
   id: 'agentlist.createJson',
   title: () => t('agent.createJson'),
   category: 'agent',
-  // ★ADR-0078★: 렌더 모드 StreamJson(headless NDJSON→RichSlot) 고정 생성 — 서브메뉴 leaf. 생성 시점 확정·불변.
+  // ★ADR-0078★: creation with the render mode fixed to StreamJson (headless NDJSON→RichSlot) — submenu leaf. Settled at creation time, immutable.
   run: async () => createReservedProfile('StreamJson'),
 })
 
-// ★ADR-0078★: agent_list pane 메뉴 "에이전트 생성"을 1단 서브메뉴 컨테이너로 — 렌더 모드를 *생성 시점*에
-//   고르게(이후 불변). children 은 flat leaf(선언 순서 보존, ADR-0065) — 활성화-시점 override 는 거부됨.
-// ADR-0064: group='content' — 공통 slot-ops 위에 렌더.
+// ★ADR-0078★: the agent_list pane menu "Create agent" as a one-level submenu container — the render mode is picked *at creation time*
+//   (immutable afterwards). children are flat leaves (declaration order kept, ADR-0065) — an activation-time override was rejected.
+// ADR-0064: group='content' — rendered above the common slot-ops.
 registerSlotMenu('agent_list', [
   {
     id: 'agentlist.create',

@@ -1,12 +1,12 @@
-//! AgentBackend — 백엔드별 명령 명세 산출 trait + 자유 함수 dispatch.
+//! AgentBackend — a trait producing per-backend command specs + free-function dispatch.
 //!
-//! transport(PtyTransport)는 claude/codex를 모른다. 누가 어떤 프로그램인지 아는 곳은
-//! 오직 `backend/<이름>/` 폴더다.
+//! The transport (PtyTransport) does not know claude/codex. The only place that knows which program is which
+//! is the `backend/<name>/` folder.
 //!
-//! ★이 파일은 어느 백엔드의 항목도 이름으로 부르지 않는다★: 백엔드 이름이 적히는 자리는 **등록부**
-//! (`pub mod`·`pub use`·정적 싱글턴 · 사용량 조회기 표 [`usage_probes`])와 **두 dispatch 표**(`backend_for` ·
-//! `backend_for_encoder`)뿐이고, 백엔드별 지식은 전부 [`AgentBackend`] 메서드와 [`UsageProbe`] 구현으로만 나온다.
-//! 게이트는 `backend/claude/mod.rs` 헤더.
+//! ★This file does not call any backend's items by name★: the places where backend names are written are only the **registry**
+//! (`pub mod`·`pub use`·static singletons · the usage prober table [`usage_probes`]) and **the two dispatch tables** (`backend_for` ·
+//! `backend_for_encoder`), and all per-backend knowledge comes out only through [`AgentBackend`] methods and [`UsageProbe`] implementations.
+//! The gate is in the `backend/claude/mod.rs` header.
 //!
 //! tauri import 0.
 
@@ -37,46 +37,46 @@ use crate::types::{
 };
 use crate::usage::UsageProbe;
 
-// ── CLI 입구 주입(백엔드 공용) ────────────────────────────────────────────────
+// ── CLI entry injection (shared by backends) ────────────────────────────────────────────────
 
-/// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜 + 제어 평면 CLI(`CLI_EXE_NAME`) 형제 디렉토리
-/// PATH 프리펜드.
+/// ADR-0086 step 2 (CLI entry): CLI credentials in the spawn env + PATH prepend of the directory of the control-plane CLI (`CLI_EXE_NAME`)
+/// sibling.
 ///
-/// ★여기 사는 이유 = 이 셋에 백엔드 지식이 하나도 없다(ADR-0004)★: 심는 것은 env 세 값과 PATH 뿐이고
-///   그 어느 것도 특정 프로그램의 플래그·파일 규약이 아니다. 반대로 `--mcp-config` 같은 **번역**은 그
-///   프로그램의 문법이라 그 백엔드 폴더에 남는다 — 그것까지 여기로 올리면 공용 자리가 한 백엔드의
-///   어휘를 갖게 된다.
-/// ★[`crate::types::ControlEndpoint::config_path`] 의 doc 이 이미 이 분담을 계약으로 적어 두었다★ —
-///   그 Option 은 **MCP 입구의 유무**만 뜻하고 CLI 배선의 유무가 아니다. 이 함수가 공용인 것이 그 문장의
-///   실물이다.
+/// ★Why it lives here = these three carry no backend knowledge at all (ADR-0004)★: what is planted is only three env values and PATH,
+///   and none of them is a flag or file convention of a specific program. Conversely, a **translation** like `--mcp-config` is that
+///   program's grammar, so it stays in that backend's folder — raising that to here too would give the shared place one backend's
+///   vocabulary.
+/// ★The doc of [`crate::types::ControlEndpoint::config_path`] already writes this division as a contract★ —
+///   that Option means only **whether there is an MCP entry**, not whether there is CLI wiring. This function being shared is the
+///   embodiment of that sentence.
 ///
-/// ★호출 조건 = control endpoint 가 있는 스폰 전부★: 제어 동사는 전원에게 열려 있고(ADR-0132 결정 5)
-///   실행파일이 하나뿐이라 계열 단위로 갈라 깔 수 없다. 우편도 여기서 가리지 않는다 — 강제는 데몬의
-///   자격증명 거절 한 곳뿐이다(ADR-0133 결정 3).
-/// ★우편 가부를 env 로 실어 보내지 말 것★: 그 값은 에이전트 자신의 프로세스에 붙어 지울 수 있으므로
-///   강제를 하나도 못 하면서, 외부가 CLI 화면을 고르는 입구만 만든다(사용자 결정 2026-09-23).
-/// ★왜 env 인가★: 에이전트가 shell 로 그 명령을 부를 때 이 값을 읽어 데몬 제어 라우트에 Bearer
-///   토큰으로 POST 한다. portable-pty CommandBuilder 가 부모 env 를 시드하므로 **모든 자식 프로세스
-///   (Bash·그 손자)까지 상속**된다.
-/// ★그래서 이 세 값은 에이전트 본인뿐 아니라 **그 프로그램이 대신 띄우는 보조 프로세스**의
-///   자격증명이기도 하다★ — 그 프로그램이 자식 env 를 덧씌우지 않는 한. 어느 프로그램이 실제로 그런지는
-///   그 백엔드 폴더가 실측으로 적는다(여기서 이름으로 세지 않는다 — ADR-0004).
-/// ★보안★: 토큰이 env 로 노출된다 — 같은 OS 유저의 자식에만 상속되고 로그엔 안 찍지만 하드 격리는
-///   원래 불가다(ADR-0086 §불변식). ★상속이 자식 전부에 걸린다는 것은 **에이전트가 띄운 하위
-///   에이전트도 같은 토큰을 든다**는 뜻이다★ — 그 토큰으로 오는 보고를 신원 하나로 믿으면 자식의 값이
-///   부모 자리에 앉는다. ★**그래서 이 토큰만으로 신원을 세우는 보고 입구를 새로 열지 말 것**★ — 한때
-///   있던 그 입구(세션 id 훅 보고)는 ADR-0216 이 걷었고, 오늘 이 자격증명이 여는 것은 **에이전트 자신이
-///   치는** 제어 동사와 우편뿐이다.
+/// ★Call condition = every spawn with a control endpoint★: the control verbs are open to everyone (ADR-0132 decision 5) and
+///   there is only one executable, so it cannot be laid down split by family. Mail is not filtered here either — enforcement is only in one place, the daemon's
+///   credential refusal (ADR-0133 decision 3).
+/// ★Do not send mail availability in env★: that value attaches to the agent's own process and can be erased, so
+///   it enforces nothing while creating an entry for the outside to choose the CLI screen (user decision 2026-09-23).
+/// ★Why env★: when the agent calls that command through the shell, it reads this value and POSTs to the daemon control route with a Bearer
+///   token. The portable-pty CommandBuilder seeds the parent env, so it is **inherited by every child process
+///   (Bash · its grandchildren)**.
+/// ★So these three values are credentials not only of the agent itself but also of **auxiliary processes that program launches on its
+///   behalf**★ — unless that program overrides the child env. Which programs actually do so is
+///   written down by measurement in that backend's folder (not counted by name here — ADR-0004).
+/// ★Security★: the token is exposed through env — inherited only by children of the same OS user and not logged, but hard isolation is
+///   impossible in the first place (ADR-0086 §Invariants). ★Inheritance reaching every child means **sub-agents the agent launched
+///   also hold the same token**★ — if reports coming with that token are trusted as one identity, the child's value
+///   sits in the parent's place. ★**So do not open a new report entry that establishes identity from this token alone**★ — the entry
+///   that once existed (the session id hook report) was removed by ADR-0216, and what this credential opens today is only the control verbs and mail
+///   **the agent itself types**.
 // ADR-0086 / ADR-0133 / ADR-0004 / ADR-0208 / ADR-0216
 pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoint) {
-    // ★ENGRAM_CONTROL_URL = base(스킴+호스트+포트)★: endpoint.url 은 MCP 라우트
-    //   (`http://127.0.0.1:<port>/mcp`)라 CLI 가 붙을 base 로 쓰려면 라우트 suffix(`/mcp`)를 벗겨 base 만
-    //   남긴다 — CLI 가 `<base>/control/send` 를 조립한다(라우트 경로 지식은 CLI 소유). suffix 가 없으면
-    //   (형태 변주) url 을 그대로 base 로 쓴다(방어적).
-    //   ★keep-in-sync(M5)★: 아래 strip_suffix 의 리터럴 "/mcp" 는 데몬측 MCP_PATH 상수와 **손으로 맞춰진**
-    //   값이다 — 정본 = `crates/engram-dashboard-daemon/src/control/mcp_server.rs`(const MCP_PATH). 그쪽
-    //   경로를 바꾸면 여기 리터럴도 함께 고쳐야 한다(빌드가 강제 못 함 → 어긋나면 base 파생이 틀어져 CLI 가
-    //   조용히 404). 두 곳 상호 앵커.
+    // ★ENGRAM_CONTROL_URL = base (scheme+host+port)★: endpoint.url is the MCP route
+    //   (`http://127.0.0.1:<port>/mcp`), so to use it as the base the CLI attaches to, the route suffix (`/mcp`) is stripped, leaving only the base
+    //   — the CLI assembles `<base>/control/send` (route path knowledge is owned by the CLI). Without the suffix
+    //   (a shape variant) the url is used as the base as is (defensive).
+    //   ★keep-in-sync (M5)★: the literal "/mcp" of strip_suffix below is a value **matched by hand** to the daemon-side MCP_PATH constant
+    //   — canonical = `crates/engram-dashboard-daemon/src/control/mcp_server.rs` (const MCP_PATH). If that
+    //   path changes, this literal must be fixed together (the build cannot enforce it → if they diverge, the base derivation goes wrong and the CLI
+    //   silently gets 404). Mutual anchor of the two places.
     let base = endpoint
         .url
         .strip_suffix("/mcp")
@@ -84,34 +84,34 @@ pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &Co
         .to_string();
     env.push((TOKEN_ENV.to_string(), endpoint.token.clone()));
     env.push(("ENGRAM_CONTROL_URL".to_string(), base));
-    // ★ENGRAM_CLI_EXE = CLI 바이너리 절대경로(F1)★: 프라이밍과 grant 는 bare 실행파일 이름
-    //   (`CLI_EXE_NAME` — 아래 PATH 주입으로 해석)을 가르치지만, 이 절대경로 env 도 함께 싣는다 —
-    //   진단·수동 조작용이다(ADR-0094 의 이름 정렬 자체는 PATH 로 이룬다).
-    //   ★이 값을 가르치는 프라이밍은 없다 — 그러니 아래 loud skip 갈래(PATH 조합 실패·비-UTF8)의 복구
-    //     수단으로 세지 말 것★: 그 갈래에서 에이전트는 bare 이름만 배운 채 PATH 로 해석하지 못하므로
-    //     실질적으로 발신 불가이고, 신호는 그 warn 로그 하나뿐이다.
-    //   None 갈래는 발신 입구가 하나도 안 남는 조합이라 데몬이 provision 에서 이미 fail-closed 로 끊는다
-    //   — 여기 도달하지 않는 방어 경로다(도달해도 크레덴셜만 있고 부를 CLI 가 없는 무해한 상태).
+    // ★ENGRAM_CLI_EXE = absolute path of the CLI binary (F1)★: priming and grants teach the bare executable name
+    //   (`CLI_EXE_NAME` — resolved by the PATH injection below), but this absolute-path env is carried too —
+    //   for diagnostics and manual operation (the name alignment of ADR-0094 itself is achieved through PATH).
+    //   ★No priming teaches this value — so do not count it as the recovery means of the loud skip branch below (PATH join failure ·
+    //     non-UTF8)★: in that branch the agent has learned only the bare name and cannot resolve it through PATH, so it
+    //     effectively cannot send, and the only signal is that warn log.
+    //   The None branch is a combination where no send entry remains, so the daemon already cuts it off fail-closed at provision
+    //   — a defensive path that is not reached here (even if reached, it is a harmless state with credentials but no CLI to call).
     if let Some(send_exe) = &endpoint.send_exe {
         env.push((
             CLI_EXE_ENV.to_string(),
             send_exe.to_string_lossy().into_owned(),
         ));
-        // ★PATH 주입(ADR-0094 bare 이름 해석)★: grant(`Bash(<CLI_EXE_NAME>:*)`)와 프라이밍이 모두 bare
-        //   실행파일 이름을 가르치므로 스폰된 에이전트의 shell(및 그 자식 Bash 도구)이 그 이름을 실제로
-        //   **찾을** 수 있어야 한다. send_exe 의 **부모 디렉토리**를 PATH **맨 앞**에 붙인다.
+        // ★PATH injection (ADR-0094 bare name resolution)★: grants (`Bash(<CLI_EXE_NAME>:*)`) and priming both teach the bare
+        //   executable name, so the spawned agent's shell (and its child Bash tool) must actually be able to
+        //   **find** that name. The **parent directory** of send_exe is put at the **very front** of PATH.
         //
-        // ★base = env 벡터에 이미 있는 PATH(프로필 우선, FIX-1)★: 프로필 env 는 이 지점보다 **먼저**
-        //   벡터에 들어와 있다. 데몬 프로세스 PATH(std::env::var_os) 로 리빌드하면 프로필이 실은 커스텀
-        //   PATH 가 통째로 증발하므로, 벡터에 PATH 가 없을 때만 데몬 PATH 로 폴백한다.
-        //   ★키 대소문자(Windows)★: 프로필이 "Path"·"PATH" 어느 표기로 넣어도 같은 변수다.
-        //   ★last-match-wins + dedupe(load-bearing)★: transport(portable-pty)는 env 를 **순서대로**
-        //   cmd.env(k,v) 하므로 같은 변수의 중복 항목이 있으면 자식엔 **마지막** 값이 산다(예: Windows
-        //   에서 `[("PATH", 데몬), ("Path", 프로필)]`). 그래서 마지막 case-equivalent PATH 를 base 이자
-        //   승리 항목으로 삼아 그 키 표기 그대로 제자리 교체하고, **나머지 PATH 항목은 전부 제거**한다 —
-        //   중복을 남기면 앞쪽만 고친 뒤 뒤쪽 미수정 항목이 last-wins 로 이겨 주입이 **조용히 무력화**된다
-        //   (adversarial 리뷰 must-fix). 구성: `send_exe_parent + separator + base` — 형제 디렉토리가
-        //   **맨 앞**(shadowing 방어), 프로필/데몬 PATH 는 **tail 로 생존**.
+        // ★base = the PATH already in the env vector (profile first, FIX-1)★: the profile env came into the vector
+        //   **before** this point. Rebuilding from the daemon process PATH (std::env::var_os) would make the custom PATH the profile carried
+        //   evaporate entirely, so it falls back to the daemon PATH only when the vector has no PATH.
+        //   ★Key case (Windows)★: whichever notation the profile uses, "Path" or "PATH", it is the same variable.
+        //   ★last-match-wins + dedupe (load-bearing)★: the transport (portable-pty) applies env **in order** with
+        //   cmd.env(k,v), so if the same variable has duplicate entries the **last** value lives in the child (e.g. on Windows
+        //   `[("PATH", daemon), ("Path", profile)]`). So the last case-equivalent PATH is taken as both the base and the
+        //   winning entry, replaced in place with that key notation as is, and **all other PATH entries are removed** —
+        //   leaving duplicates would mean fixing only the front one while the unfixed later entry wins by last-wins and the injection is **silently neutralized**
+        //   (adversarial review must-fix). Composition: `send_exe_parent + separator + base` — the sibling directory is
+        //   **at the very front** (shadowing defense), and the profile/daemon PATH **survives as the tail**.
         if let Some(parent) = send_exe.parent() {
             let is_path_key = |k: &str| engram_dashboard_platform::env::env_key_eq(k, "PATH");
             let winner_idx = env.iter().rposition(|(k, _)| is_path_key(k));
@@ -143,12 +143,12 @@ pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &Co
                     }
                     None => env.push(("PATH".to_string(), joined)),
                 },
-                // ★loud skip(FIX-2/3)★: join 실패·비-UTF8 이면 주입을 **통째 건너뛴다** — lossy 변환한
-                //   PATH 를 절대 push 하지 않는다(비-Unicode PATH 항목을 조용히 손상시키면 skip 보다
-                //   나쁘다). skip 시 env 벡터는 **원래 그대로** 둬서 상속 PATH 가 안전 폴백이 된다.
+                // ★loud skip (FIX-2/3)★: on a join failure or non-UTF8 the injection is **skipped entirely** — a lossily converted
+                //   PATH is never pushed (silently corrupting non-Unicode PATH entries is worse than
+                //   skipping). On skip the env vector is left **exactly as it was**, so the inherited PATH becomes the safe fallback.
                 None => {
                     tracing::warn!(
-                        "CLI PATH 주입 건너뜀(PATH 조합 실패 또는 비-UTF8) — grant/프라이밍은 bare `{}` 를 약속하나 이 설치에선 자식이 이름을 해석하지 못할 수 있음; 상속 PATH 유지",
+                        "CLI PATH injection skipped (PATH join failed or non-UTF8) — grants/priming promise the bare `{}` but on this installation the child may not resolve the name; keeping the inherited PATH",
                         CLI_EXE_NAME
                     );
                 }
@@ -157,137 +157,137 @@ pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &Co
     }
 }
 
-// ── 세션 id 기록 포트 ─────────────────────────────────────────────────────────
+// ── Session id record port ─────────────────────────────────────────────────────────
 
-/// backend 가 상대에게서 **받아 온** 세션 id 를 조립점에 넘기는 **한 동사** 포트.
+/// A **one-verb** port through which a backend hands the session id it **fetched** from the other side to the assembly point.
 ///
-/// 호출은 그 id 를 실제로 받은 뒤 정확히 한 번이고, 받지 못하면 한 번도 불리지 않는다.
-/// 인자는 상대가 준 문자열 그대로다 — ★uuid 인지 판정하지 않는다★. 그 해석은 넘겨받는 쪽 몫이고,
-/// 그래서 uuid 로 못 읽히는 값이 와도 이 포트는 성립한다.
+/// It is called exactly once after the id is actually received, and never if it is not received.
+/// The argument is the string the other side gave, as is — ★it does not decide whether it is a uuid★. That interpretation is the receiver's job,
+/// so this port holds even when a value that cannot be read as a uuid comes.
 ///
-/// ★`ProfileRegistry` 를 `backend/` 로 들이지 않으려고 이 모양이다(ADR-0004)★ — 그 타입이 여기서 보이면
-/// 통로가 프로필 스키마를 알게 된다. 조립점이 자기 기록 수단을 이 한 동사로 감싸 넘긴다.
-/// ★이름에 백엔드가 들어가지 않는 것도 계약이다★ — "codex 용" 이라 부르는 순간 같은 격리가 샌다.
-/// ★한 동사인 것도 계약이다★ — "적혔나" 를 되묻는 둘째 동사를 달지 않는다. 되물을 것이 없도록 호출
-/// **순서**가 대신 서 있다([`AgentBackend::open_spawn`] 의 계약 참조).
+/// ★It has this shape so as not to bring `ProfileRegistry` into `backend/` (ADR-0004)★ — if that type were visible here,
+/// the link would know the profile schema. The assembly point wraps its own recording means in this one verb and hands it over.
+/// ★Not having a backend in the name is also part of the contract★ — the moment it is called "for codex", the same isolation leaks.
+/// ★Being one verb is also part of the contract★ — no second verb asking back "was it recorded". So that there is nothing to ask back, the call
+/// **order** stands in its place (see the contract of [`AgentBackend::open_spawn`]).
 ///
-/// 반환이 없으므로 **실패는 호출자에게 돌아가지 않는다** — 기록하는 쪽이 자기 안에서 로그로 삼킨다.
-/// 그래서 이 포트가 돌아왔다는 사실 위에 「영속됐다」를 얹으면 없는 보장을 인용하게 된다.
+/// There is no return, so **a failure does not go back to the caller** — the recording side swallows it into a log inside itself.
+/// So putting 「it was persisted」 on top of the fact that this port returned would cite a guarantee that does not exist.
 // ADR-0004
 // ADR-0185
 pub type SessionIdSink = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// 「이 화신의 대화에 턴이 실제로 생겼다」를 조립점에 알리는 **한 동사** 포트 — 조립점은 세션 id 첫 제출
-/// 래치의 제출 입력을 여기 꽂는다.
+/// A **one-verb** port telling the assembly point 「a turn actually happened in this incarnation's conversation」 — the assembly point plugs the submit input of
+/// the session id first-submission latch in here.
 ///
-/// ★부르는 쪽은 턴을 통로가 지는(`MidTurnPolicy::TransportOwned`) backend 의 통로뿐이다★ — 그 모드의 세션은
-///   제출을 세지 않고, 통로가 상대의 **첫 유저 메시지 되울림**에서 이것을 부른다. 그 밖의 backend 는 세션이
-///   보내기 전에 세므로 이 포트를 무시한다. ★둘은 짝이다★: `TransportOwned` 를 신고하면서 이 포트를 통로에
-///   안 꽂으면 어느 화신도 id 를 영속하지 못한다(오류 없이 모든 이어받기가 새 대화가 된다).
-/// 여러 번 불려도 된다 — 받는 쪽(래치)이 첫 번만 센다.
+/// ★The only caller is the link of a backend whose link owns the turn (`MidTurnPolicy::TransportOwned`)★ — the session of that mode
+///   does not count submissions, and the link calls this on the other side's **echo of the first user message**. Other backends have the session
+///   count before sending, so they ignore this port. ★The two are a pair★: reporting `TransportOwned` without plugging this port into the
+///   link means no incarnation can persist its id (every resume becomes a new conversation without an error).
+/// It may be called several times — the receiver (the latch) counts only the first.
 // ADR-0226
 // ADR-0231
 pub type FirstTurnSink = Arc<dyn Fn() + Send + Sync>;
 
-/// unit struct로 구현되어 &'static으로 사용된다 — 상태 없음.
+/// Implemented as a unit struct and used as &'static — stateless.
 pub trait AgentBackend: Send + Sync {
-    /// **우리가** 세션 id 를 뽑아 spawn 때 이 프로그램에 건네주나.
+    /// Whether **we** draw the session id and hand it to this program at spawn.
     ///
-    /// true 면 manager 가 Fresh 마다 uuid 를 뽑아 [`AgentBackend::build_spec`] 의 `session_id` 로 넘기고,
-    /// 그 값은 **첫 제출 때** 프로필에 영속된다(ADR-0226 — 스폰 때는 안 쓴다). sid drift 관측기도 그 값을
-    /// 기준값으로 삼으므로 이 축에 매달린다.
+    /// If true, the manager draws a uuid on every Fresh and passes it as the `session_id` of [`AgentBackend::build_spec`],
+    /// and that value is persisted to the profile **at the first submission** (ADR-0226 — not written at spawn). The sid drift observer also takes that value
+    /// as its reference, so it hangs on this axis.
     ///
-    /// ★false 를 「세션이 없다」로 읽지 말 것★: 그 프로그램이 자기 id 를 **스스로 발급**하는 쪽일 수
-    ///   있다. 그때 우리 uuid 를 심으면 그 프로그램이 한 번도 쓰지 않을 값이 프로필에 남고, 이어받기
-    ///   판정이 그 가짜 값을 보고 선다. 이어받기 가부는 별개 축
-    ///   ([`AgentBackend::can_resume_stored_session`])이 답한다.
+    /// ★Do not read false as 「there is no session」★: the program may be one that **issues its own** id.
+    ///   Planting our uuid then would leave in the profile a value the program never uses, and the resume
+    ///   decision would stand on that fake value. Whether it can resume is answered by a separate axis
+    ///   ([`AgentBackend::can_resume_stored_session`]).
     // ADR-0185
     fn assigns_session_id(&self, command: &AgentCommand) -> bool;
 
-    /// 프로필에 **저장된 backend sid 로 이 명령을 이어받을 수 있나**.
+    /// **Can this command be resumed with the backend sid stored in the profile**.
     ///
-    /// 부팅 복원과 활성화 입구가 「Resume 으로 띄울까 Fresh 로 띄울까」를 이 값과 sid 존재 여부로 함께
-    /// 판정한다. 그 sid 를 **누가 발급했는지는 묻지 않는다**(ADR-0185) — 저장된 값이 이어받기에 쓰이나만
-    /// 묻는다.
+    /// Boot restore and the activation entry decide 「launch as Resume or as Fresh」 from this value together with whether a sid exists.
+    /// It **does not ask who issued** that sid (ADR-0185) — it only asks whether the stored value is used for resuming
+    /// at all.
     ///
-    /// ★`command` 를 받는 이유★: 같은 프로그램이라도 **어떤 모양으로 띄우느냐에 따라 갈린다** — 한
-    ///   모양에는 이어받을 식별자가 있고 다른 모양에는 없을 수 있다. 인자 없는 술어로 두면 그 프로그램의
-    ///   두 모양 중 한쪽 값이 다른 쪽에 그대로 적용된다.
+    /// ★Why it receives `command`★: even for the same program, **it differs by the shape it is launched in** — one
+    ///   shape may have an identifier to resume and another may not. As an argument-less predicate, the value of one of that program's
+    ///   two shapes would apply as is to the other.
     // ADR-0185
     fn can_resume_stored_session(&self, command: &AgentCommand) -> bool;
 
-    /// 이 백엔드가 데몬 제어 채널(MCP 입구)을 **소비**하는가(ADR-0086 F3).
-    /// true 면 manager 가 spawn 전에 provision 을 부르고(토큰+mcp-config 발급), 그 endpoint 를
-    /// build_spec 에 넘긴다(claude=`--mcp-config`). false 면 manager 가 provision 을 **아예 건드리지
-    /// 않는다** — shell 처럼 제어 채널을 안 쓰는 backend 는 registry 에 손대지 않아, config-write 실패가
-    /// MCP 가 필요 없던 스폰을 중단시키는 회귀(round-2 F3)가 생기지 않는다.
+    /// Whether this backend **consumes** the daemon control channel (MCP entry) (ADR-0086 F3).
+    /// If true, the manager calls provision before spawn (issuing the token + mcp-config) and passes that endpoint
+    /// to build_spec (claude=`--mcp-config`). If false, the manager **does not touch provision
+    /// at all** — a backend that does not use the control channel, like shell, does not touch the registry, so the regression (round-2 F3) where a config-write failure
+    /// aborts a spawn that never needed MCP does not happen.
     ///
-    /// ★fail-closed 는 provision 을 **부르는** backend 에만★: true 인 backend 는 provision 이 Err 면
-    ///   스폰이 중단된다(제어 채널 없이 몰래 도는 에이전트 금지). false 인 backend 는 그 계약과 무관하다.
+    /// ★fail-closed applies only to backends that **call** provision★: for a true backend, if provision is Err
+    ///   the spawn is aborted (no agent secretly running without a control channel). A false backend is unrelated to that contract.
     fn supports_control_channel(&self) -> bool;
 
-    /// 이 backend(프로그램)가 **MCP 로 데몬 제어 채널을 붙이는가**(ADR-0099 → ADR-0209). 오늘 claude =
-    /// true(mcp-config 파일을 `--mcp-config` 로 붙임) · codex = true(명령줄 오버라이드로 붙임) ·
-    /// shell·gemini stub = false. ★이름이 「config 를 받아들이나」인데 오늘 뜻은 「MCP 로 우편을 쓰나」에
-    /// 가깝다 — 그 어긋남은 알고 남긴 것이고(아래 조합 표), 「파일을 먹나」를 묻는 칸은 따로 있다★.
-    /// ★backend 지식(ADR-0004)★: "어느 프로그램이 MCP 를 어떻게 먹나"는 backend-kind 지식이라 여기서
-    /// 선언한다 — manager 가 `matches!` 로 직접 분기하지 않는다.
+    /// Whether this backend (program) **attaches the daemon control channel through MCP** (ADR-0099 → ADR-0209). Today claude =
+    /// true (attaches the mcp-config file with `--mcp-config`) · codex = true (attaches by command-line override) ·
+    /// shell · gemini stub = false. ★The name says 「does it accept a config」, but today's meaning is closer to 「does it use mail through MCP」
+    /// — that mismatch is kept knowingly (the combination table below), and the field asking 「does it consume a file」 is separate★.
+    /// ★backend knowledge (ADR-0004)★: "which program consumes MCP how" is backend-kind knowledge, so it is
+    /// declared here — the manager does not branch directly with `matches!`.
     ///
-    /// 이 플래그가 provision 의 grant·**프라이밍 적재 여부**·**우편 가부**를 구동한다(정합 불변식 =
-    /// 프라이밍이 가르치는 우편 채널 **=** 그 스폰이 쓸 수 있는 우편 채널. 못 쓰는 채널을 가르치면
-    /// 발신 freeze 가 재발하고, 쓸 수 있는데 안 가르치면 통제 없는 우회 표면이 남는다). true 면
-    /// `DaemonControlChannel::provision` 이 MCP bits 를 endpoint 에 실으며 MCP-only 교육 프라이밍
-    /// (`eg_send` 만 — ADR-0126 결정 1)과 CLI 우편 불가를, false 면 **프라이밍 미주입** + CLI 우편
-    /// 가능을 고른다(ADR-0133). 제어 CLI 배선은 이 축과 무관하게 전원에게 간다.
+    /// This flag drives provision's grants, **whether priming is loaded** and **mail availability** (consistency invariant =
+    /// the mail channel the priming teaches **=** the mail channel that spawn can use. Teaching a channel it cannot use
+    /// brings the send freeze back, and not teaching one it can use leaves an uncontrolled bypass surface). If true,
+    /// `DaemonControlChannel::provision` carries the MCP bits on the endpoint and picks the MCP-only education priming
+    /// (`eg_send` only — ADR-0126 decision 1) and no CLI mail; if false, **no priming injected** + CLI mail
+    /// possible (ADR-0133). The control CLI wiring goes to everyone regardless of this axis.
     ///
-    /// ★**mcp-config 파일 write 는 더 이상 이 칸이 가르지 않는다 — 이 문장을 되돌리지 말 것**★
-    ///   (ADR-0209 · `control/mod.rs` 의 `writes_mcp_config_file` 게이트): 「우리가 쓴 파일을 읽나」가
-    ///   아래 [`AgentBackend::writes_mcp_config_file`] 로 갈라져 나갔고, 그 write 와 fail-closed `?` 는
-    ///   그쪽 칸에만 걸린다. 여기 「true 면 mcp-config 를 쓴다」가 적혀 있던 동안 codex 는 우편 축을
-    ///   맞추려 이 칸을 켜는 것만으로 **아무도 안 여는 평문 Bearer 토큰 JSON** 을 스폰마다 받았다.
+    /// ★**This field no longer decides the mcp-config file write — do not revert this sentence**★
+    ///   (ADR-0209 · the `writes_mcp_config_file` gate of `control/mod.rs`): 「does it read the file we wrote」
+    ///   was split off into [`AgentBackend::writes_mcp_config_file`] below, and that write and the fail-closed `?`
+    ///   hang only on that field. While 「true means write the mcp-config」 was written here, codex, just by turning this field on
+    ///   to match the mail axis, got **a plaintext Bearer token JSON nobody opens** on every spawn.
     ///
-    /// ★그래서 **두 칸의 네 조합이 전부 정당하다** — 특히 `(true, false)` 가 그렇다★:
-    ///   - `(true, true)` = claude. MCP 로 우편을 쓰고, 그 입구가 우리가 쓴 파일이다(`--mcp-config`).
-    ///   - **`(true, false)` = codex. MCP 로 우편을 쓰지만 그 파일은 한 번도 열지 않는다** — 부착 수단이
-    ///     명령줄 오버라이드(`-c mcp_servers.<서버>=…`)이고 토큰은 그 값이 **이름으로 가리키는 env** 로
-    ///     간다. 디스크에 사본이 생길 자리가 아예 없고, 그것이 이 조합의 값어치다.
-    ///   - `(false, false)` = shell·gemini stub. 우편 평면 밖이거나 미측정이다.
-    ///   - `(false, true)` 는 오늘 쓰는 backend 가 없다(파일은 MCP 입구를 위한 것이라 짝이 없으면 낭비다).
-    /// ★첫 칸만 켜고 둘째 칸을 **안 본** backend 는 조용히 MCP 를 못 받는다★ — 둘째 칸의 기본값이
-    ///   `false` 라, 파일을 **읽어야** 하는 backend 가 그것을 선언하지 않으면 데몬은 파일을 안 쓰고
-    ///   endpoint 의 `config_path` 가 `None` 으로 오며, 그 backend 의 `--mcp-config` 주입이 한 줄도 돌지
-    ///   않는다. 증상은 오류가 아니라 「툴이 없다」는 침묵이다. 새 backend 를 들일 때 **두 칸을 함께
-    ///   답할 것** — 첫 칸은 「MCP 로 우편을 쓰나」, 둘째 칸은 「그 입구가 우리가 쓴 **파일**인가」다.
+    /// ★So **all four combinations of the two fields are legitimate** — especially `(true, false)`★:
+    ///   - `(true, true)` = claude. Uses mail through MCP, and that entry is a file we wrote (`--mcp-config`).
+    ///   - **`(true, false)` = codex. Uses mail through MCP but never opens that file** — the attachment means
+    ///     is a command-line override (`-c mcp_servers.<server>=…`) and the token goes into **an env that value names**.
+    ///     There is no place at all for a copy to appear on disk, and that is the worth of this combination.
+    ///   - `(false, false)` = shell · gemini stub. Outside the mail plane or unmeasured.
+    ///   - `(false, true)` is used by no backend today (the file is for the MCP entry, so without its pair it is waste).
+    /// ★A backend that turns on only the first field and **does not look at** the second silently gets no MCP★ — the second field's default is
+    ///   `false`, so if a backend that **must read** the file does not declare it, the daemon does not write the file,
+    ///   the endpoint's `config_path` comes as `None`, and that backend's `--mcp-config` injection does not run a single
+    ///   line. The symptom is not an error but the silence of 「no tools」. When bringing in a new backend, **answer both fields
+    ///   together** — the first is 「does it use mail through MCP」, the second 「is that entry a **file** we wrote」.
     ///
-    /// ★false 쪽이 고르는 것은 「다른 프라이밍」이 아니라 「프라이밍 없음」이다 — 변형 축을 되살리지 말 것★:
-    ///   CLI 전용 사본(`prompts/agent-priming-cli.md`)은 커밋 `2ef6902` 에서 삭제됐고 판정식은
-    ///   `wants_priming = uses_mail && accepts_mcp_config` 하나다(`control/mod.rs`). 그래서 비-MCP 스폰은
-    ///   지시서를 한 글자도 못 받고, 위 정합 불변식은 **아무것도 안 가르쳐서** 성립한다(없는 툴을 설명하는
-    ///   문서를 주는 것이 거짓말이고 침묵은 아니다 — ADR-0209 결정 3).
+    /// ★What the false side picks is not 「other priming」 but 「no priming」 — do not bring the variant axis back★:
+    ///   the CLI-only copy (`prompts/agent-priming-cli.md`) was deleted in commit `2ef6902`, and the decision formula is the one
+    ///   `wants_priming = uses_mail && accepts_mcp_config` (`control/mod.rs`). So a non-MCP spawn
+    ///   receives not a single character of instructions, and the consistency invariant above holds by **teaching nothing** (giving a document
+    ///   describing nonexistent tools would be a lie, and silence is not — ADR-0209 decision 3).
     ///
-    /// ★`supports_control_channel` 과의 관계★: 후자는 "provision 을 **부르나**"(제어 채널 자체를 소비하나),
-    ///   이것은 "provision 이 붙일 채널 중 **MCP 를 낄 수 있나**"다 — 직교 축이다. 오늘 claude 와 codex 가
-    ///   둘 다 true 이고(codex 의 MCP 부착 수단만 파일이 아닐 뿐이다 — 위 조합 표), shell·gemini stub 은
-    ///   둘 다 false 다. "제어 채널은 CLI 로만 쓰는 백엔드"는 전자 true·후자 false 가 된다.
-    ///   ★「codex 는 둘 다 false」로 적힌 자리를 만나면 낡은 것이다★ — 그 서술은 ADR-0209 이전 것이다.
+    /// ★Relation to `supports_control_channel`★: the latter is "does it **call** provision" (does it consume the control channel itself),
+    ///   this one is "among the channels provision attaches, **can it plug in MCP**" — orthogonal axes. Today claude and codex
+    ///   are both true (only codex's MCP attachment means is not a file — the combination table above), and shell · gemini stub are
+    ///   both false. "A backend that uses the control channel only through the CLI" would be the former true, the latter false.
+    ///   ★If you meet a place written as 「codex is false on both」, it is stale★ — that statement predates ADR-0209.
     // ADR-0126
     // ADR-0133
     // ADR-0209
     fn accepts_mcp_config(&self) -> bool;
 
-    /// 이 backend 가 **데몬이 쓴 mcp-config 파일을 경로로 읽나**(claude=true — `--mcp-config <path>`).
+    /// Whether this backend **reads the mcp-config file the daemon wrote, by path** (claude=true — `--mcp-config <path>`).
     ///
-    /// ★위 칸에서 갈라져 나온 축이다 — 도로 접지 말 것★: 위 칸은 오늘 사실상 「MCP 로 우편을 쓰나」를
-    ///   뜻하고(데몬이 `mail_allowed` 를 거기서 파생한다 — ADR-0133), 이 칸은 「우리가 디스크에 평문
-    ///   Bearer 토큰 JSON 을 쓸까」 하나만 묻는다. 겸직하던 동안 codex 는 우편 축을 맞추려 위 칸을 켜는
-    ///   것만으로 **아무도 안 읽는 평문 토큰 파일**을 스폰마다 받았고(기본 ACL · revoke 때 삭제), 그
-    ///   write 는 fail-closed 라 **안 읽는 파일 때문에 스폰이 끊길 수 있었다**.
-    /// ★기본값 = false(비밀을 안 쓰는 쪽)★: 아래 우편 두 축의 fail-open 과 방향이 반대인데, 재는 것이
-    ///   다르기 때문이다 — 틀린 false 의 대가는 **파일 부재**(그 backend 의 MCP 가 안 붙고 계약 표가 그
-    ///   행에서 깨진다 — 시끄럽다)이고, 틀린 true 의 대가는 **평문 토큰이 디스크에 남는 것 + 스폰 중단
-    ///   위험**이다(조용하다). 모르는 backend 에 비밀을 쓰지 않는다.
-    /// ★true 를 선언한 backend 의 fail-closed 는 그대로다★ — 그 backend 는 이 파일 없이는 MCP 입구가
-    ///   물리적으로 사라지므로, write 실패에 스폰을 계속시키면 제어 채널 없이 도는 에이전트가 된다.
+    /// ★An axis split off from the field above — do not fold it back★: the field above today effectively means 「does it use mail through MCP」
+    ///   (the daemon derives `mail_allowed` from it — ADR-0133), and this field asks only 「do we write a plaintext Bearer token JSON to disk」.
+    ///   While it doubled, codex, just by turning the field above on to match the mail axis,
+    ///   got **a plaintext token file nobody reads** on every spawn (default ACL · deleted on revoke), and that
+    ///   write is fail-closed, so **a spawn could be cut off because of a file nobody reads**.
+    /// ★Default = false (the side that writes no secret)★: the direction is opposite to the fail-open of the two mail axes below, because
+    ///   they measure different things — the cost of a wrong false is **a missing file** (that backend's MCP does not attach and the contract table breaks on that
+    ///   row — loud), and the cost of a wrong true is **a plaintext token left on disk + the risk of aborting the
+    ///   spawn** (quiet). Secrets are not written for unknown backends.
+    /// ★The fail-closed of a backend that declared true stays as is★ — without this file that backend's MCP entry
+    ///   physically disappears, so continuing the spawn on a write failure would make an agent running without a control channel.
     // ADR-0086
     // ADR-0099
     // ADR-0209
@@ -295,26 +295,26 @@ pub trait AgentBackend: Send + Sync {
         false
     }
 
-    /// cwd·env는 manager가 정규화한 값을 전달한다.
+    /// cwd and env are passed as values the manager normalized.
     ///
-    /// `control`(ADR-0086): 데몬이 발급한 제어 채널 엔드포인트(추상 descriptor). 있으면 backend 가
-    ///   자기 프로그램 방식으로 명령줄에 주입한다(claude=`--mcp-config <path>` — 그 지식은
-    ///   `backend/claude/` 단독, ADR-0004). None 이거나 제어 채널을 안 쓰는 backend(shell)면 무시한다.
+    /// `control` (ADR-0086): the control channel endpoint the daemon issued (an abstract descriptor). If present, the backend
+    ///   injects it into the command line its program's way (claude=`--mcp-config <path>` — that knowledge is
+    ///   `backend/claude/` alone, ADR-0004). If None, or for a backend that does not use the control channel (shell), it is ignored.
     ///
-    /// `resume_session_id` = 이 spawn 이 **이어받을** 저장된 backend sid. `None` = 이어받지 않는다
-    ///   (Fresh 로 띄우거나, 저장된 값이 없거나, 이 backend 의 이어받기 축이 꺼져 있다).
-    /// ★바로 위 `session_id` 와 **다른 값이다 — 한 칸으로 접지 말 것**★: 그쪽은 우리가 발급해 건네주는
-    ///   값([`AgentBackend::assigns_session_id`] 축)이고, 이 칸은 상대가 발급해 우리가 받아 적어 둔
-    ///   값이다([`SessionIdSink`] 가 적은 그것). 접으면 `assigns_session_id() == false` 가 뜻하는
-    ///   「우리는 id 를 발급하지 않는다」가 거짓이 된다 — 발급 축이 꺼진 backend 의 argv 에 우리가 넘긴
-    ///   값이 실리게 되므로.
-    /// ★[`AgentBackend::open_spawn`] 의 같은 이름 칸과 **같은 값이다**★ — 갈라지는 것은 그 값으로
-    ///   **무엇을 하나**뿐이다: 명령줄로 이어받는 backend(codex 터미널)는 여기서 argv 를 조립하고,
-    ///   통로가 이어받기를 요청하는 backend(codex app-server)는 그쪽에서 첫 요청을 고른다.
-    /// ★모드를 함께 보는 것이 여기서는 정당하다 — `open_spawn` 과 다른 점★: 그쪽은 모드를 안 받아
-    ///   「Fresh 인데 이어받을 값이 있다」가 표현 불가능하지만, 이 자리는 `mode` 를 이미 받고 있고
-    ///   **Fresh 와 Resume 의 argv 가 애초에 갈린다**(claude 의 `--session-id` ↔ `--resume`). 조립점은
-    ///   그쪽과 같은 규율로 Fresh 면 이 칸을 비워서 넘긴다.
+    /// `resume_session_id` = the stored backend sid this spawn **will resume**. `None` = does not resume
+    ///   (launched Fresh, no stored value, or this backend's resume axis is off).
+    /// ★It is **a different value from `session_id` right above — do not fold them into one field**★: that one is a value we issue and hand over
+    ///   (the [`AgentBackend::assigns_session_id`] axis), and this field is a value the other side issued and we recorded
+    ///   (what [`SessionIdSink`] recorded). Folding them would make 「we do not issue ids」,
+    ///   which `assigns_session_id() == false` means, false — since a value we passed would be carried in the argv of a backend
+    ///   whose issuing axis is off.
+    /// ★It is **the same value** as the field of the same name in [`AgentBackend::open_spawn`]★ — what differs is only **what is done** with that value:
+    ///   a backend that resumes by command line (codex terminal) assembles argv here, and
+    ///   a backend whose link requests the resume (codex app-server) picks the first request there.
+    /// ★Looking at the mode together is legitimate here — the difference from `open_spawn`★: that one does not receive the mode, so
+    ///   「Fresh but with a value to resume」 cannot be expressed, but this place already receives `mode`, and
+    ///   **the argv of Fresh and Resume differ in the first place** (claude's `--session-id` ↔ `--resume`). The assembly point
+    ///   passes this field empty on Fresh, by the same discipline as there.
     // ADR-0185
     // ADR-0208
     fn build_spec(
@@ -328,19 +328,19 @@ pub trait AgentBackend: Send + Sync {
         control: Option<ControlEndpoint>,
     ) -> CommandSpec;
 
-    /// 데몬이 발급한 제어 endpoint 로 이 spawn 을 **세울 수 있나**. `Err(사유)` = fail-closed(스폰 중단).
+    /// Whether this spawn **can be set up** with the control endpoint the daemon issued. `Err(reason)` = fail-closed (spawn aborted).
     ///
-    /// ★왜 [`AgentBackend::build_spec`] 안에서 못 하나★: 그 메서드는 `CommandSpec` 을 돌려줄 뿐이라
-    ///   「인자를 못 만들었다」를 호출자에게 말할 칸이 없다 — 조용히 빠진 인자로 스폰이 그대로 뜬다.
-    ///   그래서 조립점이 조립 **전에** 이 술어를 묻고, `Err` 면 스폰을 끊는다(발급된 토큰은 조립점의
-    ///   provision 가드가 회수한다).
-    /// ★기본값 = `Ok(())`★ — 대부분의 backend 는 제어 endpoint 로 못 세울 상태가 없다. claude 처럼
-    ///   데몬 쪽 `?`(mcp-config write 실패)가 이미 끊어 주는 backend 도 여기 손댈 것이 없다. 이 축이
-    ///   필요한 것은 **데몬이 못 보는 실패**를 가진 backend 뿐이다 — codex 의 MCP 부착 값이 그것이다
-    ///   (그 backend 는 파일을 안 쓰므로 데몬에 끊을 재료가 없다).
-    /// ★「인가되지 않음」을 여기서 끊지 말 것★ — 데몬이 우편 입구를 안 준 스폰은 **정상**이고(운영자가
-    ///   껐거나 그 backend 가 우편 평면 밖이다), 끊으면 그 조합에서 스폰이 통째로 죽는다. 이 술어가
-    ///   재는 것은 「붙여야 하는데 못 붙인다」 하나다.
+    /// ★Why it cannot be done inside [`AgentBackend::build_spec`]★: that method only returns a `CommandSpec`, so
+    ///   it has no field to tell the caller 「could not build the arguments」 — the spawn would launch as is with silently missing arguments.
+    ///   So the assembly point asks this predicate **before** assembly and cuts the spawn on `Err` (the issued token is reclaimed by the assembly point's
+    ///   provision guard).
+    /// ★Default = `Ok(())`★ — most backends have no state in which they cannot be set up with the control endpoint. A backend like claude,
+    ///   where the daemon-side `?` (mcp-config write failure) already cuts it off, has nothing to do here either. Only backends with
+    ///   **failures the daemon cannot see** need this axis — codex's MCP attachment value is one
+    ///   (that backend writes no file, so the daemon has no material to cut it off with).
+    /// ★Do not cut 「not authorized」 here★ — a spawn the daemon gave no mail entry is **normal** (the operator
+    ///   turned it off or that backend is outside the mail plane), and cutting it would kill spawns of that combination entirely. What this predicate
+    ///   measures is only 「must attach but cannot」.
     // ADR-0004
     // ADR-0209
     fn precheck_control_endpoint(
@@ -351,88 +351,88 @@ pub trait AgentBackend: Send + Sync {
         Ok(())
     }
 
-    /// 이 backend(프로그램)가 결정하는 caps — session(resume)·model.
-    /// transport(물리 채널)가 만드는 input/output/control 과 별개로, 최종 Capabilities 는
-    /// `Capabilities::compose(transport_caps, backend_caps)` 로 합성된다.
+    /// The caps this backend (program) decides — session (resume) · model.
+    /// Separately from the input/output/control the transport (physical channel) makes, the final Capabilities are
+    /// composed by `Capabilities::compose(transport_caps, backend_caps)`.
     ///
-    /// `command` 를 받는 이유(FIX 5): 같은 프로그램(claude)이라도 **모드에 따라 caps 가 다르다** —
-    /// json(stream-json) 모드는 resume 미지원(ADR-0044 후속)이라 resume=false 를 신고해야 한다.
-    /// backend 가 session caps 의 출처(ADR-0030)이고 mode 는 command 에 있으므로, 여기서 command 를
-    /// 보고 정직하게 산출한다(type split 유지 — output/control 은 여전히 transport 소관).
+    /// Why it receives `command` (FIX 5): even for the same program (claude), **caps differ by mode** —
+    /// json (stream-json) mode does not support resume (ADR-0044 follow-up), so it must report resume=false.
+    /// The backend is the source of the session caps (ADR-0030) and the mode is in command, so here it looks at command
+    /// and computes honestly (type split kept — output/control are still the transport's concern).
     fn capabilities(&self, command: &AgentCommand) -> BackendCaps;
 
-    /// 이 backend 가 `command` 에 대해 요구하는 **물리 통로 모양**.
+    /// The **physical link shape** this backend requires for `command`.
     ///
-    /// ★왜 backend 인가(ADR-0004)★: "이 프로그램을 어떤 통로로 띄워야 하나" 는 프로그램별 지식이다.
-    /// ★공용 층에 판정 술어를 되살리지 말 것★: 조립점이 `AgentCommand` payload 를 직접 되묻는 순간 한
-    ///   backend 의 출력 형식 축이 전원의 통로 선택을 굴리게 되고, 그 backend 를 안 쓰는 항목까지 그
-    ///   축을 통과한다.
-    /// ★렌더 모드 축과 같은 것이 아니다★: 그 프로그램이 무엇을 그리나(터미널 TUI ↔ 구조화 스트림)는
-    ///   그 backend 의 명령 payload 가 갖는 축이고, 이것은 그 선택이 **우리 쪽 통로**에 무엇을 요구하나다.
-    ///   한 backend 안에서 둘이 1:1 로 붙어 있어도 어휘를 합치지 말 것 — 합치면 새 backend 가 자기 렌더
-    ///   모드를 우리 통로 이름으로 신고해야 한다.
-    /// ★기본값 = `Pty`★: 선언하지 않은 backend 는 터미널로 뜬다.
+    /// ★Why the backend (ADR-0004)★: "through which link must this program be launched" is per-program knowledge.
+    /// ★Do not bring a decision predicate back to the shared layer★: the moment the assembly point asks the `AgentCommand` payload directly, one
+    ///   backend's output-format axis drives everyone's link choice, and even entries that do not use that backend pass through that
+    ///   axis.
+    /// ★It is not the same as the render mode axis★: what that program draws (terminal TUI ↔ structured stream) is
+    ///   an axis of that backend's command payload, and this is what that choice requires of **our link**.
+    ///   Even if the two are tied 1:1 inside one backend, do not merge the vocabularies — merging would make a new backend report its own render
+    ///   mode under our link's name.
+    /// ★Default = `Pty`★: a backend that declares nothing launches as a terminal.
     // ADR-0004
     // ADR-0044
     fn transport_shape(&self, _command: &AgentCommand) -> TransportShape {
         TransportShape::Pty
     }
 
-    /// 이 backend 가 `command` 를 띄울 **물리 통로를 직접 만들어**, 세션 조립에 필요한 나머지 값과 함께
-    /// 한 번에 내준다.
+    /// This backend **builds the physical link itself** to launch `command`, and hands it out at once together with the other values the session assembly
+    /// needs.
     ///
-    /// ★왜 backend 인가(ADR-0191)★: "이 프로그램을 어떤 통로 구현체로 띄우나" 는 프로그램별 지식이다.
-    ///   조립점이 [`TransportShape`] 를 다시 match 해 생성자를 고르면 **가르는 자리가 두 곳**이 되고
-    ///   (`backend_for` + 그 match), 그 자리가 백엔드 전용 통로 타입을 이름으로 알게 된다(ADR-0004).
-    /// ★조립점은 돌려받은 통로의 실제 타입을 모른다★ — `Box<dyn AgentTransport>` 로만 받는다.
-    /// ★아스펙트를 한 dispatch 에 모아 싣는다★: caps·인코더·턴 분류자·우편 자격은 각자 자기 메서드가
-    ///   그대로 소유하고, 여기서는 그것들을 **모으기만** 한다. 조립점이 같은 switch 를 아스펙트마다 다시
-    ///   타지 않게 하는 것이 이 묶음의 존재 이유다.
-    /// ★`output.structured` 를 통로 구현체가 하드코딩하는 것은 여전히 금지(ADR-0044/0030)★ — 구조화
-    ///   파이프를 고른 backend 가 그 자리에서 주입한다. 규칙은 그대로이고 주입하는 **자리**만 여기다.
-    /// `cols`/`rows` 는 터미널 통로에만 쓰인다 — 파이프에는 크기 개념이 없어 무시된다.
+    /// ★Why the backend (ADR-0191)★: "with which link implementation is this program launched" is per-program knowledge.
+    ///   If the assembly point matched [`TransportShape`] again to pick a constructor, **there would be two deciding places**
+    ///   (`backend_for` + that match), and that place would know backend-only link types by name (ADR-0004).
+    /// ★The assembly point does not know the actual type of the returned link★ — it receives only `Box<dyn AgentTransport>`.
+    /// ★Aspects are gathered and carried in one dispatch★: caps, encoder, turn classifier and mail eligibility are each owned
+    ///   by their own method as is, and here they are **only gathered**. The reason for this bundle is to keep the assembly point from riding the same switch again
+    ///   for each aspect.
+    /// ★The link implementation hardcoding `output.structured` is still forbidden (ADR-0044/0030)★ — the backend that chose the structured
+    ///   pipe injects it at that place. The rule is unchanged; only the **place** of injection is here.
+    /// `cols`/`rows` are used only for terminal links — a pipe has no size concept, so they are ignored.
     ///
-    /// `sid_sink` = 상대가 세션 id 를 **발급해 주는** backend 가 그 값을 조립점으로 돌려보낼 곳
-    /// ([`SessionIdSink`]). `None` = 조립점이 기록 수단을 주지 않았다 → 받아도 남길 곳이 없다.
-    /// ★그 id 를 스스로 받지 않는 backend 는 이 칸을 그냥 무시한다★ — claude 처럼 자기 파일을 감시해
-    ///   관측하는 쪽은 여기가 아니라 그 관측기 경로로 기록한다.
-    /// ★순서 계약★: 이 포트는 **그 세션으로 무엇을 보내기 전에** 불린다. 그래서 기록됐는지 되묻는
-    ///   둘째 동사가 필요 없다(포트가 한 동사인 이유 — [`SessionIdSink`]).
+    /// `sid_sink` = where a backend whose other side **issues** the session id sends that value back to the assembly point
+    /// ([`SessionIdSink`]). `None` = the assembly point gave no recording means → even if received there is nowhere to keep it.
+    /// ★A backend that does not receive that id itself just ignores this field★ — a side that observes by watching its own file, like claude,
+    ///   records through that observer path, not here.
+    /// ★Order contract★: this port is called **before anything is sent through that session**. So there is no need for a second verb
+    ///   asking back whether it was recorded (why the port is one verb — [`SessionIdSink`]).
     ///
-    /// `first_turn_sink` = 이 화신의 대화에 턴이 실제로 생긴 순간을 알릴 곳([`FirstTurnSink`]). ★턴을 통로가
-    ///   지는(`MidTurnPolicy::TransportOwned`) 모드를 신고하는 backend 만 그 통로에 꽂는다 — 나머지는
-    ///   무시한다★(그 모드의 세션은 제출을 세지 않는다 — 짝 규율은 그 타입의 doc).
+    /// `first_turn_sink` = where to announce the moment a turn actually happened in this incarnation's conversation ([`FirstTurnSink`]). ★Only a backend that reports
+    ///   a mode where the link owns the turn (`MidTurnPolicy::TransportOwned`) plugs it into that link — the rest
+    ///   ignore it★ (the session of that mode does not count submissions — the pairing discipline is in that type's doc).
     ///
-    /// `resume_session_id` = 이 spawn 이 **이어받을** 저장된 backend sid. `None` = 이어받지 않는다
-    ///   (Fresh 로 띄우거나, 저장된 값이 없거나, 이 backend 의 이어받기 축이 꺼져 있다).
-    /// ★[`AgentBackend::build_spec`] 의 `session_id` 와 **다른 값이다 — 같은 것으로 접지 말 것**★:
-    ///   그쪽은 우리가 발급해 건네주는 값([`AgentBackend::assigns_session_id`] 축)이고, 이 칸은 상대가
-    ///   발급해 우리가 받아 적어 둔 값이다([`SessionIdSink`] 가 적은 그것).
-    /// ★모드를 함께 받지 않는 것은 의도다★ — 조립점이 Fresh 면 이 칸을 비워서 넘긴다. 모드와 값을 둘
-    ///   다 받으면 「Fresh 인데 이어받을 값이 있다」는 조합이 표현 가능해지고, 그 조합의 해석이 backend
-    ///   마다 갈린다.
-    /// ★명령줄로 이어받는 backend(claude)는 이 칸을 쓰지 않는다★ — 그쪽은 `build_spec` 이
-    ///   `--resume <sid>` 를 조립한다. 이 칸이 필요한 것은 **통로가 이어받기를 요청하는** backend 다.
-    /// ★기본값 = PTY + 각 아스펙트가 신고한 값★: 통로를 따로 만들지 않는 backend 는 터미널로 뜨고
-    ///   ([`AgentBackend::transport_shape`] 기본값과 같은 자리), 나머지 칸은 자기 메서드의 산출을 그대로
-    ///   싣는다.
-    /// ★단 이 기본값은 `transport_shape` 를 **읽지 않는다**★: 파이프를 요구한다고 신고해 놓고 이 메서드를
-    ///   구현하지 않으면 조용히 터미널로 뜬다. 선언 표 트립와이어(`tests::expected_codec_axis`)는
-    ///   `transport_shape` 의 신고값만 재므로 그 어긋남을 못 본다.
+    /// `resume_session_id` = the stored backend sid this spawn **will resume**. `None` = does not resume
+    ///   (launched Fresh, no stored value, or this backend's resume axis is off).
+    /// ★It is **a different value from the `session_id` of [`AgentBackend::build_spec`] — do not fold them into the same thing**★:
+    ///   that one is a value we issue and hand over (the [`AgentBackend::assigns_session_id`] axis), and this field is a value the other side
+    ///   issued and we recorded (what [`SessionIdSink`] recorded).
+    /// ★Not receiving the mode together is intended★ — the assembly point passes this field empty on Fresh. Receiving both the mode and the value
+    ///   would make the combination 「Fresh but with a value to resume」 expressible, and the interpretation of that combination
+    ///   would differ per backend.
+    /// ★A backend that resumes by command line (claude) does not use this field★ — there `build_spec`
+    ///   assembles `--resume <sid>`. This field is needed by a backend **whose link requests the resume**.
+    /// ★Default = PTY + the values each aspect reports★: a backend that does not build its own link launches as a terminal
+    ///   (the same place as the [`AgentBackend::transport_shape`] default), and the other fields carry the output of their own methods as
+    ///   is.
+    /// ★But this default **does not read** `transport_shape`★: reporting that it requires a pipe while not implementing
+    ///   this method makes it silently launch as a terminal. The declaration-table tripwire (`tests::expected_codec_axis`)
+    ///   measures only the reported value of `transport_shape`, so it cannot see that mismatch.
     ///
-    /// `control` = [`AgentBackend::build_spec`] 이 받은 것과 **같은 endpoint**. 명령줄이 아니라 **통로
-    ///   핸드셰이크로** 제어 평면 데이터를 실어야 하는 backend 를 위해 온다(codex app-server 가
-    ///   `thread/start` 의 `developerInstructions` 에 프라이밍 내용을 싣는다).
-    /// ★그쪽에서 이미 썼다고 여기서 다시 쓰지 말 것★ — 한 spawn 이 같은 값을 두 수단으로 보내면 상대가
-    ///   그 둘을 어떻게 합치는지에 우리 동작이 매달린다. 조립하는 자리는 모드마다 하나여야 한다
-    ///   (`resume_session_id` 가 argv 와 핸드셰이크로 갈리는 것과 같은 규율).
-    /// ★대부분의 backend 는 이 칸을 무시한다★ — 명령줄로 번역해 끝나는 backend 는 `build_spec` 에서
-    ///   이미 다 했다.
+    /// `control` = **the same endpoint** [`AgentBackend::build_spec`] received. It comes for backends that must carry control-plane data **through the link
+    ///   handshake** rather than the command line (codex app-server puts the priming content in
+    ///   `developerInstructions` of `thread/start`).
+    /// ★Do not write it again here just because it was already written there★ — if one spawn sends the same value by two means, the other side
+    ///   hangs on how the other side merges the two. There must be one assembling place per mode
+    ///   (the same discipline as `resume_session_id` being split between argv and the handshake).
+    /// ★Most backends ignore this field★ — a backend that finishes by translating into the command line has
+    ///   already done everything in `build_spec`.
     // ADR-0004
     // ADR-0191
     // ADR-0215
-    /// 이 backend 의 통로가 연결을 세워야 하나(공개 래퍼 [`declares_link`] 의 doc 이 정본).
-    /// ★기본값 = `false`★ — 선언하지 않은 backend 는 배달 포트를 받지 않고 옛 판정 경로를 그대로 탄다.
+    /// Whether this backend's link must set up a connection (the doc of the public wrapper [`declares_link`] is canonical).
+    /// ★Default = `false`★ — a backend that declares nothing gets no delivery port and takes the old decision path as is.
     // ADR-0004
     fn declares_link(&self, _command: &AgentCommand) -> bool {
         false
@@ -447,13 +447,13 @@ pub trait AgentBackend: Send + Sync {
         sid_sink: Option<SessionIdSink>,
         first_turn_sink: Option<FirstTurnSink>,
         resume_session_id: Option<Uuid>,
-        // 연결의 결말을 배달할 곳 — `declares_link()` 가 true 인 backend 에만 온다.
+        // Where the connection's outcome is delivered — comes only to backends whose `declares_link()` is true.
         _link_sink: Option<LinkSink>,
         control: Option<&ControlEndpoint>,
     ) -> Result<SpawnParts, PtyError> {
-        // 이 기본값은 세션 id 를 받아 오지도, 턴을 통로가 지지도, 통로로 이어받지도, 제어 평면 데이터를
-        //   핸드셰이크에 싣지도 않는다 — 밑줄 이름 대신 여기서 명시적으로 버린다(이름은 위 doc 이 부르는
-        //   것과 같아야 한다: rustdoc 이 시그니처를 그대로 렌더한다).
+        // This default neither fetches the session id, nor has the link own the turn, nor resumes through the link, nor puts control-plane data
+        //   in the handshake — they are dropped explicitly here instead of using underscore names (the names must match what the doc above
+        //   calls them: rustdoc renders the signature as is).
         let _ = (sid_sink, first_turn_sink, resume_session_id, control);
         let (transport, child_pid) = PtyTransport::open(spec, cols, rows)?;
         Ok(SpawnParts {
@@ -468,69 +468,69 @@ pub trait AgentBackend: Send + Sync {
         })
     }
 
-    /// 이 backend 의 **턴 신호 분류자**(ADR-0113 사실 계층의 백엔드 지식 몫).
+    /// This backend's **turn-signal classifier** (the backend-knowledge share of the ADR-0113 fact layer).
     ///
-    /// ★왜 backend 인가(ADR-0004 · ADR-0110 결정 4 의 취지 승계)★: "어떤 출력 이벤트가 턴 진행이고
-    ///   어떤 게 턴 종료인가" 는 프로그램별 지식이다. 특히 `OutputEvent::Structured` 는 **백엔드별
-    ///   이벤트 탈출구**라 그 `kind` 의 의미가 백엔드마다 다르다 — 공용 층에서 해석하면 한 백엔드의
-    ///   관례가 전원에게 강제된다(구조화 메타 라인을 내는 백엔드가 종료 신호 없이 영구 "턴 중" 이 된다).
-    /// ★신호 어휘(`TurnSignal`)는 공용 하나뿐★: 백엔드마다 다른 건 **매핑**이지 어휘가 아니다.
-    ///   백엔드별 신호 enum 을 만들면 소비자가 백엔드를 알아야 한다.
-    /// ★기본값 = 신호 없음(fail-open)★: 매핑을 선언하지 않은 backend 는 관측 대상이 아니다. 미관측은
-    ///   소비자 쪽에서 "즉시 배달" 로 흡수되지만(positive-knowledge-only), 근거 없는 진행 신호는
-    ///   깨울 수 없는 "턴 중" 을 만든다 — 그래서 기본은 침묵이다.
+    /// ★Why the backend (ADR-0004 · inheriting the intent of ADR-0110 decision 4)★: "which output events are turn progress and
+    ///   which are turn ends" is per-program knowledge. In particular `OutputEvent::Structured` is **a per-backend
+    ///   event escape hatch**, so the meaning of its `kind` differs per backend — interpreting it in the shared layer would force one backend's
+    ///   convention on everyone (a backend emitting structured meta lines would be "in a turn" forever with no end signal).
+    /// ★There is only one shared signal vocabulary (`TurnSignal`)★: what differs per backend is the **mapping**, not the vocabulary.
+    ///   Making a per-backend signal enum would require consumers to know the backend.
+    /// ★Default = no signal (fail-open)★: a backend that declares no mapping is not observed. Unobserved is
+    ///   absorbed on the consumer side as "deliver immediately" (positive-knowledge-only), but a progress signal without grounds
+    ///   creates an "in a turn" that cannot be woken — so the default is silence.
     // ADR-0004
     // ADR-0113
     fn turn_classifier(&self) -> TurnClassifier {
         no_turn_signals
     }
 
-    /// 이어받기가 실패했을 때 **그 프로그램의 출력에서 원인을 알아볼 수 있나**(ADR-0172 분류 입구).
+    /// When resuming failed, **can the cause be recognized from that program's output** (ADR-0172 classification entry).
     ///
-    /// `evidence` = 그 화신이 남긴 텍스트(best-effort — 비어 있을 수 있다). 호출자가 **두 스트림을
-    /// 합쳐** 넘긴다: 콘솔 꼬리(PTY 세션) + 진단 stderr 꼬리(파이프 세션). 둘은 transport 에 따라
-    /// 배타적으로 차므로 구현체는 어느 쪽에서 왔는지 알 필요가 없다 — 문구만 본다.
-    /// `None` = 이 텍스트만으로는 종류를 단정할 수 없다 → 호출자가 맥락 기본값으로 떨어뜨린다.
+    /// `evidence` = the text that incarnation left (best-effort — may be empty). The caller passes **the two streams
+    /// merged**: the console tail (PTY session) + the diagnostic stderr tail (pipe session). Depending on the transport the two fill
+    /// exclusively, so the implementation does not need to know which one it came from — it only looks at the text.
+    /// `None` = the kind cannot be settled from this text alone → the caller falls back to the contextual default.
     ///
-    /// ★왜 backend 인가(ADR-0004)★: "이 문구가 무슨 뜻인가" 는 프로그램별 지식이다. manager 가 문자열을
-    ///   직접 보면 그 지식이 공용 층으로 샌다.
-    /// ★기본값 = 모름(fail-open)★: 선언하지 않은 backend 는 아무 것도 단정하지 않는다.
-    /// ★살아 있는 세션에도 불린다★: 호출자는 종료를 기다리지 않고 진단 스트림만으로 확정할 수 있다
-    ///   (`EarlyVerdict::Diagnosed`). 그러니 **"그 프로그램이 실패했을 때만 낼 수 있는 문구"** 만
-    ///   선언할 것 — 대화 본문에 섞여 나올 수 있는 문구를 선언하면 성공한 활성화가 실패로 도장 찍힌다.
+    /// ★Why the backend (ADR-0004)★: "what this text means" is per-program knowledge. If the manager looked at the string
+    ///   directly, that knowledge would leak into the shared layer.
+    /// ★Default = unknown (fail-open)★: a backend that declares nothing settles nothing.
+    /// ★It is also called for live sessions★: the caller can settle from the diagnostic stream alone without waiting for exit
+    ///   (`EarlyVerdict::Diagnosed`). So declare **only "text that program can emit only when it failed"**
+    ///   — declaring text that could appear mixed into the conversation body would stamp a successful activation as a failure.
     // ADR-0004
     // ADR-0172
     fn resume_failure_kind(&self, _evidence: &str) -> Option<AgentFailureKind> {
         None
     }
 
-    /// 이 backend 가 **편지를 읽는 주체**인가 = 에이전트 간 우편의 수신자 명단 자격.
+    /// Whether this backend is **a reader of mail** = eligibility for the recipient list of agent-to-agent mail.
     ///
-    /// ★"턴 관측 가능성" 축이 아니다(ADR-0116 결정 1·7 을 되돌리는 게 아니다)★: 구조화 출력이 없는
-    ///   터미널 claude 는 **그대로 받는다**. 여기서 가르는 건 관측 가능성이 아니라 **입력이 무엇으로
-    ///   해석되는가** 다 — shell 은 입력을 명령으로 **실행**하는 채널이라 봉투가 닿으면 읽히는 게 아니라
-    ///   실행된다(본문은 LLM 자유 텍스트라 `&`·`|`·`;` 가 섞이면 그 뒤가 별도 명령으로 파싱된다).
-    /// ★기본값 = true(fail-open)★: 새 CLI 백엔드는 편지를 읽는 쪽이 정상이다. 모른다고 배달을 끊으면
-    ///   편지가 조용히 사라지므로, 실행 채널인 backend 만 스스로 false 를 선언한다.
+    /// ★It is not the "turn observability" axis (it does not revert ADR-0116 decisions 1·7)★: terminal claude without structured output
+    ///   **still receives**. What is decided here is not observability but **what the input is
+    ///   interpreted as** — shell is a channel that **executes** input as commands, so an envelope reaching it is not read but
+    ///   executed (the body is LLM free text, so if `&`·`|`·`;` are mixed in, what follows is parsed as a separate command).
+    /// ★Default = true (fail-open)★: for a new CLI backend, reading mail is the normal side. Cutting delivery because it is unknown
+    ///   would make mail silently disappear, so only a backend that is an execution channel declares false itself.
     // ADR-0004
     fn reads_messages(&self) -> bool {
         true
     }
 
-    /// 이 backend 에 **우편 채널을 배정하나** = [`AgentBackend::reads_messages`] 의 보내기 짝.
+    /// Whether this backend **is assigned a mail channel** = the sending pair of [`AgentBackend::reads_messages`].
     ///
-    /// ★이 칸이 없던 동안 무엇이 벌어졌나(되살리지 말 것)★: 우편 가부를 데몬이
-    ///   `!accepts_mcp_config` **하나로** 파생했다. 그래서 「제어 채널은 쓰지만 우편은 안 쓰는」 backend 가
-    ///   제어 채널을 켜는 순간 **보내기 인가까지 함께 열렸다** — 받기는 위 칸이 false 인 채로. 보내기만
-    ///   열린 그 비대칭은 아무 선언에도 안 적혀 있었고, 데몬은 「CLI 우편을 가르쳤다」고 기록하는데
-    ///   실제 스폰은 그 교육을 한 글자도 안 받는 상태로 갈렸다.
-    /// ★그래서 이 축은 **backend 가 말한다**(ADR-0004)★: 어느 프로그램이 우편 평면에 드나는 프로그램별
-    ///   사실이다. 데몬은 이 값과 `accepts_mcp_config` 둘로 **한 값**(`mail_allowed`)을 파생하므로
-    ///   ADR-0133 결정 2 의 단일 파생점은 그대로다 — 갈린 것은 재료가 하나에서 둘로 는 것뿐이다.
-    /// ★기본값 = true(fail-open)★: 위 받기 칸과 같은 이유다. 모른다고 우편을 끊으면 편지가 조용히
-    ///   사라지므로, 우편 평면 밖에 있는 backend 만 스스로 false 를 선언한다.
-    /// ★`false` 는 "우편을 못 쓴다" 이지 "제어를 못 쓴다" 가 아니다★ — 제어 동사는 전원 개방이다
-    ///   (ADR-0132 결정 5). 그 둘을 가르는 것이 이 칸을 세운 이유다.
+    /// ★What happened while this field did not exist (do not bring it back)★: the daemon derived mail availability
+    ///   from `!accepts_mcp_config` **alone**. So for a backend 「that uses the control channel but not mail」,
+    ///   the moment it turned the control channel on, **send authorization opened along with it** — while receiving stayed false through the field above. That asymmetry,
+    ///   with only sending open, was written in no declaration, and while the daemon recorded 「taught CLI mail」,
+    ///   the actual spawn ended up in a state receiving not a single character of that education.
+    /// ★So this axis **is stated by the backend** (ADR-0004)★: whether a program comes and goes on the mail plane is a per-program
+    ///   fact. The daemon derives **one value** (`mail_allowed`) from this value and `accepts_mcp_config`, so
+    ///   the single derivation point of ADR-0133 decision 2 stays as is — what changed is only that the ingredients grew from one to two.
+    /// ★Default = true (fail-open)★: the same reason as the receiving field above. Cutting mail because it is unknown would make mail silently
+    ///   disappear, so only a backend outside the mail plane declares false itself.
+    /// ★`false` means "cannot use mail", not "cannot use control"★ — the control verbs are open to everyone
+    ///   (ADR-0132 decision 5). Telling those two apart is why this field was set up.
     // ADR-0004
     // ADR-0133
     // ADR-0209
@@ -538,55 +538,55 @@ pub trait AgentBackend: Send + Sync {
         true
     }
 
-    /// 이 backend 가 `command` 에 대해 쓰는 **입력 인코딩 태그**. 세션이 spawn 때 한 번 받아 보관한다.
+    /// The **input encoding tag** this backend uses for `command`. The session receives it once at spawn and keeps it.
     ///
-    /// ★왜 backend 인가(ADR-0004)★: "이 프로그램이 stdin 을 무엇으로 읽나" 는 프로그램별 지식이다.
-    ///   dispatch 층이 명령 모양을 직접 보고 태그를 고르면 그 지식이 공용 층으로 샌다.
-    /// ★기본값 = `Raw`★: 모르는 프로그램의 stdin 에 지어낸 봉투를 씌우면 그 프로그램은 입력을 통째로
-    ///   못 읽는다 — 그래서 선언하지 않은 backend 는 바이트를 그대로 통과시킨다.
+    /// ★Why the backend (ADR-0004)★: "how this program reads stdin" is per-program knowledge.
+    ///   If the dispatch layer picked the tag by looking at the command shape directly, that knowledge would leak into the shared layer.
+    /// ★Default = `Raw`★: putting a made-up envelope on the stdin of an unknown program would make that program unable to read the input
+    ///   at all — so a backend that declares nothing passes bytes through as is.
     // ADR-0004
     // ADR-0044
     fn input_encoder(&self, _command: &AgentCommand) -> InputEncoder {
         InputEncoder::Raw
     }
 
-    /// 텍스트 1턴을 이 backend 의 구조화 입력 라인으로 감싼다 — [`InputEncoder::encode`] 의 실물.
+    /// Wraps one text turn into this backend's structured input line — the real thing behind [`InputEncoder::encode`].
     ///
-    /// `msg_uuid` 는 [`AgentBackend::input_echo_event`] 에 넘어가는 값과 **반드시 같다**(호출자가 한 번
-    /// 생성해 양쪽에 넘긴다 — dedup 키).
-    /// ★기본값 = 감싸지 않음★: `input_encoder` 가 `Raw` 인 backend 는 [`backend_for_encoder`] 가 `None` 을
-    ///   줘 이 경로를 아예 타지 않는다. 계약을 총(total)으로 두려는 자리채움이고, 불려도 `Raw` 와 같은
-    ///   바이트를 낸다.
+    /// `msg_uuid` **must be the same** as the value passed to [`AgentBackend::input_echo_event`] (the caller generates it once
+    /// and passes it to both — the dedup key).
+    /// ★Default = no wrapping★: for a backend whose `input_encoder` is `Raw`, [`backend_for_encoder`] gives `None`
+    ///   and this path is never taken. It is a placeholder to keep the contract total, and even if called it emits the same
+    ///   bytes as `Raw`.
     fn wrap_input_turn(&self, text: &str, _msg_uuid: Uuid) -> Vec<u8> {
         text.as_bytes().to_vec()
     }
 
-    /// 입력 성공 직후 세션 층이 emit 할 입력-시점 유저 에코 이벤트. `None` = 만들지 않는다.
+    /// The input-time user echo event the session layer emits right after input succeeds. `None` = none made.
     ///
-    /// ★이벤트 shape 는 그 backend 의 decoder 가 replay 에 대해 만드는 것과 같아야 한다★ — 프론트가
-    ///   uuid 로 둘을 합치므로 어긋나면 화면에 두 개로 남는다. 그 shape 는 구현체 소유다.
-    /// ★기본값 = 없음★: PTY 가 입력을 즉시 로컬 에코하는 채널은 합성 에코를 만들면 중복이 된다.
+    /// ★The event shape must be the same as what that backend's decoder makes for a replay★ — the frontend
+    ///   merges the two by uuid, so if they diverge, two remain on screen. That shape is owned by the implementation.
+    /// ★Default = none★: for a channel where the PTY echoes input locally right away, making a synthetic echo would duplicate it.
     // ADR-0044
     // ADR-0045
     fn input_echo_event(&self, _text: &str, _msg_uuid: Uuid) -> Option<OutputEvent> {
         None
     }
 
-    /// pump→core 앞에 꽂히는 출력 정제 decoder. `None` = 바이트 직통.
+    /// The output refining decoder plugged in before pump→core. `None` = bytes pass straight through.
     ///
-    /// [`AgentBackend::input_encoder`] 의 출력 방향 짝 — 감싼 쪽이 푸는 쪽도 소유한다.
-    /// ★기본값 = 없음★: 선언하지 않은 backend 의 출력은 정제 없이 그대로 흐른다(터미널·평문 불변).
+    /// The output-direction pair of [`AgentBackend::input_encoder`] — the side that wraps also owns the side that unwraps.
+    /// ★Default = none★: the output of a backend that declares nothing flows as is without refining (terminal and plain text unchanged).
     // ADR-0004
     // ADR-0044
     fn output_decoder(&self, _command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
         None
     }
 
-    /// resume 스폰 시 이 명령의 과거 대화를 복원한 이벤트 목록. 빈 Vec = seed 안 함.
+    /// The event list restoring this command's past conversation on a resume spawn. An empty Vec = no seed.
     ///
-    /// transcript 의 파일 배치·포맷 지식은 전부 구현체 몫이다 — manager 는 이 호출만 하고 경로 규칙을
-    /// 모른다.
-    /// ★기본값 = 빈 Vec★: 선언하지 않은 backend 는 과거를 복원하지 않는다(fresh 버퍼 동작 불변).
+    /// All knowledge of the transcript's file layout and format belongs to the implementation — the manager only makes this call and does not know
+    /// the path rules.
+    /// ★Default = empty Vec★: a backend that declares nothing does not restore the past (fresh buffer behavior unchanged).
     // ADR-0004
     // ADR-0079
     fn resume_transcript_events(
@@ -598,17 +598,17 @@ pub trait AgentBackend: Send + Sync {
         Vec::new()
     }
 
-    /// 이 화신의 **세션 id 가 바뀐 것을 밖에서 알아볼 수 있나** — 알아본다면 그 관측기.
+    /// Whether **a change of this incarnation's session id can be recognized from outside** — and if so, that observer.
     ///
-    /// 우리가 spawn 때 지정한 sid 는 그 프로그램 안에서 바뀔 수 있다(claude 는 `/clear`·`/resume` 로
-    /// 프로세스는 그대로인 채 갈아탄다 — spike 실측). 바뀐 값을 못 따라잡으면 다음 복원이 옛 세션을
-    /// 살린다. 그것을 어디서 어떻게 읽나(파일 경로·JSON 스키마·PID 우회)는 전부 구현체 몫이고,
-    /// 러너([`crate::session_tracker`])는 주기·명부·콜백만 갖는다.
+    /// The sid we set at spawn can change inside that program (claude switches with `/clear`·`/resume`
+    /// while the process stays the same — spike measurement). If the changed value is not followed, the next restore revives the old session.
+    /// Where and how to read it (file path · JSON schema · PID workaround) all belong to the implementation, and
+    /// the runner ([`crate::session_tracker`]) has only the period, the registry and the callback.
     ///
-    /// `agent_id` 는 구현체 진단 로그의 상관 키로만 쓴다 — 관측 대상을 고르는 데 쓰지 않는다.
-    /// ★기본값 = `None`(관측 없음)★: 선언하지 않은 backend 는 추적 대상이 아니다. 근거 없는 관측기를
-    ///   기본으로 두면 남의 파일을 읽고 엉뚱한 sid 를 프로필에 적는다.
-    /// ★`None` 은 실패가 아니다★: 관측이 없어도 복원은 최초 지정 sid 로 정상 동작한다(best-effort).
+    /// `agent_id` is used only as the correlation key of the implementation's diagnostic logs — not for choosing what to observe.
+    /// ★Default = `None` (no observation)★: a backend that declares nothing is not tracked. Making an observer without grounds
+    ///   the default would read someone else's file and write a wrong sid into the profile.
+    /// ★`None` is not a failure★: even without observation, restore works normally with the originally set sid (best-effort).
     // ADR-0004
     fn session_id_source(
         &self,
@@ -620,11 +620,11 @@ pub trait AgentBackend: Send + Sync {
     }
 }
 
-/// spawn 한 번을 조립하는 데 필요한, backend 가 **한 dispatch 로** 내주는 묶음([`AgentBackend::open_spawn`]).
+/// The bundle a backend hands out **in one dispatch** that is needed to assemble one spawn ([`AgentBackend::open_spawn`]).
 ///
-/// ★caps 소유권 분할은 그대로다(ADR-0030)★: `backend_caps` 는 backend 몫뿐이고, 통로가 신고하는
-///   input/output/control caps 와는 세션 층에서 `Capabilities::compose` 로 합성된다. 여기서 미리 합치지
-///   않는다 — 합치면 두 출처가 한 값으로 뭉개져 어느 쪽이 무엇을 신고했는지 추적이 끊긴다.
+/// ★The caps ownership split stays as is (ADR-0030)★: `backend_caps` is only the backend's share, and it is composed with the input/output/control caps
+///   the link reports by `Capabilities::compose` in the session layer. It is not merged in advance here
+///   — merging would mash the two sources into one value and lose track of which side reported what.
 // ADR-0191
 pub struct SpawnParts {
     pub transport: Box<dyn AgentTransport>,
@@ -633,37 +633,37 @@ pub struct SpawnParts {
     pub encoder: InputEncoder,
     pub turn_classifier: TurnClassifier,
     pub reads_messages: bool,
-    /// 턴 도중 입력을 누가 분류·해제하나 — 세션이 이 값으로만 가른다.
+    /// Who classifies and releases mid-turn input — the session decides only by this value.
     // ADR-0231
     pub mid_turn: MidTurnPolicy,
-    /// 이 화신의 받음 알림 가능 여부 — ★backend 가 자기 디코더·통로에 건넨 **바로 그** Arc 를 싣는다★. 따로
-    ///   만들면 세션이 읽는 값과 디코더가 채우는 값이 갈리고, 그 어긋남은 오류 없이 영원한 `Unknown` 으로만
-    ///   보인다.
+    /// Whether this incarnation can give ack notices — ★carries **the very** Arc the backend handed to its decoder and link★. Making a separate one
+    ///   would split the value the session reads from the value the decoder fills, and that mismatch would show only as an eternal `Unknown`
+    ///   without any error.
     // ADR-0231
     pub delivery_ack: Arc<DeliveryAck>,
 }
 
-/// 출력 이벤트 → 턴 신호 매핑 함수(ADR-0113). 백엔드가 자기 함수를 내주고 `OutputCore` 가 그 포인터를
-/// 세션 수명 동안 들고 이벤트마다 부른다.
+/// The output event → turn signal mapping function (ADR-0113). The backend hands out its own function and `OutputCore` holds that pointer
+/// for the session's lifetime and calls it on every event.
 ///
-/// ★왜 함수 포인터인가★: emit 은 에이전트 출력마다 도는 hot path 다 — 매 이벤트에 `AgentCommand` 를
-///   들고 dispatch 하면 세션이 자기 명령 사본을 들거나 매니저를 되짚어야 하고, `Box<dyn Fn>` 은 할당을
-///   낳는다. backend 는 상태 없는 unit struct 라 매핑이 순수 함수로 떨어지므로, spawn 때 한 번 뽑아
-///   포인터로 들고 있으면 할당·락·조회가 전부 0 이다.
+/// ★Why a function pointer★: emit is the hot path that runs on every agent output — dispatching with an `AgentCommand` on every event
+///   would make the session hold its own copy of the command or retrace the manager, and `Box<dyn Fn>` causes an allocation.
+///   The backend is a stateless unit struct, so the mapping falls out as a pure function; taking it once at spawn
+///   and holding it as a pointer makes allocation, locking and lookup all zero.
 pub type TurnClassifier = fn(&OutputEvent) -> Option<TurnSignal>;
 
-/// 관측이 필요 없는 조립(테스트 하네스)도 이걸 꽂아 "신호 없음" 을 명시한다.
+/// Assemblies that need no observation (test harnesses) also plug this in to state "no signal" explicitly.
 pub fn no_turn_signals(_event: &OutputEvent) -> Option<TurnSignal> {
     None
 }
 
-// ── 정적 싱글턴 ────────────────────────────────────────────────────────────────
+// ── Static singletons ────────────────────────────────────────────────────────────────
 
 static CLAUDE_BACKEND: ClaudeBackend = ClaudeBackend;
 static SHELL_BACKEND: ShellBackend = ShellBackend;
 static CODEX_BACKEND: CodexBackend = CodexBackend;
 
-// 새 variant 연결 시: tests::expected_channel_matrix(tripwire)가 의식적 capability 선언을 강제한다 — ADR-0099
+// When wiring a new variant: tests::expected_channel_matrix (tripwire) forces a conscious capability declaration — ADR-0099
 fn backend_for(c: &AgentCommand) -> &'static dyn AgentBackend {
     match c {
         AgentCommand::Claude { .. } => &CLAUDE_BACKEND,
@@ -672,46 +672,46 @@ fn backend_for(c: &AgentCommand) -> &'static dyn AgentBackend {
     }
 }
 
-/// 인코딩 태그를 **소유한 backend**. `backend_for`(명령 축)의 인코더 축 짝이다 — 세션 층은 태그만 들고
-/// 명령은 갖고 있지 않아(소유권 분할) 여기서 되짚는다.
+/// The **backend that owns** the encoding tag. The encoder-axis pair of `backend_for` (the command axis) — the session layer holds only the tag
+/// and not the command (ownership split), so it is traced back here.
 ///
-/// `None` = 그 태그에는 backend 지식이 없다(바이트 통과).
-/// ★백엔드 이름은 이 표와 바로 위 `backend_for`, 아래 [`usage_probes`], 그리고 싱글턴 선언에만 적는다★ —
-///   그 바깥에서 백엔드 이름이 나오면 `backend/<이름>/` 폴더 격리가 샌 것이다(ADR-0004).
+/// `None` = that tag has no backend knowledge (bytes pass through).
+/// ★Backend names are written only in this table, `backend_for` right above, [`usage_probes`] below, and the singleton declarations★ —
+///   if a backend name appears outside them, the `backend/<name>/` folder isolation has leaked (ADR-0004).
 fn backend_for_encoder(e: InputEncoder) -> Option<&'static dyn AgentBackend> {
     match e {
         InputEncoder::Raw => None,
         InputEncoder::ClaudeStreamJson => Some(&CLAUDE_BACKEND),
-        // 봉투를 통로가 만드는 태그라 backend 가 감쌀 것이 없다 — `encode` 는 통과, 에코도 없다.
+        // A tag whose envelope is made by the link, so the backend has nothing to wrap — `encode` passes through, and there is no echo.
         InputEncoder::TransportFramed => None,
     }
 }
 
-// ── 사용량 조회기 등록부 ───────────────────────────────────────────────────────
+// ── Usage prober registry ───────────────────────────────────────────────────────
 
-/// 사용량 능동 조회기 전량 — 받는 쪽(데몬)은 키 목록·쿨타임·시한을 여기서만 받는다(벤더 이름·정책을 모른다).
+/// All active usage probers — the receiver (the daemon) gets the key list, cooldowns and time limits only from here (it does not know vendor names or policies).
 ///
-/// ★[`AgentBackend`] 의 칸이 아닌 것은 의도다★ — 조회는 에이전트 없이 돈다. trait 칸이면 명령 하나를 지어내
-///   `backend_for` 를 거쳐야 하는 두 겹 디스패치가 된다.
-/// 키는 서로 다르다(시험이 잰다).
+/// ★Not being a field of [`AgentBackend`] is intended★ — the query runs without an agent. As a trait field, it would become a two-layer dispatch
+///   that has to make up a command and go through `backend_for`.
+/// The keys are distinct from each other (a test measures it).
 // ADR-0004
 // ADR-0246
 pub fn usage_probes() -> [&'static dyn UsageProbe; 2] {
     [&claude::CLAUDE_USAGE_PROBE, &codex::CODEX_USAGE_PROBE]
 }
 
-/// 낱말 → 그 벤더의 조회기. `None` = 그 낱말의 조회기가 없다.
+/// Word → that vendor's prober. `None` = there is no prober for that word.
 ///
-/// ASCII 대소문자를 가리지 않는다 — wire(`"claude"`)와 버스(`"Claude"`, `agent.new` 의 낱말)가 한 조회기에 닿는다.
-/// ★칸 키는 들어온 낱말이 아니라 돌려받은 조회기의 [`UsageProbe::key`] 로 만든다★ — 들어온 철자로 키를 만들면
-///   두 입구가 다른 칸을 친다.
+/// ASCII case-insensitive — the wire (`"claude"`) and the bus (`"Claude"`, the word of `agent.new`) reach one prober.
+/// ★The entry key is made from the [`UsageProbe::key`] of the returned prober, not from the incoming word★ — making the key from the incoming spelling
+///   would have the two entries hit different entries.
 pub fn usage_probe_for(word: &str) -> Option<&'static dyn UsageProbe> {
     usage_probes()
         .into_iter()
         .find(|probe| probe.key().as_str().eq_ignore_ascii_case(word))
 }
 
-// ── 자유 함수 dispatch ─────────────────────────────────────────────────────────
+// ── Free-function dispatch ─────────────────────────────────────────────────────────
 
 pub fn assigns_session_id(c: &AgentCommand) -> bool {
     backend_for(c).assigns_session_id(c)
@@ -721,11 +721,11 @@ pub fn can_resume_stored_session(c: &AgentCommand) -> bool {
     backend_for(c).can_resume_stored_session(c)
 }
 
-/// 이 프로필을 **저장된 sid 로 이어받을 수 있나** = 이어받기 축 ∧ 저장된 sid 존재.
+/// Whether this profile **can be resumed with the stored sid** = the resume axis ∧ a stored sid exists.
 ///
-/// ★활성화 입구들이 이 규칙을 각자 적지 않게 하는 자리다★: 부팅 복원·명령 버스·WS 가 전부 여기를 부른다.
-/// 규칙을 베끼면 다음 입구가 두 항 중 하나만 옮겨 적고, 그 입구만 조용히 다르게 판정한다.
-/// ★명시 resume 요청은 이 함수가 모른다★ — 그것을 얹을지는 부르는 입구가 정한다.
+/// ★The place that keeps the activation entries from each writing this rule★: boot restore, the command bus and WS all call here.
+/// Copying the rule would have the next entry transcribe only one of the two terms, and only that entry would silently decide differently.
+/// ★This function does not know about an explicit resume request★ — whether to add it on top is decided by the calling entry.
 // ADR-0185
 pub fn can_resume_profile(p: &AgentProfile) -> bool {
     can_resume_stored_session(&p.command) && p.backend_session_id.is_some()
@@ -759,10 +759,10 @@ pub fn build_command_spec(
     backend_for(c).build_spec(c, mode, session_id, resume_session_id, cwd, env, control)
 }
 
-/// 조립 **직전**의 fail-closed 게이트(정본 doc = [`AgentBackend::precheck_control_endpoint`]).
+/// The fail-closed gate **right before** assembly (canonical doc = [`AgentBackend::precheck_control_endpoint`]).
 ///
-/// ★조립점이 이것을 부르는 자리는 provision 가드가 무장된 **뒤**여야 한다★ — 그래야 여기서 끊길 때
-///   이미 발급된 토큰·파일이 회수된다.
+/// ★The place where the assembly point calls this must be **after** the provision guard is armed★ — so that when cut off here,
+///   the token and file already issued are reclaimed.
 pub fn precheck_control_endpoint(
     c: &AgentCommand,
     control: Option<&ControlEndpoint>,
@@ -774,10 +774,10 @@ pub fn transport_shape(c: &AgentCommand) -> TransportShape {
     backend_for(c).transport_shape(c)
 }
 
-/// 통로 실물도 그 위에 실리는 아스펙트 값도 전부 [`AgentBackend::open_spawn`] 이 소유하고 이 함수는
-/// dispatch 뿐이다 — 새 backend 는 자기 폴더에서 그 메서드를 구현하면 되고 이 함수는 손대지 않는다
-/// (교체성). ★이 호출이 자식 프로세스를 띄운다★ — 위아래 dispatch 들과 달리 부작용이 있고, 실패하면
-/// 그 spawn 이 성립하지 않는다.
+/// Both the real link and the aspect values carried on it are owned by [`AgentBackend::open_spawn`], and this function is
+/// only dispatch — a new backend implements that method in its own folder and this function is not touched
+/// (swappability). ★This call launches the child process★ — unlike the dispatches above and below it has side effects, and if it fails
+/// that spawn does not hold.
 // ADR-0191
 pub fn open_spawn(
     c: &AgentCommand,
@@ -803,13 +803,13 @@ pub fn open_spawn(
     )
 }
 
-/// 이 backend 의 통로가 **연결을 세워야** 쓸 수 있나 = 결말을 배달할 축이 있나.
+/// Whether this backend's link can be used only **after setting up a connection** = whether there is an axis to deliver the outcome.
 ///
-/// ★조립점이 이것으로 배달 포트를 **깔지 말지**를 가른다★ — 축이 없는 backend 에 포트를 주면 아무도
-///   부르지 않는 채널을 감독자가 기다리게 된다. `false` 인 backend 의 활성화 판정은 옛 경로 그대로다
-///   (claude·shell·stdio·codex 터미널 — 바이트 단위로 같다).
-/// ★왜 backend 인가(ADR-0004)★: 「이 프로그램이 뜬 직후부터 쓸 수 있나, 아니면 왕복을 해야 하나」는
-///   프로그램별 지식이다. manager 가 command 를 직접 matches! 하면 그 지식이 공용 층으로 샌다.
+/// ★The assembly point decides by this **whether to lay down** the delivery port★ — giving a port to a backend without the axis would make the supervisor
+///   wait on a channel nobody calls. The activation decision of a `false` backend is the old path as is
+///   (claude · shell · stdio · codex terminal — byte for byte the same).
+/// ★Why the backend (ADR-0004)★: 「can this program be used right after it launches, or does it need a round trip」 is
+///   per-program knowledge. If the manager did matches! on command directly, that knowledge would leak into the shared layer.
 pub fn declares_link(c: &AgentCommand) -> bool {
     backend_for(c).declares_link(c)
 }
@@ -835,85 +835,85 @@ pub fn session_id_source(
     backend_for(c).session_id_source(agent_id, child_pid, expected_sid)
 }
 
-// ── 입력 인코딩(ADR-0044/0004) ────────────────────────────────────────────────
+// ── Input encoding (ADR-0044/0004) ────────────────────────────────────────────────
 
-/// 세션 입력(write_input)을 transport 로 보내기 **직전** 인코딩 방식. AgentSession 이 spawn 시
-/// 받아 보관하고 write_input 마다 적용한다.
+/// The encoding method applied **right before** session input (write_input) is sent to the transport. AgentSession receives it at spawn,
+/// keeps it, and applies it on every write_input.
 ///
-/// ★설계 의도★: transport 는 항상 raw 바이트만 쓴다(바보 파이프 — ADR-0044). "텍스트 턴을
-/// claude JSON 라인으로 감싸는" 지식은 backend 소유다. session 은 이 enum(태그)만 들고, 실제
-/// 스키마는 [`AgentBackend::wrap_input_turn`] 구현체 안에만 산다(ADR-0004 격리 — 이 모듈도 session 도
-/// transport 도 형태를 모른다).
-/// backend 가 요구하는 물리 통로 모양 — **신고값**이다. 통로 실물을 만드는 것은
-/// [`AgentBackend::open_spawn`] 이고, 그 안에서도 이 값을 다시 match 해 생성자를 고르지 않는다
-/// (ADR-0191 — 가르는 switch 는 `backend_for` 하나뿐). 오늘 이 값을 읽는 곳은 선언 표 트립와이어
-/// (`tests::expected_codec_axis`)뿐이다.
+/// ★Design intent★: the transport always writes only raw bytes (a dumb pipe — ADR-0044). The knowledge of "wrapping a text turn
+/// into a claude JSON line" is owned by the backend. The session holds only this enum (tag), and the actual
+/// schema lives only inside the [`AgentBackend::wrap_input_turn`] implementation (ADR-0004 isolation — neither this module nor the session nor
+/// the transport knows the shape).
+/// The physical link shape the backend requires — a **reported value**. What builds the real link is
+/// [`AgentBackend::open_spawn`], and even inside it this value is not matched again to pick a constructor
+/// (ADR-0191 — the only deciding switch is `backend_for`). Today the only place reading this value is the declaration-table tripwire
+/// (`tests::expected_codec_axis`).
 ///
-/// ★출력 구조화 여부가 여기 함의돼 있다★: `StdioNdjson` 은 그 파이프가 나르는 바이트가 줄단위 JSON
-/// 이라는 뜻이고, 통로 자신은 그것을 모른다(바보 파이프 — ADR-0044). 그래서 그 `structured` output caps
-/// 는 하드코딩되지 않고 주입되는데, 주입하는 쪽이 파이프를 고른 backend 자신이다(ADR-0030 분담 유지).
+/// ★Whether output is structured is implied here★: `StdioNdjson` means the bytes that pipe carries are line-based JSON,
+/// and the link itself does not know that (a dumb pipe — ADR-0044). So that `structured` output cap
+/// is not hardcoded but injected, and the side injecting it is the backend that chose the pipe (ADR-0030 division kept).
 // ADR-0004
 // ADR-0044
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportShape {
-    /// 터미널(ConPTY/pty) — 바이트 그대로, resize 있음.
+    /// Terminal (ConPTY/pty) — bytes as is, resize available.
     Pty,
-    /// stdio 파이프 + 줄단위 JSON 출력 — resize 개념 없음.
+    /// stdio pipe + line-based JSON output — no resize concept.
     StdioNdjson,
-    /// stdio 파이프 + 줄단위 JSON 이 **양방향**으로 흐른다 — resize 개념 없음.
+    /// stdio pipe + line-based JSON flowing **both ways** — no resize concept.
     ///
-    /// ★[`TransportShape::StdioNdjson`] 과의 구분★: 그쪽은 우리가 쓴 바이트를 상대가 그대로 읽고
-    ///   우리는 상대의 줄을 읽기만 하는 단방향 파이프라, 봉투를 만드는 것은 backend 인코더다
-    ///   ([`InputEncoder`]). 이쪽은 상대가 **우리에게도 묻고 답을 기다리는** 프로토콜이라, 나가는 줄의
-    ///   id·메서드·순서를 통로가 직접 쥔다 — 그래서 [`AgentTransport::send_input`] 이 받는 바이트는
-    ///   와이어 프레임이 아니라 **메시지 본문**이고, 인코더는 그것을 건드리지 않는다
+    /// ★Distinction from [`TransportShape::StdioNdjson`]★: that one is a one-way pipe where the other side reads the bytes we wrote as is
+    ///   and we only read the other side's lines, so what makes the envelope is the backend encoder
+    ///   ([`InputEncoder`]). This one is a protocol where the other side **also asks us and waits for the answer**, so the id, method and order of
+    ///   outgoing lines are held directly by the link — so the bytes [`AgentTransport::send_input`] receives are
+    ///   **the message body**, not a wire frame, and the encoder does not touch them
     ///   ([`InputEncoder::TransportFramed`]).
     StdioBidiJson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEncoder {
-    /// 바이트 그대로 통과(PTY/터미널·shell). 기존 동작과 **바이트 동일**.
+    /// Bytes pass through as is (PTY/terminal · shell). **Byte-identical** to the existing behavior.
     Raw,
-    /// claude stream-json: 텍스트 1턴을 user JSON 라인(`\n` 종단)으로 감싼다(스키마 = `backend/claude/`).
+    /// claude stream-json: wraps one text turn into a user JSON line (`\n`-terminated) (schema = `backend/claude/`).
     ClaudeStreamJson,
-    /// 봉투를 **통로가 만든다** — 인코더는 바이트를 그대로 통과시킨다([`backend_for_encoder`] 가 `None`).
+    /// The envelope **is made by the link** — the encoder passes bytes through as is ([`backend_for_encoder`] is `None`).
     ///
-    /// ★`Raw` 를 재사용하지 않는 이유★: `Raw` 는 "PTY 로 사람 키보드를 흉내내는 채널" 이라
-    ///   [`InputEncoder::submit_sequence`] 가 CR 을 내고, 세션이 그 CR 을 **본문과 별개의
-    ///   `send_input` 호출**로 한 번 더 낸다([`crate::session::AgentSession::submit_input_observed`]).
-    ///   봉투를 스스로 만드는 통로에 그 호출이 닿으면 빈 본문짜리 턴이 하나 더 나간다.
+    /// ★Why `Raw` is not reused★: `Raw` is "a channel imitating a human keyboard through a PTY", so
+    ///   [`InputEncoder::submit_sequence`] emits a CR, and the session emits that CR once more **as a `send_input`
+    ///   call separate from the body** ([`crate::session::AgentSession::submit_input_observed`]).
+    ///   If that call reached a link that builds the envelope itself, one more turn with an empty body would go out.
     TransportFramed,
 }
 
 impl InputEncoder {
-    /// `msg_uuid`: 이 유저 턴의 메시지 uuid(replay dedup 키). ClaudeStreamJson 은 stdin user 라인에
-    ///   심어 claude 가 replay 시 그대로 되울리게 한다(uuid dedup 계약 = `backend/claude/`).
-    ///   같은 write_input 이 이 uuid 를 input_echo_event 에도 넘겨 합성 에코와 replay 를 uuid 로 합친다.
-    ///   Raw(터미널·shell)는 uuid 를 쓰지 않는다(무시) — 바이트 동일 보장 유지.
+    /// `msg_uuid`: the message uuid of this user turn (replay dedup key). ClaudeStreamJson plants it in the stdin user line
+    ///   so claude echoes it back as is on replay (uuid dedup contract = `backend/claude/`).
+    ///   The same write_input also passes this uuid to input_echo_event, so the synthetic echo and the replay are merged by uuid.
+    ///   Raw (terminal · shell) does not use the uuid (ignored) — the byte-identical guarantee is kept.
     pub fn encode(&self, bytes: &[u8], msg_uuid: Uuid) -> Vec<u8> {
         match backend_for_encoder(*self) {
             None => bytes.to_vec(),
-            // ※from_utf8_lossy(FIX 6b): 비-UTF8 입력은 U+FFFD 로 치환돼 손상될 수 있으나, 구조화 입력은
-            //   텍스트 챗 메시지라 UTF-8 이 전제다(MVP=텍스트 챗, ADR-0044) → 허용.
+            // ※from_utf8_lossy (FIX 6b): non-UTF8 input may be replaced with U+FFFD and corrupted, but structured input is
+            //   a text chat message, so UTF-8 is a premise (MVP = text chat, ADR-0044) → allowed.
             Some(b) => b.wrap_input_turn(&String::from_utf8_lossy(bytes), msg_uuid),
         }
     }
 
-    /// 입력 성공 직후 세션 층이 core.emit 할 **입력-시점 유저 에코 이벤트**를 만든다(ADR-0044/0045).
+    /// Builds the **input-time user echo event** the session layer core.emits right after input succeeds (ADR-0044/0045).
     ///
-    /// ★왜 여기(backend) 인가★: 터미널(Raw)은 PTY 가 입력을 즉시 로컬 에코하지만, json 모드는 claude
-    ///   가 되울릴 때까지 화면에 안 뜬다. 그 왕복 지연을 없애려 write_input 직후 합성 유저 이벤트를
-    ///   emit 한다. 어떤 encoder 가 이 에코가 필요한지·이벤트의 json 스키마가 뭔지는 backend 지식이라
-    ///   session 이 아니라 여기서 판정한다(ADR-0004 — session 은 encoder 태그만 들고 형태를 모른다).
-    ///   Raw(터미널)는 None 을 돌려줘 세션이 아무 것도 emit 하지 않는다(PTY 가 이미 에코 — 중복 방지).
+    /// ★Why here (backend)★: for the terminal (Raw) the PTY echoes input locally right away, but in json mode it does not appear on screen
+    ///   until claude echoes it back. To remove that round-trip delay, a synthetic user event is emitted right after write_input.
+    ///   Which encoder needs this echo and what the event's json schema is are backend knowledge, so
+    ///   it is decided here, not in the session (ADR-0004 — the session holds only the encoder tag and does not know the shape).
+    ///   Raw (terminal) returns None so the session emits nothing (the PTY already echoes — prevents duplicates).
     ///
-    /// ★decoder uuid dedup 과 짝(blunt-suppress → uuid dedup 교체)★: 이 이벤트는 decoder 가 replay 된
-    ///   user-role 블록에 대해 만드는 것과 동일 shape(`Structured{kind:"user", json:{"type":"text",
-    ///   "text":<raw>,"uuid":"X"}}`)이다. `msg_uuid` 가 stdin(encode)에 심은 값과 같아, 이후 claude 가
-    ///   되울린 replay(같은 uuid)를 프론트 accumulator 가 uuid 로 dedup 해 한 개로 합친다. 예전엔 decoder 가
-    ///   user text 블록을 blunt 억제해 이 합성 에코가 "자리 대체"했으나, resume 시 과거 대화가 사라지는
-    ///   버그라 uuid dedup 으로 바꿨다(과거/비매칭 uuid user text 는 전부 보존).
+    /// ★Paired with the decoder uuid dedup (blunt-suppress → uuid dedup replacement)★: this event has the same shape as what the decoder makes for a replayed
+    ///   user-role block (`Structured{kind:"user", json:{"type":"text",
+    ///   "text":<raw>,"uuid":"X"}}`). `msg_uuid` is the same as the value planted in stdin (encode), so the replay (same uuid) claude
+    ///   later echoes back is deduped by uuid in the frontend accumulator and merged into one. Previously the decoder
+    ///   blunt-suppressed user text blocks and this synthetic echo "took their place", but that was a bug making past conversations disappear on resume,
+    ///   so it was changed to uuid dedup (past/non-matching-uuid user text is all preserved).
     pub fn input_echo_event(
         &self,
         bytes: &[u8],
@@ -922,25 +922,25 @@ impl InputEncoder {
         backend_for_encoder(*self)?.input_echo_event(&String::from_utf8_lossy(bytes), msg_uuid)
     }
 
-    /// 인코딩된 본문 뒤에 **별도 write** 로 한 번 더 내보내야 하는 제출(턴 시작) 바이트.
-    /// `None` = 본문 write 하나가 이미 제출이다.
+    /// The submit (turn start) bytes that must be sent once more **as a separate write** after the encoded body.
+    /// `None` = the one body write is already the submit.
     ///
-    /// ★왜 `encode` 안에서 붙일 수 없나(실측 2026-08-17 — 되살리지 마라)★: 살아 있는 claude TUI 세션에
-    ///   `본문 + CR` 을 **한 번의 write** 로 넣으면 텍스트가 입력창에 남고 턴이 시작되지 않는다. 제출을
-    ///   만드는 건 바이트열이 아니라 **수신자가 그것을 언제 읽느냐**라, 바이트열 하나를 돌려주는 `encode`
-    ///   로는 표현할 수 없다 — 그래서 별도 질문이다.
-    /// ★write 를 나누는 것만으로는 부족하다★: 나눠 써도 **간격이 없으면** 두 write 가 PTY 에서 한 덩이로
-    ///   묶여 수신자가 한 번의 read 로 받고, 결국 합쳐 쓴 것과 같아진다. 그래서 짝이 되는 대기가 필요하고
-    ///   그 값이 [`SUBMIT_PACING`] 이다(둘은 항상 같이 간다 — 한쪽만 보고 고치지 말 것).
-    /// ★`Raw` = CR★: 터미널·shell 은 PTY 로 사람 키보드를 흉내내는 채널이라 Enter = CR(0x0D) 이다.
-    /// ★`ClaudeStreamJson` = None★: `encode` 가 붙이는 종단 `\n` 이 그 프로토콜의 제출이다. 여기에 CR 을
-    ///   더하면 라인 경계 뒤에 잉여 바이트가 붙어 페이로드가 오염된다.
-    /// ★`TransportFramed` = None★: 본문 바이트 하나가 그대로 한 턴이고, 그것을 봉투에 넣어 제출하는 것은
-    ///   통로다. 여기에 값을 두면 세션이 **본문과 별개의 `send_input` 호출**로 그 바이트를 한 번 더 내고,
-    ///   통로는 그것을 또 하나의 본문으로 읽어 빈 턴을 연다.
-    /// ★키 입력 경로는 이 값을 보지 않는다★: 소비자는 "완성된 메시지 하나 = 턴 하나" 인
-    ///   `AgentSession::submit_input_observed` 뿐이다. 사람이 Enter 를 직접 치는 터미널 스트리밍 입력
-    ///   (`write_input`)에 제출을 끼워 넣으면 키 한 번마다 턴이 제출된다.
+    /// ★Why it cannot be appended inside `encode` (measured 2026-08-17 — do not bring it back)★: putting `body + CR` into a live claude TUI session
+    ///   in **one write** leaves the text in the input box and the turn does not start. What makes the submit
+    ///   is not the byte sequence but **when the receiver reads it**, so it cannot be expressed by `encode`, which returns one byte sequence
+    ///   — hence a separate question.
+    /// ★Splitting the write alone is not enough★: even when split, **without a gap** the two writes are bundled into one chunk in the PTY,
+    ///   the receiver gets them in one read, and in the end it is the same as writing them together. So a paired wait is needed, and
+    ///   that value is [`SUBMIT_PACING`] (the two always go together — do not fix one while looking at only one side).
+    /// ★`Raw` = CR★: terminal · shell are channels imitating a human keyboard through a PTY, so Enter = CR (0x0D).
+    /// ★`ClaudeStreamJson` = None★: the terminating `\n` that `encode` appends is that protocol's submit. Adding a CR here
+    ///   would put surplus bytes after the line boundary and pollute the payload.
+    /// ★`TransportFramed` = None★: one body byte sequence is one turn as is, and putting it into an envelope and submitting it is
+    ///   the link's job. With a value here, the session would emit those bytes once more **as a `send_input` call separate from the body**,
+    ///   and the link would read it as one more body and open an empty turn.
+    /// ★The keystroke path does not look at this value★: the only consumer is `AgentSession::submit_input_observed`, where "one completed message = one turn".
+    ///   Inserting a submit into terminal streaming input where a person types Enter directly
+    ///   (`write_input`) would submit a turn on every keystroke.
     // ADR-0004
     pub fn submit_sequence(&self) -> Option<&'static [u8]> {
         match self {
@@ -950,16 +950,16 @@ impl InputEncoder {
         }
     }
 
-    /// 이 입력 한 조각이 **사용자 턴을 제출하나** — 세션 id 첫 제출 래치가 세는 기준이다.
+    /// Whether this one piece of input **submits a user turn** — the criterion the session id first-submission latch counts by.
     ///
-    /// - `ClaudeStreamJson`·`TransportFramed` → 언제나 `true`: 호출 1회 = 완결된 유저 턴 1개다
-    ///   (`AgentSession::write_input` 의 FIX 6a 계약 · codex 통로는 쓰기마다 턴 하나).
-    /// - `Raw` → 제출 바이트(CR)가 들어 있으면 `true`.
+    /// - `ClaudeStreamJson`·`TransportFramed` → always `true`: 1 call = 1 complete user turn
+    ///   (the FIX 6a contract of `AgentSession::write_input` · the codex link makes one turn per write).
+    /// - `Raw` → `true` if it contains the submit bytes (CR).
     ///
-    /// ★`Raw` 의 CR 판정은 프론트의 키 인코딩에 매인다★: 터미널 Enter = CR 은 xterm 이 **기본** 키
-    ///   인코딩으로 보내는 바이트다. kitty 키보드·win32-input-mode 처럼 Enter 를 다른 시퀀스로 보내는
-    ///   모드를 켜면 이 판정이 **조용히** 거짓이 되어 제출이 안 세어지고, 그 모드의 이어받기가 전부
-    ///   사라진다. 같은 가정에 선 [`InputEncoder::submit_sequence`] 와 짝이다 — 한쪽만 고치지 말 것.
+    /// ★The CR decision of `Raw` is tied to the frontend's key encoding★: terminal Enter = CR is the byte xterm sends with its **default** key
+    ///   encoding. Turning on a mode that sends Enter as a different sequence, like the kitty keyboard or win32-input-mode, makes this decision
+    ///   **silently** false so submits are not counted and every resume of that mode
+    ///   disappears. It is paired with [`InputEncoder::submit_sequence`], which stands on the same assumption — do not fix only one side.
     // ADR-0226
     pub fn submits_turn(&self, bytes: &[u8]) -> bool {
         match self {
@@ -969,45 +969,45 @@ impl InputEncoder {
     }
 }
 
-/// 본문 write 와 제출 write([`InputEncoder::submit_sequence`]) **사이에 두는 대기**.
+/// The **wait placed between** the body write and the submit write ([`InputEncoder::submit_sequence`]).
 ///
-/// ★왜 필요한가(실측 2026-08-17 — 지우지 마라)★: write 를 둘로 나누는 것만으로는 제출되지 않는다. 간격이
-///   없으면 두 write 가 PTY 에서 한 덩이로 묶여 claude TUI 가 **한 번의 read** 로 받고, CR 을 붙여넣은
-///   텍스트의 일부로 취급해 입력창에 그대로 담아 둔다. 경계를 만드는 건 write 횟수가 아니라 **수신자의
-///   read 경계**이고, 그걸 벌리는 수단이 이 대기다.
-/// ★"지연 0 으로도 제출된다" 는 옛 관측은 측정 오류였다(되살리지 마라)★: 그 측정은 제어 평면 명령을 **두
-///   번 따로** 보낸 것이라 웹소켓 왕복·태스크 전환으로 이미 수 밀리초가 벌어져 있었는데 0ms 로 읽혔다.
-///   같은 함수에서 연달아 쓰는 배달 경로에는 그 간격이 없어 실제로 제출되지 않았다(살아 있는 에이전트로
-///   재확인).
-/// ★값의 출처 = 임의 상수가 아니다(ADR-0038)★: 같은 문제를 푸는 tmux 기반 멀티에이전트 오케스트레이터들이
-///   claude Code 를 상대로 쓰는 정착값이 0.5초이고, 사유도 같다("텍스트와 Enter 를 합치거나 너무 붙여
-///   보내면 입력 버퍼와 경쟁이 난다"). 근거 없이 줄이거나 늘리지 말 것 — 줄이면 이 결함이 그대로 재발한다.
+/// ★Why it is needed (measured 2026-08-17 — do not delete)★: splitting the write in two alone does not submit. Without a gap
+///   the two writes are bundled into one chunk in the PTY and the claude TUI receives them in **one read**, treating the CR as part of
+///   pasted text and keeping it in the input box. What makes the boundary is not the number of writes but **the receiver's
+///   read boundary**, and the means of widening it is this wait.
+/// ★The old observation that "it submits even with 0 delay" was a measurement error (do not bring it back)★: that measurement sent control-plane commands **twice
+///   separately**, so the websocket round trip and task switching had already opened a few milliseconds, but it was read as 0ms.
+///   The delivery path that writes consecutively in the same function has no such gap and actually did not submit (reconfirmed with a live
+///   agent).
+/// ★The source of the value = not an arbitrary constant (ADR-0038)★: the settled value tmux-based multi-agent orchestrators solving the same problem
+///   use against Claude Code is 0.5 s, for the same reason ("combining text and Enter, or sending them too close together,
+///   races with the input buffer"). Do not shrink or grow it without grounds — shrinking it brings this defect right back.
 pub const SUBMIT_PACING: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub fn input_encoder(c: &AgentCommand) -> InputEncoder {
     backend_for(c).input_encoder(c)
 }
 
-// ── 출력 정제(ADR-0044/0004/0045) — 입력 인코더의 대칭 짝 ──────────────────────────
+// ── Output refining (ADR-0044/0004/0045) — the symmetric pair of the input encoder ──────────────────────────
 
-/// pump→core 앞에 꽂히는 출력 정제 decoder. None = 바이트 직통(터미널·평문 불변).
+/// The output refining decoder plugged in before pump→core. None = bytes pass straight through (terminal and plain text unchanged).
 ///
-/// ★대칭★: `input_encoder`(입력 방향)의 출력 방향 짝이다. 판정도 decoder 실물도
-/// [`AgentBackend::output_decoder`] 가 소유하고 이 함수는 dispatch 뿐이다 — session 은 encoder 태그만,
-/// transport 는 `dyn OutputDecoder` 만 안다(ADR-0004). 새 backend 는 자기 폴더에서 그 메서드를 구현하면
-/// 되고 이 함수는 손대지 않는다(교체성).
+/// ★Symmetry★: the output-direction pair of `input_encoder` (input direction). Both the decision and the real decoder
+/// are owned by [`AgentBackend::output_decoder`], and this function is only dispatch — the session knows only the encoder tag,
+/// the transport only `dyn OutputDecoder` (ADR-0004). A new backend implements that method in its own folder
+/// and this function is not touched (swappability).
 pub fn output_decoder(c: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
     backend_for(c).output_decoder(c)
 }
 
-// ── ADR-0079: resume 시 `.jsonl` transcript → 과거 이벤트 seed (backend dispatch) ──────
+// ── ADR-0079: `.jsonl` transcript → past event seed on resume (backend dispatch) ──────
 
-/// ADR-0079: resume 스폰 시 이 명령의 과거 대화를 복원한 `OutputEvent` 목록. 빈 Vec = seed 안 함
-/// (기존 fresh 버퍼 동작 불변).
+/// ADR-0079: the list of `OutputEvent`s restoring this command's past conversation on a resume spawn. An empty Vec = no seed
+/// (existing fresh buffer behavior unchanged).
 ///
-/// ★backend 지식 격리(ADR-0004)★: transcript 의 파일 배치·포맷·seed 가부 판정은 전부
-///   [`AgentBackend::resume_transcript_events`] 구현체 몫이고 이 함수는 dispatch 뿐이다. manager 도 이
-///   dispatch 만 부르고 경로 규칙을 모른다. `output_decoder`(라이브 정제)의 resume 방향 짝.
+/// ★Backend knowledge isolation (ADR-0004)★: the transcript's file layout, format and seed decision all belong to the
+///   [`AgentBackend::resume_transcript_events`] implementation, and this function is only dispatch. The manager also
+///   calls only this dispatch and does not know the path rules. The resume-direction pair of `output_decoder` (live refining).
 pub fn resume_transcript_events(
     c: &AgentCommand,
     cwd: &std::path::Path,
@@ -1021,37 +1021,37 @@ mod tests {
     use super::*;
     use crate::profile::AgentOutputFormat;
 
-    // ── ADR-0099 트립와이어: 새 AgentCommand variant 배선 시 capability 의식적 선언 강제 ──────
+    // ── ADR-0099 tripwire: forces a conscious capability declaration when wiring a new AgentCommand variant ──────
     //
-    // ★ 와일드카드를 절대 추가하지 말 것 ★ — 새 AgentCommand variant가 생기면 이 match가
-    // 컴파일 에러를 내서 아래 체크리스트를 강제로 방문하게 하는 장치다(목록 rot 방지 —
-    // 갱신이 컴파일로 강제되는 목록은 rot하지 않는다).
+    // ★ Never add a wildcard ★ — when a new AgentCommand variant appears, this match
+    // gives a compile error and forces a visit to the checklist below (prevents list rot —
+    // a list whose update is forced by compilation does not rot).
     //
-    // 새 variant 배선 시 체크리스트:
-    //   ① 새 백엔드의 두 capability는 stub 복붙 금지 — CLI spike로 실측한 값으로 채울 것.
-    //   ② supports_control_channel=false로 연결하면 메시징 없는 단독 에이전트가 된다(의도인지 확인).
-    //   ③ 비-MCP(accepts_mcp_config=false)면 provision이 [Cli] grant를 자동 선택하고 **프라이밍은 아예
-    //      안 싣는다**(CLI판 사본은 커밋 `2ef6902`에서 삭제됐고 `roundtrip-smoke --cli-only` 노브도 함께
-    //      사라졌다 — 되살리려 하지 말 것). 그 갈래는 오늘 실측 수단이 없다 — ADR-0209.
-    //   ④ MCP-capable이면 기본 roundtrip으로 실측.
-    //   ⑤ 셋째 칸(writes_mcp_config_file)은 **둘째 칸에서 파생하지 말 것** — 「MCP 로 우편을 쓰나」와
-    //      「우리가 쓴 mcp-config 파일을 읽나」는 별개다. 그 프로그램에 그 파일을 가리킬 플래그가 실제로
-    //      있을 때만 true(claude 의 `--mcp-config`). true 면 스폰마다 평문 토큰 JSON 이 디스크에 쓰이고
-    //      그 write 실패가 스폰을 끊는다(fail-closed) — 안 읽는 backend 에 켜면 순수 손실이다.
-    //   참조: ADR-0099.
+    // Checklist when wiring a new variant:
+    //   ① Do not copy-paste the stub for the new backend's two capabilities — fill them with values measured in a CLI spike.
+    //   ② Wiring with supports_control_channel=false makes a standalone agent without messaging (check that it is intended).
+    //   ③ If non-MCP (accepts_mcp_config=false), provision automatically picks the [Cli] grant and **does not load priming
+    //      at all** (the CLI copy was deleted in commit `2ef6902` and the `roundtrip-smoke --cli-only` knob went
+    //      away with it — do not try to bring them back). That branch has no means of measurement today — ADR-0209.
+    //   ④ If MCP-capable, measure with the default roundtrip.
+    //   ⑤ **Do not derive** the third field (writes_mcp_config_file) **from the second** — 「does it use mail through MCP」 and
+    //      「does it read the mcp-config file we wrote」 are separate. true only when that program actually has a flag
+    //      pointing at that file (claude's `--mcp-config`). If true, a plaintext token JSON is written to disk on every spawn and
+    //      a failure of that write cuts the spawn (fail-closed) — turning it on for a backend that does not read it is pure loss.
+    //   Reference: ADR-0099.
     fn expected_channel_matrix(c: &AgentCommand) -> (bool, bool, bool) {
-        // (supports_control_channel, accepts_mcp_config, writes_mcp_config_file) — CLI spike 실측값
+        // (supports_control_channel, accepts_mcp_config, writes_mcp_config_file) — values measured in the CLI spike
         match c {
             AgentCommand::Claude { .. } => (true, true, true),
             AgentCommand::Shell { .. } => (false, false, false),
-            // ★이 행의 둘째 칸은 **이름대로 읽으면 틀린 값이다 — 알고 켰다**★: codex 는 우리가 만든
-            //   mcp-config 파일을 여전히 못 먹는다(그 파일을 가리킬 플래그가 없다 — 실측 0.155.0).
-            //   그런데 데몬이 이 한 칸으로 우편 채널 판정까지 파생해서(`mail_allowed`), false 로 두면
-            //   MCP 로 우편을 쓰는 이 백엔드에 **CLI 미러가 열린 채로** 남는다. 사유의 정본은
-            //   `backend/codex/` 의 그 메서드 주석이고 여기 되풀어 적지 않는다.
-            // ★그래서 셋째 칸이 false 다 — 둘째를 복사하지 말 것★: 안 읽는 파일을 쓰던 대가(스폰마다
-            //   평문 토큰 JSON · 그 write 실패로 스폰 중단)는 이 칸이 갈라지면서 사라졌다. 여기를 true 로
-            //   되돌리면 그 대가가 그대로 돌아온다.
+            // ★The second field of this row **is a wrong value if read by its name — it was turned on knowingly**★: codex still cannot consume
+            //   the mcp-config file we make (it has no flag pointing at that file — measured 0.155.0).
+            //   But the daemon derives even the mail channel decision from this one field (`mail_allowed`), so leaving it false
+            //   would leave **the CLI mirror open** for this backend, which uses mail through MCP. The canonical reasoning is
+            //   that method's comment in `backend/codex/` and is not repeated here.
+            // ★So the third field is false — do not copy the second★: the cost of writing a file nobody reads (a plaintext token JSON on every
+            //   spawn · spawn aborted by that write's failure) went away when this field was split. Reverting this to true
+            //   brings that cost right back.
             // ADR-0209
             AgentCommand::Codex { .. } => (true, true, false),
         }
@@ -1082,25 +1082,25 @@ mod tests {
             assert_eq!(
                 actual_control,
                 expected_control,
-                "variant {:?}: supports_control_channel 불일치 — backend mod.rs 상단 expected_channel_matrix 체크리스트를 따라 capability를 의식적으로 선언할 것(ADR-0099)",
+                "variant {:?}: supports_control_channel mismatch — declare the capability consciously following the expected_channel_matrix checklist at the top of backend mod.rs (ADR-0099)",
                 c
             );
             assert_eq!(
                 actual_mcp,
                 expected_mcp,
-                "variant {:?}: accepts_mcp_config 불일치 — backend mod.rs 상단 expected_channel_matrix 체크리스트를 따라 capability를 의식적으로 선언할 것(ADR-0099)",
+                "variant {:?}: accepts_mcp_config mismatch — declare the capability consciously following the expected_channel_matrix checklist at the top of backend mod.rs (ADR-0099)",
                 c
             );
             assert_eq!(
                 actual_writes,
                 expected_writes,
-                "variant {:?}: writes_mcp_config_file 불일치 — 이 칸이 true 면 스폰마다 평문 토큰 JSON 이 디스크에 쓰이고 그 write 실패가 스폰을 끊는다. 위 체크리스트 ⑤ 를 따라 의식적으로 선언할 것(ADR-0209)",
+                "variant {:?}: writes_mcp_config_file mismatch — if this field is true, a plaintext token JSON is written to disk on every spawn and a failure of that write cuts the spawn. Declare it consciously following checklist ⑤ above (ADR-0209)",
                 c
             );
         }
     }
 
-    // ── ADR-0113/0004: 턴 신호 분류자 dispatch(매핑은 백엔드 소유, 어휘는 공용) ──────────────
+    // ── ADR-0113/0004: turn-signal classifier dispatch (the mapping is owned by the backend, the vocabulary is shared) ──────────────
 
     #[test]
     fn turn_classifier_dispatch_maps_claude_events_and_silences_shell() {
@@ -1128,9 +1128,9 @@ mod tests {
             claude_classify(&done),
             Some(TurnSignal::Ended(crate::turn::TurnEndKind::Clean))
         );
-        // ★`Structured` 해석이 백엔드별인 이유의 회귀★: claude 는 입력 시점 유저 에코를 여기 싣기에
-        //   진행으로 세지만, 매핑을 선언하지 않은 backend 는 같은 이벤트에 침묵해야 한다 — 안 그러면
-        //   턴과 무관한 구조화 메타 라인이 종료 신호 없는 영구 "턴 중" 을 만든다.
+        // ★Regression of why `Structured` interpretation is per backend★: claude carries the input-time user echo here, so it
+        //   counts as progress, but a backend that declared no mapping must be silent on the same event — otherwise
+        //   structured meta lines unrelated to turns create a permanent "in a turn" with no end signal.
         let meta = OutputEvent::Structured {
             kind: "session_meta".into(),
             json: "{}".into(),
@@ -1141,12 +1141,12 @@ mod tests {
             assert_eq!(
                 shell_classify(ev),
                 None,
-                "매핑 미선언 backend 는 어떤 이벤트에도 신호를 내지 않는다(기본 = 침묵)"
+                "a backend that declared no mapping emits no signal for any event (default = silence)"
             );
         }
     }
 
-    // ── ADR-0172/0004: 이어받기 실패 분류 dispatch(문구 지식은 백엔드 소유) ──────────────────
+    // ── ADR-0172/0004: resume-failure classification dispatch (text knowledge is owned by the backend) ──────────────────
 
     #[test]
     fn resume_failure_dispatch_reads_claudes_marker_and_stays_silent_elsewhere() {
@@ -1166,22 +1166,22 @@ mod tests {
         assert_eq!(
             resume_failure_kind(&claude, "NO CONVERSATION FOUND with session ID: x"),
             Some(AgentFailureKind::NoConversationToResume),
-            "대소문자는 외부 프로그램이 정하므로 우리 판정이 거기 매달리면 안 된다"
+            "case is set by the external program, so our decision must not hang on it"
         );
         assert_eq!(
             resume_failure_kind(&claude, ""),
             None,
-            "꼬리가 비면 단정하지 않는다 — 구조화 세션은 진단을 stderr 로 흘려 여기 안 온다"
+            "an empty tail settles nothing — a structured session sends diagnostics to stderr, which does not come here"
         );
         assert_eq!(
             resume_failure_kind(&claude, "Error: EPERM"),
             None,
-            "모르는 문구는 단정하지 않는다(호출자가 맥락 기본값으로 떨어뜨린다)"
+            "unknown text settles nothing (the caller falls back to the contextual default)"
         );
         assert_eq!(
             resume_failure_kind(&shell, tail),
             None,
-            "선언하지 않은 backend 는 남의 문구를 읽지 않는다"
+            "a backend that declared nothing does not read someone else's text"
         );
     }
 
@@ -1213,19 +1213,19 @@ mod tests {
         );
     }
 
-    // ── 우편 자격 트립와이어: 새 variant 는 분류를 **의식적으로** 선언해야 한다 ──────────────────
+    // ── Mail eligibility tripwire: a new variant must declare its classification **consciously** ──────────────────
     //
-    // ★와일드카드를 추가하지 말 것★ — 기본값이 true(fail-open)라 아무 선언 없이도 수신자가 되는데,
-    // 이 축이 막는 건 **LLM 자유 텍스트가 명령으로 실행되는 것**이라 조용한 상속은 안전 문제가 된다.
+    // ★Do not add a wildcard★ — the default is true (fail-open), so it becomes a recipient even without any declaration, and
+    // what this axis prevents is **LLM free text being executed as commands**, so silent inheritance becomes a safety problem.
     //
-    // ★목록 누락도 잡힌다(그래서 슬롯을 쓴다)★: 손으로 채우는 Vec 하나였을 땐 새 variant 를 거기 넣는 걸
-    // 잊으면 `reads_messages` 가 한 번도 안 불려 테스트가 초록인 채 fail-open 이 통과했다. 새 variant 를
-    // 추가하면 ① `variant_slot` 의 match 가 컴파일 에러 → ② 슬롯 번호를 늘리면 `BACKEND_VARIANTS` 와
-    // 샘플 배열 길이가 안 맞아 다시 컴파일 에러 → ③ 그래도 샘플을 안 채우면 아래 "슬롯 전부 채움" 단언이
-    // 깨진다. 세 관문 중 하나는 반드시 걸린다.
+    // ★Omissions from the list are caught too (that is why slots are used)★: when it was a single hand-filled Vec, forgetting to put a new variant
+    // there meant `reads_messages` was never called and fail-open passed with the test green. Adding a new variant
+    // gives ① a compile error in the `variant_slot` match → ② increasing the slot number mismatches `BACKEND_VARIANTS` and
+    // the sample array length, another compile error → ③ and if the sample is still not filled, the "all slots filled" assertion below
+    // breaks. One of the three gates always catches it.
     //
-    // 분류 기준: 입력을 **읽고 해석하는** 에이전트(CLI 코딩 에이전트 등)면 true, 입력을 **실행**하는
-    //   채널(셸·REPL 류)이면 false. 판단이 서지 않으면 false 로 두고 사용자에게 올린다.
+    // Classification criterion: true if it is an agent that **reads and interprets** input (CLI coding agents etc.), false if it is a channel that
+    //   **executes** input (shell · REPL kinds). If unsure, leave it false and raise it to the user.
     const BACKEND_VARIANTS: usize = 3;
 
     fn variant_slot(c: &AgentCommand) -> usize {
@@ -1240,20 +1240,20 @@ mod tests {
         match c {
             AgentCommand::Claude { .. } => true,
             AgentCommand::Shell { .. } => false,
-            // ★한때 false 였고 그 사유는 「턴을 관측할 수 없어 바쁜 때를 못 가린다」였다 — 그 전제를
-            //   ADR-0116 결정 7 이 기각했다★(「관측할 수 없으니 배달할 수 없다」 = 그 ADR 의 거부한
-            //   대안). 터미널 claude 가 같은 자리에서 이미 받으므로 이 백엔드만 뺄 근거가 없고, 위
-            //   분류 기준으로 재면 codex 는 입력을 **읽고 해석하는** 쪽이라 true 다.
-            //   사유의 정본은 `backend/codex/` 의 그 메서드 doc.
+            // ★It was once false, and the reason was 「turns cannot be observed, so busy times cannot be told apart」 — ADR-0116 decision 7
+            //   rejected that premise★ (「cannot observe, so cannot deliver」 = an alternative that ADR
+            //   rejected). Terminal claude already receives in the same place, so there is no ground to exclude only this backend, and measured by the
+            //   classification criterion above, codex is on the side that **reads and interprets** input, so it is true.
+            //   The canonical reasoning is that method's doc in `backend/codex/`.
             AgentCommand::Codex { .. } => true,
         }
     }
 
-    /// 아래 트립와이어들이 전부 도는 표본 목록.
+    /// The sample list that every tripwire below runs over.
     ///
-    /// ★이 목록에서 한 줄을 지우면 그 **모드가 그 트립와이어들에서 통째로 빠진 채 전부 초록이 된다**★
-    ///   (실측 — codex app-server 줄을 지우고 돌려 확인했다). variant 슬롯 커버리지는 모드를 안 세므로
-    ///   그 침묵을 못 잡는다. 그래서 목록 자체를 재는 관문을 따로 뒀다:
+    /// ★Deleting one line from this list makes **that mode drop out of those tripwires entirely while everything stays green**★
+    ///   (measured — confirmed by deleting the codex app-server line and running). Variant slot coverage does not count modes, so
+    ///   it cannot catch that silence. So a separate gate measuring the list itself was set up:
     ///   [`the_sample_list_covers_every_mode_of_every_backend`].
     fn mail_eligibility_samples() -> Vec<AgentCommand> {
         let per_variant: [AgentCommand; BACKEND_VARIANTS] = [
@@ -1282,12 +1282,12 @@ mod tests {
         all
     }
 
-    /// 표본 목록을 지키는 관문. ★그 트립와이어들이 재는 것은 전부 이 목록이 닿은 것뿐이라, 목록에 구멍이
-    /// 나면 그 구멍은 **아무 데서도 안 보인다**★ — 전부 초록인 채로 그 모드를 한 번도 안 묻는다.
+    /// The gate guarding the sample list. ★What those tripwires measure is only what this list reaches, so if the list has a hole,
+    /// that hole **is visible nowhere**★ — everything stays green while that mode is never asked.
     ///
-    /// ★슬롯이 variant 가 아니라 **(variant × 출력 모드)** 인 것이 요점이다★: variant 슬롯은 모드를 안
-    /// 세므로 둘째 모드가 빠져도 채워진 것으로 보인다. 새 variant 든 새 [`AgentOutputFormat`] 값이든
-    /// 늘면 아래 match 가 컴파일 에러를 낸다.
+    /// ★The point is that a slot is not a variant but **(variant × output mode)**★: variant slots do not count modes,
+    /// so even if the second mode is missing it looks filled. Whether a new variant or a new [`AgentOutputFormat`] value,
+    /// when it grows the match below gives a compile error.
     const BACKEND_MODES: usize = 5;
 
     fn mode_slot(c: &AgentCommand) -> usize {
@@ -1320,7 +1320,7 @@ mod tests {
         }
         assert!(
             covered.iter().all(|c| *c),
-            "표본 목록이 안 닿은 모드가 있다 — 그 모드는 아래 트립와이어 어디에도 안 걸린 채 전부 초록이 된다: {covered:?}"
+            "there is a mode the sample list does not reach — that mode is caught by none of the tripwires below and everything stays green: {covered:?}"
         );
     }
 
@@ -1332,31 +1332,31 @@ mod tests {
             assert_eq!(
                 reads_messages(c),
                 expected_reads_messages(c),
-                "variant {c:?}: 우편 자격 불일치 — 위 expected_reads_messages 의 분류 기준을 따라 의식적으로 선언할 것"
+                "variant {c:?}: mail eligibility mismatch — declare it consciously following the classification criterion of expected_reads_messages above"
             );
         }
         assert!(
             covered.iter().all(|c| *c),
-            "샘플이 안 닿은 variant 가 있다(그 variant 는 reads_messages 가 한 번도 안 불려 fail-open 이 그대로 통과한다): {covered:?}"
+            "there is a variant the sample does not reach (reads_messages is never called for that variant, so fail-open passes as is): {covered:?}"
         );
     }
 
-    // ── 세션 두 축 트립와이어: 발급 축과 이어받기 축을 모드마다 의식적으로 선언한다 ────────────────────
+    // ── Session two-axis tripwire: declare the issuing axis and the resume axis consciously per mode ────────────────────
     //
-    // ★와일드카드를 추가하지 말 것★ — 두 축 다 trait 에 기본값이 없어 **새 backend** 는 값을 적을 수밖에
-    // 없지만, **새 출력 모드**는 컴파일러가 못 본다(한 impl 이 그 백엔드의 모든 모드를 받는다). 그 자리를
-    // 세우는 것이 아래 모드별 match 다.
+    // ★Do not add a wildcard★ — neither axis has a default in the trait, so **a new backend** has no choice but to write the values,
+    // but **a new output mode** is invisible to the compiler (one impl receives every mode of that backend). What sets up that place
+    // is the per-mode match below.
     //
-    // 두 축이 서로 다른 것을 묻는다 — 한 칸으로 접지 말 것:
-    //   ① assigns_session_id — **우리가** id 를 뽑아 spawn 때 건네주나. true 면 manager 가
-    //      발급해 프로필에 영속한다. 자기 id 를 스스로 발급하는 프로그램에 켜면 그 프로그램이 한 번도
-    //      쓰지 않을 uuid 가 심기고, 그 뒤 이어받기 판정이 그 가짜 값을 보고 선다.
-    //   ② can_resume_stored_session — 저장된 그 id 로 이어받을 수 있나. **발급 주체는 안 묻는다**.
-    // ★두 칸을 한 칸으로 접지 말 것★: 접는 순간 한쪽을 고치면 다른 쪽이 딸려 가고, 그 둘이 서로 다른
-    // 소비자(발급 = spawn 시점 · 이어받기 = 활성화 입구 셋)를 굴린다. 값이 실제로 갈리는 행이 이미 있다 —
-    // codex 두 모드가 다 (false, true) 다: 발급은 codex 가 하고(우리가 심을 값이 없다), 우리는 받아 적은 그
-    // 값으로 이어받는다. ★터미널 모드가 (false, false) 로 적혀 있는 자리를 만나면 낡은 것이다★ —
-    // 그 모드는 `codex resume <id>` 로 이어받고(ADR-0208), 손잡이는 훅이 적어 준다.
+    // The two axes ask different things — do not fold them into one field:
+    //   ① assigns_session_id — whether **we** draw the id and hand it over at spawn. If true, the manager
+    //      issues it and persists it to the profile. Turning it on for a program that issues its own id plants a uuid the program never
+    //      uses, and later resume decisions stand on that fake value.
+    //   ② can_resume_stored_session — whether it can resume with that stored id. **It does not ask who issued it**.
+    // ★Do not fold the two fields into one★: the moment they are folded, fixing one drags the other along, and the two drive different
+    // consumers (issuing = at spawn · resuming = the three activation entries). There are already rows where the values actually differ —
+    // both codex modes are (false, true): codex does the issuing (we have no value to plant), and we resume with the value
+    // we recorded. ★If you meet a place where the terminal mode is written as (false, false), it is stale★ —
+    // that mode resumes with `codex resume <id>` (ADR-0208), and the handle is written down by the hook.
     // ADR-0185
     fn expected_session_axes(c: &AgentCommand) -> (bool, bool) {
         // (assigns_session_id, can_resume_stored_session)
@@ -1374,9 +1374,9 @@ mod tests {
                 output_format: AgentOutputFormat::Terminal,
                 ..
             } => (false, true),
-            // ★이 행이 두 칸의 값이 갈리는 첫 행이다★ — 발급은 여전히 codex 가 하고(①), 우리는 그
-            //   받아 적은 thread id 로 `thread/resume` 을 낸다(②). 사유의 정본은 `backend/codex/` 의 그
-            //   두 메서드 주석.
+            // ★This row is the first row where the values of the two fields differ★ — codex still does the issuing (①), and we send
+            //   `thread/resume` with the thread id we recorded (②). The canonical reasoning is the comments of those
+            //   two methods in `backend/codex/`.
             AgentCommand::Codex {
                 output_format: AgentOutputFormat::StreamJson,
                 ..
@@ -1384,8 +1384,8 @@ mod tests {
         }
     }
 
-    /// 표본 목록의 구멍은 [`the_sample_list_covers_every_mode_of_every_backend`] 가 잰다 — 여기서 슬롯
-    /// 커버리지를 다시 세지 않는다(같은 목록·같은 슬롯이라 같은 답만 두 번 나온다).
+    /// Holes in the sample list are measured by [`the_sample_list_covers_every_mode_of_every_backend`] — slot coverage
+    /// is not counted again here (same list, same slots, so the same answer would just come out twice).
     #[test]
     fn session_axes_are_consciously_declared_for_every_mode() {
         for c in &mail_eligibility_samples() {
@@ -1393,19 +1393,19 @@ mod tests {
             assert_eq!(
                 assigns_session_id(c),
                 expected_assign,
-                "{c:?}: 발급 축 불일치 — 위 expected_session_axes 의 ①을 따라 의식적으로 선언할 것"
+                "{c:?}: issuing axis mismatch — declare it consciously following ① of expected_session_axes above"
             );
             assert_eq!(
                 can_resume_stored_session(c),
                 expected_resume,
-                "{c:?}: 이어받기 축 불일치 — 위 expected_session_axes 의 ②를 따라 의식적으로 선언할 것"
+                "{c:?}: resume axis mismatch — declare it consciously following ② of expected_session_axes above"
             );
         }
     }
 
-    /// 활성화 입구 셋이 함께 부르는 판정의 회귀망 — ★저장된 sid 가 있다는 것만으로 이어받을 수 있는 게
-    /// 아니다★. 두 항을 다 재므로, 어느 입구가 이 함수 대신 `sid.is_some()` 만 보도록 되돌아가면 그 입구의
-    /// 테스트가 이것과 함께 깨진다.
+    /// The regression net of the decision the three activation entries call together — ★having a stored sid alone does not mean it can
+    /// resume★. Both terms are measured, so if any entry reverted to looking only at `sid.is_some()` instead of this function, that entry's
+    /// test breaks along with this one.
     #[test]
     fn a_stored_sid_alone_does_not_make_a_profile_resumable() {
         let sid = Some(Uuid::new_v4());
@@ -1416,8 +1416,8 @@ mod tests {
             p
         };
 
-        // ★축이 꺼진 표본은 이제 셸뿐이다★ — codex 터미널 모드가 이 자리를 떠났다(ADR-0208 로 그 모드도
-        //   `codex resume <id>` 로 이어받게 됐다). 셸에는 재개 개념 자체가 없어 이 자리가 비지 않는다.
+        // ★The only sample with the axis off is now shell★ — the codex terminal mode left this place (with ADR-0208 that mode also
+        //   resumes with `codex resume <id>`). Shell has no resume concept at all, so this place does not become empty.
         let not_resumable = profile(
             AgentCommand::Shell {
                 program: "cmd.exe".into(),
@@ -1427,12 +1427,12 @@ mod tests {
         );
         assert!(
             !can_resume_profile(&not_resumable),
-            "이어받기 축이 false 인 명령은 sid 가 있어도 이어받지 않는다 — 켜면 새 대화가 「이어받음」으로 보고된다"
+            "a command whose resume axis is false does not resume even with a sid — turning it on would report a new conversation as resumed"
         );
 
-        // ★codex 는 **두 통로 다** 이어받는다 — 수단만 갈린다★: app-server 는 `thread/resume`,
-        //   터미널은 `codex resume <id>`. 둘을 다 재는 것이 요점이다 — 한쪽만 재면 다른 쪽이 조용히
-        //   꺼졌을 때 「이어받는 스폰이 새 대화로 보고된다」가 여기서 안 보인다.
+        // ★codex resumes through **both links** — only the means differ★: app-server with `thread/resume`,
+        //   terminal with `codex resume <id>`. Measuring both is the point — measuring only one would hide here
+        //   「a resuming spawn is reported as a new conversation」 when the other is silently turned off.
         for output_format in [AgentOutputFormat::StreamJson, AgentOutputFormat::Terminal] {
             let resumable_codex = profile(
                 AgentCommand::Codex {
@@ -1443,7 +1443,7 @@ mod tests {
             );
             assert!(
                 can_resume_profile(&resumable_codex),
-                "{output_format:?}: codex 는 받아 적은 id 로 이어받는다 — 이 칸이 꺼지면 이어받는 스폰이 「새 대화」로 보고된다"
+                "{output_format:?}: codex resumes with the recorded id — if this field is turned off, a resuming spawn is reported as a new conversation"
             );
         }
 
@@ -1465,32 +1465,32 @@ mod tests {
         );
         assert!(
             !can_resume_profile(&no_sid),
-            "축이 true 여도 이어받을 값이 없으면 Fresh 다"
+            "even if the axis is true, without a value to resume it is Fresh"
         );
     }
 
-    // ── 코덱 축 트립와이어: 새 variant·새 출력 모드는 입출력 코덱을 의식적으로 선언해야 한다 ──────────
+    // ── Codec-axis tripwire: a new variant or new output mode must declare its I/O codec consciously ──────────
     //
-    // ★와일드카드를 추가하지 말 것★ — 이 축의 기본값(`Raw` · decoder 없음)은 둘 다 fail-open 이라
-    // 아무 선언 없이도 컴파일되고 조용히 초록이 된다. 그런데 구조화 stdin 을 요구하는 프로그램에 `Raw`
-    // 가 물리면 그 에이전트는 **입력을 통째로 못 읽고**, 런타임엔 아무 신호도 안 난다. `AgentCommand`
-    // variant 든 `AgentOutputFormat` 값이든 늘어나면 아래 match 가 컴파일 에러를 낸다.
+    // ★Do not add a wildcard★ — the defaults of this axis (`Raw` · no decoder) are both fail-open, so
+    // it compiles without any declaration and silently goes green. But if `Raw` is attached to a program that requires structured stdin,
+    // that agent **cannot read the input at all**, and at runtime there is no signal. Whether an `AgentCommand`
+    // variant or an `AgentOutputFormat` value grows, the match below gives a compile error.
     //
-    // 채우는 법 — CLI spike 실측값으로:
-    //   ① input_encoder — 그 프로그램이 stdin 을 무엇으로 읽나(감쌀 게 없으면 `Raw`)
-    //   ② output_decoder 유무 — 출력이 구조화라 정제가 필요한가
-    //   ③ transport_shape — 그 출력을 받으려면 터미널이어야 하나 파이프여야 하나
+    // How to fill it — with values measured in a CLI spike:
+    //   ① input_encoder — how that program reads stdin (`Raw` if there is nothing to wrap)
+    //   ② whether there is an output_decoder — whether the output is structured and needs refining
+    //   ③ transport_shape — whether receiving that output needs a terminal or a pipe
     //
-    // ★③ 은 ①②와 붙어 다니지만 같은 축이 아니다★: 통로 모양은 잘못 골라도 컴파일되고 **런타임에도
-    // 그럴싸하게 뜬다** — TUI 를 파이프로 받으면 화면이 깨지고, 줄단위 JSON 을 PTY 로 받으면 이스케이프가
-    // 섞인다. 기본값(`Pty`)이 fail-open 이라 여기 열이 없으면 새 backend 가 조용히 그것을 물려받는다.
+    // ★③ goes with ①② but is not the same axis★: a wrong link shape compiles and **even launches
+    // plausibly at runtime** — receiving a TUI through a pipe breaks the screen, and receiving line-based JSON through a PTY mixes in
+    // escapes. The default (`Pty`) is fail-open, so without a column here a new backend silently inherits it.
     //
-    // ★이 표가 덮지 않는 것 = resume transcript seed★: `resume_transcript_events` 도 같은 fail-open
-    //   기본값(빈 Vec)을 갖지만, 판정하려면 실제 transcript 파일이 있어야 해서 "seed 안 함" 과 "파일이
-    //   없어서 빈 Vec" 이 여기서 구별되지 않는다. 그쪽 회귀망은 `backend/claude/` 의 transcript 단위
-    //   테스트가 진다 — 여기 세 번째 열을 만들면 아무 것도 재지 않는 열이 하나 생길 뿐이다.
+    // ★What this table does not cover = the resume transcript seed★: `resume_transcript_events` has the same fail-open
+    //   default (an empty Vec), but deciding it requires an actual transcript file, so "no seed" and "an empty Vec because
+    //   there is no file" cannot be told apart here. That regression net is carried by the transcript unit
+    //   tests of `backend/claude/` — making a third column here would only create one column that measures nothing.
     fn expected_codec_axis(c: &AgentCommand) -> (InputEncoder, bool, TransportShape) {
-        // (input_encoder, output_decoder 유무, transport_shape)
+        // (input_encoder, whether there is an output_decoder, transport_shape)
         match c {
             AgentCommand::Claude {
                 output_format: AgentOutputFormat::Terminal,
@@ -1509,9 +1509,9 @@ mod tests {
                 output_format: AgentOutputFormat::Terminal,
                 ..
             } => (InputEncoder::Raw, false, TransportShape::Pty),
-            // ★app-server 모드의 인코더가 `Raw` 가 아닌 것이 이 행의 요점이다★ — `Raw` 였다면 세션이
-            //   본문 뒤에 CR 을 **별도 호출**로 한 번 더 내고, 봉투를 스스로 만드는 통로는 그것을 또 하나의
-            //   본문으로 읽어 빈 턴을 연다.
+            // ★The point of this row is that the app-server mode's encoder is not `Raw`★ — if it were `Raw`, the session would
+            //   emit a CR once more **as a separate call** after the body, and the link, which builds the envelope itself, would read it as one more
+            //   body and open an empty turn.
             AgentCommand::Codex {
                 output_format: AgentOutputFormat::StreamJson,
                 ..
@@ -1532,38 +1532,38 @@ mod tests {
             assert_eq!(
                 input_encoder(c),
                 expected_encoder,
-                "variant {c:?}: input_encoder 불일치 — 위 expected_codec_axis 를 따라 의식적으로 선언할 것"
+                "variant {c:?}: input_encoder mismatch — declare it consciously following expected_codec_axis above"
             );
             assert_eq!(
                 output_decoder(c).is_some(),
                 expects_decoder,
-                "variant {c:?}: output_decoder 유무 불일치 — 위 expected_codec_axis 를 따라 의식적으로 선언할 것"
+                "variant {c:?}: output_decoder presence mismatch — declare it consciously following expected_codec_axis above"
             );
             assert_eq!(
                 transport_shape(c),
                 expected_shape,
-                "variant {c:?}: transport_shape 불일치 — 위 expected_codec_axis 를 따라 의식적으로 선언할 것"
+                "variant {c:?}: transport_shape mismatch — declare it consciously following expected_codec_axis above"
             );
         }
         assert!(
             covered.iter().all(|c| *c),
-            "샘플이 안 닿은 variant 가 있다(그 variant 는 코덱 축이 한 번도 안 불려 fail-open 이 그대로 통과한다): {covered:?}"
+            "there is a variant the sample does not reach (the codec axis is never called for that variant, so fail-open passes as is): {covered:?}"
         );
     }
 
-    // ── 선언한 통로 모양과 실제로 넘어오는 통로 ────────────────────────────────────────────
+    // ── The declared link shape and the link actually handed over ────────────────────────────────────────────
     //
-    // ★왜 위 코덱 축 표와 따로 재나(ADR-0191 이후)★: 조립점이 `transport_shape` 를 match 해 생성자를
-    //   고르던 시절엔 그 표의 셋째 열이 **실제로 뜨는 통로**까지 전이적으로 단언했다. 통로 생성이
-    //   backend 의 `open_spawn` 으로 들어가면서 그 신고값을 읽는 생산 코드가 0 이 됐고, 그때부터
-    //   파이프를 선언해 놓고 기본 `open_spawn`(=PTY)을 타도 그 열은 초록이다. 런타임 증상은 깨진
-    //   화면뿐이라 지금 그 어긋남을 잡는 것은 이 테스트뿐이다.
-    // ★`structured` 로 가르지 않는 이유★: 그 칸은 통로가 아니라 backend 가 주입하는 값이라
-    //   (ADR-0030/0044) 평문 파이프도 false 를 신고한다 — 두 구현체를 실제로 가르는 것은 양쪽이
-    //   하드코딩하는 `terminal_bytes` 와 `resize` 다.
-    // ★슬롯 커버리지 단언을 두지 않았다★: 같은 샘플 목록을 도는 위 트립와이어들이 이미 잰다.
-    // ★spec 은 그 백엔드의 실 CLI 가 아니다★: `open_spawn` 은 무엇을 띄울지를 spec 에서, 어떤 통로로
-    //   띄울지를 command 에서 따로 받으므로, 즉시 끝나는 프로브를 띄워 통로 선택만 본다(ADR-0012).
+    // ★Why it is measured separately from the codec-axis table above (since ADR-0191)★: back when the assembly point matched `transport_shape` to pick
+    //   a constructor, the third column of that table transitively asserted even **the link that actually launches**. When link creation
+    //   moved into the backend's `open_spawn`, production code reading that reported value went to 0, and since then
+    //   declaring a pipe while taking the default `open_spawn` (=PTY) still leaves that column green. The runtime symptom is only a broken
+    //   screen, so the only thing catching that mismatch now is this test.
+    // ★Why it is not split by `structured`★: that field is a value the backend injects, not the link
+    //   (ADR-0030/0044), so a plain pipe also reports false — what actually tells the two implementations apart is the `terminal_bytes` and `resize`
+    //   both hardcode.
+    // ★No slot coverage assertion was added★: the tripwires above running the same sample list already measure it.
+    // ★spec is not that backend's real CLI★: `open_spawn` takes what to launch from spec and which link to
+    //   launch it with from command separately, so it launches a probe that ends immediately and looks only at the link choice (ADR-0012).
     // ADR-0191
     #[cfg(windows)]
     #[test]
@@ -1579,10 +1579,10 @@ mod tests {
             let expected = match shape {
                 TransportShape::Pty => (true, true),
                 TransportShape::StdioNdjson => (false, false),
-                // 파이프라 터미널 바이트도 크기도 없다 — 단방향 파이프와 같은 짝이다. `interrupt` 는 이 쌍에
-                //   안 들어 있다: 파이프 쪽 그 칸은 backend 가 주입하는 값이라(ADR-0238) 통로 신고가 아니다.
-                //   오늘은 두 파이프 모양이 다 true 이고, `interrupt` 가 가르는 것은 PTY(false · ADR-0245)와
-                //   파이프다.
+                // A pipe, so neither terminal bytes nor size — the same pair as the one-way pipe. `interrupt` is not
+                //   in this pair: on the pipe side that field is a value the backend injects (ADR-0238), not a link report.
+                //   Today both pipe shapes are true, and what `interrupt` tells apart is PTY (false · ADR-0245) and
+                //   pipes.
                 TransportShape::StdioBidiJson => (false, false),
             };
             let parts =
@@ -1592,62 +1592,62 @@ mod tests {
             parts.transport.shutdown();
             assert_eq!(
                 actual, expected,
-                "variant {c:?}: {shape:?} 를 신고했는데 open_spawn 이 넘긴 통로의 (terminal_bytes, resize) 가 다르다 — 신고와 통로 생성 중 한쪽만 고친 것이다"
+                "variant {c:?}: reported {shape:?} but the (terminal_bytes, resize) of the link open_spawn handed over differ — only one of the report and the link creation was fixed"
             );
         }
     }
 
-    // ── 제출 바이트(submit_sequence) — 백엔드별 "본문 write 만으론 턴이 안 시작되나" ──────────────
+    // ── Submit bytes (submit_sequence) — per backend, "does the body write alone fail to start a turn" ──────────────
     #[test]
     fn submit_sequence_is_cr_for_raw_and_absent_for_stream_json() {
         assert_eq!(
             InputEncoder::Raw.submit_sequence(),
             Some(b"\r".as_slice()),
-            "터미널·shell 은 PTY 키보드 흉내 — Enter = CR"
+            "terminal · shell imitate a PTY keyboard — Enter = CR"
         );
         assert_eq!(
             InputEncoder::ClaudeStreamJson.submit_sequence(),
             None,
-            "encode 의 종단 \\n 이 이미 제출 — CR 을 더하면 라인 뒤에 잉여 바이트가 붙는다"
+            "the terminating \\n of encode is already the submit — adding a CR puts surplus bytes after the line"
         );
     }
 
     #[test]
     fn submit_sequence_is_not_baked_into_encode() {
-        // ★합치면 claude TUI 가 제출하지 않는다(실측)★ — encode 산출물에 제출 바이트가 섞여 들어가면
-        //   session 이 두 write 로 나눠도 첫 write 가 이미 오염된 상태다.
+        // ★Combined, the claude TUI does not submit (measured)★ — if submit bytes get mixed into the encode output,
+        //   the first write is already polluted even if the session splits it into two writes.
         let out = InputEncoder::Raw.encode(b"<message from=\"bob\">hi</message>", Uuid::new_v4());
         assert!(
             !out.contains(&b'\r'),
-            "Raw encode 는 제출 바이트를 붙이지 않는다(제출은 write 경계 — session 소관): {out:?}"
+            "Raw encode does not append submit bytes (the submit is a write boundary — the session's concern): {out:?}"
         );
     }
 
-    // ── 턴 제출 판정(submits_turn) — 세션 id 첫 제출 래치의 기준(ADR-0226) ──────────────────
-    /// ★이름에 가정을 박는다★: 이 판정은 xterm 기본 키 인코딩(Enter = CR)에 선다. Enter 를 다른 시퀀스로
-    ///   보내는 키 인코딩 모드가 들어오면 이 항목이 아니라 **판정 자체**를 다시 봐야 한다.
+    // ── Turn submit decision (submits_turn) — the criterion of the session id first-submission latch (ADR-0226) ──────────────────
+    /// ★The assumption is baked into the name★: this decision stands on xterm's default key encoding (Enter = CR). If a key encoding mode that sends Enter
+    ///   as a different sequence comes in, **the decision itself**, not this entry, must be revisited.
     #[test]
     fn raw_submission_is_cr_under_default_xterm_encoding() {
         assert!(
             !InputEncoder::Raw.submits_turn(b"hel"),
-            "CR 없는 키 입력 조각은 턴이 아니다"
+            "a keystroke fragment without CR is not a turn"
         );
         assert!(
             !InputEncoder::Raw.submits_turn(b""),
-            "빈 조각은 턴이 아니다"
+            "an empty fragment is not a turn"
         );
         assert!(
             !InputEncoder::Raw.submits_turn(b"\n"),
-            "LF 는 xterm 기본 키 인코딩의 Enter 가 아니다"
+            "LF is not Enter in xterm's default key encoding"
         );
-        assert!(InputEncoder::Raw.submits_turn(b"\r"), "Enter 단독");
+        assert!(InputEncoder::Raw.submits_turn(b"\r"), "Enter alone");
         assert!(
             InputEncoder::Raw.submits_turn(b"hello\r"),
-            "본문 뒤 Enter 가 같은 조각에 실렸다"
+            "Enter after the body came in the same fragment"
         );
         assert!(
             InputEncoder::Raw.submits_turn(b"a\rb"),
-            "붙여넣기처럼 CR 이 가운데 든 조각도 제출로 센다"
+            "a fragment with a CR in the middle, like a paste, also counts as a submit"
         );
     }
 
@@ -1659,22 +1659,22 @@ mod tests {
         ] {
             assert!(
                 encoder.submits_turn(b"hello"),
-                "{encoder:?}: 호출 1회 = 유저 턴 1개 — CR 이 없어도 턴이다"
+                "{encoder:?}: 1 call = 1 user turn — a turn even without CR"
             );
             assert!(
                 encoder.submits_turn(b""),
-                "{encoder:?}: 내용과 무관하게 호출 자체가 턴이다"
+                "{encoder:?}: the call itself is a turn regardless of content"
             );
         }
     }
 
-    /// ★제출 바이트를 내는 인코더는 그 바이트를 턴으로 센다★ — 우편 배달은 제출 바이트 앞에서
-    ///   `submits_turn(제출 바이트)` 로 세므로, 한쪽(예: `Raw` 의 제출 바이트)만 바뀌면 우편이 **조용히**
-    ///   안 세어지고 그 에이전트의 이어받기가 사라진다.
+    /// ★An encoder that emits submit bytes counts those bytes as a turn★ — mail delivery counts with `submits_turn(submit bytes)` in front of the
+    ///   submit bytes, so if only one side (e.g. the submit bytes of `Raw`) changes, mail is **silently**
+    ///   not counted and that agent's resume disappears.
     // ADR-0226
     #[test]
     fn every_submit_sequence_counts_as_a_turn_submission() {
-        // 변형이 늘면 이 match 가 컴파일을 깬다 — 아래 목록에 더하라는 신호다.
+        // If the variants grow, this match breaks compilation — a signal to add to the list below.
         let _exhaustive = |e: InputEncoder| match e {
             InputEncoder::Raw | InputEncoder::ClaudeStreamJson | InputEncoder::TransportFramed => {}
         };
@@ -1686,20 +1686,20 @@ mod tests {
             if let Some(submit) = encoder.submit_sequence() {
                 assert!(
                     encoder.submits_turn(submit),
-                    "{encoder:?}: 제출 바이트 {submit:?} 가 턴 제출로 안 세어진다 — 우편이 영속을 못 부른다"
+                    "{encoder:?}: the submit bytes {submit:?} are not counted as a turn submit — mail cannot call persistence"
                 );
             }
         }
     }
 
-    // ── ADR-0044/0045: 입력-시점 유저 에코 이벤트 dispatch(input_echo_event) — uuid dedup ──────
+    // ── ADR-0044/0045: input-time user echo event dispatch (input_echo_event) — uuid dedup ──────
     #[test]
     fn input_echo_event_json_mode_emits_structured_user_with_uuid() {
         use crate::types::OutputEvent;
         let id = Uuid::new_v4();
         let ev = InputEncoder::ClaudeStreamJson
             .input_echo_event(b"hi there", id)
-            .expect("json 모드 → 합성 유저 에코 이벤트");
+            .expect("json mode → synthetic user echo event");
         match ev {
             OutputEvent::Structured { kind, json } => {
                 assert_eq!(kind, "user");
@@ -1709,7 +1709,7 @@ mod tests {
                 assert_eq!(
                     v["uuid"],
                     id.to_string(),
-                    "합성 에코에 msg_uuid 부착(dedup 키)"
+                    "msg_uuid attached to the synthetic echo (dedup key)"
                 );
             }
             other => panic!("expected Structured user, got {other:?}"),
@@ -1722,7 +1722,7 @@ mod tests {
             InputEncoder::Raw
                 .input_echo_event(b"echo hi\r\n", Uuid::new_v4())
                 .is_none(),
-            "Raw 는 합성 유저 에코를 만들지 않아야 함(PTY 에코 중복 방지)"
+            "Raw must not make a synthetic user echo (prevents duplicating the PTY echo)"
         );
     }
 
@@ -1736,11 +1736,11 @@ mod tests {
         assert!(s.contains("\"text\":\"hi\""));
         assert!(
             s.contains(&id.to_string()),
-            "stdin user 라인에 msg_uuid 포함"
+            "msg_uuid included in the stdin user line"
         );
     }
 
-    // ── S15 B3: output_decoder dispatch(입력 encoder 의 대칭) ──────────────────────
+    // ── S15 B3: output_decoder dispatch (symmetric to the input encoder) ──────────────────────
     #[test]
     fn output_decoder_dispatch_by_mode() {
         let term = AgentCommand::Claude {
@@ -1757,15 +1757,15 @@ mod tests {
         };
         assert!(
             output_decoder(&term).is_none(),
-            "터미널 모드 → decoder 없음(직통)"
+            "terminal mode → no decoder (straight through)"
         );
         assert!(
             output_decoder(&shell).is_none(),
-            "shell → decoder 없음(직통)"
+            "shell → no decoder (straight through)"
         );
         assert!(
             output_decoder(&json).is_some(),
-            "json 모드 → ClaudeStreamDecoder 주입"
+            "json mode → ClaudeStreamDecoder injected"
         );
     }
 
@@ -1782,14 +1782,14 @@ mod tests {
         assert!(
             ev.iter()
                 .any(|e| matches!(e, OutputEvent::MessageDone { .. })),
-            "trait object decode 가 result 라인을 MessageDone 으로 정제해야 함: {ev:?}"
+            "the trait object decode must refine a result line into MessageDone: {ev:?}"
         );
     }
 
-    // ── 사용량 조회기 등록부 ──────────────────────────────────────────────────────
+    // ── Usage prober registry ──────────────────────────────────────────────────────
 
-    /// `agent.new` 가 받는 백엔드 낱말 전량(직렬화 철자). ★match 에 와일드카드를 넣지 말 것★ — 선언 어휘에
-    /// 낱말이 늘면 여기서 컴파일이 깨져, 그 백엔드에 사용량 조회기를 둘지 정하게 한다.
+    /// All backend words `agent.new` accepts (serialized spelling). ★Do not put a wildcard in the match★ — when the declaration vocabulary
+    /// gains a word, compilation breaks here, making you decide whether to give that backend a usage prober.
     fn agent_new_backend_words() -> Vec<String> {
         use crate::commands::AgentBackend;
         let all = [AgentBackend::Claude, AgentBackend::Codex];
@@ -1801,9 +1801,9 @@ mod tests {
         all.iter()
             .map(|backend| {
                 serde_json::to_value(backend)
-                    .expect("직렬화")
+                    .expect("serialize")
                     .as_str()
-                    .expect("unit variant 는 낱말로 직렬화된다")
+                    .expect("a unit variant serializes as a word")
                     .to_owned()
             })
             .collect()
@@ -1815,11 +1815,11 @@ mod tests {
         assert_eq!(
             usage_probes().len(),
             words.len(),
-            "조회기와 `agent.new` 낱말이 하나씩 짝지어야 한다: {words:?}"
+            "probers and `agent.new` words must pair one to one: {words:?}"
         );
         for word in &words {
             let probe = usage_probe_for(word)
-                .unwrap_or_else(|| panic!("`agent.new` 낱말 {word} 의 조회기가 없다"));
+                .unwrap_or_else(|| panic!("no prober for the `agent.new` word {word}"));
             assert!(
                 probe.key().as_str().eq_ignore_ascii_case(word),
                 "{word} → {}",
@@ -1835,7 +1835,7 @@ mod tests {
             for b in &probes[i + 1..] {
                 assert!(
                     !a.key().as_str().eq_ignore_ascii_case(b.key().as_str()),
-                    "키가 겹친다: {}",
+                    "keys overlap: {}",
                     a.key().as_str()
                 );
             }
@@ -1856,7 +1856,7 @@ mod tests {
         for unknown in ["", "codx", "gemini", "shell", " claude", "claude "] {
             assert!(
                 usage_probe_for(unknown).is_none(),
-                "모르는 낱말 {unknown:?}"
+                "unknown word {unknown:?}"
             );
         }
     }

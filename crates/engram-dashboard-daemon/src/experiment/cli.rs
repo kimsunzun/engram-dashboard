@@ -1,14 +1,10 @@
 //! saturation-pilot CLI argument parser (ADR-0090 Stage 2 pilot).
 //!
-//! ## Role
-//! Parses the command line of the `saturation_pilot` bin into a validated `PilotConfig`. It does **not add** an argument parsing
-//! crate such as clap (ADR-0090 constraint: no new deps) — there are few kinds of flags and hand assembly is enough.
+//! Parses the `saturation_pilot` bin's command line into a validated `PilotConfig`. No argument parsing crate such as clap (ADR-0090: no new deps) — few flags, hand assembly suffices.
 //!
 //! ## Core invariants (ADR-0090)
-//! - **Hard-cap clamp**: `fill_target_tokens` is hard-clamped at the parsing stage. Even if the user gives a value
-//!   above the cap it is quietly reduced (prevents a runaway experiment — a double defense with the runtime cap).
-//! - **Unknown flag = refused**: an unknown flag is refused with `ParseError::Unknown` and the caller
-//!   ends with exit 2 (prevents silently running with wrong parameters caused by a typo).
+//! - Hard-cap clamp: `fill_target_tokens` is hard-clamped at parsing; a value above the cap is quietly reduced (a double defense with the runtime cap against a runaway experiment).
+//! - Unknown flag = refused: `ParseError::Unknown`, and the caller ends with exit 2 (a typo must not silently run with wrong parameters).
 // ADR-0090
 
 use std::path::PathBuf;
@@ -16,11 +12,10 @@ use std::path::PathBuf;
 /// Hard clamp of the fill target tokens (ADR-0090 invariant).
 pub const FILL_TARGET_CLAMP: u64 = 180_000;
 
-/// ★doc_chars hard clamp (ADR-0090 invariant — finding 7)★: there is no reason for one document to exceed the fill-target (character-converted cap),
-///   so a generous fixed ceiling is set. An excess value is quietly reduced at the parsing stage.
+/// doc_chars hard clamp (ADR-0090 invariant): one document has no reason to exceed the fill-target (character-converted cap), so a generous fixed ceiling is set; an excess value is quietly reduced at parsing.
 pub const DOC_CHARS_CLAMP: usize = 200_000;
 
-/// Pilot run config — all parameters + seed. Serialized as is into the JSONL header (reproducibility pin = ADR-0088 d5a).
+/// Pilot run config — all parameters + seed, serialized as is into the JSONL header (reproducibility pin = ADR-0088 d5a).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PilotConfig {
     /// Number of repeated runs (each run = 1 spawn of a new agent).
@@ -68,27 +63,27 @@ pub enum ParseError {
 
 pub fn usage() -> String {
     "\
-saturation-pilot — ADR-0090 Stage 2 컨텍스트 포화 파일럿 드라이버
+saturation-pilot — ADR-0090 Stage 2 context saturation pilot driver
 
 USAGE:
   saturation-pilot [OPTIONS]
 
 OPTIONS:
-  --runs <N>                  반복 런 수 (기본 1)
-  --fill-target-tokens <N>    포화 목표 토큰 (기본 150000, 하드 클램프 180000)
-  --inject-at <\"0.5,0.9\">      주입 시점 fill 분율 CSV (기본 \"0.5,0.9\")
-  --probe-gap-turns <N>       주입 후 프로브까지 fill 턴 수 (기본 6)
-  --doc-chars <N>             doc 1개 근사 문자 수 (기본 12000)
-  --model <NAME>              모델 핀 (기본 sonnet)
-  --out <DIR>                 JSONL 출력 디렉토리 (기본 target/experiments/pilot-<UTC>)
-  --seed <U64>                필러 seed (기본 고정값)
-  --keep-workspace            런 종료 후 임시 워크스페이스 보존
-  -h, --help                  이 도움말
+  --runs <N>                  number of repeated runs (default 1)
+  --fill-target-tokens <N>    saturation target tokens (default 150000, hard clamp 180000)
+  --inject-at <\"0.5,0.9\">      injection points as fill-fraction CSV (default \"0.5,0.9\")
+  --probe-gap-turns <N>       fill turns from injection to probe (default 6)
+  --doc-chars <N>             approximate characters per doc (default 12000)
+  --model <NAME>              model pin (default sonnet)
+  --out <DIR>                 JSONL output directory (default target/experiments/pilot-<UTC>)
+  --seed <U64>                filler seed (default fixed value)
+  --keep-workspace            keep the temporary workspace after the run ends
+  -h, --help                  this help
 "
     .to_string()
 }
 
-/// Parse argv (excluding the program name). A flag that takes a value uses the `--flag value` form (the equals form `--flag=value` is also allowed).
+/// Parses argv (excluding the program name). A flag taking a value uses `--flag value` (`--flag=value` is also allowed).
 pub fn parse_args<I, S>(args: I) -> Result<PilotConfig, ParseError>
 where
     I: IntoIterator<Item = S>,
@@ -137,17 +132,15 @@ where
     Ok(cfg)
 }
 
-/// ★finding 15 fix★: when another flag came in the value position like `--out --keep-workspace`, previously the next flag was swallowed
-///   as the value (out="--keep-workspace") and the typo ran silently. (The pathological case of a path starting with `--` is
-///   not supported — experiment arguments have no such value.)
+/// When another flag appears in the value position (`--out --keep-workspace`), it is not swallowed as the value — that used to run the typo silently. (A path starting with `--` is not supported; experiment arguments have none.)
 fn take_value<I: Iterator<Item = String>>(
     it: &mut std::iter::Peekable<I>,
     flag: &str,
 ) -> Result<String, ParseError> {
     match it.next() {
-        None => Err(ParseError::Invalid(format!("{flag} 는 값이 필요합니다"))),
+        None => Err(ParseError::Invalid(format!("{flag} needs a value"))),
         Some(v) if v.starts_with("--") => Err(ParseError::Invalid(format!(
-            "{flag} 값 누락 — 값 자리에 플래그가 왔습니다: {v:?}"
+            "{flag} value missing — a flag came in the value position: {v:?}"
         ))),
         Some(v) => Ok(v),
     }
@@ -159,11 +152,10 @@ fn take_parse<I: Iterator<Item = String>, T: std::str::FromStr>(
 ) -> Result<T, ParseError> {
     let v = take_value(it, flag)?;
     v.parse::<T>()
-        .map_err(|_| ParseError::Invalid(format!("{flag} 값 파싱 실패: {v:?}")))
+        .map_err(|_| ParseError::Invalid(format!("{flag} value parse failed: {v:?}")))
 }
 
-/// Each element must be in the range (0,1] — 0 is meaningless since it is before fill, 1 is the saturation reach point. An empty string is an empty
-/// list (no injection).
+/// Each element must be in (0,1] — 0 is before fill, 1 is the saturation reach point. An empty string is an empty list (no injection).
 pub fn parse_inject_at(raw: &str) -> Result<Vec<f64>, ParseError> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -174,10 +166,10 @@ pub fn parse_inject_at(raw: &str) -> Result<Vec<f64>, ParseError> {
         let p = part.trim();
         let f: f64 = p
             .parse()
-            .map_err(|_| ParseError::Invalid(format!("--inject-at 원소 파싱 실패: {p:?}")))?;
+            .map_err(|_| ParseError::Invalid(format!("--inject-at element parse failed: {p:?}")))?;
         if !(f > 0.0 && f <= 1.0) {
             return Err(ParseError::Invalid(format!(
-                "--inject-at 원소는 (0,1] 범위여야: {f}"
+                "--inject-at elements must be in (0,1]: {f}"
             )));
         }
         out.push(f);

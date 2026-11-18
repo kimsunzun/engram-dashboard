@@ -18,8 +18,8 @@ const EXACT: f64 = 9_007_199_254_740_992.0;
 /// where the advertised schema matches what is actually accepted**.
 ///
 /// ★It cannot be narrowed on the schema side★: in JSON's number model `1.0` and `1` are **the same value**,
-/// and `{"type":"integer"}` includes 「소수부가 0 인 수」 (numbers whose fractional part is 0) (since draft 6 — the derived file
-/// states its dialect through `$schema`). So no keyword expresses 「소수점을 찍지 마라」 (do not write a decimal point). But serde
+/// and `{"type":"integer"}` includes 「numbers whose fractional part is 0」 (since draft 6 — the derived file
+/// states its dialect through `$schema`). So no keyword expresses 「do not write a decimal point」. But serde
 /// rejects an f64 arriving in an integer field, so if we leave it alone, a caller that filled the arguments from the schema
 /// (an LLM or JS — writing an integer as `1.0` is common) sends what was advertised and gets rejected.
 ///
@@ -31,7 +31,7 @@ const EXACT: f64 = 9_007_199_254_740_992.0;
 ///
 /// ★Known limit (not fixed)★: a value with a fractional part inside `[2^52, 2^53)` is **already broken
 /// before it gets here** — JSON→f64 parsing cannot represent a fractional part in that range and rounds to an integer, so
-/// whatever threshold this function picks, it cannot recover 「호출자가 소수를 보냈다」 (the caller sent a decimal). Also, the schema keywords this function reads
+/// whatever threshold this function picks, it cannot recover 「the caller sent a decimal」. Also, the schema keywords this function reads
 /// are only four: `properties`, `items`, `anyOf`, `type` (it cannot follow `$ref`, `oneOf`, `allOf`, `prefixItems`) —
 /// because the declaration macro emits only those four; if the macro starts emitting more, this must grow with it.
 pub(crate) fn integral_numbers_to_integers(schema: &Value, value: &mut Value) {
@@ -98,7 +98,7 @@ fn accepts(schema: &Value, wanted: &str) -> bool {
 ///
 /// ★Why be lenient★: what fills this field is a word typed by hand by a person or LLM, and if the declaration is
 /// PascalCase like `Claude`, `Codex`, typing `claude` is natural (and the reverse is the same). Reading those two as different values
-/// would reject 「아는 낱말」 (a word it knows) for a caller who filled it from the schema.
+/// would reject 「a word it knows」 for a caller who filled it from the schema.
 /// ★The only fields we rewrite are **those the declaration said are enums**★ — free-string fields are left alone. The letter case of
 /// such a field is part of the value (paths, names, ids).
 /// ★Two cases we do not rewrite★: if it is **already exactly equal** to the declared spelling, leave it (nothing to rewrite), and if
@@ -196,7 +196,7 @@ mod tests {
                  "rows":{"type":"array","items":{"type":"object","properties":{
                     "size":{"type":"integer"}}}}}}"#,
         )
-        .expect("픽스처 스키마")
+        .expect("fixture schema")
     }
 
     fn coerced(mut args: Value) -> Value {
@@ -209,8 +209,12 @@ mod tests {
         let out = coerced(json!({ "count": 2.0, "ratio": 1.0, "maybe": 3.0 }));
 
         assert_eq!(out["count"], json!(2));
-        assert_eq!(out["ratio"], json!(1.0), "실수 칸은 실수로 남는다");
-        assert_eq!(out["maybe"], json!(3), "선택 칸(anyOf)도 조정된다");
+        assert_eq!(out["ratio"], json!(1.0), "a float field stays a float");
+        assert_eq!(
+            out["maybe"],
+            json!(3),
+            "an optional field (anyOf) is adjusted too"
+        );
     }
 
     /// ★Knowing the type lets us tell `-0.0` apart★ — integers have no signed zero, so in an integer field it is `0`, and
@@ -221,9 +225,9 @@ mod tests {
 
         assert_eq!(out["count"], json!(0));
         assert_eq!(
-            serde_json::to_string(&out["ratio"]).expect("직렬화"),
+            serde_json::to_string(&out["ratio"]).expect("serialize"),
             "-0.0",
-            "실수 칸의 부호는 관측된다"
+            "the sign of a float field is observed"
         );
     }
 
@@ -236,10 +240,18 @@ mod tests {
     #[test]
     fn a_fractional_value_and_a_value_beyond_exact_range_are_left_alone() {
         let out = coerced(json!({ "count": 2.5 }));
-        assert_eq!(out["count"], json!(2.5), "소수부가 있으면 정수가 아니다");
+        assert_eq!(
+            out["count"],
+            json!(2.5),
+            "with a fractional part it is not an integer"
+        );
 
         let out = coerced(json!({ "count": 1e300 }));
-        assert_eq!(out["count"], json!(1e300), "2^53 밖은 옮기면 값이 바뀐다");
+        assert_eq!(
+            out["count"],
+            json!(1e300),
+            "outside 2^53, moving it changes the value"
+        );
     }
 
     /// Fields absent from the declaration are left alone — there is no basis for changing a value whose reading is unknown.
@@ -260,7 +272,7 @@ mod tests {
                  "name":{"type":"string"},
                  "rows":{"type":"array","items":{"enum":["Claude"]}}}}"#,
         )
-        .expect("픽스처 스키마")
+        .expect("fixture schema")
     }
 
     fn respelled(mut args: Value) -> Value {
@@ -276,7 +288,7 @@ mod tests {
         assert_eq!(
             out["format"],
             json!("StreamJson"),
-            "선택 칸(anyOf)도 옮긴다"
+            "an optional field (anyOf) is moved too"
         );
 
         let out = respelled(json!({ "backend": "CLAUDE" }));
@@ -310,7 +322,7 @@ mod tests {
     fn a_word_that_two_declared_spellings_could_be_is_left_alone() {
         let ambiguous: Value =
             serde_json::from_str(r#"{"anyOf":[{"enum":["Claude"]},{"enum":["CLAUDE"]}]}"#)
-                .expect("스키마");
+                .expect("schema");
         let mut value = json!("claude");
         enum_words_to_declared_spelling(&ambiguous, &mut value);
 
@@ -322,7 +334,7 @@ mod tests {
     fn a_field_that_accepts_both_integer_and_number_is_left_alone() {
         let both: Value =
             serde_json::from_str(r#"{"anyOf":[{"type":"integer"},{"type":"number"}]}"#)
-                .expect("스키마");
+                .expect("schema");
         let mut value = json!(1.0);
         integral_numbers_to_integers(&both, &mut value);
 

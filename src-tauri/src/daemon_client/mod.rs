@@ -1,21 +1,13 @@
-//! DaemonClient — the shell's single authority over the daemon WS connection (S14 module ①, ADR-0036).
-//!
-//! **One connection to the daemon however many windows** — the frontend reaches the daemon through the shell, not
-//! with a WS per window (`src/api/wsTransport.ts`). This module owns that connection's setup, handshake and life.
-//! Protocol semantics (epoch guard · request id extraction · reply classification) are `protocol_state.rs`, output
-//! routing is `output_router` / `output_channel`.
-//!
-//! - The connection runs on the driver in `connection.rs` over the transport crate (`link/`) — its module doc holds
-//!   the concurrency model (one actor owns the routing; callers' round trips run on their own tasks).
+//! DaemonClient — the shell's single authority over the daemon WS connection (S14 module ①, ADR-0036): one connection however many windows (the frontend reaches the daemon through the shell, not a WS per window — `src/api/wsTransport.ts`); owns its setup, handshake and life.
+//! Protocol semantics are `protocol_state.rs`; output routing is `output_router` / `output_channel`.
+//! - The connection runs on the driver in `connection.rs` over the transport crate (`link/`); its module doc holds the concurrency model (one actor owns the routing; callers' round trips run on their own tasks).
 //! - `connect` (explicit, may spawn the daemon) and `ensure` (attach-only, never spawns) stay apart — ADR-0021.
-//! - States: connected / down / reconnecting — there is no connecting state.
+//! - States: connected / down / reconnecting — no connecting state.
 
 // ADR-0310: the driver on the transport crate (TRD S21 trd-3 §6-2 U3) — every client runs on it.
 mod connection;
-// ADR-0012: the seam for the connection's emits to the frontend (real AppHandle / recording fake / no-op). Without it
-// this module's unit harness cannot stand — the reasons and contract live in that file's header.
-// ★Being `pub(crate)` is the point★: its consumers are the connection drivers inside this crate; opening it would
-//   leak the `AppHandle` carrier onto the lib surface with nowhere outside the crate to plug it in.
+// ADR-0012: the seam for the connection's emits to the frontend (real AppHandle / recording fake / no-op); the reasons and contract live in that file's header.
+// `pub(crate)` on purpose: its consumers are the connection drivers inside this crate; opening it would leak the `AppHandle` carrier onto the lib surface.
 pub(crate) mod events;
 // ADR-0231: relay decision for one output binary frame (decode · incarnation marker filter · viewing window) — seq is never skipped.
 mod frame_relay;
@@ -73,10 +65,8 @@ pub enum ConnectionState {
     /// Not attached, explicitly closed, refused, or a never-connected handle's first failure (the link may still retry
     /// in the background — ADR-0346, TRD rev 9 ①).
     Down,
-    // `Hello` received = authenticated. Commands and subscriptions work.
     Connected,
-    // Retrying after an unintended loss (backoff … next attempt); the link driver never gives up on network failures.
-    // Matches wsTransport's `reconnecting` — distinct from an explicit close (Down).
+    // Retrying after an unintended loss (backoff … next attempt); the link driver never gives up on network failures. Distinct from an explicit close (Down), matching wsTransport's `reconnecting`.
     Reconnecting,
 }
 
@@ -92,7 +82,6 @@ pub struct ConnectionStatus {
 }
 
 impl ConnectionStatus {
-    /// Before routing showed anything.
     pub const DOWN: Self = Self {
         state: ConnectionState::Down,
         band: None,
@@ -113,21 +102,9 @@ pub enum Band {
     Version { can_stop: bool },
 }
 
-/// The shared handle to one shell's usage interest ([`UsageInterest`]) — the connection driver, the side that changes
-/// the interest (layout recompute · hide · shrink timer) and the webview pull hold the same one (TRD S21
-/// usage-limit-slot §1-7).
-///
-/// ★Lock order = `ViewManager → this lock`★. On the link driver a nudge ([`DaemonClient::nudge_usage_interest`])
-/// issued inside this lock only sends to the driver's actor (non-blocking); the driver takes the ViewManager lock
-/// ([`AgentNamesSink`]) holding no lock, so there is no reverse order. Inside this lock only [`UsageInterest`] methods,
-/// that nudge and the link driver's usage-subscribe queueing run; ★emits happen after the lock is released★ (ADR-0006). The link
-/// driver queues its usage subscribe inside this lock on purpose, so the order sets are read is the order they are
-/// queued — that queueing (`Peer::notify_in`) is a non-blocking leaf, and the peer is looked up before the lock is
-/// taken.
-///
-/// ★Poison is recovered from★: if a panic inside that method leaves the state half-fixed, the outcome is a subscription out of
-/// step with the daemon or a missed delivery target, and the next recompute · snapshot reconciliation · new socket sets it right
-/// again. Propagating the poison would kill the connection task on the spot and stop output and commands altogether.
+/// The shared handle to one shell's usage interest ([`UsageInterest`]) — held by the connection driver, the side that changes the interest (layout recompute · hide · shrink timer) and the webview pull (TRD S21 usage-limit-slot §1-7).
+/// Lock order = `ViewManager → this lock`. A nudge ([`DaemonClient::nudge_usage_interest`]) issued inside this lock only sends to the actor (non-blocking); the driver takes the ViewManager lock ([`AgentNamesSink`]) holding no lock, so there is no reverse order. Inside this lock run only [`UsageInterest`] methods, that nudge and the driver's usage-subscribe queueing (queued here on purpose so read order = queue order; `Peer::notify_in` is a non-blocking leaf and the peer is looked up before the lock); emits happen after release (ADR-0006).
+/// Poison is recovered from: a panic leaving the state half-fixed costs a subscription out of step or a missed delivery target that the next recompute · snapshot reconciliation · new socket repairs, whereas propagating the poison would kill the connection task and stop output and commands.
 #[derive(Clone, Default)]
 pub struct SharedUsageInterest(Arc<Mutex<UsageInterest>>);
 
@@ -137,24 +114,15 @@ impl SharedUsageInterest {
     }
 }
 
-/// Port that receives the name part of the daemon's `AgentListUpdated` — it fills the agent-name ledger that tab auto-names read (TRD
-/// S26-window-chrome §4-3). The real one = the shell assembly (`lib.rs`) calling the layout apply service `layout::apply::agent_names_updated`;
-/// harness = discard (`NoAgentNames`) · recording type.
-///
-/// - A sibling cut separately without widening the notification port `events::DaemonEvents` (its doc forbids widening) — that port only
-///   notifies the frontend, while the real one of this port edits shell state (the ledger inside the layout lock).
-/// - ★The connection driver calls it holding no lock★ — the real one takes the layout lock, and inside that lock the
-///   usage interest lock is taken ([`SharedUsageInterest`] doc); calling it while holding that lock is the reverse
-///   order.
-/// - The implementation never blocks except for the short critical section of the layout lock, and it swallows failures — failing to edit the ledger is not
-///   a reason to roll the connection back, and the next list refills it.
+/// Port receiving the name part of the daemon's `AgentListUpdated` — fills the agent-name ledger tab auto-names read (TRD S26-window-chrome §4-3). Real = the shell assembly (`lib.rs`) calling `layout::apply::agent_names_updated`; harness = discard (`NoAgentNames`) · recording type.
+/// - Separate from `events::DaemonEvents` (its doc forbids widening): that port only notifies the frontend while this one edits shell state (the ledger inside the layout lock).
+/// - The driver calls it holding no lock: the real one takes the layout lock, inside which the usage interest lock is taken ([`SharedUsageInterest`]) — calling it under that lock is the reverse order.
+/// - Never blocks beyond the layout lock's short critical section and swallows failures: a failed ledger edit is no reason to roll the connection back, and the next list refills it.
 pub trait AgentNamesSink: Send + Sync {
-    /// Called with each `AgentListUpdated`, passing that list as is — after the frontend notification (`agent_list_updated`) has been emitted.
     fn agents(&self, agents: &[AgentInfo]);
 }
 
-/// The assembly that discards the name-ledger port — ★harness-only★. The reason it is `#[cfg(test)]` is the same as `events::NoDaemonEvents` —
-/// in a production build it would open a way to quietly assemble a client whose tab names stay at 「에이전트」 (agent) even when the daemon list arrives.
+/// Discards the name-ledger port — harness-only, `#[cfg(test)]` for the same reason as `events::NoDaemonEvents`: in production it would let a client be assembled whose tab names stay at 「agent」 though the daemon list arrives.
 #[cfg(test)]
 pub(crate) struct NoAgentNames;
 
@@ -163,7 +131,6 @@ impl AgentNamesSink for NoAgentNames {
     fn agents(&self, _agents: &[AgentInfo]) {}
 }
 
-/// The endpoint source of [`DaemonClient::unconnected`] — no daemon, and none is ever started.
 #[cfg(test)]
 struct NoDaemonAnywhere;
 
@@ -178,88 +145,53 @@ impl link::endpoint::EndpointSource for NoDaemonAnywhere {
     }
 }
 
-// Default discover (spawnable) timeout (aligned with wsTransport discover_daemon 5s).
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The thread name of the client's own runtime — blocking waits on that runtime must not run on its threads
-/// (`shutdown::DaemonClient::stop_daemon_blocking`).
+/// Thread name of the client's own runtime — blocking waits on that runtime must not run on its threads (`shutdown::DaemonClient::stop_daemon_blocking`).
 pub(crate) const CLIENT_THREAD_NAME: &str = "engram-daemon-client";
 
-// TRD S21 trd-3 §5 15 (C10): one ws message or frame on the daemon link is at most 16 MiB — the shell's side; the
-//   daemon's accept side takes the same value in stage 3-3. The largest legitimate message is not measured.
+// TRD S21 trd-3 §5 15 (C10): one ws message or frame on the daemon link is at most 16 MiB (the shell's side; the daemon's accept side takes the same value in stage 3-3). The largest legitimate message is not measured.
 const DAEMON_MESSAGE_MAX_BYTES: usize = 16 << 20;
 
-/// The text a caller gets when no connection takes commands right now (ADR-0195) — "never connected",
-/// "lost and reconnecting" and "explicitly closed" **all** fall into this one. The text does not tell them apart
-/// because the caller's next step is the same for each.
-///
-/// ★It does not say "connect first"★ — while the link is reconnecting, a caller following that would re-add the
-/// link and cut the recovery in progress. This text reaches LLM callers through the control surface (§5), so a
-/// wrong next step written here is one they would actually take. ADR-0195 decided that the caller picks when to
-/// retry, and the text says only that.
+/// The text a caller gets when no connection takes commands right now (ADR-0195) — "never connected", "lost and reconnecting" and "explicitly closed" all fall into this one, since the caller's next step is the same.
+/// It does not say "connect first": while reconnecting, a caller following that would re-add the link and cut the recovery in progress. This text reaches LLM callers through the control surface (§5), so a wrong next step here is one they would take; ADR-0195 leaves the retry timing to the caller.
 pub(crate) const NOT_CONNECTED: &str =
-    "데몬에 연결되어 있지 않음 — 지금은 명령을 받지 않는다(재시도 시점은 호출자가 정한다)";
+    "not connected to the daemon — no commands are taken now (the caller decides when to retry)";
 
-/// Something that should take the command is gone — the driver's actor stopped while a caller waited for the
-/// connection to open (`connection.rs`), or a write found the peer's queue closed (`link::errors::send_error_text`
-/// for `SendError::Closed`). A **different fact** from [`NOT_CONNECTED`] (no connection right now).
-pub(crate) const CHANNEL_GONE: &str = "연결 task 가 명령을 받지 못함(끊김)";
+/// Something that should take the command is gone — the driver's actor stopped while a caller waited for the connection to open (`connection.rs`), or a write found the peer's queue closed (`link::errors::send_error_text` for `SendError::Closed`). A different fact from [`NOT_CONNECTED`].
+pub(crate) const CHANNEL_GONE: &str = "the connection task did not take the command (disconnected)";
 
-/// A replay request that wrote no `Subscribe` and got no generation — the link dropped, or no window shows the agent.
 pub(crate) const REPLAY_UNSENT: &str =
-    "replay 요청 미전송(연결 끊김 · 그 에이전트를 보이는 창 없음) — 프론트 재요청 안전";
+    "replay request not sent (disconnected · no window shows that agent) — safe for the frontend to request again";
 
-/// A round trip asked for a command that takes no reply (no `request_id`) — read by the link's error texts
-/// (`link::errors`).
+/// A round trip asked for a command that takes no reply (no `request_id`) — read by `link::errors` texts.
 pub(crate) const NO_REQUEST_ID: &str =
-    "send_command: request_id 없는 명령은 reply 를 기대할 수 없다";
+    "send_command: a command without a request_id cannot expect a reply";
 
-// The single handle to the daemon connection, shared by invoke handlers, the tray and state subscribers
-// (`Arc<DaemonClient>`).
-//
-// The link driver (`connection`) owns the connection: its actor owns the routing and the transport peer owns the
-// socket; this struct holds the driver's caller side (`link`) and the status watch (`status_rx`) — never the stream.
+// The single handle to the daemon connection, shared by invoke handlers, the tray and state subscribers (`Arc<DaemonClient>`). The link driver (`connection`) owns the connection (its actor the routing, the transport peer the socket); this struct holds the driver's caller side (`link`) and the status watch (`status_rx`) — never the stream.
 pub struct DaemonClient {
-    // Runtime handle on which to spawn the connection task. Production = dedicated multi-thread (`_owned_rt`), tests = current runtime.
     rt: Handle,
-    // ★Owns a dedicated runtime (production — T6a)★. The `setup` callback may not be in a tokio runtime context, so
-    // `Handle::current()` panics. So the production constructor (`new_real_with_owned_runtime`) follows spike §2
-    // "tokio multi-thread (like the daemon)" and *builds* a dedicated multi-thread runtime *itself*, using its Handle.
-    // This field keeps the runtime alive — if it is dropped the Handle becomes invalid and the connection task dies, so it is tied to the DaemonClient
-    // lifetime (`Arc<DaemonClient>` is the app lifetime). `None` = external handle injected (tests = current runtime).
+    // Owns a dedicated runtime (production — T6a): `setup` may run outside a tokio context where `Handle::current()` panics, so `new_real_with_owned_runtime` builds a dedicated multi-thread runtime (spike §2) and keeps it alive here — dropping it invalidates the Handle and kills the connection task. Tied to the `DaemonClient` lifetime (`Arc<DaemonClient>` = app lifetime). `None` = external handle injected (tests = current runtime).
     _owned_rt: Option<Arc<tokio::runtime::Runtime>>,
-    /// The filter for the command-registration refusal box (ADR-0281). Production = `refusal::TauriRefusalBox`,
-    /// harness = `refusal::NoRefusalNotice` or a recording fake ([`Self::new_on_link`]).
-    /// ★The client holds one and shares it with the driver — never make one per connection★: repeat suppression lives
-    /// as long as the shell process (`RefusalAlerts` doc), so one per connection re-shows the box on every reconnect
-    /// that gets the same refusal.
+    /// Filter for the command-registration refusal box (ADR-0281). Production = `refusal::TauriRefusalBox`, harness = `refusal::NoRefusalNotice` or a recording fake ([`Self::new_on_link`]). One per client, shared with the driver — never one per connection: repeat suppression lives as long as the shell process (`RefusalAlerts`), so per-connection filters would re-show the box on every reconnect with the same refusal.
     refusals: Arc<RefusalAlerts>,
-    /// The connection status, read without a lock — the driver's watch, which routing publishes. Only borrowed here.
+    /// Connection status read without a lock — the driver's watch, which routing publishes; only borrowed here.
     status_rx: watch::Receiver<ConnectionStatus>,
-    /// The driver's output routing — tests set which windows show which agent here.
     #[cfg(test)]
     router: Arc<OutputRouter>,
-    /// The driver's window output channels — tests register a window here.
     #[cfg(test)]
     registry: WindowChannelRegistry,
-    /// ★The entry for commands the daemon delivers★ (ADR-0155 decision 4). Filled late — the table's spawn port holds
-    ///   this client, so the assembly has a cycle (`inbound::InboundSlot` doc). Shared with the driver.
+    /// Entry for commands the daemon delivers (ADR-0155 decision 4). Filled late: the table's spawn port holds this client, so the assembly has a cycle (`inbound::InboundSlot`). Shared with the driver.
     inbound: Arc<InboundSlot>,
-    /// The usage interest — outlives every connection (the interest comes from the layout, not the socket). Shared
-    ///   with the driver.
+    /// The usage interest — outlives every connection (it comes from the layout, not the socket). Shared with the driver.
     usage: SharedUsageInterest,
-    /// The driver on the transport crate (`connection`) — connect, ensure, close, the command round trips,
-    /// fire-and-forget sends, unsubscribe, replay requests and usage nudges go there; `status_rx` is its watch.
+    /// The driver on the transport crate (`connection`): connect, ensure, close, command round trips, fire-and-forget sends, unsubscribe, replay requests and usage nudges go there; `status_rx` is its watch.
     link: connection::LinkClient,
-    /// The one stop path's single flight (`shutdown`) — it re-adds `link` after a `User` stop.
     stopper: Arc<Stopper>,
 }
 
 impl DaemonClient {
-    /// A client on the link driver over a test network (TRD S21 trd-3 §6-2 U3): `inner` dials the address the endpoint
-    /// `source` resolves (a memory network), `clock` drives the transport. The assembly is production's
-    /// ([`Self::on_link`]); this client's `router` and `registry` are its own, empty ones. ★The ports go in here★ — the
-    /// driver starts with this call and keeps what it got.
+    /// A client on the link driver over a test network (TRD S21 trd-3 §6-2 U3): `inner` dials the address `source` resolves (a memory network), `clock` drives the transport. The assembly is production's ([`Self::on_link`]) with its own empty `router` and `registry`; the ports go in here — the driver starts with this call and keeps what it got.
     #[cfg(test)]
     pub(crate) fn new_on_link(
         rt: Handle,
@@ -283,7 +215,6 @@ impl DaemonClient {
         )
     }
 
-    /// [`Self::new_on_link`] with the stop path's ports — a test that stops a daemon plugs its fakes in here.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_on_link_with_stop(
@@ -311,8 +242,7 @@ impl DaemonClient {
         )
     }
 
-    /// A client that is never connected — its endpoint source finds no daemon, so `connect` / `ensure` fail and every
-    /// command fails as not connected. For tests of callers that do not connect.
+    /// A client that is never connected — its endpoint source finds no daemon, so `connect` / `ensure` fail and every command fails as not connected.
     #[cfg(test)]
     pub(crate) fn unconnected(rt: Handle) -> Self {
         Self::new_on_link(
@@ -326,10 +256,7 @@ impl DaemonClient {
         )
     }
 
-    /// Starts the link driver on `rt` and builds the client around it. Every connection path of the client runs on
-    /// the driver, and the driver's ports are this client's own objects (`router`, `registry`, command table slot,
-    /// refusal filter, usage interest), so [`Self::install_command_table`] · [`Self::refusal_alerts`] ·
-    /// [`Self::usage_interest`] see what the driver sees.
+    /// Starts the link driver on `rt` and builds the client around it; the driver's ports are this client's own objects (`router`, `registry`, command table slot, refusal filter, usage interest), so [`Self::install_command_table`] · [`Self::refusal_alerts`] · [`Self::usage_interest`] see what the driver sees.
     #[allow(clippy::too_many_arguments)]
     fn on_link(
         rt: Handle,
@@ -357,8 +284,7 @@ impl DaemonClient {
         )
     }
 
-    /// The client around the link `start` makes from this client's ports — [`Self::on_link`] starts the driver; a test
-    /// may build one it never starts.
+    /// The client around the link `start` makes from this client's ports — [`Self::on_link`] starts the driver; a test may build one it never starts.
     #[allow(clippy::too_many_arguments)]
     fn around_link(
         rt: Handle,
@@ -402,14 +328,8 @@ impl DaemonClient {
         }
     }
 
-    /// ★The production constructor★ — `lib.rs` `setup` calls it. The client owns a multi-thread runtime it builds here,
-    /// because `setup` may run outside a tokio context, where `Handle::current()` panics (spike §2); the runtime lives
-    /// as long as the client (`_owned_rt`). It runs on the link driver: the ws dialer, the local daemon's endpoint
-    /// record (`daemon.json` in the default data folder) and the system clock. `Err` = the runtime could not be built;
-    /// the caller reports it and goes on without daemon commands.
-    ///
-    /// `router` and `registry` are the shared instances `setup` also hands the layout commands and `subscribe_output`,
-    /// so the output fan-out and those commands see the same ones.
+    /// The production constructor — `lib.rs` `setup` calls it. The client owns a multi-thread runtime built here because `setup` may run outside a tokio context (`Handle::current()` panics — spike §2); the runtime lives as long as the client (`_owned_rt`). Runs on the link driver: ws dialer, the local daemon's endpoint record (`daemon.json` in the default data folder), system clock. `Err` = the runtime could not be built; the caller reports it and goes on without daemon commands.
+    /// `router` and `registry` are the shared instances `setup` also hands the layout commands and `subscribe_output`.
     pub fn new_real_with_owned_runtime(
         router: Arc<OutputRouter>,
         registry: WindowChannelRegistry,
@@ -436,9 +356,7 @@ impl DaemonClient {
         Ok(client)
     }
 
-    /// [`Self::on_link`] on the local daemon of `data_dir`: the ws dialer, that folder's endpoint record
-    /// (`daemon.json`) and the system clock — production's transport, which a test drives on a temporary folder. The
-    /// stop path reads the same folder (`StopPorts::local`).
+    /// [`Self::on_link`] on the local daemon of `data_dir`: ws dialer, that folder's endpoint record (`daemon.json`), system clock — production's transport, driven in tests on a temporary folder. The stop path reads the same folder (`StopPorts::local`).
     #[allow(clippy::too_many_arguments)]
     fn on_local_daemon(
         rt: Handle,
@@ -469,19 +387,9 @@ impl DaemonClient {
         )
     }
 
-    /// Plug in the command table this client can execute — ★call it before connecting★ (ADR-0155 decisions 4·5).
-    ///
-    /// ★Choosing the runtime here is the point★: the apply tasks must run on the **same runtime** as the connection
-    /// driver — while `agent.spawnInto` waits on a daemon round trip, the driver's tasks must keep running for the
-    /// answer to arrive (on another runtime that interleaving is left to chance). Letting each assembly pick the
-    /// `Handle` would make every assembly re-keep that invariant, so the client decides with its own `rt`.
-    /// Calling it late is allowed (the first winner wins), but **after a connection opened**, envelopes that arrived
-    /// meanwhile get a "no table" error reply, and that connection sends no registration — the next connection does
-    /// (the driver registers on every `LinkUp`).
-    /// `view` = where names absent from the shell table go (the webview's share — TRD §3-8 hop ③). It is plugged in
-    /// **at the same spot** as the table because the registration packet carries both layers in one go (TRD §3-7
-    /// clause 2) — plugging them separately lets some assembly send a registration without the webview's share, and on
-    /// that connection every view command is `UNKNOWN_COMMAND`.
+    /// Plug in the command table this client can execute — call it before connecting (ADR-0155 decisions 4·5). The client picks the runtime with its own `rt`: apply tasks must run on the same runtime as the connection driver (while `agent.spawnInto` waits on a daemon round trip the driver's tasks must keep running), and letting each assembly pick the `Handle` would make each re-keep that invariant.
+    /// Late calls are allowed (first winner wins), but after a connection opened, envelopes that arrived meanwhile get a "no table" error reply and that connection sends no registration — the next does (the driver registers on every `LinkUp`).
+    /// `view` = where names absent from the shell table go (the webview's part — TRD §3-8 hop ③). It is plugged in at the same spot as the table because the registration packet carries both layers at once (TRD §3-7 clause 2) — separately, some assembly could send a registration without the webview's part and every view command would be `UNKNOWN_COMMAND` on that connection.
     pub fn install_command_table(
         &self,
         table: engram_dashboard_command::CommandTable,
@@ -497,43 +405,33 @@ impl DaemonClient {
             )));
     }
 
-    // Snapshot of the current connection state (lock-free).
     pub fn state(&self) -> ConnectionState {
         self.status_rx.borrow().state
     }
 
-    /// Snapshot of the current connection status — state and band (lock-free).
     pub fn status(&self) -> ConnectionStatus {
         *self.status_rx.borrow()
     }
 
-    /// Subscribe to status changes (watch). The caller awaits the next change or looks at the current value.
     pub fn subscribe_status(&self) -> watch::Receiver<ConnectionStatus> {
         self.status_rx.clone()
     }
 
-    /// The main window's boot daemon search began, with `timeout` for it: no band for a never-connected link is held
-    /// past that search and a margin, and the 60 s cap no longer applies (TRD S21 trd-3-2-u5 R20 · R24). Nothing once
-    /// the hold is over. Call it once the search really runs (after any wait for another window's search).
+    /// The main window's boot daemon search began with `timeout`: no never-connected band is held past that search plus a margin, and the 60 s cap no longer applies (TRD S21 trd-3-2-u5 R20 · R24). Nothing once the hold is over. Call once the search really runs.
     pub fn boot_start_began(&self, timeout: Duration) {
         self.link.bound_boot_start(timeout);
     }
 
-    /// The main window's boot start answered — its `daemon_start` failed or its `daemon_connect` returned: the band
-    /// hold of a cold boot ends (TRD S21 trd-3-2-u5 R20). Call it before the answer reaches the frontend: an attach the
-    /// frontend makes after it is then routed after the hold ended.
+    /// The main window's boot start answered (`daemon_start` failed or `daemon_connect` returned): the cold-boot band hold ends (TRD S21 trd-3-2-u5 R20). Call before the answer reaches the frontend, so an attach the frontend then makes routes after the hold ended.
     pub fn boot_start_answered(&self, why: &'static str) {
         self.link.end_boot_start_hold(why);
     }
 
-    /// Usage-interest state — the webview pull reads the cache. The side that changes the interest does not use this handle but calls the recompute set
-    /// ([`Self::usage_layout_changed`] · [`Self::usage_window_destroyed`] · [`Self::usage_window_visibility`]) —
-    /// result handling (nudge · shrink timer) lives there in one place. For lock order see the [`SharedUsageInterest`] doc.
+    /// Usage-interest state — the webview pull reads the cache. The side that changes the interest calls the recompute set ([`Self::usage_layout_changed`] · [`Self::usage_window_destroyed`] · [`Self::usage_window_visibility`]) instead, where result handling (nudge · shrink timer) lives. Lock order: [`SharedUsageInterest`].
     pub fn usage_interest(&self) -> &SharedUsageInterest {
         &self.usage
     }
 
-    /// The **same** filter as the registration spot of the connection task — used by the diff spot (`commands::view_bus`).
     pub(crate) fn refusal_alerts(&self) -> &RefusalAlerts {
         &self.refusals
     }
@@ -543,35 +441,26 @@ impl DaemonClient {
         self.link.connect().await
     }
 
-    /// Attach-only connect (ADR-0021 B-1 — never starts a daemon; wsTransport `ensureReady()`). Contract:
-    /// `LinkClient::ensure`.
+    /// Attach-only connect (ADR-0021 B-1 — never starts a daemon; wsTransport `ensureReady()`). Contract: `LinkClient::ensure`.
     pub async fn ensure(&self) -> Result<(), HandshakeError> {
         self.link.ensure().await
     }
 
-    /// Explicit close (wsTransport `close()`) — the link does not reconnect. Returns at once; every window learns `down`
-    /// through routing. Contract: `LinkClient::close`.
+    /// Explicit close (wsTransport `close()`) — no reconnect. Returns at once; every window learns `down` through routing. Contract: `LinkClient::close`.
     pub fn close(&self) {
         self.link.close();
     }
 
     // ── T6a: invoke command request/reply plane (spawn/kill/interrupt/write/resize/…) ─────────
-    // Sends a side-effect command through the connection driver and awaits the daemon's reply (matched by request_id).
-    /// Sibling of [`Self::send_command_with_origin`] that returns a failure only as text — contract · flow · remainder are written there.
+    /// Sends a side-effect command through the driver and awaits the daemon's reply (matched by request_id); failure as text only — contract · flow in [`Self::send_command_with_origin`].
     pub async fn send_command(&self, cmd: AgentCommand) -> Result<AgentEvent, String> {
         self.send_command_with_origin(cmd)
             .await
             .map_err(|failure| failure.to_string())
     }
 
-    /// Same round trip as [`Self::send_command`], but it keeps the **origin** of the failure as a type — used by callers that must tell whether the daemon replied with `Error`
-    /// (`CommandFailure::Daemon`) or the failure ended on the shell side (`CommandFailure::Local`) without reading the wording
-    /// (ADR-0281). The text is byte-for-byte the same as the sibling's (`Display` of `CommandFailure`).
-    /// Every failure inside this function (no request_id · not connected · channel closed · reply lost) is `Local`.
-    ///
-    /// ★Call precondition — the caller already stamps a request_id into `cmd`★ (the builder in commands/agent.rs fills it with
-    /// `RequestId::new()`). That way the reply-matching key is known to the caller too and fits idempotency (same
-    /// key on retry) — if this round trip filled it arbitrarily the caller would not know the key.
+    /// Same round trip as [`Self::send_command`] but keeps the failure's origin as a type (`CommandFailure::Daemon` = the daemon replied `Error`, `CommandFailure::Local` = ended shell-side) so callers need not read the wording (ADR-0281); text identical to the sibling's. Every failure inside this function (no request_id · not connected · channel closed · reply lost) is `Local`.
+    /// Precondition: the caller already stamped a request_id into `cmd` (commands/agent.rs fills `RequestId::new()`), so the reply-matching key is known to the caller too and fits idempotency (same key on retry).
     pub async fn send_command_with_origin(
         &self,
         cmd: AgentCommand,
@@ -580,53 +469,35 @@ impl DaemonClient {
     }
 
     // ── T6b: fire-and-forget plane (Subscribe/Unsubscribe/Resize — no reply) ─────────────
-    /// Writes `Unsubscribe` on the open connection, behind earlier unsubscribes and replay requests; with none open it
-    /// does nothing — the daemon drops a connection's subscriptions with it. Never blocks (the layout calls it under its
-    /// lock). Contract: `LinkClient::unsubscribe`.
+    /// Writes `Unsubscribe` on the open connection behind earlier unsubscribes and replay requests; with none open it does nothing (the daemon drops a connection's subscriptions with it). Never blocks (the layout calls it under its lock). Contract: `LinkClient::unsubscribe`.
     pub fn unsubscribe(&self, agent_id: AgentId) {
         self.link.unsubscribe(agent_id);
     }
 
-    /// A command without a reply (Resize …) — `agent_resize` uses it. Never blocks; with no connection to take it the
-    /// command is dropped (ADR-0195) and the frontend re-issues a lost Resize. Contract:
-    /// `LinkClient::send_fire_and_forget`.
+    /// A command without a reply (Resize …); `agent_resize` uses it. Never blocks; with no connection it is dropped (ADR-0195) and the frontend re-issues a lost Resize. Contract: `LinkClient::send_fire_and_forget`.
     pub fn send_fire_and_forget(&self, cmd: AgentCommand) {
         self.link.send_fire_and_forget(cmd);
     }
 
-    /// Usage interest may have changed — one **set-less** nudge to the connection task (TRD S21 usage-limit-slot §1-7
-    /// 「한 직렬 경로」 (one serial path)). The set to send is read by the connection task as the **current** interest via [`UsageInterest::sync`] when it takes the nudge out —
-    /// so however many nudges there are and in whatever order they are handled, the last one on the socket carries the latest interest. If the set were read here
-    /// and carried along, when two changes interleave between the read and the send the old set would arrive last — do not revive that
-    /// (TRD §3 #74).
-    ///
-    /// It is non-blocking, so it may be called inside the [`SharedUsageInterest`] lock (lock order in that doc).
-    /// With no connection open it does nothing — the next one gets the whole interest when it opens
-    /// (`LinkClient::nudge_usage`).
+    /// Usage interest may have changed — one set-less nudge to the connection task (TRD S21 usage-limit-slot §1-7). The task reads the current interest via [`UsageInterest::sync`] when it takes the nudge out, so the last nudge on the socket carries the latest interest in whatever order they are handled. Do not revive reading the set here and carrying it: interleaved changes would deliver the old set last (TRD §3 #74).
+    /// Non-blocking, so callable inside the [`SharedUsageInterest`] lock. With no connection open it does nothing — the next one gets the whole interest on open (`LinkClient::nudge_usage`).
     pub fn nudge_usage_interest(&self) {
         self.link.nudge_usage();
     }
 
-    /// The layout changed — recompute the usage interest and, per the result, nudge or start the shrink timer (TRD S21
-    /// usage-limit-slot §1-7 「재계산 자리」 (the recompute spot)). Called by the layout write's subscription resync (`layout::SubscriptionSync`).
-    ///
-    /// ★Called inside the ViewManager lock★ — lock order is as in the [`SharedUsageInterest`] doc, and all it does is in-memory
-    /// computation · a non-blocking nudge · starting a timer task, so it keeps that port's 「락 안 · 동기 · 비블로킹」 (inside the lock · synchronous · non-blocking) contract. The other two
-    /// siblings ([`Self::usage_window_destroyed`] · [`Self::usage_window_visibility`]) are the same.
+    /// The layout changed — recompute the usage interest and nudge or start the shrink timer per the result (TRD S21 usage-limit-slot §1-7). Called by the layout write's subscription resync (`layout::SubscriptionSync`). Called inside the ViewManager lock (order: [`SharedUsageInterest`]); it only computes in memory, nudges without blocking and starts a timer task, keeping that port's inside-the-lock · synchronous · non-blocking contract — as do [`Self::usage_window_destroyed`] · [`Self::usage_window_visibility`].
     pub fn usage_layout_changed(&self, mgr: &ViewManager) {
         let action = self.usage.lock().recompute(mgr, Instant::now());
         self.run_usage_action(action);
     }
 
-    /// Popup window `label` is gone — called inside the same ViewManager lock that removed the window from the model. Whether or not the model
-    /// held that window, it forgets that label's hidden flag ([`UsageInterest::forget_window`]).
+    /// Popup window `label` is gone — called inside the same ViewManager lock that removed it from the model; it forgets that label's hidden flag whether or not the model held the window ([`UsageInterest::forget_window`]).
     pub fn usage_window_destroyed(&self, label: &str, mgr: &ViewManager) {
         let action = self.usage.lock().forget_window(label, mgr, Instant::now());
         self.run_usage_action(action);
     }
 
-    /// The shell hid (`false`) or re-showed (`true`) window `label` — tray show/hide takes the ViewManager lock briefly per window
-    /// and calls this (the OS window call is outside that lock).
+    /// The shell hid (`false`) or re-showed (`true`) window `label` — tray show/hide takes the ViewManager lock briefly per window and calls this (the OS window call is outside that lock).
     pub fn usage_window_visibility(&self, label: &str, visible: bool, mgr: &ViewManager) {
         let action = self
             .usage
@@ -635,15 +506,13 @@ impl DaemonClient {
         self.run_usage_action(action);
     }
 
-    // The single place that handles the recompute result — the usage-interest lock is already released (a nudge carries no set, so even outside the lock the order
-    // does not interleave — [`Self::nudge_usage_interest`]).
+    // The single place that handles the recompute result — the usage-interest lock is already released (a nudge carries no set, so order does not interleave outside the lock — [`Self::nudge_usage_interest`]).
     fn run_usage_action(&self, action: InterestAction) {
         match action {
             InterestAction::Unchanged => {}
             InterestAction::Nudge => self.nudge_usage_interest(),
             InterestAction::Defer { gen, deadline } => {
-                // Build the sleep until the deadline **at the call site**, with this runtime's clock — building it inside a task shifts the deadline by
-                //   its first poll, and in a fake-clock test it is built after the clock was advanced, so the deadline is shifted wholesale.
+                // Build the sleep to the deadline at the call site with this runtime's clock — inside a task it would shift the deadline by its first poll, and in a fake-clock test by the whole advance.
                 let delay = deadline.saturating_duration_since(Instant::now());
                 let sleep = {
                     let _rt = self.rt.enter();
@@ -652,10 +521,9 @@ impl DaemonClient {
                 tracing::debug!(
                     ?gen,
                     delay_ms = delay.as_millis() as u64,
-                    "사용량 관심: 줄임 대기 — 기한에 넛지"
+                    "usage interest: shrink pending — nudge at the deadline"
                 );
-                // Holds the shared interest and a nudger that does not keep the actor alive — not the client (a nudge
-                //   after the client is gone does nothing).
+                // Holds the shared interest and a nudger that does not keep the actor alive (a nudge after the client is gone does nothing).
                 let usage = self.usage.clone();
                 let nudger = self.link.usage_nudger();
                 self.rt.spawn(async move {
@@ -663,7 +531,7 @@ impl DaemonClient {
                     if !usage.lock().deferral_elapsed(gen) {
                         tracing::debug!(
                             ?gen,
-                            "사용량 관심: 줄임 기한 — 그 사이 무르거나 새 세대가 섰다, 넛지 없음"
+                            "usage interest: shrink deadline — reverted or a new generation started in the meantime, no nudge"
                         );
                         return;
                     }
@@ -674,9 +542,7 @@ impl DaemonClient {
         }
     }
 
-    /// View-driven replay (ADR-0046 M1 — single flight): the generation the view fences its flush with. `Err` when no
-    /// connection is open, no window shows the agent or its `Subscribe` could not be written. Contract:
-    /// `LinkClient::request_replay`.
+    /// View-driven replay (ADR-0046 M1, single flight): the generation the view fences its flush with. `Err` when no connection is open, no window shows the agent or its `Subscribe` could not be written. Contract: `LinkClient::request_replay`.
     pub async fn request_replay(&self, agent_id: AgentId) -> Result<u64, String> {
         self.link.request_replay(agent_id).await
     }
@@ -685,18 +551,9 @@ impl DaemonClient {
 impl Drop for DaemonClient {
     fn drop(&mut self) {
         // The link driver ends with its `LinkClient` (dropped with the fields below).
-        // ★The dedicated runtime is shut down here **without blocking**★ — when this function body ends the fields are dropped
-        //   next, and among them [`Self::_owned_rt`] is a tokio `Runtime`. A `Runtime`'s default drop blocks until the workers
-        //   stop, and **if that drop happens inside an async context tokio panics**. A panic inside `Drop`
-        //   aborts the process if it happens during unwinding — an end that dies with no diagnostics.
-        //   `shutdown_background` detaches the workers and returns at once, so it gives the same result in any context.
-        //   That is exactly what a destructor wants (no waiting + no panic).
-        // ★Do not hang this on "it cannot be reached today"★: there is no path by which this spot reaches that combination today — every test
-        //   constructor has `_owned_rt: None`, and the production client is never dropped in the first place, because of an `Arc` cycle (`lib.rs` bakes the client's own `Arc`
-        //   into the command table and plugs that table into this client with `install_command_table`). But that
-        //   harmlessness is **an accident, not structure** (it disappears the day one more constructor that owns a runtime is
-        //   added, or the cycle is broken). So it is blocked by structure.
-        // ★Shut down only when this is the last reference★ — if an `Arc` remains, another owner is still using that runtime.
+        // Shut the dedicated runtime down here without blocking: the fields drop next, and a tokio `Runtime`'s default drop blocks until the workers stop and panics inside an async context — a panic inside `Drop` during unwinding aborts the process with no diagnostics. `shutdown_background` detaches the workers and returns at once in any context.
+        // Do not rest on "unreachable today": every test constructor has `_owned_rt: None` and the production client is never dropped (an `Arc` cycle: `lib.rs` bakes the client's own `Arc` into the command table installed by `install_command_table`) — that harmlessness is an accident, not structure (one more runtime-owning constructor, or breaking the cycle, ends it), so it is blocked by structure.
+        // Shut down only when this is the last reference — a remaining `Arc` means another owner still uses that runtime.
         if let Some(rt) = self._owned_rt.take() {
             if let Ok(rt) = Arc::try_unwrap(rt) {
                 rt.shutdown_background();

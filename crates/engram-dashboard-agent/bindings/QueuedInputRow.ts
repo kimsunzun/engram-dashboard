@@ -2,20 +2,20 @@
 import type { QueuedInputCancel } from "./QueuedInputCancel";
 
 /**
- * 대기 목록의 한 줄.
+ * One line of the waiting list.
  */
 export type QueuedInputRow = { 
 /**
- * 입력 id — `agent.cancelQueuedInput` 의 `input_id` 로 그대로 쓴다.
+ * The input id — used as is as the `input_id` of `agent.cancelQueuedInput`.
  */
 id: string, text: string, 
 /**
- * `queued` | `sent`(통로가 넘겼고 되울림을 기다린다) | `unconfirmed`(통로가 넘겼는데 받혔는지 모른다 —
- * 우편이 그 결말을 기다린다 · ★오늘 내는 백엔드가 없다★ — ADR-0235) | `cancelling`(취소 대기 — 결말이 날
- * 때까지 목록에 남는다).
+ * `queued` | `sent` (the link handed it over and waits for the echo) | `unconfirmed` (the link handed it over but it is unknown whether it was accepted —
+ * mail waits for that outcome · ★no backend emits it today★ — ADR-0235) | `cancelling` (pending cancel — stays on the list until
+ * the outcome happens).
  */
 state: string, 
 /**
- * `cancelling` 행만 싣는다 — 그 밖은 `null`.
+ * Carried only on `cancelling` rows — otherwise `null`.
  */
 cancel?: QueuedInputCancel | null, };

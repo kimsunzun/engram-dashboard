@@ -11,12 +11,12 @@ const openOf = (slotId: string, key: string) => effectiveOpen(store(), slotId, k
 beforeEach(() => useToolGroupStore.setState({ bySlot: {} }))
 
 describe('toolGroupStore', () => {
-  it('고른 값이 없으면 접힘', () => {
+  it('collapsed when there is no picked value', () => {
     store().bind('s1', 'a1')
     expect(openOf('s1', 'tool:x')).toBe(false)
   })
 
-  it('고른 값이 두 방향 다 그대로 선다', () => {
+  it('the picked value stands as is in both directions', () => {
     store().bind('s1', 'a1')
     expect(store().setOpen('s1', 'tool:x', true)).toBe(true)
     expect(store().setOpen('s1', 'tool:y', false)).toBe(true)
@@ -24,25 +24,25 @@ describe('toolGroupStore', () => {
     expect(openOf('s1', 'tool:y')).toBe(false)
   })
 
-  it('슬롯마다 따로다', () => {
+  it('separate per slot', () => {
     store().bind('s1', 'a1')
     store().bind('s2', 'a1')
     store().setOpen('s1', 'tool:x', true)
     expect(openOf('s2', 'tool:x')).toBe(false)
   })
 
-  it('한 번도 묶이지 않은 슬롯의 setOpen 은 false 를 돌려주고 아무것도 적지 않는다', () => {
+  it('setOpen on a slot never bound returns false and writes nothing', () => {
     expect(store().setOpen('s1', 'tool:x', true)).toBe(false)
     expect(store().bySlot).toEqual({})
   })
 
-  it('slotId 가 없으면 고른 값을 안 읽고 늘 접힘', () => {
+  it('without slotId it does not read the picked value and is always collapsed', () => {
     store().bind('s1', 'a1')
     store().setOpen('s1', 'tool:x', true)
     expect(effectiveOpen(store(), undefined, 'tool:x')).toBe(false)
   })
 
-  it('해제 뒤 setOpen 은 false — 고른 값은 남고, 같은 에이전트로 다시 마운트하면 그대로 붙는다', () => {
+  it('setOpen after release is false — the picked value remains, and remounting with the same agent attaches it as is', () => {
     const release = store().bind('s1', 'a1')
     store().setOpen('s1', 'tool:x', true)
     release()
@@ -53,7 +53,7 @@ describe('toolGroupStore', () => {
     expect(store().setOpen('s1', 'tool:y', true)).toBe(true)
   })
 
-  it('두 번 해제해도 · 다시 마운트한 뒤의 옛 해제도 새 묶임을 풀지 않는다(StrictMode · 늦은 정리)', () => {
+  it('releasing twice · an old release after remounting do not undo the new binding (StrictMode · late cleanup)', () => {
     const first = store().bind('s1', 'a1')
     first()
     const second = store().bind('s1', 'a1')
@@ -64,21 +64,21 @@ describe('toolGroupStore', () => {
     expect(store().setOpen('s1', 'tool:x', false)).toBe(false)
   })
 
-  it('해제 없이 다시 bind 해도(겹친 마운트) 앞 묶임의 해제는 뒤 묶임을 풀지 않는다', () => {
+  it('even when bound again without release (overlapping mounts), the release of the earlier binding does not undo the later one', () => {
     const older = store().bind('s1', 'a1')
     store().bind('s1', 'a1')
     older()
     expect(store().setOpen('s1', 'tool:x', true)).toBe(true)
   })
 
-  it('같은 에이전트로 다시 bind 하면 고른 값이 남는다 — 재마운트 · 재구독', () => {
+  it('binding again with the same agent keeps the picked value — remount · resubscribe', () => {
     store().bind('s1', 'a1')
     store().setOpen('s1', 'tool:x', true)
     store().bind('s1', 'a1')
     expect(openOf('s1', 'tool:x')).toBe(true)
   })
 
-  it('다른 에이전트로 bind 하면 그 슬롯 칸을 비운다 — 해제된 칸이어도', () => {
+  it("binding with another agent clears that slot's entry — even a released one", () => {
     const release = store().bind('s1', 'a1')
     store().setOpen('s1', 'tool:x', true)
     release()
@@ -87,7 +87,7 @@ describe('toolGroupStore', () => {
     expect(openOf('s1', 'tool:x')).toBe(false)
   })
 
-  it('clear 는 고른 값만 비우고 묶임은 남긴다 — 뒤 setOpen 이 그대로 먹힌다', () => {
+  it('clear empties only the picked value and keeps the binding — a later setOpen takes effect as is', () => {
     store().bind('s1', 'a1')
     store().setOpen('s1', 'tool:x', true)
     store().clear('s1')
@@ -95,7 +95,7 @@ describe('toolGroupStore', () => {
     expect(store().setOpen('s1', 'tool:y', true)).toBe(true)
   })
 
-  it('clear · setOpen · 해제가 바꿀 것이 없으면 상태 객체를 새로 만들지 않는다(구독자 재렌더 없음)', () => {
+  it('clear · setOpen · release create no new state object when there is nothing to change (no subscriber re-render)', () => {
     const release = store().bind('s1', 'a1')
     store().setOpen('s1', 'tool:x', true)
     const before = store().bySlot
@@ -113,7 +113,7 @@ describe('toolGroupStore', () => {
     expect(store().bySlot).toBe(cleared)
   })
 
-  it('프로토타입 이름(슬롯 id · 키)을 칸으로 읽지 않는다', () => {
+  it('does not read prototype names (slot id · key) as entries', () => {
     expect(store().setOpen('constructor', 'tool:x', true)).toBe(false)
     expect(openOf('toString', 'tool:x')).toBe(false)
     store().bind('s1', 'a1')

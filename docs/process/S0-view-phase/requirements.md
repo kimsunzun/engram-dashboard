@@ -30,7 +30,7 @@ Decisions that came out of the conversation, recorded in order.
 ## Agent tree UI
 
 - The tree can be collapsed/expanded
-- Controls: provide the options "모두 펼치기" (expand all) and "하위만 펼치기" (expand only the children)
+- Controls: provide the options "Expand all" and "Expand children only"
 - Inactive agent: icon gray / active agent: active color
 - If there are several agents of the same type, group them as a folder structure
   - Upper: agent type node (e.g. secretary agent)

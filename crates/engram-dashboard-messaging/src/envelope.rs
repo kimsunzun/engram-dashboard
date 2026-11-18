@@ -266,7 +266,7 @@ pub struct DeliveryObservation {
 
 impl DeliveryObservation {
     /// ★The basis of completeness is `error.is_none()`★ — that `Ok` was produced by the delivery verb (`submit_stdin_observed`) **after confirming the bytes
-    ///   actually went out to the OS**. ★What once said here 「= 세션 write_all 이 Ok」 (= session write_all is Ok) is
+    ///   actually went out to the OS**. ★What once said here 「= session write_all is Ok」 is
     ///   stale★: once the channel began using a bounded input queue, `write_all` no longer happens on the calling thread,
     ///   and that landing confirmation moved to a separate verb (`AgentTransport::flush_input`). ★On a channel that reports it has no means
     ///   of confirming write completion (codex app-server), this record asserts only up to **acceptance**, not landing★. The byte equality that follows does not catch short-write
@@ -318,7 +318,10 @@ mod tests {
             to: Some("@coders".into()),
         };
         let w = wrap_message("alice", "mid", "hello", EnvelopeFormat::Colon, &fields);
-        assert_eq!(w, "alice: hello", "colon 은 속성을 무시하고 순수 본문만");
+        assert_eq!(
+            w, "alice: hello",
+            "colon ignores attributes and has only the plain body"
+        );
     }
 
     #[test]
@@ -347,7 +350,7 @@ mod tests {
         );
         assert_eq!(
             w, r#"<message from="bob">hi</message>"#,
-            "기본 포맷은 xml plain 렌더여야(ADR-0103)"
+            "the default format must be the xml plain render (ADR-0103)"
         );
     }
 
@@ -365,13 +368,13 @@ mod tests {
         let w = wrap_message(
             "qa-alpha",
             "mid",
-            "코드 짜고 회신해",
+            "write the code and reply",
             EnvelopeFormat::Xml,
             &fields,
         );
         assert_eq!(
             w,
-            r#"<message from="qa-alpha" id="m-7f3k" type="request" reply-by="10m">코드 짜고 회신해</message>"#
+            r#"<message from="qa-alpha" id="m-7f3k" type="request" reply-by="10m">write the code and reply</message>"#
         );
     }
 
@@ -390,13 +393,13 @@ mod tests {
         let w = wrap_message(
             "qa-alpha",
             "mid",
-            "모두에게 작업 배분",
+            "split the work among everyone",
             EnvelopeFormat::Xml,
             &fields,
         );
         assert_eq!(
             w,
-            r#"<message from="qa-alpha" id="m-7f3k" type="request" reply-by="10m" in-reply-to="m-0000" to="@coders">모두에게 작업 배분</message>"#
+            r#"<message from="qa-alpha" id="m-7f3k" type="request" reply-by="10m" in-reply-to="m-0000" to="@coders">split the work among everyone</message>"#
         );
     }
 
@@ -410,13 +413,13 @@ mod tests {
         let w = wrap_message(
             "qa-bravo",
             "mid",
-            "다 짰음, 테스트 통과",
+            "all written, tests pass",
             EnvelopeFormat::Xml,
             &fields,
         );
         assert_eq!(
             w,
-            r#"<message from="qa-bravo" in-reply-to="m-7f3k">다 짰음, 테스트 통과</message>"#
+            r#"<message from="qa-bravo" in-reply-to="m-7f3k">all written, tests pass</message>"#
         );
     }
 
@@ -430,13 +433,13 @@ mod tests {
         let w = wrap_message(
             "qa-alpha",
             "mid",
-            "전원 리베이스 대기",
+            "everyone wait for the rebase",
             EnvelopeFormat::Xml,
             &fields,
         );
         assert_eq!(
             w,
-            r#"<message from="qa-alpha" to="@coders">전원 리베이스 대기</message>"#
+            r#"<message from="qa-alpha" to="@coders">everyone wait for the rebase</message>"#
         );
     }
 
@@ -446,14 +449,14 @@ mod tests {
         let w = wrap_message(
             "qa-alpha",
             "mid",
-            "빌드 끝났음",
+            "build finished",
             EnvelopeFormat::Xml,
             &EnvelopeFields::default(),
         );
-        assert_eq!(w, r#"<message from="qa-alpha">빌드 끝났음</message>"#);
+        assert_eq!(w, r#"<message from="qa-alpha">build finished</message>"#);
         assert!(
             !w.contains("id=") && !w.contains("type=") && !w.contains("reply-by="),
-            "None 필드는 속성으로 나타나지 않아야: {w}"
+            "None fields must not appear as attributes: {w}"
         );
     }
 
@@ -472,19 +475,22 @@ mod tests {
         assert_eq!(
             w.matches('"').count(),
             4,
-            "raw 겹따옴표는 봉투 delimiter 4개뿐 — 속성 값의 \" 는 전부 &quot; 로 중화: {w}"
+            "raw double quotes are only the 4 envelope delimiters — every \" in attribute values is neutralized to &quot;: {w}"
         );
     }
 
     // ── ADR-0103: `<notice>` render (daemon-only, no from) ──────────────────────────────
     #[test]
     fn wrap_notice_has_no_from_attribute() {
-        let n = wrap_notice("요청 m-7f3k 기한(10m) 초과 — qa-bravo 회신 없음");
+        let n = wrap_notice("request m-7f3k deadline (10m) exceeded — no reply from qa-bravo");
         assert_eq!(
             n,
-            "<notice>요청 m-7f3k 기한(10m) 초과 — qa-bravo 회신 없음</notice>"
+            "<notice>request m-7f3k deadline (10m) exceeded — no reply from qa-bravo</notice>"
         );
-        assert!(!n.contains("from="), "notice 에는 from 속성이 없어야: {n}");
+        assert!(
+            !n.contains("from="),
+            "a notice must have no from attribute: {n}"
+        );
     }
 
     #[test]
@@ -494,7 +500,7 @@ mod tests {
         assert_eq!(
             n.matches("</notice>").count(),
             1,
-            "닫는 태그는 우리가 만든 1개뿐 — body 주입 태그는 escape: {n}"
+            "the closing tag is only the 1 we made — tags injected in the body are escaped: {n}"
         );
     }
 
@@ -533,11 +539,11 @@ mod tests {
         assert_eq!(
             w.matches("<message ").count(),
             1,
-            "authenticated 봉투 1개만 — 사칭 봉투 없음: {w}"
+            "only 1 authenticated envelope — no impersonating envelope: {w}"
         );
         assert!(
             w.starts_with(r#"<message from="alice">"#),
-            "발신자는 alice 로 고정: {w}"
+            "the sender is pinned to alice: {w}"
         );
     }
 
@@ -558,7 +564,7 @@ mod tests {
         assert_eq!(
             w.matches('"').count(),
             2,
-            "raw 겹따옴표는 봉투 delimiter 2개뿐 — sender 의 \" 는 전부 &quot; 로 중화: {w}"
+            "raw double quotes are only the 2 envelope delimiters — every \" in the sender is neutralized to &quot;: {w}"
         );
     }
 
@@ -595,7 +601,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         assert!(
             std::env::var("ENGRAM_WRAP_FORMAT").is_err(),
-            "테스트 진입 시 env 미설정이어야(leak 감지)"
+            "env must be unset on entering the test (leak detection)"
         );
         std::env::set_var("ENGRAM_WRAP_FORMAT", "<{sender}#{id}> {body}");
         let w_colon = wrap_message(
@@ -613,8 +619,14 @@ mod tests {
             &EnvelopeFields::default(),
         );
         std::env::remove_var("ENGRAM_WRAP_FORMAT"); // Must be removed (so it does not leak into other tests).
-        assert_eq!(w_colon, "<alice#id7> hello", "env 템플릿이 colon 을 이겨야");
-        assert_eq!(w_xml, "<alice#id7> hello", "env 템플릿이 xml 도 이겨야");
+        assert_eq!(
+            w_colon, "<alice#id7> hello",
+            "the env template must beat colon"
+        );
+        assert_eq!(
+            w_xml, "<alice#id7> hello",
+            "the env template must beat xml too"
+        );
     }
 
     #[test]
@@ -657,15 +669,15 @@ mod tests {
     fn new_msg_id_is_m_prefix_plus_eight_lowercase_base36() {
         for _ in 0..200 {
             let id = new_msg_id();
-            assert_eq!(id.len(), 10, "`m-` + 8자 = 10바이트: {id}");
+            assert_eq!(id.len(), 10, "`m-` + 8 chars = 10 bytes: {id}");
             let body = id
                 .strip_prefix("m-")
-                .unwrap_or_else(|| panic!("m- 접두: {id}"));
+                .unwrap_or_else(|| panic!("m- prefix: {id}"));
             assert_eq!(body.len(), 8);
             assert!(
                 body.bytes()
                     .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
-                "소문자 base36 만: {id}"
+                "lowercase base36 only: {id}"
             );
         }
     }
@@ -673,14 +685,17 @@ mod tests {
     #[test]
     fn new_msg_id_is_not_a_uuid_and_varies() {
         let a = new_msg_id();
-        assert!(a.parse::<PeerId>().is_err(), "UUID 로 파싱되면 안 됨: {a}");
+        assert!(
+            a.parse::<PeerId>().is_err(),
+            "must not parse as a UUID: {a}"
+        );
         let mut seen = std::collections::HashSet::new();
         for _ in 0..100 {
             seen.insert(new_msg_id());
         }
         assert!(
             seen.len() > 90,
-            "100회 생성에 중복이 거의 없어야: {}",
+            "there should be almost no duplicates in 100 generations: {}",
             seen.len()
         );
     }

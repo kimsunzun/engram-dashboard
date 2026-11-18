@@ -1,6 +1,6 @@
-// RestoreModal — it covers main and blocks input · shortcuts stop · it closes only by state (TRD S21-storage §6-7 · §8 「프론트 모달」).
+// RestoreModal — it covers main and blocks input · shortcuts stop · it closes only by state (TRD S21-storage §6-7 · §8 「frontend modal」).
 //
-// Run the whole wiring (AppLayout + restoreClient + the shortcut dispatcher) over a fake IPC — the modal alone cannot measure 「main 을 막는다」 (blocks main)
+// Run the whole wiring (AppLayout + restoreClient + the shortcut dispatcher) over a fake IPC — the modal alone cannot measure 「blocks main」
 // (the lock is one set: AppLayout's `inert` plus the modal's focus · stop).
 
 import { StrictMode, type ReactNode } from 'react'
@@ -71,8 +71,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('RestoreModal — 덮고 막는다', () => {
-  it('첫 당기기가 awaiting 이면 바로 그리고, 그 아래 레이아웃을 inert 로 잠근다', async () => {
+describe('RestoreModal — covers and blocks', () => {
+  it('if the first pull is awaiting it draws at once, and locks the layout beneath it with inert', async () => {
     const { layer } = mount(view('awaiting'))
     await settle()
     expect(dialog()).not.toBeNull()
@@ -82,7 +82,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(layer().contains(dialog())).toBe(false)
   })
 
-  it('알림 층도 잠기는 층 안이고, 모달은 그 밖 · 그 위(z-50 > 40)다', async () => {
+  it('the notice layer is also inside the locked layer, and the modal is outside it · above it (z-50 > 40)', async () => {
     const { layer, container } = mount(view('awaiting', { saves: false }))
     await settle()
     const notices = screen.getByTestId('notice-overlay')
@@ -95,7 +95,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(overlay.className).toMatch(/\bz-50\b/)
   })
 
-  it('saves 칸이 없는 짐(셸과 판이 어긋남)이어도 모달이 뜬다 — 가드 ⅱ 알림은 없다', async () => {
+  it('even with a load without a saves field (version mismatch with the shell) the modal shows — there is no guard ⅱ notice', async () => {
     const { saves: _omit, ...withoutSaves } = view('awaiting')
     mount(withoutSaves as RestoreStatusView)
     await settle()
@@ -108,7 +108,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  it('state_file 이 모르는 값인 짐(셸과 판이 어긋남)이어도 모달이 뜬다 — 알림은 없다', async () => {
+  it('even with a load where state_file is an unknown value (version mismatch with the shell) the modal shows — there is no notice', async () => {
     mount({ ...view('awaiting', { saves: false }), state_file: 'from_a_newer_shell' as never })
     await settle()
     expect(dialog()).not.toBeNull()
@@ -120,7 +120,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  it('awaiting 이 아니면 덮는 층도 inert 도 없다', async () => {
+  it('if not awaiting there is neither a covering layer nor inert', async () => {
     const { layer, container } = mount(view('none'))
     await settle()
     expect(dialog()).toBeNull()
@@ -128,7 +128,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(layer().hasAttribute('inert')).toBe(false)
   })
 
-  it('저장 시각 · 창 수 · 탭 수만 보여 준다', async () => {
+  it('shows only the saved time · window count · tab count', async () => {
     const at = new Date(2026, 9, 5, 14, 3).getTime()
     mount(view('awaiting', { saved_at_ms: at, windows: 3, tabs: 7 }))
     await settle()
@@ -139,7 +139,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(d.querySelector('[data-restore-tabs]')?.textContent).toBe('7개')
   })
 
-  it('떠 있는 동안 단축키 디스패처가 멈추고, 답한 뒤 다시 돈다(N4)', async () => {
+  it('while up the shortcut dispatcher stops, and runs again after the answer (N4)', async () => {
     mount(view('awaiting'))
     await settle()
     const blocked = fireCtrlTab(document.body)
@@ -153,7 +153,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(shortcut).toHaveBeenCalledTimes(1)
   })
 
-  it('포커스를 안의 「이전 화면 복원」으로 옮긴다 — 그 아래 입력에 있던 포커스도', async () => {
+  it('moves focus to the inner 「restore previous screen」 — also focus that was on an input beneath it', async () => {
     const { f } = mount(view('none'))
     await settle()
     const under = screen.getByTestId('under-input')
@@ -166,7 +166,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(document.activeElement).toBe(acceptBtn())
   })
 
-  it('단추 밖을 눌러도 포커스가 떨어지지 않는다(mousedown 기본 동작을 막는다) — 단추는 그대로 눌린다', async () => {
+  it('even pressing outside the buttons does not drop focus (mousedown default is prevented) — the button is still pressed as is', async () => {
     const { container } = mount(view('awaiting'))
     await settle()
     const overlay = container.querySelector('[data-restore-overlay]') as HTMLElement
@@ -189,7 +189,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     }
   })
 
-  it('formatSavedAt — Date 범위(±8.64e15) 안은 형식화하고 밖 · 유한하지 않은 값은 null', () => {
+  it('formatSavedAt — formats within the Date range (±8.64e15) and null outside it · for a non-finite value', () => {
     expect(formatSavedAt(8.64e15)).not.toBeNull()
     expect(formatSavedAt(-8.64e15)).not.toBeNull()
     expect(formatSavedAt(8.64e15 + 1)).toBeNull()
@@ -198,7 +198,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(formatSavedAt(Number.NaN)).toBeNull()
   })
 
-  it('저장 시각이 Date 로 나타낼 수 없는 값(u64 상한 근처)이면 그 줄만 빼고 모달은 그대로 쓸 수 있다', async () => {
+  it('if the saved time is a value Date cannot represent (near the u64 limit) only that line is dropped and the modal is still usable', async () => {
     const { f } = mount(view('awaiting', { saved_at_ms: 1.8e19 }))
     await settle()
     expect(dialog()).not.toBeNull()
@@ -211,7 +211,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(dialog()).toBeNull()
   })
 
-  it('Tab 은 모달 안에서 돈다', async () => {
+  it('Tab cycles inside the modal', async () => {
     mount(view('awaiting'))
     await settle()
     rejectBtn().focus()
@@ -221,7 +221,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(document.activeElement).toBe(rejectBtn())
   })
 
-  it('StrictMode 이중 effect 뒤에도 리스너는 하나 · 디스패처는 멈춘 채다', async () => {
+  it('after a StrictMode double effect there is one listener · the dispatcher stays stopped', async () => {
     const { f } = mount(view('awaiting'), { strict: true })
     await settle()
     expect(f.hasListener()).toBe(true)
@@ -231,7 +231,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(shortcut).not.toHaveBeenCalled()
   })
 
-  it('main 이 내려가면(언마운트) 디스패처가 다시 돈다', async () => {
+  it('when main goes down (unmount) the dispatcher runs again', async () => {
     const { unmount } = mount(view('awaiting'))
     await settle()
     unmount()
@@ -240,8 +240,8 @@ describe('RestoreModal — 덮고 막는다', () => {
   })
 })
 
-describe('RestoreModal — 답과 닫힘', () => {
-  it('수락은 accept:true 로 답하고, 답이 끝나 다시 당긴 상태로만 닫힌다(누르는 순간 닫지 않는다)', async () => {
+describe('RestoreModal — answer and closing', () => {
+  it('accept answers with accept:true, and closes only in the state pulled again after the answer ends (it does not close at the moment of pressing)', async () => {
     const { f, layer } = mount(view('awaiting'))
     await settle()
     const gate = deferred<AnswerReply>()
@@ -263,7 +263,7 @@ describe('RestoreModal — 답과 닫힘', () => {
     expect(layer().hasAttribute('inert')).toBe(false)
   })
 
-  it('거절은 accept:false 로 답한다', async () => {
+  it('reject answers with accept:false', async () => {
     const { f } = mount(view('awaiting'))
     await settle()
     fireEvent.click(rejectBtn())
@@ -272,7 +272,7 @@ describe('RestoreModal — 답과 닫힘', () => {
     expect(dialog()).toBeNull()
   })
 
-  it('답이 처리 중이면 두 단추가 비활성이고 두 번째 답을 내지 않는다', async () => {
+  it('while an answer is processing both buttons are disabled and a second answer is not made', async () => {
     const { f } = mount(view('awaiting'))
     await settle()
     const gate = deferred<AnswerReply>()
@@ -290,7 +290,7 @@ describe('RestoreModal — 답과 닫힘', () => {
     await settle()
   })
 
-  it('실패하면 오류 줄을 띄우고, 다시 당기고, 열린 채 단추를 되살린다', async () => {
+  it('on failure it shows an error line, pulls again, and revives the buttons while open', async () => {
     const { f } = mount(view('awaiting'))
     await settle()
     f.setOnAnswer(async () => {
@@ -308,13 +308,13 @@ describe('RestoreModal — 답과 닫힘', () => {
     expect(dialog()?.textContent).not.toContain('INTERNAL')
   })
 
-  it('실패 뒤 단추가 살아날 때 밖으로 떨어진 포커스를 「이전 화면 복원」으로 데려온다', async () => {
+  it('when the buttons revive after a failure it brings focus that fell outside back to 「restore previous screen」', async () => {
     const { f } = mount(view('awaiting'))
     await settle()
     const gate = deferred<AnswerReply>()
     f.setOnAnswer(() => gate.promise)
     // Chromium releases the focus of a button that became disabled — jsdom does not, and ignores blur on a disabled button, so before pressing,
-    //   drop it by hand to create 「처리 중 포커스가 밖에 있다」 (focus is outside while processing).
+    //   drop it by hand to create 「focus is outside while processing」.
     acceptBtn().blur()
     fireEvent.click(rejectBtn())
     await settle()
@@ -326,7 +326,7 @@ describe('RestoreModal — 답과 닫힘', () => {
     expect(document.activeElement).toBe(acceptBtn())
   })
 
-  it('다시 누르면 앞 오류 줄을 걷는다', async () => {
+  it('pressing again lifts the earlier error line', async () => {
     const { f } = mount(view('awaiting'))
     await settle()
     f.setOnAnswer(async () => {
@@ -345,7 +345,7 @@ describe('RestoreModal — 답과 닫힘', () => {
     await settle()
   })
 
-  it('되돌림 알림(awaiting)이 와도 열린 채다', async () => {
+  it('it stays open even when a revert notice (awaiting) arrives', async () => {
     const { f } = mount(view('awaiting'))
     await settle()
     const gate = deferred<AnswerReply>()
@@ -365,7 +365,7 @@ describe('RestoreModal — 답과 닫힘', () => {
 })
 
 describe('RestoreModal — restore:changed', () => {
-  it('알림으로 갱신된다 — 없다가 생기면 뜨고, 버스로 낸 답(answered)이면 닫힌다', async () => {
+  it('it is updated by notices — it shows if it appears from none, and closes if it is an answer (answered) sent over the bus', async () => {
     const { f } = mount(view('none'))
     await settle()
     expect(dialog()).toBeNull()
@@ -384,19 +384,19 @@ describe('RestoreModal — restore:changed', () => {
   })
 })
 
-describe('RestoreModal — 거절 경고는 durable 로 가른다', () => {
+describe('RestoreModal — the reject warning splits on durable', () => {
   const warningText = () => dialog()?.querySelector('[data-restore-warning]')?.textContent
 
-  it('durable:true 면 「지운다 · 되돌릴 수 없다」', async () => {
+  it('with durable:true 「deletes · cannot be undone」', async () => {
     mount(view('awaiting', { durable: true }))
     await settle()
     expect(warningText()).toBe(t('restore.rejectWarning'))
   })
 
   it.each([
-    ['state.json 을 못 읽은 실행(가드 ⅰ)', 'unreadable' as const],
-    ['사본을 못 뜬 실행(가드 ⅱ — state_file 은 ok)', 'ok' as const],
-  ])('durable:false 면 「그대로 남고 다음 실행 때 다시 묻는다」 — %s', async (_label, stateFile) => {
+    ['a run that could not read state.json (guard ⅰ)', 'unreadable' as const],
+    ['a run that could not make a copy (guard ⅱ — state_file is ok)', 'ok' as const],
+  ])('with durable:false 「stays as is and is asked again on the next run」 — %s', async (_label, stateFile) => {
     mount(view('awaiting', { durable: false, state_file: stateFile }))
     await settle()
     const text = warningText()
@@ -406,21 +406,21 @@ describe('RestoreModal — 거절 경고는 durable 로 가른다', () => {
     expect(text).not.toContain('state.json')
   })
 
-  it('durable:true 면 state_file 이 unreadable 이어도 「지운다」 — 경고는 state_file 을 보지 않는다', async () => {
+  it('with durable:true even if state_file is unreadable 「deletes」 — the warning does not look at state_file', async () => {
     mount(view('awaiting', { durable: true, state_file: 'unreadable' }))
     await settle()
     expect(warningText()).toBe(t('restore.rejectWarning'))
   })
 
-  it('묻는 동안 durable 이 null 이면(오지 않는 값) 「지운다 · 되돌릴 수 없다」 쪽으로 둔다', async () => {
+  it('if durable is null while asking (a value that does not come) it leans toward 「deletes · cannot be undone」', async () => {
     mount(view('awaiting', { durable: null }))
     await settle()
     expect(warningText()).toBe(t('restore.rejectWarning'))
   })
 })
 
-describe('AppLayout — 상태 파일 알림', () => {
-  it('같은 상태 한 벌에서 state_file 을 읽어 main 위에 띄운다', async () => {
+describe('AppLayout — state file notice', () => {
+  it('reads state_file from the same state set and shows it over main', async () => {
     mount(view('none', { state_file: 'corrupt_copied_aside' }))
     await settle()
     expect(screen.getByRole('status').textContent).toContain('state.json.corrupt')
@@ -428,9 +428,9 @@ describe('AppLayout — 상태 파일 알림', () => {
 
   // For guard ⅱ, `state_file` is `ok`, so after answering, the single field that carries that fact is `saves` (guard ⅱ notice — ADR-0276).
   it.each([
-    ['수락', () => acceptBtn()],
-    ['거절', () => rejectBtn()],
-  ])('가드 ⅱ(saves:false · ok) 알림은 %s으로 모달이 닫힌 뒤에도 남는다', async (_label, button) => {
+    ['accept', () => acceptBtn()],
+    ['reject', () => rejectBtn()],
+  ])('the guard ⅱ (saves:false · ok) notice stays after the modal is closed by %s', async (_label, button) => {
     mount(view('awaiting', { saves: false }))
     await settle()
     expect(dialog()).not.toBeNull()
@@ -443,7 +443,7 @@ describe('AppLayout — 상태 파일 알림', () => {
     expect(notice.getAttribute('data-state-file')).toBe('ok')
   })
 
-  it('저장하는 실행(saves:true · ok)은 답한 뒤에도 알림이 없다', async () => {
+  it('a run that saves (saves:true · ok) has no notice even after answering', async () => {
     mount(view('awaiting'))
     await settle()
     fireEvent.click(acceptBtn())

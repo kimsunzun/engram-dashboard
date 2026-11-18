@@ -103,7 +103,7 @@ tool_result → A result/success → A completed
 | ② | Does an echo come · when | **Yes, before `turn/completed`** — `item/started userMessage`(clientId) 4.5–4.8 ms ahead of `turn/completed`, `item/completed` ~2.3 ms after · the steer success response ~2.4 ms after · it carries the id of the turn that is ending | certain |
 | ③ | Does an echo come after the probe said 「없음」 (none) | not applicable — the probe never produced 「없음」 | — |
 | ④ | Turn id · position | the ended turn's **own** id (same as the steer response) · desc index 0 (after the last `agentMessage`) · ascending within the turn = U, agentMessage, W | certain |
-| ⑤ | `limit:2` page walk | page 0 = [W, agentMessage](찾음) (found) · page 1 = [U, the previous turn's agentMessage] → passed the turn in 2 pages · walk 1.9–3.5 ms | certain |
+| ⑤ | `limit:2` page walk | page 0 = [W, agentMessage] (found) · page 1 = [U, the previous turn's agentMessage] → passed the turn in 2 pages · walk 1.9–3.5 ms | certain |
 
 - **Record-only lengthens the turn end:** tokenUsage → `turn/completed` is 8.1–8.5 ms (3.3–3.6 ms without record-only).
 - ★**It cannot be told from the `turn/completed` payload**★ — `itemsView "summary"` carries only `agentMessage`. A record-only item is visible only through the echo or the probe.

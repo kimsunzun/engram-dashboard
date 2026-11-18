@@ -1,7 +1,7 @@
 # ADR-0047: Frontend styling = adopt Tailwind CSS v4 + shadcn/lucide (switching away from the pure-CSS stance)
 
 - 상태: 확정 (2026-07-05, basis: /research medium + Codex adversarial review + CSS measurement)
-- 관련: CLAUDE.md "기술 스택(프론트)" (the wording `CSS 변수(Tailwind X)` is to be updated) · `src/styles/theme.css` (three data-theme themes) · step-log 2026-07-05 · Amended by ADR-0048 (how the chat UI is rendered: native CC-look direct implementation, OSS as reference only (not copy-paste) → verbatim code port of Cline leaf components (Apache-2.0 attribution))
+- 관련: CLAUDE.md "Tech stack (frontend)" (the wording `CSS 변수(Tailwind X)` is to be updated) · `src/styles/theme.css` (three data-theme themes) · step-log 2026-07-05 · Amended by ADR-0048 (how the chat UI is rendered: native CC-look direct implementation, OSS as reference only (not copy-paste) → verbatim code port of Cline leaf components (Apache-2.0 attribution))
 
 ## 맥락
 We tried to match the chat rendering of the structured-output (StreamJson) slot to the **Claude Code VS Code extension look** (a vertical dotted-line timeline · a collapsed "Thought for Ns" thinking · minimal tool IN/OUT), but the previous port stayed at an "approximation" (emoji icons, a hand-made `<details>` accordion) and its quality was much lower.
@@ -33,7 +33,7 @@ This decision **switches** the `CSS 변수(Tailwind X)` stance of the CLAUDE.md 
 - **No performance harm** — Tailwind = static CSS generated at build time (zero runtime JS overhead). It is even lighter than the styled-components that some candidates use (which have a runtime cost), and unused classes are tree-shaken out of the bundle.
 
 ## 영향 / 불변식
-- **CLAUDE.md "기술 스택(프론트)"**: `… CSS 변수(Tailwind X) …` → update to `Tailwind CSS v4 + shadcn/lucide + CSS 변수 테마` (as one bundle with this ADR).
+- **CLAUDE.md "Tech stack (frontend)"**: `… CSS 변수(Tailwind X) …` → update to `Tailwind CSS v4 + shadcn/lucide + CSS 변수 테마` (as one bundle with this ADR).
 - **Themes unchanged** — the three `data-theme` themes (dark/light/e-ink) stay as CSS variables, and the Tailwind color tokens reference those `var()`s. **The theme-switching mechanism is not changed** (the three themes are not expressed by the Tailwind `dark:` variant alone).
 - **Chat UI look = native design** — there is no source to copy the CC look from, so we design it ourselves. OSS is limited to data-mapping and wording references (not copy-paste → no license legal trigger).
 - **Unrelated to the §5 LLM control invariant** — changing the styling system does not affect the control surface (command bus, invoke).

@@ -1,9 +1,9 @@
-// Raw CDP helper — node 18+ 전역 WebSocket로 9223(WebView2)에 직접 붙는다. MCP 불필요.
-// 사용:
-//   node scripts/cdp.mjs shot <out.png>     메인 페이지 스크린샷 저장(파일명만 주면 _wip/shots/로 라우팅)
-//   node scripts/cdp.mjs eval "<js>"        메인 페이지에서 JS 평가 후 결과 출력(JSON)
-//   node scripts/cdp.mjs info               타깃 목록
-// 환경: CDP_PORT(기본 9223), CDP_MATCH(기본 메인=hash 없는 localhost:1420/).
+// Raw CDP helper — attaches directly to 9223 (WebView2) with the node 18+ global WebSocket. No MCP needed.
+// Usage:
+//   node scripts/cdp.mjs shot <out.png>     save a main page screenshot (a bare file name is routed to _wip/shots/)
+//   node scripts/cdp.mjs eval "<js>"        evaluate JS in the main page and print the result (JSON)
+//   node scripts/cdp.mjs info               target list
+// Environment: CDP_PORT (default 9223), CDP_MATCH (default main = localhost:1420/ without a hash).
 import fs from 'node:fs';
 
 const PORT = process.env.CDP_PORT || '9223';
@@ -14,7 +14,7 @@ async function targets() {
   return await r.json();
 }
 
-// 메인 페이지 선택: popup/tree 제외, page 타입.
+// Main page selection: popup/tree excluded, page type.
 function pickMain(list) {
   const pages = list.filter(t => t.type === 'page');
   const main = pages.find(t => /\/(index\.html)?(#\/?)?$/.test(t.url) && !/popup|tree/.test(t.url))
@@ -57,11 +57,11 @@ const list = await targets();
 if (cmd === 'info') { console.log(JSON.stringify(list.map(t => ({ type: t.type, title: t.title, url: t.url })), null, 2)); process.exit(0); }
 
 const main = pickMain(list);
-if (!main) { console.error('메인 페이지 없음'); process.exit(1); }
+if (!main) { console.error('no main page'); process.exit(1); }
 const c = await cdp(main.webSocketDebuggerUrl);
 
 if (cmd === 'shot') {
-  // 스크린샷 기본 보관함 = _wip/shots/ (gitignore됨). 디렉토리 없이 파일명만 주면 그쪽으로 라우팅해 repo 루트 오염 방지.
+  // Default screenshot store = _wip/shots/ (gitignored). A bare file name without a directory is routed there so the repo root is not polluted.
   let out = arg || 'cdp-shot.png';
   if (!/[\\/]/.test(out)) {
     fs.mkdirSync('_wip/shots', { recursive: true });

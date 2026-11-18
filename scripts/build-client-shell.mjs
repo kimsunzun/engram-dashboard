@@ -9,7 +9,7 @@
 //   running does the dev app die at once with no window (single-instance mutex collision. Full mechanism =
 //   the comment in `src-tauri/tauri.dev.conf.json`). It really regressed that way.
 // ★There are three consumers, so it was pulled out into a script★: the two debug launcher `.bat` files and the GUI measurement procedure of `/engram-qa`
-//   (`.claude/skill-bindings/qa.md` 「GUI 실측」). If the three each copy the injection, nobody knows when one drops it —
+//   (`.claude/skill-bindings/qa.md` 「GUI 실측」). If the three each copy the injection, nobody knows when one drops it — // hangul-ok
 //   in fact the qa procedure was left without it. When a new consumer appears, do not copy the injection; call this script.
 //   **Do not optimize the call away as "already built, skip it"** — the cost of one more link step each run is
 //   a known cost (accepted in review), and skipping it removes the verification too.
@@ -43,7 +43,7 @@ function note(message) {
 
 // Takes no arguments — the verification below assumes the debug profile path, so if an argument like `--release` came in,
 // it would pass while looking at the wrong artifact.
-if (process.argv.length > 2) fail(`인자를 받지 않습니다(받은 것: ${process.argv.slice(2).join(' ')})`)
+if (process.argv.length > 2) fail(`takes no arguments (received: ${process.argv.slice(2).join(' ')})`)
 
 // ★Do not hard-code the output directory (`target/debug` is only the default)★: `CARGO_TARGET_DIR` or
 //   `build.target-dir` in `.cargo/config.toml` redirects the output elsewhere. If hard-coded, the build goes to the new path and the verification
@@ -56,21 +56,21 @@ function resolveTargetDir() {
     ['metadata', '--format-version', '1', '--no-deps', '--manifest-path', join(ROOT, 'Cargo.toml')],
     { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
   )
-  if (meta.error) fail(`cargo metadata 를 실행하지 못했습니다 - ${meta.error.message}`)
-  if (meta.status !== 0) fail(`cargo metadata 실패(exit ${meta.status})\n${meta.stderr ?? ''}`)
+  if (meta.error) fail(`could not run cargo metadata - ${meta.error.message}`)
+  if (meta.status !== 0) fail(`cargo metadata failed (exit ${meta.status})\n${meta.stderr ?? ''}`)
   let targetDirectory
   try {
     targetDirectory = JSON.parse(meta.stdout).target_directory
   } catch (err) {
-    fail(`cargo metadata 출력을 파싱하지 못했습니다 - ${err.message}`)
+    fail(`could not parse the cargo metadata output - ${err.message}`)
   }
   if (typeof targetDirectory !== 'string' || targetDirectory === '') {
-    fail('cargo metadata 에 target_directory 가 없습니다')
+    fail('cargo metadata has no target_directory')
   }
   // If CARGO_BUILD_TARGET (a non-host triple) is set, the artifact goes down to `<target>/<triple>/debug`.
   //   The metadata target_directory does not include that segment, so it is inserted here.
   const triple = (process.env.CARGO_BUILD_TARGET ?? '').trim()
-  if (triple !== '') note(`CARGO_BUILD_TARGET=${triple} 감지 — 산출 경로에 triple 세그먼트 반영`)
+  if (triple !== '') note(`CARGO_BUILD_TARGET=${triple} detected — the triple segment is applied to the output path`)
   return triple === '' ? join(targetDirectory, 'debug') : join(targetDirectory, triple, 'debug')
 }
 
@@ -78,7 +78,7 @@ let config
 try {
   config = readDevConfig()
 } catch (err) {
-  fail(`dev 오버레이를 쓸 수 없습니다 - ${err.message}`)
+  fail(`cannot use the dev overlay - ${err.message}`)
 }
 
 const exePath = join(
@@ -94,7 +94,7 @@ const build = spawnSync('cargo', ['build', '-p', 'engram-dashboard'], {
   env: { ...process.env, TAURI_CONFIG: config.json },
   stdio: 'inherit',
 })
-if (build.error) fail(`cargo 를 실행하지 못했습니다 - ${build.error.message}`)
+if (build.error) fail(`could not run cargo - ${build.error.message}`)
 if (build.status !== 0) process.exit(build.status ?? 1)
 
 let image
@@ -102,15 +102,15 @@ try {
   // latin1 = bytes 1:1 — the identifier is ASCII so this is enough, and 22MB is not decoded as UTF-8.
   image = readFileSync(exePath).toString('latin1')
 } catch (err) {
-  fail(`빌드는 성공했는데 산출물을 읽지 못했습니다(${exePath}) - ${err.message}`)
+  fail(`the build succeeded but the artifact could not be read (${exePath}) - ${err.message}`)
 }
 
 if (!image.includes(config.devId)) {
   fail(
-    `산출물에 dev identifier("${config.devId}")가 없습니다 — 오버레이 주입이 끊겼습니다.\n` +
-      `  대상: ${exePath}\n` +
-      `  TAURI_CONFIG 를 tauri 가 아직 읽는지 확인할 것(tauri-build/tauri-codegen 의 config 병합).\n` +
-      `  이대로 띄우면 릴리즈 앱이 떠 있을 때 창 없이 즉시 죽습니다.`,
+    `the artifact has no dev identifier ("${config.devId}") — the overlay injection is broken.\n` +
+      `  target: ${exePath}\n` +
+      `  check that tauri still reads TAURI_CONFIG (the config merge of tauri-build/tauri-codegen).\n` +
+      `  launched as is, it dies at once with no window while the release app is running.`,
   )
 }
 
@@ -122,10 +122,10 @@ const bareRelease = config.devId.startsWith(config.releaseId)
   : new RegExp(escape(config.releaseId))
 if (bareRelease.test(image)) {
   fail(
-    `산출물에 release identifier("${config.releaseId}")가 그대로 남아 있습니다 — 오버레이가 부분만 먹었습니다.\n` +
-      `  대상: ${exePath}`,
+    `the release identifier ("${config.releaseId}") is still left in the artifact — the overlay was only partly applied.\n` +
+      `  target: ${exePath}`,
   )
 }
 
-note(`OK - identifier "${config.devId}" 확인 (${exePath})`)
+note(`OK - identifier "${config.devId}" confirmed (${exePath})`)
 process.stdout.write(`${exePath}\n`)

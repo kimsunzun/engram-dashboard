@@ -76,7 +76,7 @@ fn probe_write_at(probe: &Path) -> std::io::Result<()> {
     written?;
     if let Err(e) = cleanup {
         tracing::warn!(
-            "쓰기 프로브 파일 삭제 실패({}) — 남긴다: {e}",
+            "failed to delete the write probe file ({}) — leaving it: {e}",
             probe.display()
         );
     }
@@ -120,16 +120,16 @@ mod tests {
     #[test]
     fn writable_probe_rejects_a_name_it_cannot_create() {
         let dir = fresh_probe_dir("nofile");
-        std::fs::create_dir_all(&dir).expect("폴더 생성");
+        std::fs::create_dir_all(&dir).expect("create folder");
         let taken = dir.join("taken-by-a-directory");
-        std::fs::create_dir_all(&taken).expect("프로브 이름을 폴더로 선점");
+        std::fs::create_dir_all(&taken).expect("take the probe name as a folder first");
         let err = probe_write_at(&taken).unwrap_err();
         let _ = std::fs::remove_dir_all(&dir);
         // It must be told apart from a race (NotFound) so that the retry does not spin in vain.
         assert_ne!(
             err.kind(),
             ErrorKind::NotFound,
-            "폴더가 있는데 파일을 못 만드는 것은 경합이 아니다: {err:?}"
+            "failing to create a file while the folder exists is not a race: {err:?}"
         );
     }
 
@@ -137,14 +137,17 @@ mod tests {
     #[test]
     fn writable_probe_recovers_from_a_leftover_probe_file() {
         let dir = fresh_probe_dir("leftover");
-        std::fs::create_dir_all(&dir).expect("폴더 생성");
+        std::fs::create_dir_all(&dir).expect("create folder");
         let leftover = dir.join(format!("{WRITE_PROBE_PREFIX}{}-0", std::process::id()));
-        std::fs::write(&leftover, b"leftover").expect("잔여 프로브 생성");
+        std::fs::write(&leftover, b"leftover").expect("create leftover probe");
         let got = probe_write_at(&leftover);
         let still_there = leftover.exists();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(got.is_ok(), "잔여 프로브는 실패 사유가 아님: {got:?}");
-        assert!(!still_there, "잔여 프로브까지 정리돼야");
+        assert!(
+            got.is_ok(),
+            "a leftover probe is not a failure reason: {got:?}"
+        );
+        assert!(!still_there, "the leftover probe must be cleaned up too");
     }
 
     /// Decision table — each line = the results `once` yields in turn (`None` = success) · the expected call count · the expected error. The overlapping-check
@@ -173,8 +176,8 @@ mod tests {
                     Some(kind) => Err(std::io::Error::from(kind)),
                 }
             });
-            assert_eq!(calls, want_calls, "호출 수: {script:?}");
-            assert_eq!(got.err().map(|e| e.kind()), want, "결과: {script:?}");
+            assert_eq!(calls, want_calls, "call count: {script:?}");
+            assert_eq!(got.err().map(|e| e.kind()), want, "result: {script:?}");
         }
     }
 }

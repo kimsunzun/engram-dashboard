@@ -1,4 +1,4 @@
-// restoreClient — subscribe first · the later-issued pull wins · pull again after the answer (TRD S21-storage §6-7 · §8 「프론트 모달」).
+// restoreClient — subscribe first · the later-issued pull wins · pull again after the answer (TRD S21-storage §6-7 · §8 「frontend modal」).
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -10,8 +10,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('restoreClient — 구독 먼저, 당기기 나중', () => {
-  it('listen 등록이 끝나기 전에는 restore_status 를 내지 않는다', async () => {
+describe('restoreClient — subscribe first, pull later', () => {
+  it('does not issue restore_status before listen registration finishes', async () => {
     const f = fakeRestoreIpc(view('awaiting'))
     const open = f.holdListen()
     const client = createRestoreClient(f.ipc)
@@ -26,7 +26,7 @@ describe('restoreClient — 구독 먼저, 당기기 나중', () => {
     expect(client.status()?.crash_copy).toBe('awaiting')
   })
 
-  it('등록이 끝나기 전에 dispose 되면 받은 핸들을 바로 풀고 당기지 않는다(StrictMode 첫 회)', async () => {
+  it('when disposed before registration finishes, releases the received handle right away and does not pull (StrictMode first pass)', async () => {
     const f = fakeRestoreIpc(view('awaiting'))
     const open = f.holdListen()
     const client = createRestoreClient(f.ipc)
@@ -40,8 +40,8 @@ describe('restoreClient — 구독 먼저, 당기기 나중', () => {
   })
 })
 
-describe('restoreClient — 내린 설치의 답', () => {
-  it('dispose 뒤에 풀린 당기기는 칠하지 않는다', async () => {
+describe('restoreClient — answers of a torn-down install', () => {
+  it('a pull that resolves after dispose does not paint', async () => {
     const f = fakeRestoreIpc(view('awaiting'))
     f.setHoldStatus(true)
     const client = createRestoreClient(f.ipc)
@@ -55,7 +55,7 @@ describe('restoreClient — 내린 설치의 답', () => {
     expect(client.status()).toBeNull()
   })
 
-  it('재마운트 — 앞 설치의 답이 새 설치의 답보다 먼저 와도 칠하지 않고, 새 설치의 답만 남는다', async () => {
+  it("remount — even when the previous install's answer comes before the new install's, it does not paint; only the new install's answer remains", async () => {
     const f = fakeRestoreIpc(view('awaiting'))
     f.setHoldStatus(true)
     const client = createRestoreClient(f.ipc)
@@ -77,8 +77,8 @@ describe('restoreClient — 내린 설치의 답', () => {
   })
 })
 
-describe('restoreClient — 알림', () => {
-  it('restore:changed 마다 다시 당기고 구독자에게 알린다', async () => {
+describe('restoreClient — notices', () => {
+  it('pulls again on every restore:changed and notifies subscribers', async () => {
     const f = fakeRestoreIpc(view('none'))
     const client = createRestoreClient(f.ipc)
     const seen = vi.fn()
@@ -95,7 +95,7 @@ describe('restoreClient — 알림', () => {
     expect(seen).toHaveBeenCalledTimes(2)
   })
 
-  it('답이 낸 순서와 다르게 와도 나중에 낸 당기기의 답이 남는다', async () => {
+  it('even when answers come in a different order than issued, the answer of the later-issued pull remains', async () => {
     const f = fakeRestoreIpc(view('awaiting'))
     const client = createRestoreClient(f.ipc)
     f.setHoldStatus(true)
@@ -113,7 +113,7 @@ describe('restoreClient — 알림', () => {
     expect(client.status()?.crash_copy).toBe('answered')
   })
 
-  it('dispose 뒤에 늦게 배달된 알림은 당기지 않는다', async () => {
+  it('a notice delivered late after dispose does not pull', async () => {
     const f = fakeRestoreIpc(view('none'))
     const client = createRestoreClient(f.ipc)
     const dispose = client.install()
@@ -127,7 +127,7 @@ describe('restoreClient — 알림', () => {
     expect(f.calls.length).toBe(before)
   })
 
-  it('durable 은 불리언이면 그대로, 없거나 모양이 다르면 null 로 싣는다', async () => {
+  it('durable is carried as is when a boolean, and as null when missing or of a different shape', async () => {
     const f = fakeRestoreIpc(view('awaiting', { durable: false }))
     const client = createRestoreClient(f.ipc)
     client.install()
@@ -141,7 +141,7 @@ describe('restoreClient — 알림', () => {
     expect(client.status()?.durable).toBeNull()
   })
 
-  it('saves 를 싣고, 답한 뒤에도 그대로다', async () => {
+  it('carries saves, and it stays the same after the answer', async () => {
     const f = fakeRestoreIpc(view('awaiting', { saves: false }))
     const client = createRestoreClient(f.ipc)
     client.install()
@@ -155,10 +155,10 @@ describe('restoreClient — 알림', () => {
 
   // When the shell and frontend editions are out of step — if the payload is dropped, even the asking modal does not show.
   it.each([
-    ['없어도', undefined],
-    ['null 이어도', null],
-    ['불리언이 아니어도', 'false'],
-  ])('saves 가 %s 첫 짐을 버리지 않는다 — saves 만 모른다(undefined)로 두고 경고는 한 번', async (_label, saves) => {
+    ['when missing', undefined],
+    ['when null', null],
+    ['when not a boolean', 'false'],
+  ])('saves %s does not drop the first payload — only saves is left unknown (undefined) and the warning comes once', async (_label, saves) => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { saves: _omit, ...withoutSaves } = view('awaiting')
     const f = fakeRestoreIpc((saves === undefined ? withoutSaves : { ...withoutSaves, saves }) as never)
@@ -176,7 +176,7 @@ describe('restoreClient — 알림', () => {
     expect(warn).toHaveBeenCalledTimes(1)
   })
 
-  it('state_file 이 모르는 값이어도 첫 짐을 버리지 않는다 — state_file 만 undefined, 경고는 한 번', async () => {
+  it('an unknown state_file value does not drop the first payload — only state_file is undefined, the warning comes once', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const f = fakeRestoreIpc({ ...view('awaiting'), state_file: 'from_a_newer_shell' as never })
     const client = createRestoreClient(f.ipc)
@@ -194,7 +194,7 @@ describe('restoreClient — 알림', () => {
   })
 
   // ADR-0291: the shell's `newer` is a known value — lowering it to unknown would lose that notice.
-  it('state_file 의 newer 를 그대로 싣고 경고하지 않는다', async () => {
+  it('carries newer of state_file as is and does not warn', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const f = fakeRestoreIpc({ ...view('none'), saves: false, state_file: 'newer' })
     const client = createRestoreClient(f.ipc)
@@ -205,7 +205,7 @@ describe('restoreClient — 알림', () => {
     expect(warn).not.toHaveBeenCalled()
   })
 
-  it('알림 두 칸이 다 어긋나면 한 경고에 둘을 함께 남긴다', async () => {
+  it('when both notice fields are off, one warning carries both', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { saves: _omit, ...withoutSaves } = view('none')
     const f = fakeRestoreIpc({ ...withoutSaves, state_file: 7 } as never)
@@ -218,8 +218,8 @@ describe('restoreClient — 알림', () => {
   })
 })
 
-describe('restoreClient — 답', () => {
-  it('restore_answer 에 accept 를 싣고, 답 뒤 다시 당긴 다음에 풀린다', async () => {
+describe('restoreClient — answer', () => {
+  it('carries accept to restore_answer, and resolves after pulling again after the answer', async () => {
     const f = fakeRestoreIpc(view('awaiting'))
     const client = createRestoreClient(f.ipc)
     client.install()
@@ -232,7 +232,7 @@ describe('restoreClient — 답', () => {
     expect(client.status()?.crash_copy).toBe('answered')
   })
 
-  it('실패해도 다시 당기고, 셸의 오류를 그대로 reject 한다', async () => {
+  it("pulls again even on failure, and rejects with the shell's error as is", async () => {
     const f = fakeRestoreIpc(view('awaiting'))
     f.setOnAnswer(async () => {
       throw 'CONFLICT'
@@ -250,7 +250,7 @@ describe('restoreClient — 답', () => {
 // Enough time for the bounded retry (4 attempts spaced 150 + 300 + 600 ms) to run out.
 const RETRIES_DONE_MS = 1100
 
-describe('restoreClient — 부팅 당기기는 받을 때까지 놓지 않는다', () => {
+describe('restoreClient — the boot pull does not let go until it receives', () => {
   function quietConsole() {
     return {
       error: vi.spyOn(console, 'error').mockImplementation(() => {}),
@@ -258,7 +258,7 @@ describe('restoreClient — 부팅 당기기는 받을 때까지 놓지 않는�
     }
   }
 
-  it('재시도가 다 실패하면 간격마다 다시 당기고, 받으면 멈춘다 — 로그는 한 번', async () => {
+  it('when all retries fail, it pulls again every interval and stops once it receives — the log comes once', async () => {
     vi.useFakeTimers()
     const log = quietConsole()
     const f = fakeRestoreIpc(view('awaiting'))
@@ -286,7 +286,7 @@ describe('restoreClient — 부팅 당기기는 받을 때까지 놓지 않는�
     expect(f.statusCalls()).toBe(8)
   })
 
-  it('dispose 하면 다시 당기기를 멈춘다', async () => {
+  it('dispose stops pulling again', async () => {
     vi.useFakeTimers()
     quietConsole()
     const f = fakeRestoreIpc(view('awaiting'))
@@ -300,7 +300,7 @@ describe('restoreClient — 부팅 당기기는 받을 때까지 놓지 않는�
     expect(f.statusCalls()).toBe(5)
   })
 
-  it('StrictMode 식 install → dispose → install 은 루프를 하나만 돌린다', async () => {
+  it('a StrictMode-style install → dispose → install runs only one loop', async () => {
     vi.useFakeTimers()
     quietConsole()
     const f = fakeRestoreIpc(view('awaiting'))
@@ -315,7 +315,7 @@ describe('restoreClient — 부팅 당기기는 받을 때까지 놓지 않는�
     expect(f.statusCalls()).toBe(7)
   })
 
-  it('루프 도중 다시 설치해도(재마운트) 앞 설치의 루프는 멈추고 새 설치의 것만 돈다', async () => {
+  it("installing again mid-loop (remount) stops the previous install's loop and only the new install's runs", async () => {
     vi.useFakeTimers()
     quietConsole()
     const f = fakeRestoreIpc(view('awaiting'))
@@ -333,7 +333,7 @@ describe('restoreClient — 부팅 당기기는 받을 때까지 놓지 않는�
     expect(f.statusCalls()).toBe(10)
   })
 
-  it('구독이 재시도까지 다 실패해도 부팅 당기기는 나간다', async () => {
+  it('the boot pull goes out even when the subscription fails through all its retries', async () => {
     vi.useFakeTimers()
     const log = quietConsole()
     const f = fakeRestoreIpc(view('awaiting'))
@@ -349,7 +349,7 @@ describe('restoreClient — 부팅 당기기는 받을 때까지 놓지 않는�
     expect(log.error).toHaveBeenCalledTimes(1)
   })
 
-  it('crash_copy 를 못 읽은 짐은 실패한 당기기다 — 간격마다 다시 당기고, 맞는 짐을 받으면 멈춘다', async () => {
+  it('a payload that could not read crash_copy is a failed pull — it pulls again every interval and stops on receiving a valid payload', async () => {
     vi.useFakeTimers()
     const log = quietConsole()
     const f = fakeRestoreIpc({ ...view('awaiting'), crash_copy: 'Awaiting' as never })
@@ -375,7 +375,7 @@ describe('restoreClient — 부팅 당기기는 받을 때까지 놓지 않는�
     expect(f.statusCalls()).toBe(4)
   })
 
-  it('알림이 부른 당기기가 먼저 받으면 루프는 거기서 멈춘다', async () => {
+  it('when a pull a notice called receives first, the loop stops there', async () => {
     vi.useFakeTimers()
     quietConsole()
     const f = fakeRestoreIpc(view('none'))

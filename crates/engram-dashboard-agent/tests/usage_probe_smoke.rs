@@ -39,41 +39,41 @@ const TURN_PROMPT: &str = "Reply with just OK.";
 // ── Production-path query ─────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "실 claude CLI·로그인·계정의 조회 제한을 쓴다"]
+#[ignore = "uses the real claude CLI · login · the account's query limits"]
 fn claude_get_usage_answers_through_the_operating_command() {
     let root = TempTree::fresh("claude");
     let run = run_probe("claude", root.path(), Tweaks::default());
     run.report("claude get_usage (temp scratch root)", &root);
     let obs = run
         .result
-        .expect("claude 조회가 운영 명령 그대로 성공해야 한다");
+        .expect("the claude query must succeed with the production command as is");
     assert_eq!(obs.source, UsageSource::Active);
     assert_eq!(obs.vendor.as_str(), "claude");
 }
 
 #[test]
-#[ignore = "실 codex CLI·로그인·계정의 조회 제한을 쓴다"]
+#[ignore = "uses the real codex CLI · login · the account's query limits"]
 fn codex_rate_limits_read_answers_through_the_operating_command() {
     let root = TempTree::fresh("codex");
     let run = run_probe("codex", root.path(), Tweaks::default());
     run.report("codex account/rateLimits/read", &root);
     let obs = run
         .result
-        .expect("codex 조회가 운영 명령 그대로 성공해야 한다");
+        .expect("the codex query must succeed with the production command as is");
     assert_eq!(obs.source, UsageSource::Active);
     assert_eq!(obs.vendor.as_str(), "codex");
 }
 
 /// An empty config folder = no login. We do not assert the classification — the aim is collecting the response shape (TRD §6 #4). The contracts measured are
-/// two: it returns within the deadline · if it returns as success it is 「한도 정보 없음」 (no limit information).
+/// two: it returns within the deadline · if it returns as success it is 「no limit information」.
 /// ★Measured (claude 2.1.280 · 2026-09-27) = it is a success response, not an error★ — `rate_limits: null` ·
 /// `subscription_type: null` · `rate_limits_available: false` (`true` on the logged-in side). There was no upstream error phrase.
 #[test]
-#[ignore = "실 claude CLI 를 쓴다"]
+#[ignore = "uses the real claude CLI"]
 fn claude_logged_out_answer_shape() {
     let root = TempTree::fresh("claude-logged-out");
     let config = TempTree::fresh("claude-empty-config");
-    let config_dir = config.path().to_str().expect("유니코드 경로").to_owned();
+    let config_dir = config.path().to_str().expect("Unicode path").to_owned();
     // Also strip the login keys and API-key paths that the daemon env leaves — if they remain, it queries still logged in even with an empty config folder.
     let login_env = [
         "CLAUDE_CODE_OAUTH_TOKEN",
@@ -108,13 +108,13 @@ fn claude_logged_out_answer_shape() {
     eprintln!("[logged-out] lock/tmp leftovers in the config dir: {leftovers:?}");
     assert!(
         run.elapsed <= timeout + KILL_WAIT + RETURN_SLACK,
-        "마감 안에 돌아와야 한다: {:?}",
+        "must come back within the deadline: {:?}",
         run.elapsed
     );
     if let Ok(obs) = &run.result {
         assert!(
             obs.limits_unavailable.is_some(),
-            "로그아웃 성공 응답은 「한도 정보 없음」이어야 한다"
+            "a logged-out success response must be no-limit-info"
         );
     }
 }
@@ -122,20 +122,20 @@ fn claude_logged_out_answer_shape() {
 /// TRD §6 #18 — the development build's data folder is inside the repository, so the CLI can climb up from its working folder and read the repository's
 /// `.claude/settings.json`·CLAUDE.md. We measure that the query still stands.
 #[test]
-#[ignore = "실 claude CLI·로그인·계정의 조회 제한을 쓴다"]
+#[ignore = "uses the real claude CLI · login · the account's query limits"]
 fn claude_get_usage_answers_with_the_scratch_root_inside_the_repo() {
     let root = TempTree::at(repo_root().join(".engram-dev").join("usage-probe-smoke"));
     let run = run_probe("claude", root.path(), Tweaks::default());
     run.report("claude get_usage (scratch root inside the repo)", &root);
     run.result
-        .expect("저장소 안 작업 폴더에서도 claude 조회가 성공해야 한다");
+        .expect("the claude query must succeed even from a working folder inside the repository");
 }
 
 /// Measuring the grace after the answer (`FINISH_GRACE`) — runs the querier's conversation with the production command as is, but only the wait after
 /// receiving the answer and closing stdin is extended to [`EXIT_WINDOW`], to measure how long claude takes to end **by itself** (if it does not end within the window, it is cut then). In the meantime
 /// the global config file (`.claude.json`) is looked at only for modification time and the presence of a lock file — the content is not read.
 #[test]
-#[ignore = "실 claude CLI·로그인·계정의 조회 제한을 쓴다"]
+#[ignore = "uses the real claude CLI · login · the account's query limits"]
 fn claude_exit_after_stdin_close_measurement() {
     let root = TempTree::fresh("claude-exit");
     let (config, config_source) = claude_global_config();
@@ -155,7 +155,7 @@ fn claude_exit_after_stdin_close_measurement() {
     let result = probe.query(&env);
     let returned = started.elapsed();
     let after = ConfigMark::of(config);
-    let log = std::mem::take(&mut *spawner.log.lock().expect("기록 락"));
+    let log = std::mem::take(&mut *spawner.log.lock().expect("record lock"));
 
     eprintln!("== claude exit after stdin close (measurement)");
     eprintln!(
@@ -275,14 +275,14 @@ impl PatientChild {
     fn patient(&self, deadline: Instant) -> Instant {
         self.log
             .lock()
-            .expect("기록 락")
+            .expect("record lock")
             .closed_at
             .map_or(deadline, |closed| closed + EXIT_WINDOW)
     }
 
     fn exited(&self, code: Option<i32>) {
         let mark = ConfigMark::of(self.config.as_deref());
-        let mut log = self.log.lock().expect("기록 락");
+        let mut log = self.log.lock().expect("record lock");
         log.exited_at.get_or_insert_with(Instant::now);
         log.exit_code = Some(code);
         log.at_exit = Some(mark);
@@ -297,7 +297,7 @@ impl ProbeChild for PatientChild {
     fn close_stdin(&mut self) {
         let mark = ConfigMark::of(self.config.as_deref());
         {
-            let mut log = self.log.lock().expect("기록 락");
+            let mut log = self.log.lock().expect("record lock");
             log.closed_at = Some(Instant::now());
             log.at_close = Some(mark);
         }
@@ -307,7 +307,7 @@ impl ProbeChild for PatientChild {
     fn read_line(&mut self, deadline: Instant) -> Result<Option<String>, ProbeError> {
         let got = self.inner.read_line(self.patient(deadline));
         if let Ok(None) = got {
-            let mut log = self.log.lock().expect("기록 락");
+            let mut log = self.log.lock().expect("record lock");
             if log.closed_at.is_some() {
                 log.eof_at.get_or_insert_with(Instant::now);
             }
@@ -339,12 +339,12 @@ impl ProbeChild for PatientChild {
 // ── Pickup-shape collection — feeds the raw lines of a short real turn to the pickup interpreter ─────────
 
 #[test]
-#[ignore = "실 claude 모델 턴 하나를 쓴다"]
+#[ignore = "uses one real claude model turn"]
 fn claude_stream_turn_rate_limit_event_through_the_passive_parser() {
     let root = TempTree::fresh("claude-turn");
-    let scratch = ScratchDir::create(root.path()).expect("임시 폴더");
+    let scratch = ScratchDir::create(root.path()).expect("scratch folder");
     let started = Instant::now();
-    let lines = claude_turn_lines(scratch.path(), started + TURN_TIMEOUT).expect("claude 턴");
+    let lines = claude_turn_lines(scratch.path(), started + TURN_TIMEOUT).expect("claude turn");
     let elapsed = started.elapsed();
     drop(scratch);
 
@@ -368,7 +368,7 @@ fn claude_stream_turn_rate_limit_event_through_the_passive_parser() {
         extra_args: vec![],
         output_format: AgentOutputFormat::StreamJson,
     })
-    .expect("stream-json 디코더");
+    .expect("stream-json decoder");
     for line in &lines {
         decoder.decode(format!("{line}\n").as_bytes());
     }
@@ -382,12 +382,12 @@ fn claude_stream_turn_rate_limit_event_through_the_passive_parser() {
 }
 
 #[test]
-#[ignore = "실 codex 모델 턴 하나를 쓴다"]
+#[ignore = "uses one real codex model turn"]
 fn codex_turn_rate_limits_updated_through_the_passive_parser() {
     let root = TempTree::fresh("codex-turn");
-    let scratch = ScratchDir::create(root.path()).expect("임시 폴더");
+    let scratch = ScratchDir::create(root.path()).expect("scratch folder");
     let started = Instant::now();
-    let lines = codex_turn_lines(scratch.path(), started + TURN_TIMEOUT).expect("codex 턴");
+    let lines = codex_turn_lines(scratch.path(), started + TURN_TIMEOUT).expect("codex turn");
     let elapsed = started.elapsed();
     drop(scratch);
 
@@ -414,7 +414,7 @@ fn codex_turn_rate_limits_updated_through_the_passive_parser() {
         extra_args: vec![],
         output_format: AgentOutputFormat::StreamJson,
     })
-    .expect("app-server 디코더");
+    .expect("app-server decoder");
     // In the production path the wait ticket takes the response to our request and passes the remaining lines to the translator — response lines are not fed.
     for line in lines.iter().filter(|line| !is_rpc_response(line)) {
         decoder.decode(format!("{line}\n").as_bytes());
@@ -444,7 +444,7 @@ struct ProbeRun {
 }
 
 fn probe(word: &str) -> &'static dyn UsageProbe {
-    usage_probe_for(word).unwrap_or_else(|| panic!("{word} 조회기가 등록부에 없다"))
+    usage_probe_for(word).unwrap_or_else(|| panic!("the {word} prober is not in the registry"))
 }
 
 fn policy_timeout(word: &str) -> Duration {
@@ -575,7 +575,7 @@ impl Recorder {
     }
 
     fn take_log(&self) -> ChildLog {
-        std::mem::take(&mut *self.log.lock().expect("기록 락"))
+        std::mem::take(&mut *self.log.lock().expect("record lock"))
     }
 }
 
@@ -589,7 +589,7 @@ impl ProbeSpawner for Recorder {
         cmd.env_remove
             .extend(self.tweaks.env_remove.iter().cloned());
         cmd.env_set.extend(self.tweaks.env_set.iter().cloned());
-        self.log.lock().expect("기록 락").command =
+        self.log.lock().expect("record lock").command =
             Some(format!("{} {}", cmd.program, cmd.args.join(" ")));
         let inner = OsProbeSpawner.spawn(&cmd, deadline)?;
         Ok(Box::new(RecordingChild {
@@ -616,7 +616,11 @@ impl ProbeChild for RecordingChild {
     fn read_line(&mut self, deadline: Instant) -> Result<Option<String>, ProbeError> {
         let got = self.inner.read_line(deadline);
         if let Ok(Some(line)) = &got {
-            self.log.lock().expect("기록 락").lines.push(line.clone());
+            self.log
+                .lock()
+                .expect("record lock")
+                .lines
+                .push(line.clone());
         }
         got
     }
@@ -624,7 +628,7 @@ impl ProbeChild for RecordingChild {
     fn wait_exit(&mut self, deadline: Instant) -> Result<ExitInfo, ProbeError> {
         let got = self.inner.wait_exit(deadline);
         if let Ok(exit) = &got {
-            self.log.lock().expect("기록 락").exit = Some(*exit);
+            self.log.lock().expect("record lock").exit = Some(*exit);
         }
         got
     }
@@ -632,7 +636,7 @@ impl ProbeChild for RecordingChild {
     fn wait_exit_code(&mut self, deadline: Instant) -> Result<Option<i32>, ProbeError> {
         let got = self.inner.wait_exit_code(deadline);
         if let Ok(code) = &got {
-            self.log.lock().expect("기록 락").exit_code = Some(*code);
+            self.log.lock().expect("record lock").exit_code = Some(*code);
         }
         got
     }
@@ -675,9 +679,9 @@ fn claude_env_to_strip() -> Vec<String> {
 fn claude_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, ProbeError> {
     let settings = scratch.join("settings.json");
     let mcp = scratch.join("mcp.json");
-    fs::write(&settings, r#"{"disableAllHooks":true}"#).expect("설정 파일");
-    fs::write(&mcp, r#"{"mcpServers":{}}"#).expect("MCP 설정 파일");
-    let path = |p: &Path| p.to_str().expect("유니코드 경로").to_owned();
+    fs::write(&settings, r#"{"disableAllHooks":true}"#).expect("settings file");
+    fs::write(&mcp, r#"{"mcpServers":{}}"#).expect("MCP settings file");
+    let path = |p: &Path| p.to_str().expect("Unicode path").to_owned();
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -746,7 +750,7 @@ fn codex_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, Pr
         is_response_to(l, 1)
     })?;
     child.write_line(&json!({"method": "initialized"}).to_string(), deadline)?;
-    let cwd = repo_root().to_str().expect("유니코드 경로").to_owned();
+    let cwd = repo_root().to_str().expect("Unicode path").to_owned();
     let start = json!({"id": 2, "method": "thread/start",
         "params": {"cwd": cwd, "approvalPolicy": "never", "sandbox": "read-only"}});
     child.write_line(&start.to_string(), deadline)?;
@@ -759,7 +763,9 @@ fn codex_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, Pr
         .find(|l| is_response_to(l, 2))
         .and_then(|l| serde_json::from_str::<Value>(l).ok())
         .and_then(|v| v.pointer("/result/thread/id")?.as_str().map(str::to_owned))
-        .ok_or_else(|| ProbeError::Parse("thread/start 응답에 thread.id 가 없다".to_owned()))?;
+        .ok_or_else(|| {
+            ProbeError::Parse("the thread/start response has no thread.id".to_owned())
+        })?;
     let turn = json!({"id": 3, "method": "turn/start",
         "params": {"threadId": thread_id, "input": [{"type": "text", "text": TURN_PROMPT}]}});
     child.write_line(&turn.to_string(), deadline)?;
@@ -780,7 +786,7 @@ fn read_until(
     loop {
         let Some(line) = child.read_line(deadline)? else {
             return Err(ProbeError::Upstream(
-                "stdout 이 끝날 때까지 기다리던 줄이 안 왔다".to_owned(),
+                "the line waited for until stdout ended did not come".to_owned(),
             ));
         };
         if let Ok(value) = serde_json::from_str::<Value>(&line) {
@@ -847,7 +853,7 @@ fn window_text(window: Option<&WindowObs>) -> String {
     )
 }
 
-/// epoch seconds → `YYYY-MM-DDTHH:MM:SSZ (+남은 시간)`. Calendar conversion = the Gregorian day-count formula (proleptic).
+/// epoch seconds → `YYYY-MM-DDTHH:MM:SSZ (+time left)`. Calendar conversion = the Gregorian day-count formula (proleptic).
 fn iso_utc(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
@@ -1030,7 +1036,8 @@ fn redact(text: &str) -> String {
 // ── Temp folder ───────────────────────────────────────────────────────────────
 
 fn repo_root() -> PathBuf {
-    dunce::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).expect("저장소 루트")
+    dunce::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .expect("repository root")
 }
 
 /// One folder the test made — deleted whole on drop.
@@ -1049,7 +1056,7 @@ impl TempTree {
     /// If a same folder left by a previous run exists, delete it and make it anew.
     fn at(path: PathBuf) -> Self {
         let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("시험 폴더");
+        fs::create_dir_all(&path).expect("test folder");
         Self { path }
     }
 

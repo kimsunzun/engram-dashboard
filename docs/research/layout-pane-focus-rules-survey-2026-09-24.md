@@ -1,6 +1,6 @@
 # Focus rules in split layouts — peer survey on focus after closing and on control panels
 
-- 상태: 확정 research · **decision = C (previous content pane → first empty pane → none) + refusing focus on control panes — user decision 2026-09-24, ADR-0224** · Date: 2026-09-24 · Intensity: medium · design-decision mode
+- Status: confirmed research · **decision = C (previous content pane → first empty pane → none) + refusing focus on control panes — user decision 2026-09-24, ADR-0224** · Date: 2026-09-24 · Intensity: medium · design-decision mode
 - Method: main-family (Claude) 3 collector tracks (terminals · multiplexers · tiling WMs / editors · IDEs · docking libraries / control panels and the work-target pane) + the third track run once more with Sonnet (pilot — the result comparison goes to the research skill's feedback) + main grounding (local clone tmux · zellij code, source-text cross-check of VS Code `editorPart.ts` · Zed `workspace.rs` · Emacs `window.el`) + one cross-family (codex, effort high, web search) adversarial review — verdict REFUTE-PARTIAL, all 6 findings incorporated (3 omissions · 2 logic gaps · 1 missing source)
 - Confidence legend: certain = 2 or more independent sources or direct check of code / likely = supported by a single source / uncertain = unsupported · inference
 

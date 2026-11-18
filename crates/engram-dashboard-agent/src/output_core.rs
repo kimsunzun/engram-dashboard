@@ -87,7 +87,7 @@ pub struct OutputCore {
     queued_inputs: Arc<QueuedInputs>,
     /// The pending-list table that mail busyness reads. `None` = an assembly where the registry is not visible to mail (harness) — no table, no doorbell either.
     inputs_pending: Option<Arc<InputsPendingTable>>,
-    /// 「봉인됨」 (sealed) — set by the terminal synthesis of `finish`. A `Queued` after it stands in the ring as `Dropped{AgentEnded}`.
+    /// 「sealed」 — set by the terminal synthesis of `finish`. A `Queued` after it stands in the ring as `Dropped{AgentEnded}`.
     /// ★Read and written only inside the replay lock★ — the order (whether it is after the synthesis swept) is carried by that lock and the atomic value is only interior mutability, so it is
     /// `Relaxed`. If a spot that reads outside the lock is made, a `Queued` slips out between the synthesis and the seal.
     sealed: AtomicBool,
@@ -96,7 +96,7 @@ pub struct OutputCore {
 /// Pending-input registry wiring (ADR-0231) — the registry and the pending-list table are always plugged in together. With a registry but no table, mail reads as idle even while the user
 /// list is full and reaches stdin before the user's text.
 ///
-/// ★`registry` is a new registry dedicated to that incarnation★ — created anew for each incarnation (the tombstone and 「받음 불가 판명」 (acceptance-impossible finding) are incarnation facts).
+/// ★`registry` is a new registry dedicated to that incarnation★ — created anew for each incarnation (the tombstone and 「acceptance-impossible finding」 are incarnation facts).
 /// ★`pending` must be the table on which that incarnation was `register`ed★ — the table drops writes without registration, so if missed, the list
 /// never shows to mail (and there is no error).
 // ADR-0231
@@ -105,15 +105,15 @@ pub struct QueuedWiring {
     pub pending: Arc<InputsPendingTable>,
 }
 
-/// What one list event left inside the replay lock — used by the steps after the lock is released (turn observation · 「비었다」 (became empty) · fanout).
+/// What one list event left inside the replay lock — used by the steps after the lock is released (turn observation · 「became empty」 · fanout).
 struct ListStep {
     /// Lines that stood in the ring (in issue order) — through rewriting, one event can become two lines.
     numbered: Vec<(u64, OutputEvent)>,
     /// The slot for the original event to hand to the classifier. `None` = the original event was rewritten as a seal.
     classify_at: Option<usize>,
-    /// This event emptied the registry — with that seq write 「비었다」 (became empty) and ring the doorbell (outside the lock, after turn observation).
+    /// This event emptied the registry — with that seq write 「became empty」 and ring the doorbell (outside the lock, after turn observation).
     drained_at: Option<u64>,
-    /// This span was the first to reduce this incarnation's 「받음 불가 판명」 (acceptance-impossible finding) — leave the decision log once outside the lock.
+    /// This span was the first to reduce this incarnation's 「acceptance-impossible finding」 — leave the decision log once outside the lock.
     ack_unavailable_judged: bool,
 }
 
@@ -139,7 +139,7 @@ impl TurnWiring {
     ///   It produces no signal at all, so from the observation consumer's viewpoint it equals "that agent has never been observed".
     ///
     /// ★The production spawn path never uses it★: if used, that agent's turn gate is silently turned off
-    ///   (= mid-turn injection). Production must always use `new(manager 표, backend 분류자)` — that is why the names
+    ///   (= mid-turn injection). Production must always use `new(manager table, backend classifier)` — that is why the names
     ///   differ. ★There is **no** device that enforces that distinction★: unlike the `use tauri` isolation or messaging isolation, there is
     ///   no grep gate that blocks this call, so this is a boundary kept by convention, not by the compiler (whether production calls are 0 is
     ///   checked in review).
@@ -265,15 +265,15 @@ impl OutputCore {
         self.emit_inner(event, true);
     }
 
-    /// Emit the same event **exactly the same**, but ★do not count this line as 「이 화신이 턴 중이라는 증거」 (evidence that this incarnation is in a turn)★
+    /// Emit the same event **exactly the same**, but ★do not count this line as 「evidence that this incarnation is in a turn」★
     /// (nothing is written to ADR-0113's fact layer).
     ///
-    /// ★Reason to exist★: 「화면에 보여야 한다」 (it must be visible on screen) and 「이 화신이 턴 중이다」 (this incarnation is in a turn) are not the same fact. If the peer
+    /// ★Reason to exist★: 「it must be visible on screen」 and 「this incarnation is in a turn」 are not the same fact. If the peer
     ///   leaks a line of a **turn we never opened**, its content must be visible on screen (dropping it is a silent loss), but
     ///   if we record it as a progress signal, the end of that turn, not being ours, is blocked by the attribution gate — and with nobody able to
     ///   undo that fact, mail stays blocked until the 30-minute fail-open valve. This door closes that asymmetry.
     /// ★So an end that must move the turn table is not sent through this door★ — this door also skips the doorbell
-    ///   (`StatusSink::turn_ended`), so if our turn's end is sent here, the turn table stays at 「턴 중」 (in turn)
+    ///   (`StatusSink::turn_ended`), so if our turn's end is sent here, the turn table stays at 「in turn」
     ///   and the consumer waiting for that end is not woken. ★The one exception is a boundary for the screen only★ — a `TurnEnd{turn_id:
     ///   None}` (③ below) that turns off only the frontend's wait indicator at a place where the turn table is
     ///   already idle, so there is nothing to write and no consumer to wake. If that were emitted through the normal door, the classifier would fold it into a clean end and erase the earlier error end
@@ -284,7 +284,7 @@ impl OutputCore {
     /// ★There are three callers and **all in the same file**★ (`backend/codex/transport.rs`):
     ///   ① unattributed lines the peer leaks (including a late receipt that arrived outside our turn, and its bubble) ② the user bubble the path synthesizes when idle
     ///   (ADR-0127 — if emitted through the normal door, the classifier records it as progress, so when that text's `turn/start` is
-    ///   rejected, a turn that was never opened remains 「진행 중」 (in progress)) ③ the screen-only
+    ///   rejected, a turn that was never opened remains 「in progress」) ③ the screen-only
     ///   boundary set after a receipt that arrived when there was no open turn (the exception above — ADR-0231).
     ///   ★The past screen fetched as a page right after resume (ADR-0203) comes not through this door but through
     ///   [`Self::emit_batch_without_turn_observation`]★ — it must be loaded as one chunk so it is not split in the ring.
@@ -300,20 +300,20 @@ impl OutputCore {
 
     /// Emit **several items as one chunk** through the same door — ★no other emit can slip in between★.
     ///
-    /// ★The reason to exist = 「끼어들 수 없다」 (cannot slip in), just that★: if called singly, each call takes the replay lock separately, so
+    /// ★The reason to exist = 「cannot slip in」, just that★: if called singly, each call takes the replay lock separately, so
     ///   at each gap the pump's live emit can take a seq. A new line stuck **in the middle** of the restored conversation
     ///   is the result (this is why ADR-0203's history restore uses this door). Issuing seq consecutively
     ///   within one lock span makes that chunk always contiguous in the ring.
-    /// ★★That 「끼어들 수 없다」 (cannot slip in) is true **only inside the ring** — do not read it as extending to delivery★★: the implementation below
+    /// ★★That 「cannot slip in」 is true **only inside the ring** — do not read it as extending to delivery★★: the implementation below
     ///   does fanout after releasing the lock (the grounds for that discipline = [`Self::emit`]), so **already attached** subscribers
     ///   can receive them in the order [chunk seq N] → [live seq N+k] → [chunk seq N+1]. The outcome is not discarding but
-    ///   **reordering on the frontend** — the frontend (`src/api/protocolClient.ts`) always passes only `마지막+1` to the view, holds frames
+    ///   **reordering on the frontend** — the frontend (`src/api/protocolClient.ts`) always passes only `last+1` to the view, holds frames
     ///   after a gap, and passes them in seq order once the gap is filled (ADR-0231 — past the hold cap it returns to the buffer phase and
     ///   asks for a full replay again). So on screen they stand in ring order — only the wire arrival order gets scrambled.
     ///   ★**Later-attached** subscribers are unaffected★ (they replay from the ring, so the order is intact).
     /// ★And it cannot block what comes **before the chunk** either★ — a live line that arrived before this chunk still stands ahead.
-    /// ★So what this door sells is just 「**링 안에서** 이력이 쪼개지지 않는다」 (history is not split inside the ring)★ — delivery order and 「이력이
-    ///   맨 앞이다」 (history is at the very front) are not what this door gives, and the only way to close both is to hold the live emit at the
+    /// ★So what this door sells is just 「history is not split inside the ring」★ — delivery order and 「history is at the very front」
+    ///   are not what this door gives, and the only way to close both is to hold the live emit at the
     ///   producer side up to the gate (that queue's cap and overflow handling are prerequisites so it is a separate matter — that separate matter was **closed as not
     ///   to be built**: ADR-0205. The limitation above stays open).
     /// ★The lock discipline is the same as [`Self::emit`] (ADR-0006)★ — issue · push inside the replay lock, fanout without the lock using
@@ -325,7 +325,7 @@ impl OutputCore {
         if events.is_empty() {
             return;
         }
-        // 1. Issue + push within **one** replay lock — this span is the actual form of 「끼어들 수 없다」 (cannot slip in).
+        // 1. Issue + push within **one** replay lock — this span is the actual form of 「cannot slip in」.
         let numbered: Vec<(u64, OutputEvent)> = {
             let mut replay = self.replay.lock().expect("replay poisoned");
             events
@@ -474,14 +474,14 @@ impl OutputCore {
     /// The door for a list event (`QueuedInput`) — the same stages as the single-item door, with registry reduction and the pending-list table write inserted among them.
     ///
     /// ★Inside the replay lock (one span)★: seal → rewrite after decision → fill the `AckUnavailable` copy → issue · push · reduce →
-    ///   「찼다」 (became full). Since the registry is fed in this span, registry = the reduced value of the ring prefix, and the seal · rewrite decisions also follow the ring
+    ///   「became full」. Since the registry is fed in this span, registry = the reduced value of the ring prefix, and the seal · rewrite decisions also follow the ring
     ///   order (they do not read the atomic `DeliveryAck` — if read, ring replay and the registry would see different orders).
-    /// ★Outside the lock★: turn observation (only the original event that was not rewritten) → 「비었다」 (became empty) + doorbell → fanout.
-    ///   Why 「비었다」 is written **after** turn observation: the claude `Delivered` that empties the list is progress of that turn, so if written inside
-    ///   the lock, there is a moment before the progress reaches the table when both facts are 「한가」 (idle), and mail that asked for busyness then
-    ///   gets folded into the user's turn. 「찼다」 is the opposite, inside the lock — if delayed, mail would read as idle even after `Queued` stands in the ring
-    ///   and could reach stdin before the user's text. That the 「비었다」 deferred outside the lock does not overwrite a later
-    ///   「찼다」 written by another thread in between is carried by the table's seq rule.
+    /// ★Outside the lock★: turn observation (only the original event that was not rewritten) → 「became empty」 + doorbell → fanout.
+    ///   Why 「empty」 is written **after** turn observation: the claude `Delivered` that empties the list is progress of that turn, so if written inside
+    ///   the lock, there is a moment before the progress reaches the table when both facts are 「idle」, and mail that asked for busyness then
+    ///   gets folded into the user's turn. 「filled」 is the opposite, inside the lock — if delayed, mail would read as idle even after `Queued` stands in the ring
+    ///   and could reach stdin before the user's text. That the 「empty」 deferred outside the lock does not overwrite a later
+    ///   「filled」 written by another thread in between is carried by the table's seq rule.
     // ADR-0231
     fn emit_list_event(&self, op: QueuedInputEvent, observe_turn: bool) {
         let step = {
@@ -520,25 +520,25 @@ impl OutputCore {
         CancelRequest::Recorded
     }
 
-    /// The busyness the session classification reads — the pending-list table says 「찼다」 (full) or turn observation says in a turn. It does not read the registry.
+    /// The busyness the session classification reads — the pending-list table says 「full」 or turn observation says in a turn. It does not read the registry.
     ///
-    /// ★Table first, turn observation later★: the emit of the `Delivered` that empties the list writes 「비었다」 (became empty) **after** recording turn observation's progress,
-    ///   so a read in this order that saw 「비었다」 also sees that progress. Reading in reverse or reading the registry lets input arriving in the middle of that emit
-    ///   see 「빔 + 턴 없음」 (empty + no turn) and be classified as idle.
+    /// ★Table first, turn observation later★: the emit of the `Delivered` that empties the list writes 「became empty」 **after** recording turn observation's progress,
+    ///   so a read in this order that saw 「empty」 also sees that progress. Reading in reverse or reading the registry lets input arriving in the middle of that emit
+    ///   see 「empty + no turn」 and be classified as idle.
     /// ★An assembly without the table (harness) reads the list as always empty★ — only turn observation remains.
     // ADR-0231
     pub(crate) fn classified_input_busy(&self) -> bool {
         pending_then_in_turn(self)
     }
 
-    /// Finish one span of a list event outside the lock — turn observation → 「비었다」 (became empty) + doorbell → fanout.
+    /// Finish one span of a list event outside the lock — turn observation → 「became empty」 + doorbell → fanout.
     fn finish_list_step(&self, step: ListStep, observe_turn: bool) {
         if step.ack_unavailable_judged {
             // ADR-0231: the old-CLI decision is once per incarnation (one span where the registry's finding marker goes false → true).
             tracing::info!(
                 agent = %self.id,
                 epoch = self.epoch,
-                "받음 알림 불가 판정 — 이 화신은 대기 목록 없이 오늘 경로"
+                "ack-unavailable decision — this incarnation takes today's path without a waiting list"
             );
         }
         if observe_turn {
@@ -571,7 +571,7 @@ impl OutputCore {
                     agent = %self.id,
                     epoch = self.epoch,
                     id = %id,
-                    "봉인 뒤의 Queued 를 Dropped(AgentEnded) 로 바꿔 적음"
+                    "rewrote a Queued after the seal as Dropped(AgentEnded)"
                 );
                 (
                     vec![QueuedInputEvent::Dropped {
@@ -616,7 +616,10 @@ impl OutputCore {
         let ack_unavailable_judged = !was_judged && registry.ack_unavailable_seen();
         drop(registry);
 
-        let last_seq = numbered.last().map(|(seq, _)| *seq).expect("한 줄 이상");
+        let last_seq = numbered
+            .last()
+            .map(|(seq, _)| *seq)
+            .expect("at least one line");
         let mut drained_at = None;
         match (was_empty, now_empty) {
             (true, false) => {
@@ -636,7 +639,7 @@ impl OutputCore {
         }
     }
 
-    /// Write 「비었다」 (became empty) and ring the doorbell — holding no lock. An assembly without the table does neither.
+    /// Write 「became empty」 and ring the doorbell — holding no lock. An assembly without the table does neither.
     /// The table comes first: the side that gets the doorbell asks for busyness again right away.
     // ADR-0231
     fn write_drained(&self, seq: u64) {
@@ -702,10 +705,10 @@ impl OutputCore {
                 agent = %self.id,
                 epoch = self.epoch,
                 count = synthesized.len(),
-                "종료 합성: 남은 대기 입력을 Dropped(AgentEnded) 로 닫음"
+                "exit synthesis: closing the remaining queued inputs as Dropped(AgentEnded)"
             );
         }
-        // ★Even when terminal synthesis empties the list, it neither writes 「비었다」 (became empty) nor rings the doorbell★: this incarnation's entry in the pending-list table
+        // ★Even when terminal synthesis empties the list, it neither writes 「became empty」 nor rings the doorbell★: this incarnation's entry in the pending-list table
         //   is reaped below together with the turn entry, so writing it would just be erased soon, and the doorbell would be a stimulus to flow mail into an incarnation
         //   about to make its terminal transition. Parked mail is carried by the next incarnation's appearance flush.
         // ADR-0231
@@ -781,7 +784,10 @@ impl OutputCore {
             });
             numbered.push((seq, event));
         }
-        debug_assert!(registry.is_empty(), "종료 합성 뒤 열린 항목이 남았다");
+        debug_assert!(
+            registry.is_empty(),
+            "an open entry remained after the exit synthesis"
+        );
         self.sealed.store(true, Ordering::Relaxed);
         numbered
     }
@@ -798,7 +804,7 @@ impl OutputCore {
     /// The notification inversion window is only "the moment a natural process exit overlaps with kill", and this is existing behavior that exists identically in the S9 original
     /// (manager.kill_agent's Exiting emission vs drain.transition's terminal emission).
     /// The frontend decides terminal not by status_changed but by agent-list-updated (the list)
-    /// (`docs/reference/architecture.md` 「런타임 불변식」 (runtime invariants) I4), so even receiving a late Exiting it does not stick — mitigated by design.
+    /// (`docs/reference/architecture.md` 「runtime invariants」 I4), so even receiving a late Exiting it does not stick — mitigated by design.
     pub fn enter_exiting(&self) -> bool {
         // If termination has already been handled, do not write Exiting (fast path — the real status field protection is the lock span below).
         if self.finalized.load(Ordering::Acquire) {
@@ -1020,7 +1026,7 @@ impl OutputCore {
                     tracing::warn!(
                         seq = s.seq,
                         kind,
-                        "structured event dropped from wire snapshot (B7 미배선 — get_snapshot 경로 무음 유실)"
+                        "structured event dropped from wire snapshot (B7 not wired — silent loss on the get_snapshot path)"
                     );
                     None
                 }
@@ -1114,13 +1120,16 @@ mod diagnostic_tests {
 
         assert!(
             core.diagnostic_tail().contains("No conversation found"),
-            "진단은 진단 버퍼에 남는다"
+            "diagnostics stay in the diagnostic buffer"
         );
         assert!(
             core.terminal_tail(4096).is_empty(),
-            "진단이 출력 링에 들어가면 안 된다 — 링은 화면과 stream-json 파서가 함께 먹는다"
+            "diagnostics must not enter the output ring — the ring is consumed by both the screen and the stream-json parser"
         );
-        assert!(core.snapshot().is_empty(), "링에 이벤트가 생겨서도 안 된다");
+        assert!(
+            core.snapshot().is_empty(),
+            "no event must appear in the ring either"
+        );
     }
 
     /// Even past the cap the **latest line stays**, and no multibyte character is split.
@@ -1133,7 +1142,7 @@ mod diagnostic_tests {
     fn the_diagnostic_buffer_is_bounded_and_utf8_safe() {
         let core = core();
         // A line is purely multibyte, so wherever it is cut it lands on a boundary.
-        let noisy = "가".repeat(512); // 3 bytes each = 1536B/line
+        let noisy = "가".repeat(512); // 3 bytes each = 1536B/line // hangul-ok
         for _ in 0..32 {
             core.push_diagnostic(&noisy);
         }
@@ -1142,26 +1151,26 @@ mod diagnostic_tests {
         let tail = core.diagnostic_tail();
         assert!(
             tail.len() <= DIAGNOSTIC_CAP_BYTES,
-            "상한이 안 지켜지면 세션이 사는 내내 자라는 누수가 된다 — got {}B",
+            "if the cap is not kept, it becomes a leak that grows for the whole life of the session — got {}B",
             tail.len()
         );
         assert!(
             tail.contains("No conversation found"),
-            "앞에서부터 버리므로 **최신** 줄이 증거로 남아야 한다"
+            "it discards from the front, so the **latest** line must remain as evidence"
         );
     }
 
     /// If the cut position is in the middle of a character, it moves up to the **next** boundary — discarding the least without exceeding the cap.
     ///
     /// The test above does not decide where the cut lands. Here we pin the number of bytes to cut at 2
-    /// and drop it in the middle of `'가'`(0..3): going down (0) exceeds the cap, and cutting at 2 as is makes `drain` panic.
+    /// and drop it in the middle of `'가'`(0..3): going down (0) exceeds the cap, and cutting at 2 as is makes `drain` panic. // hangul-ok
     #[test]
     fn a_cut_inside_a_character_moves_up_to_the_next_boundary() {
         let core = core();
-        core.push_diagnostic("가");
+        core.push_diagnostic("가"); // hangul-ok
         let filler = "a".repeat(DIAGNOSTIC_CAP_BYTES - 3);
         core.push_diagnostic(&filler);
-        // "가\n" 4 + filler + "\n" = cap + 2 → cut position 2.
+        // "가\n" 4 + filler + "\n" = cap + 2 → cut position 2. // hangul-ok
         assert_eq!(core.diagnostic_tail(), format!("\n{filler}\n"));
     }
 }
@@ -1184,7 +1193,7 @@ pub struct StoredOutput {
 fn debug_assert_not_list_event(event: &OutputEvent) {
     debug_assert!(
         !matches!(event, OutputEvent::QueuedInput(_)),
-        "목록 사건이 명부를 거치지 않는 문으로 들었다: {event:?}"
+        "a list event came in through a door that bypasses the registry: {event:?}"
     );
 }
 
@@ -1204,7 +1213,7 @@ pub(crate) enum CancelRequest {
 /// (removing any room to swap the two reads at the call site).
 // ADR-0231
 trait BusyReads {
-    /// Did the pending-list table record this incarnation as 「찼다」 (full). An assembly without the table (harness) is `false`.
+    /// Did the pending-list table record this incarnation as 「full」. An assembly without the table (harness) is `false`.
     fn read_pending_listed(&self) -> bool;
     /// Did the turn-observation table record this incarnation as in a turn.
     fn read_in_turn(&self) -> bool;
@@ -1237,7 +1246,7 @@ fn pending_then_in_turn(reads: &impl BusyReads) -> bool {
 /// events were counted only as "count 1", they would bypass the max_bytes (2MB) cap and the buffer would grow without bound. To prevent this,
 /// we structurally approximate the **sum of byte lengths of the payload string fields** and reflect it in the budget. This value is for eviction
 /// decisions only and is not the exact serialized size (tag · delimiter · escape overhead ignored).
-/// ★`pub(crate)` because **someone outside the ring must be able to count 「이만큼이면 링을 채운다」 (this much fills the ring)**★:
+/// ★`pub(crate)` because **someone outside the ring must be able to count 「this much fills the ring」**★:
 /// a backend that **requests** the restored history from the peer (codex app-server) must decide by itself how many items to fetch,
 /// and the ceiling is [`REPLAY_MAX_BYTES`] · [`REPLAY_MAX_EVENTS`], and the axis that counts weight is this function. If estimated on another
 /// axis, that backend would either fetch more of what the ring will discard (pure cost) or fetch less of what can be loaded
@@ -1315,7 +1324,7 @@ pub struct Ring {
 }
 
 /// The byte ceiling of the ring. ★It is pulled out as a constant for the same reason as [`estimate_cost_bytes`]★ — a backend that requests history and
-/// receives it decides 「여기까지만 받으면 된다」 (this much is enough to receive) with this value (ADR-0203). The only place the ring itself uses it is
+/// receives it decides 「this much is enough to receive」 with this value (ADR-0203). The only place the ring itself uses it is
 /// [`Ring::new`] below.
 pub(crate) const REPLAY_MAX_BYTES: usize = 2 * 1024 * 1024;
 
@@ -1509,10 +1518,13 @@ mod tests {
             core.report_usage(vec![observation(), observation()]);
             is_contained()
         }))
-        .expect("panic 없음");
+        .expect("no panic");
 
         assert_eq!(*sink.0.lock().unwrap(), vec![false, false]);
-        assert!(after, "관측을 넘긴 뒤 펌프의 표시가 되살아나지 않았다");
+        assert!(
+            after,
+            "after handing over the observation, the pump's marker did not come back"
+        );
     }
 
     // ── ADR-0113: emit → turn observation table + turn end push ───────────────────────────────────
@@ -1559,12 +1571,12 @@ mod tests {
     fn emit_records_turn_signals_into_the_shared_table() {
         let (core, turns, id) = core_with_turns(MockStatusSink::new(), 7);
         core.emit(delta());
-        assert!(turns.is_in_turn(id, 7), "진행 신호 → 턴 중");
+        assert!(turns.is_in_turn(id, 7), "progress signal → in a turn");
         core.emit(message_done());
-        assert!(!turns.is_in_turn(id, 7), "종료 신호 → 턴 아님");
+        assert!(!turns.is_in_turn(id, 7), "end signal → not in a turn");
     }
 
-    /// A sink that reads the table at the doorbell moment — an observation window on the order 「표 갱신 → 통지」 (table update → notification).
+    /// A sink that reads the table at the doorbell moment — an observation window on the order 「table update → notification」.
     struct HaltAtDoorbell {
         turns: Arc<TurnObservations>,
         seen: Mutex<Vec<bool>>,
@@ -1573,7 +1585,7 @@ mod tests {
         fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
         fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
         fn turn_ended(&self, id: AgentId, epoch: u32) {
-            let halted = self.turns.get(id, epoch).expect("관측됨").last_end_failed;
+            let halted = self.turns.get(id, epoch).expect("observed").last_end_failed;
             self.seen.lock().unwrap().push(halted);
         }
     }
@@ -1620,7 +1632,7 @@ mod tests {
         assert_eq!(
             *sink.seen.lock().unwrap(),
             vec![true, false],
-            "초인종을 받은 쪽이 곧바로 바쁨을 묻는다 — 그때 표가 이미 멈춤·풀림을 보여야 한다"
+            "the side that got the doorbell asks about busy right away — by then the table must already show the stop or its release"
         );
     }
 
@@ -1676,7 +1688,7 @@ mod tests {
         };
         entered_rx
             .recv_timeout(Duration::from_secs(5))
-            .expect("오류 줄의 seq 가 발급된 채 붙잡혔다");
+            .expect("the seq of the error line was held after being issued");
         // The injection thread's input echo.
         core.emit(OutputEvent::Structured {
             kind: "user".into(),
@@ -1701,14 +1713,14 @@ mod tests {
         assert_eq!(
             order,
             ["Error", "Structured", "MessageDone"],
-            "링 순서 전제"
+            "ring order premise"
         );
-        let o = turns.get(id, 4).expect("관측됨");
+        let o = turns.get(id, 4).expect("observed");
         assert!(
             o.last_end_failed,
-            "링 순서상 오류로 끝난 턴이 깨끗하게 접혔다 — 뒤 seq 의 진행에 밀려 오류가 버려졌다"
+            "a turn that ended with an error in ring order folded cleanly — the error was discarded, pushed back by progress at a later seq"
         );
-        assert!(!o.in_turn, "턴 끝이 가장 새 신호다");
+        assert!(!o.in_turn, "the turn end is the newest signal");
     }
 
     /// ★A door that writes no progress signal★ — the same event goes to the screen (fanout) · replay as is, but nothing is left in the fact
@@ -1721,8 +1733,12 @@ mod tests {
         core.subscribe(sink.clone());
 
         core.emit_without_turn_observation(delta());
-        assert_eq!(turns.get(id, 3), None, "미귀속 줄이 사실 계층을 켰다");
-        assert_eq!(sink.len(), 1, "화면으로는 나가야 한다");
+        assert_eq!(
+            turns.get(id, 3),
+            None,
+            "an unattributed line turned on the fact layer"
+        );
+        assert_eq!(sink.len(), 1, "it must still go out to the screen");
         assert_eq!(
             core.replay
                 .lock()
@@ -1730,7 +1746,7 @@ mod tests {
                 .snapshot()
                 .len(),
             1,
-            "replay 에도 남아야 한다"
+            "it must remain in replay too"
         );
 
         // The same core's normal door still writes — the doors were split, the table was not turned off.
@@ -1751,7 +1767,7 @@ mod tests {
         assert_eq!(
             turns.get(id, 0),
             None,
-            "턴 신호가 아니면 항목을 만들지 않는다"
+            "no entry is created unless it is a turn signal"
         );
     }
 
@@ -1781,10 +1797,10 @@ mod tests {
     fn a_late_echo_after_finish_cannot_resurrect_the_entry() {
         let (core, turns, id) = core_with_turns(MockStatusSink::new(), 0);
         core.emit(delta());
-        assert!(turns.is_in_turn(id, 0), "전제: 턴 중으로 관측됨");
+        assert!(turns.is_in_turn(id, 0), "premise: observed as in a turn");
 
         core.finish(TerminalReason::Exited { code: Some(0) });
-        assert_eq!(turns.get(id, 0), None, "finish 가 자기 항목을 거둔다");
+        assert_eq!(turns.get(id, 0), None, "finish collects its own entry");
 
         // The injection thread that was blocked now emits the echo (same epoch).
         core.emit(OutputEvent::Structured {
@@ -1794,7 +1810,7 @@ mod tests {
         assert_eq!(
             turns.get(id, 0),
             None,
-            "종료된 화신은 항목을 되살리지 못한다"
+            "an exited incarnation cannot revive its entry"
         );
         assert!(turns.in_turn_snapshot().is_empty());
     }
@@ -1816,12 +1832,19 @@ mod tests {
             dead.emit(delta());
         }
         dead.finish(TerminalReason::Killed);
-        assert_eq!(turns.get(id, 0), None, "종료가 자기 항목을 거둔다(전제)");
+        assert_eq!(
+            turns.get(id, 0),
+            None,
+            "the exit collects its own entry (premise)"
+        );
 
         // The new incarnation (epoch 1) — same AgentId, a new core, so seq counts from 0 again.
         let live = OutputCore::new(id, 1, MockStatusSink::new(), wiring(&turns));
         live.emit(delta());
-        assert!(turns.is_in_turn(id, 1), "산 화신이 턴 중으로 관측됨(전제)");
+        assert!(
+            turns.is_in_turn(id, 1),
+            "the live incarnation is observed as in a turn (premise)"
+        );
 
         // The dead incarnation's injection thread wakes up only now and emits an echo — its seq is **larger** than the live incarnation's.
         dead.emit(OutputEvent::Structured {
@@ -1830,12 +1853,12 @@ mod tests {
         });
         assert!(
             turns.is_in_turn(id, 1),
-            "죽은 화신의 지각 emit 이 산 화신의 관측을 덮거나 지우면 안 된다"
+            "a dead incarnation's late emit must not overwrite or erase the live incarnation's observation"
         );
         assert_eq!(
             turns.get(id, 0),
             None,
-            "죽은 화신의 항목이 되살아나지도 않는다"
+            "the dead incarnation's entry is not revived either"
         );
     }
 
@@ -1862,7 +1885,11 @@ mod tests {
             json: "{}".into(),
         });
         core.emit(message_done());
-        assert_eq!(turns.get(id, 0), None, "분류자가 침묵하면 관측도 없다");
+        assert_eq!(
+            turns.get(id, 0),
+            None,
+            "if the classifier is silent there is no observation either"
+        );
     }
 
     #[test]
@@ -1871,7 +1898,10 @@ mod tests {
         let core = new_core(sink.clone());
         core.emit(delta());
         core.emit(message_done());
-        assert!(sink.turn_ends().is_empty(), "배선 없으면 통지도 없다");
+        assert!(
+            sink.turn_ends().is_empty(),
+            "without wiring there is no notification either"
+        );
     }
 
     #[test]
@@ -1879,8 +1909,11 @@ mod tests {
         let sink = MockStatusSink::new();
         let (core, turns, id) = core_with_turns(sink.clone(), 0);
         core.seed(vec![delta(), message_done(), delta()]);
-        assert_eq!(turns.get(id, 0), None, "seed 는 관측이 아니다");
-        assert!(sink.turn_ends().is_empty(), "seed 는 통지도 내지 않는다");
+        assert_eq!(turns.get(id, 0), None, "seed is not an observation");
+        assert!(
+            sink.turn_ends().is_empty(),
+            "seed emits no notification either"
+        );
         // Observation starts from live emit (it is not that seed blocks observation either).
         core.emit(delta());
         assert!(turns.is_in_turn(id, 0));
@@ -1917,15 +1950,22 @@ mod tests {
         assert_eq!(sink.seqs(), vec![0]);
     }
 
-    /// Like the single-item door, the chunk door **writes no observation** — if a past record made the new incarnation 「턴 중」 (in a turn),
+    /// Like the single-item door, the chunk door **writes no observation** — if a past record made the new incarnation 「in a turn」,
     /// the end of that turn would never come (ADR-0113/0127 · the same discipline `seed` kept).
     #[test]
     fn a_batch_never_bootstraps_turn_observation() {
         let sink = MockStatusSink::new();
         let (core, turns, id) = core_with_turns(sink.clone(), 0);
         core.emit_batch_without_turn_observation(vec![delta(), message_done(), delta()]);
-        assert_eq!(turns.get(id, 0), None, "덩이 문이 관측을 적었다");
-        assert!(sink.turn_ends().is_empty(), "덩이 문이 통지를 냈다");
+        assert_eq!(
+            turns.get(id, 0),
+            None,
+            "the chunk door recorded an observation"
+        );
+        assert!(
+            sink.turn_ends().is_empty(),
+            "the chunk door emitted a notification"
+        );
     }
 
     /// ★★No other emit can slip **into** the chunk★★ — this is the reason this door exists (ADR-0203).
@@ -1965,12 +2005,12 @@ mod tests {
             )
             .map(|c| c.seq)
             .collect();
-        assert_eq!(seqs.len(), 200, "덩이가 링에서 잘렸다");
+        assert_eq!(seqs.len(), 200, "the chunk was cut in the ring");
         for pair in seqs.windows(2) {
             assert_eq!(
                 pair[1],
                 pair[0] + 1,
-                "덩이 한가운데에 다른 줄이 끼어들었다: {seqs:?}"
+                "another line cut into the middle of the chunk: {seqs:?}"
             );
         }
     }
@@ -1990,7 +2030,7 @@ mod tests {
             let ev = sink.events.lock().unwrap();
             assert_eq!(ev[0].1, b"hello");
             assert_eq!(ev[1].1, b"world");
-            assert!(!ev[0].2, "TerminalBytes 는 OutputPayload::Bytes 로 와야 함");
+            assert!(!ev[0].2, "TerminalBytes must come as OutputPayload::Bytes");
             assert!(!ev[1].2);
         }
         let snap = core.snapshot();
@@ -2019,13 +2059,13 @@ mod tests {
             assert_eq!(ev.len(), 2);
             assert!(
                 ev[0].2,
-                "구조화 이벤트는 OutputPayload::Event 로 fanout 돼야 함"
+                "a structured event must fan out as OutputPayload::Event"
             );
             assert!(
                 String::from_utf8_lossy(&ev[0].1).contains("TextDelta"),
-                "Event payload 가 해당 이벤트를 담아야 함"
+                "the Event payload must carry that event"
             );
-            assert!(!ev[1].2, "TerminalBytes 는 Bytes 로 fanout");
+            assert!(!ev[1].2, "TerminalBytes fans out as Bytes");
             assert_eq!(ev[1].1, b"raw");
         }
 
@@ -2035,7 +2075,10 @@ mod tests {
             let ev = late.events.lock().unwrap();
             assert_eq!(ev.len(), 2);
             assert_eq!(ev[0].0, 0);
-            assert!(ev[0].2, "replay 된 구조화 이벤트도 Event payload");
+            assert!(
+                ev[0].2,
+                "a replayed structured event is also an Event payload"
+            );
             assert_eq!(ev[1].0, 1);
             assert!(!ev[1].2);
             assert_eq!(ev[1].1, b"raw");
@@ -2050,10 +2093,10 @@ mod tests {
         core.seed(vec![
             OutputEvent::Structured {
                 kind: "user".into(),
-                json: r#"{"type":"text","text":"과거 질문"}"#.into(),
+                json: r#"{"type":"text","text":"past question"}"#.into(),
             },
             OutputEvent::TextDelta {
-                text: "과거 답변".into(),
+                text: "past answer".into(),
                 turn_id: None,
                 message_id: None,
             },
@@ -2070,18 +2113,18 @@ mod tests {
         assert_eq!(
             late.seqs(),
             vec![0, 1, 2],
-            "seed 한 과거 3건이 Ring 에 seq 0,1,2 로 순서대로 있어야 하고 replay 로 전달됨"
+            "the 3 seeded past items must be in the Ring in order as seq 0,1,2 and be delivered by replay"
         );
 
         core.emit(OutputEvent::TextDelta {
-            text: "새 라이브 토큰".into(),
+            text: "new live token".into(),
             turn_id: None,
             message_id: None,
         });
         assert_eq!(
             late.seqs(),
             vec![0, 1, 2, 3],
-            "seed 뒤 라이브 emit 의 seq 가 seed 마지막+1 로 이어져야 함(gap·중복 없음)"
+            "the seq of a live emit after the seed must continue from the seed's last+1 (no gaps, no duplicates)"
         );
     }
 
@@ -2098,7 +2141,11 @@ mod tests {
             message_id: None,
         }]);
 
-        assert_eq!(sink.len(), 0, "seed 는 기존 구독자로 fanout 하지 않아야 함");
+        assert_eq!(
+            sink.len(),
+            0,
+            "seed must not fan out to existing subscribers"
+        );
 
         core.emit(OutputEvent::TextDelta {
             text: "live".into(),
@@ -2108,7 +2155,7 @@ mod tests {
         assert_eq!(
             sink.seqs(),
             vec![1],
-            "라이브 emit 만 fanout, seq 는 seed 다음"
+            "only live emits fan out, and the seq follows the seed"
         );
     }
 
@@ -2170,7 +2217,7 @@ mod tests {
         assert_eq!(
             ring.terminal_tail(4),
             b"6789".to_vec(),
-            "뒤에서부터 채우므로 남는 건 가장 최근 바이트다"
+            "it fills from the back, so what remains is the most recent bytes"
         );
     }
 
@@ -2193,7 +2240,7 @@ mod tests {
         assert_eq!(
             ring.terminal_tail(64),
             b"raw".to_vec(),
-            "사이에 낀 구조화 이벤트는 건너뛰고 콘솔 바이트만 잇는다"
+            "structured events in between are skipped and only console bytes are joined"
         );
     }
 
@@ -2254,7 +2301,7 @@ mod tests {
         let snap = ring.snapshot();
         assert!(
             snap.len() < 3,
-            "cost_bytes 합이 2MB 초과 시 건수 상한과 무관하게 evict 돼야 함(len={})",
+            "when the sum of cost_bytes exceeds 2MB, it must be evicted regardless of the count cap (len={})",
             snap.len()
         );
         assert_eq!(snap.last().unwrap().seq, 2);
@@ -2288,8 +2335,15 @@ mod tests {
             },
         ));
         let snap = ring.snapshot();
-        assert_eq!(snap.len(), 1, "단일 초과 이벤트라도 최신 1건은 보존돼야 함");
-        assert_eq!(snap[0].seq, 42, "보존된 이벤트는 방금 push 한 최신 seq");
+        assert_eq!(
+            snap.len(),
+            1,
+            "even a single oversized event must keep the latest 1"
+        );
+        assert_eq!(
+            snap[0].seq, 42,
+            "the kept event is the latest seq just pushed"
+        );
     }
 
     #[test]
@@ -2307,8 +2361,12 @@ mod tests {
             },
         ));
         let snap = ring.snapshot();
-        assert_eq!(snap.len(), 1, "오래된 것만 빠지고 최신 1건 남아야 함");
-        assert_eq!(snap[0].seq, 2, "남은 것은 최신 이벤트");
+        assert_eq!(
+            snap.len(),
+            1,
+            "only the old ones go and the latest 1 must remain"
+        );
+        assert_eq!(snap[0].seq, 2, "what remains is the latest event");
     }
 
     #[test]
@@ -2343,7 +2401,7 @@ mod tests {
         assert_eq!(cost3, 6);
     }
 
-    /// Registry events count the body (text · bubble copy) as ring weight — so a long text does not bypass the ring cap as 「건수 1」 (count 1).
+    /// Registry events count the body (text · bubble copy) as ring weight — so a long text does not bypass the ring cap as 「count 1」.
     #[test]
     fn ring_cost_bytes_counts_queued_text_and_ack_copies() {
         use crate::types::{DeliveredCopy, DropCause};
@@ -2409,14 +2467,14 @@ mod tests {
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
-            "finalize 승자 경로에서 on_terminal hook 이 정확히 1회 호출돼야 함"
+            "the on_terminal hook must be called exactly once on the finalize winner path"
         );
 
         core.finish(TerminalReason::Killed);
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
-            "중복 finish(finalize 패자)에서 on_terminal hook 이 다시 호출됨(1회 위반)"
+            "the on_terminal hook was called again on a duplicate finish (finalize loser) (violates once)"
         );
     }
 
@@ -2495,14 +2553,14 @@ mod tests {
             assert_eq!(out.replayed, 0);
             assert_eq!(
                 out.replay_from, 0,
-                "빈 ring 은 첫 발급 seq({after_seq:?}, {epoch_matches})"
+                "an empty ring gives the first issued seq ({after_seq:?}, {epoch_matches})"
             );
 
             core.emit(OutputEvent::TerminalBytes(b"a".to_vec()));
             assert_eq!(
                 sink.seqs(),
                 vec![out.replay_from],
-                "머리 = 실제로 처음 오는 seq"
+                "head = the seq that actually comes first"
             );
         }
     }
@@ -2560,7 +2618,7 @@ mod tests {
         let out = core.subscribe_from(sink, Some(1), true, move |outcome| {
             assert!(
                 !started.load(Ordering::SeqCst),
-                "on_ready 는 replay 전송 전에 호출돼야 함"
+                "on_ready must be called before the replay is sent"
             );
             cc.fetch_add(1, Ordering::SeqCst);
             *seen_cb.lock().unwrap() = Some(*outcome);
@@ -2569,7 +2627,7 @@ mod tests {
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
         // Whether the replay was really sent (after_seq=1 → seq 2 sent) → started true.
         assert!(replay_started.load(Ordering::SeqCst));
-        let seen = seen.lock().unwrap().expect("콜백이 호출됨");
+        let seen = seen.lock().unwrap().expect("the callback was called");
         assert_eq!(seen.kind, out.kind);
         assert_eq!(seen.oldest_seq, out.oldest_seq);
         assert_eq!(seen.latest_seq, out.latest_seq);
@@ -2624,11 +2682,11 @@ mod tests {
         assert_eq!(
             seqs.len() as u64,
             THREADS * PER_THREAD,
-            "eviction 없이 전량 저장돼야(검사 완전성)"
+            "everything must be stored without eviction (completeness of the check)"
         );
         assert!(
             seqs.windows(2).all(|w| w[0] < w[1]),
-            "replay ring 은 seq 로 엄격 오름차순이어야 한다(동시 emit 원자성): {seqs:?}"
+            "the replay ring must be strictly ascending by seq (atomicity of concurrent emits): {seqs:?}"
         );
     }
 }
@@ -2703,7 +2761,7 @@ mod queued_tests {
         fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
     }
 
-    /// Write the two tables at the moment two doorbells ring — an observation window on the orders 「표 갱신 → 통지」 (table update → notification) · 「턴 관측 → 비었다」 (turn observation → became empty).
+    /// Write the two tables at the moment two doorbells ring — an observation window on the orders 「table update → notification」 · 「turn observation → became empty」.
     struct DoorbellProbe {
         id: AgentId,
         pending: Arc<InputsPendingTable>,
@@ -2772,7 +2830,7 @@ mod queued_tests {
         })
     }
 
-    /// A classifier where the receipt that empties the list is also a turn end — built to tell whether the turn-end doorbell comes before 「비었다」 (became empty).
+    /// A classifier where the receipt that empties the list is also a turn end — built to tell whether the turn-end doorbell comes before 「became empty」.
     fn delivered_ends_the_turn(event: &OutputEvent) -> Option<TurnSignal> {
         matches!(
             event,
@@ -2899,29 +2957,33 @@ mod queued_tests {
         let ops = ring_ops(&core);
         assert!(
             ring(&core).len() < REPLAY_MAX_EVENTS,
-            "축출 없이 전량 남아야 대조가 완전하다"
+            "everything must remain without eviction for the comparison to be complete"
         );
         samples.sort_by_key(|(_, s)| *s);
         let mut fresh = Registry::new();
         let mut next = ops.iter().peekable();
         for (rows, s) in samples {
             let Some(s) = s else {
-                assert!(rows.is_empty(), "목록 사건 없이 행이 있다");
+                assert!(rows.is_empty(), "there are rows without list events");
                 continue;
             };
             while let Some((seq, op)) = next.next_if(|(seq, _)| *seq <= s) {
                 fresh.reduce(*seq, op);
             }
-            assert_eq!(fresh.as_of_seq(), Some(s), "S 가 목록 사건의 seq 가 아니다");
+            assert_eq!(
+                fresh.as_of_seq(),
+                Some(s),
+                "S is not the seq of a list event"
+            );
             assert_eq!(
                 fresh.rows(),
                 &rows[..],
-                "S={s} 의 행이 링 접두의 환원값과 다르다"
+                "the rows at S={s} differ from the reduced value of the ring prefix"
             );
         }
         assert!(
             next.next().is_none(),
-            "마지막 스냅숏이 링 끝까지 환원하지 않았다"
+            "the last snapshot did not reduce to the end of the ring"
         );
     }
 
@@ -2987,7 +3049,7 @@ mod queued_tests {
                 format!("{:?}", ended("b")),
                 format!("status {:?}", AgentStatus::Exited { code: Some(0) }),
             ],
-            "남은 항목이 종점 전이보다 먼저 닫혀야 한다(목록 순)"
+            "the remaining entries must be closed before the terminal transition (in list order)"
         );
         let tail: Vec<_> = ring_ops(&core)
             .into_iter()
@@ -3000,13 +3062,13 @@ mod queued_tests {
         assert_eq!(
             registry.tombstone("a"),
             Some(false),
-            "에이전트 종료는 되살림 불가"
+            "agent exit is not revivable"
         );
         drop(registry);
         assert_eq!(
             fx.pending(),
             None,
-            "대기 목록 표가 이 화신의 항목을 거두지 않았다"
+            "the waiting-list table did not collect this incarnation's entries"
         );
     }
 
@@ -3062,12 +3124,12 @@ mod queued_tests {
         let first_drop = ops
             .iter()
             .position(|op| matches!(op, QueuedInputEvent::Dropped { .. }))
-            .expect("합성 Dropped 가 없다");
+            .expect("there is no synthesized Dropped");
         let listed: Vec<&String> = ops[..first_drop]
             .iter()
             .map(|op| match op {
                 QueuedInputEvent::Queued { id, .. } => id,
-                other => panic!("합성 앞에 Queued 아닌 사건: {other:?}"),
+                other => panic!("an event before the synthesis that is not Queued: {other:?}"),
             })
             .collect();
         let dropped_after: Vec<&String> = ops[first_drop..]
@@ -3077,15 +3139,18 @@ mod queued_tests {
                     id,
                     cause: DropCause::AgentEnded,
                 } => id,
-                other => panic!("합성 뒤에 AgentEnded 아닌 사건 — 봉인을 빠져나갔다: {other:?}"),
+                other => panic!("an event after the synthesis that is not AgentEnded — it slipped past the seal: {other:?}"),
             })
             .collect();
         assert_eq!(
             &dropped_after[..listed.len()],
             &listed[..],
-            "합성 덩이가 그때 열린 항목 전부를 목록 순으로 잇달아 닫지 않았다"
+            "the synthesis chunk did not close every entry open at that time in list order one after another"
         );
-        assert!(rows(&core).is_empty(), "명부에 비종결 항목이 남았다");
+        assert!(
+            rows(&core).is_empty(),
+            "a non-terminal entry remained in the registry"
+        );
     }
 
     // ── Rewriting after the decision · copy ─────────────────────────────────────────────────────────────
@@ -3119,14 +3184,14 @@ mod queued_tests {
         );
         let registry = core.queued_inputs().lock();
         assert!(registry.is_empty());
-        assert_eq!(registry.tombstone("b"), Some(false), "받음으로 닫혔다");
+        assert_eq!(registry.tombstone("b"), Some(false), "closed as accepted");
         assert_eq!(registry.as_of_seq(), Some(3));
         drop(registry);
         assert_eq!(fx.pending(), Some(false));
         assert_eq!(
             probe.drains().len(),
             1,
-            "빔 → 빔인 바꿔 적기는 초인종을 울리지 않는다"
+            "a rewrite from empty → empty does not ring the doorbell"
         );
     }
 
@@ -3144,7 +3209,7 @@ mod queued_tests {
         assert_eq!(
             ops[1],
             (1, ended("c")),
-            "봉인 뒤의 Queued 는 받음이 아니라 버림이다"
+            "a Queued after the seal is a drop, not an acceptance"
         );
     }
 
@@ -3189,16 +3254,16 @@ mod queued_tests {
         );
 
         core.emit(OutputEvent::QueuedInput(QueuedInputEvent::AckUnavailable {
-            delivered: vec![copy("zz", "디코더가 채운 것")],
+            delivered: vec![copy("zz", "what the decoder filled")],
         }));
 
-        let stored = ring(&core).pop().expect("판명");
+        let stored = ring(&core).pop().expect("settled");
         let filled = QueuedInputEvent::AckUnavailable {
             delivered: vec![copy("a", "AAAA"), copy("b", "BBBB"), copy("c", "CCCC")],
         };
         assert!(
             matches!(&stored.event, OutputEvent::QueuedInput(op) if *op == filled),
-            "사본이 닫힌 항목의 목록 순 본문이 아니다: {:?}",
+            "the copy is not the list-order body of the closed entry: {:?}",
             stored.event
         );
         assert_eq!(
@@ -3211,7 +3276,7 @@ mod queued_tests {
         assert_eq!(
             registry.tombstone("zz"),
             None,
-            "덮인 디코더 사본은 환원되지 않는다"
+            "an overwritten decoder copy is not reduced"
         );
         assert!(registry.ack_unavailable_seen());
     }
@@ -3250,12 +3315,12 @@ mod queued_tests {
         assert_eq!(
             ring_ops(&core).len(),
             3,
-            "합성 Dropped x · 봉인 Dropped y 가 링에 섰다"
+            "synthesized Dropped x · sealed Dropped y stood in the ring"
         );
         assert_eq!(
             classified(),
             vec!["Queued x"],
-            "종료 합성·봉인이 분류기를 지났다"
+            "the exit synthesis and seal went through the classifier"
         );
 
         // Rewriting after the decision — only the original event (including the decoder's finding) passes.
@@ -3268,7 +3333,7 @@ mod queued_tests {
         assert_eq!(
             classified(),
             vec!["Queued a", "AckUnavailable", "Queued b"],
-            "판정 뒤 잇는 AckUnavailable 이 분류기를 지났다"
+            "the AckUnavailable that follows the decision went through the classifier"
         );
     }
 
@@ -3285,16 +3350,19 @@ mod queued_tests {
         core.emit(dropped("b", DropCause::Rejected));
         core.emit(ack_unavailable());
         core.emit(queued("c", "C"));
-        assert!(!fx.turns.is_in_turn(fx.id, EPOCH), "목록 사건이 턴을 켰다");
+        assert!(
+            !fx.turns.is_in_turn(fx.id, EPOCH),
+            "a list event turned a turn on"
+        );
         assert!(
             probe.at_turn_end.lock().unwrap().is_empty(),
-            "목록 사건이 턴을 끝냈다"
+            "a list event ended a turn"
         );
     }
 
     // ── Write order of the pending-list table ─────────────────────────────────────────────────────────────
 
-    /// 「찼다」 (became full) is inside the replay lock that reduced it — the side that received that emit's fanout already reads true.
+    /// 「became full」 is inside the replay lock that reduced it — the side that received that emit's fanout already reads true.
     #[test]
     fn filled_is_written_inside_the_lock_that_reduced_it() {
         struct ReadsPendingOnQueued {
@@ -3332,7 +3400,7 @@ mod queued_tests {
         assert_eq!(*sink.seen.lock().unwrap(), vec![Some(true)]);
     }
 
-    /// 「비었다」 (became empty) is **after** that emit's turn observation — if the receipt that empties the list is also a turn end, the table is
+    /// 「became empty」 is **after** that emit's turn observation — if the receipt that empties the list is also a turn end, the table is
     /// still true at the turn-end doorbell moment and false at the became-empty doorbell moment.
     #[test]
     fn drained_is_written_after_the_turn_observation_of_the_same_emit() {
@@ -3346,7 +3414,7 @@ mod queued_tests {
     }
 
     /// The claude `Delivered` that empties the list (progress of the drain turn) — at the moment the table turns false, turn observation is already progress.
-    /// An observer reading nonstop in the same order as the adapter (table first, turn observation later) never sees 「둘 다 한가」 (both idle) even once.
+    /// An observer reading nonstop in the same order as the adapter (table first, turn observation later) never sees 「both idle」 even once.
     #[test]
     fn a_draining_claude_delivery_is_never_observed_idle_on_both_facts() {
         let fx = Fixture::new();
@@ -3375,7 +3443,9 @@ mod queued_tests {
             })
         };
         core.emit(queued("a", "A"));
-        filled_rx.recv_timeout(WAIT).expect("관찰자가 찼다를 봤다");
+        filled_rx
+            .recv_timeout(WAIT)
+            .expect("the observer saw filled");
         core.emit(delivered("a"));
         stop.store(true, Ordering::Release);
         assert_eq!(observer.join().expect("observer"), 0);
@@ -3397,22 +3467,25 @@ mod queued_tests {
         core.emit(queued("b", "B"));
         assert_eq!(fx.pending(), Some(true));
         core.finish(TerminalReason::Killed);
-        assert!(rows(&core).is_empty(), "종료 합성이 목록을 비웠다(전제)");
+        assert!(
+            rows(&core).is_empty(),
+            "the exit synthesis emptied the list (premise)"
+        );
         // ADR-0231: terminal synthesis does not ring the doorbell — the pending-list table entry is reaped right away, and the doorbell would be a stimulus to flow mail into an incarnation about to make its
         //   terminal transition (parked mail is carried by the next incarnation's appearance flush).
         assert_eq!(
             probe.drains().len(),
             1,
-            "종료 합성이 죽어가는 화신 앞으로 초인종을 울렸다"
+            "the exit synthesis rang the doorbell for the dying incarnation"
         );
-        assert_eq!(fx.pending(), None, "표에서 거둔다");
+        assert_eq!(fx.pending(), None, "collected from the table");
     }
 
-    /// The table drops writes with a smaller seq — a 「비었다」 (became empty) (seq N) deferred outside the lock does not overwrite a 「찼다」 (became full) (seq N+1) that another thread
+    /// The table drops writes with a smaller seq — a 「became empty」 (seq N) deferred outside the lock does not overwrite a 「became full」 (seq N+1) that another thread
     /// wrote inside the lock in between.
     #[test]
     fn a_deferred_drain_never_overwrites_a_later_fill() {
-        /// Catch at the first turn-end doorbell — a spot that holds the thread right before it writes 「비었다」 (became empty) (test only).
+        /// Catch at the first turn-end doorbell — a spot that holds the thread right before it writes 「became empty」 (test only).
         struct HoldFirstTurnEnd {
             hold: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
         }
@@ -3441,8 +3514,13 @@ mod queued_tests {
             let core = core.clone();
             std::thread::spawn(move || core.emit(delivered("a")))
         };
-        entered_rx.recv_timeout(WAIT).expect("비우는 스레드가 섰다");
-        assert!(rows(&core).is_empty(), "명부는 이미 비었다(락 안)");
+        entered_rx
+            .recv_timeout(WAIT)
+            .expect("the emptying thread stood up");
+        assert!(
+            rows(&core).is_empty(),
+            "the registry is already empty (inside the lock)"
+        );
         core.emit(queued("b", "B"));
         release_tx.send(()).expect("release");
         drainer.join().expect("drainer");
@@ -3450,7 +3528,7 @@ mod queued_tests {
         assert_eq!(
             fx.pending(),
             Some(true),
-            "늦게 쓴 더 작은 seq 의 「비었다」가 「찼다」를 덮었다"
+            "the empty written late with a smaller seq overwrote the filled"
         );
         assert_eq!(rows(&core).len(), 1);
     }
@@ -3474,11 +3552,11 @@ mod queued_tests {
         assert_eq!(
             probe.drains().len(),
             2,
-            "빈 목록의 묘비 사건은 울리지 않는다"
+            "a tombstone event of an empty list does not ring"
         );
         assert!(
             probe.at_turn_end.lock().unwrap().is_empty(),
-            "턴 끝은 없었다"
+            "there was no turn end"
         );
     }
 
@@ -3585,7 +3663,7 @@ mod queued_tests {
         };
         entered_rx
             .recv_timeout(WAIT)
-            .expect("seq 0 의 send 가 붙잡혔다");
+            .expect("the send of seq 0 was held");
         core.emit(queued("n1", "N+1"));
         let late = Recorder::new();
         core.subscribe(late.clone());
@@ -3596,12 +3674,12 @@ mod queued_tests {
         assert_eq!(
             held.got.lock().unwrap().clone(),
             vec![1, 2, 0],
-            "붙잡힌 N 이 N+1 뒤에 도착한다 — 역전은 있다"
+            "the held N arrives after N+1 — there is reordering"
         );
         assert_eq!(
             late.seqs(),
             vec![0, 1, 2],
-            "새 sink 는 replay + 라이브로 전부 받는다"
+            "a new sink receives everything through replay + live"
         );
     }
 
@@ -3650,8 +3728,11 @@ mod queued_tests {
         assert!(!core.read_pending_listed() && !core.read_in_turn());
 
         fx.pending.set(fx.id, EPOCH, 100, true);
-        assert!(core.read_pending_listed(), "표만 찼다");
-        assert!(!core.read_in_turn(), "턴 관측은 표를 읽지 않는다");
+        assert!(core.read_pending_listed(), "only the table is filled");
+        assert!(
+            !core.read_in_turn(),
+            "turn observation does not read the table"
+        );
 
         fx.pending.set(fx.id, EPOCH, 101, false);
         core.emit(OutputEvent::TextDelta {
@@ -3659,10 +3740,13 @@ mod queued_tests {
             turn_id: None,
             message_id: None,
         });
-        assert!(core.read_in_turn(), "턴 관측만 턴 중");
+        assert!(
+            core.read_in_turn(),
+            "only the turn observation is in a turn"
+        );
         assert!(
             !core.read_pending_listed(),
-            "목록 읽기는 턴 관측을 읽지 않는다"
+            "the list read does not read the turn observation"
         );
     }
 
@@ -3687,27 +3771,33 @@ mod queued_tests {
         };
 
         assert!(!judged(queued_op("q1")));
-        assert!(judged(unavailable()), "첫 판정");
-        assert!(!judged(unavailable()), "둘째 판정은 다시 세우지 않는다");
-        assert!(!judged(queued_op("q2")), "판명 뒤 바꿔 적기");
+        assert!(judged(unavailable()), "first decision");
+        assert!(
+            !judged(unavailable()),
+            "the second decision does not set it again"
+        );
+        assert!(!judged(queued_op("q2")), "a rewrite after settling");
     }
 
     #[test]
     fn classified_input_busy_reads_the_two_tables_of_this_incarnation() {
         let fx = Fixture::new();
         let core = fx.core(Arc::new(Quiet), claude_classifier());
-        assert!(!core.classified_input_busy(), "빈 목록 · 턴 없음 = 한가");
+        assert!(!core.classified_input_busy(), "empty list · no turn = idle");
         core.emit(queued("q1", "one"));
-        assert!(core.classified_input_busy(), "목록이 찼다");
+        assert!(core.classified_input_busy(), "the list is filled");
         core.emit(delivered("q1"));
         assert_eq!(fx.pending(), Some(false));
-        assert!(core.classified_input_busy(), "받음 = 진행 — 턴 중");
+        assert!(
+            core.classified_input_busy(),
+            "accepted = progress — in a turn"
+        );
 
         let detached = OutputCore::new(fx.id, EPOCH, Arc::new(Quiet), TurnWiring::detached());
         detached.emit(queued("q1", "one"));
         assert!(
             !detached.classified_input_busy(),
-            "표가 없는 조립은 목록을 빈 것으로 읽는다"
+            "an assembly without a table reads the list as empty"
         );
     }
 
@@ -3726,7 +3816,7 @@ mod queued_tests {
         assert_eq!(
             ring_ops(&core).len(),
             before,
-            "목록 밖 id 는 링에 아무것도 안 세운다"
+            "an id outside the list sets nothing up in the ring"
         );
 
         assert_eq!(core.emit_cancel_request("q1"), CancelRequest::Recorded);
@@ -3748,8 +3838,12 @@ mod queued_tests {
         assert_eq!(
             ring_ops(&core).len(),
             before + 1,
-            "멱등 — 둘째 요청은 링을 안 건드린다"
+            "idempotent — the second request does not touch the ring"
         );
-        assert_eq!(fx.pending(), Some(true), "취소 대기도 목록이다");
+        assert_eq!(
+            fx.pending(),
+            Some(true),
+            "a pending cancel is also part of the list"
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! Wire shape of the connection's first frame (token handshake) — built by the shell and unpacked by the daemon (ADR-0129 0-4 · ADR-0310 decision 9).
 //!
-//! ★Not a variant of the command enum ([`crate::AgentCommand`])★: token auth decides 「이 소켓을 살릴지」 (whether to keep this socket alive), so even if the
+//! ★Not a variant of the command enum ([`crate::AgentCommand`])★: token auth decides 「whether to keep this socket alive」, so even if the
 //! network layer that makes that decision does not know the command vocabulary, it must be able to unpack this one frame (ADR-0129 decision 1).
 //! So it is a separate type, and reviving `Auth` in the command enum would make two definitions coexist and diverge (that enum's comment).
 //!
@@ -80,10 +80,10 @@ mod tests {
             protocol_version: 7,
         };
         for shown in [format!("{frame:?}"), format!("{frame:#?}")] {
-            assert!(!shown.contains(&token), "Debug 가 토큰을 찍었다: {shown}");
+            assert!(!shown.contains(&token), "Debug printed the token: {shown}");
             assert!(
                 shown.contains("protocol_version"),
-                "가린 것은 토큰뿐: {shown}"
+                "only the token is masked: {shown}"
             );
         }
     }
@@ -98,7 +98,7 @@ mod tests {
         ] {
             assert!(
                 serde_json::from_str::<AuthFrame>(text).is_err(),
-                "auth 가 아닌 프레임이 통과했다: {text}"
+                "a frame that is not auth passed: {text}"
             );
         }
     }
@@ -108,11 +108,11 @@ mod tests {
         // The failure branches of the daemon's `link::auth` (the first frame is not auth / not JSON at all) rely on this classification.
         // It is a value serde_json has already computed, so the branches split without re-parsing.
         let shape = serde_json::from_str::<AuthFrame>(r#"{"NotACommand":true}"#).unwrap_err();
-        assert!(shape.is_data(), "JSON 이지만 모양이 다름 = data 에러");
+        assert!(shape.is_data(), "JSON but a different shape = data error");
         let syntax = serde_json::from_str::<AuthFrame>("not json at all").unwrap_err();
-        assert!(!syntax.is_data(), "JSON 이 아님 = data 에러가 아님");
+        assert!(!syntax.is_data(), "not JSON = not a data error");
         let empty = serde_json::from_str::<AuthFrame>("").unwrap_err();
-        assert!(!empty.is_data(), "빈 프레임 = data 에러가 아님(eof)");
+        assert!(!empty.is_data(), "empty frame = not a data error (eof)");
     }
 
     #[test]

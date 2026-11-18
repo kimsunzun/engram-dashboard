@@ -36,7 +36,7 @@ Editions 1 and 2 of the Phase 2a TRD guessed at this place on top of layer names
 
 ★**The decisive ground = re-reading the original comment text**★. `transport/mod.rs:19-23` read as if it named codex and forbade it, so the edition-2 review blocked this option as 「TRD 가 정할 게 아니라 별도 결정이 필요한 행위」 (an act that needs a separate decision, not something a TRD can decide). The subject of the original sentence is **`StdioTransport`** (the comment is kept verbatim in Korean; in English: the transport (StdioTransport) is a **dumb pipe**, so it must not know what schema the child's stdout bytes follow (claude stream-json / codex protocol / plain text)):
 
-> transport(StdioTransport)는 **바보 파이프**라 자식 stdout 바이트가 무슨 스키마인지(claude stream-json / codex 프로토콜 / 평문) 몰라야 한다.
+> transport(StdioTransport) is a **dumb pipe**, so it must not know what schema the child stdout bytes are (claude stream-json / codex protocol / plain text).
 
 That is, it describes **one general-purpose pipe implementation**, and codex was merely listed as a schema example. The same intent is in `stdio.rs:7-9` and likewise points at that file itself. **The general-purpose pipe stays dumb as it is, and the schema knowledge lives in the backend folder — both rules are kept at once.** ★Because this reinterpretation overturns a review verdict, the main agent did not settle it on its own and took the user's decision (2026-09-09).★
 

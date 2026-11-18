@@ -1,13 +1,7 @@
-// The applier that attaches the shell setting `chat.style.*` to :root CSS variables — the authority of the value is the shell setting (ADR-0265), and here we only move the received value
-//   to a variable name through a whitelist (`CSS_VAR_BY_KEY`) and setProperty it. StructuredTextView/ChatRow/chat.css read only
-//   var() (the CSS variable layer of ADR-0051).
-//
-// ★No default is kept here★ — the canonical source is the shell schema table (`src-tauri/src/settings/registry.rs`), and the first
-//   paint before values arrive is handled by the `--chat-*` fallback in `theme.css` (TRD S21-storage §10 F6 (a) — asynchronous).
-// ★Nothing is saved★ — writes are only `settings_set`/`settings_reset`, and their result comes back as a notice and is painted here.
-//   Do not revive localStorage persistence: the saved copy would diverge from the shell value and become two sources.
-// ★There is no key-set cross-check (U2)★ — if the shell table's 11 keys and `CSS_VAR_BY_KEY` diverge, `settings.set chat.style.X`
-//   answers `changed:true` but the screen stays the same (ADR-0265 「U2 의 대가」).
+// Applies the shell setting `chat.style.*` to :root CSS variables — the value's authority is the shell setting (ADR-0265); here the received value is only moved to a variable name through a whitelist (`CSS_VAR_BY_KEY`) and setProperty'd. StructuredTextView/ChatRow/chat.css read only var() (the CSS variable layer of ADR-0051).
+// ★No default is kept here★ — the canonical source is the shell schema table (`src-tauri/src/settings/registry.rs`); the first paint before values arrive is the `--chat-*` fallback in `theme.css` (TRD S21-storage §10 F6 (a) — asynchronous).
+// ★Nothing is saved★ — writes are only `settings_set`/`settings_reset`, and their result comes back as a notice painted here. Do not revive localStorage persistence: the saved copy would diverge from the shell value into two sources.
+// ★No key-set cross-check (U2)★ — if the shell table's 11 keys and `CSS_VAR_BY_KEY` diverge, `settings.set chat.style.X` answers `changed:true` but the screen stays the same (ADR-0265 "the cost of U2").
 // ADR-0265
 
 import {
@@ -29,7 +23,7 @@ export type ChatStyleKey =
   | 'railDotTop' // dot marker top (near the first line of content)
   | 'fontSize' // chat base font-size (in sync with chat.css)
   | 'lineHeight' // chat base line-height
-  | 'waitStripH' // waiting-indicator row height above the input (user decision 2026-10-01)
+  | 'waitStripH' // waiting-indicator row height above the input
 
 /** Setting key = this prefix + `ChatStyleKey` (the last segment of the shell table is this spelling). */
 const KEY_PREFIX = 'chat.style.'
@@ -53,8 +47,7 @@ const CSS_VAR_BY_KEY: Record<ChatStyleKey, string> = {
 function cssVarOf(settingKey: string): string | undefined {
   if (!settingKey.startsWith(KEY_PREFIX)) return undefined
   const key = settingKey.slice(KEY_PREFIX.length)
-  // FIX-2: decide by own key only — `key in CSS_VAR_BY_KEY` walks the prototype chain so keys like `chat.style.constructor` ·
-  //   `chat.style.__proto__` pass.
+  // FIX-2: decide by own key only — `key in CSS_VAR_BY_KEY` walks the prototype chain, so `chat.style.constructor` · `chat.style.__proto__` would pass.
   if (!Object.prototype.hasOwnProperty.call(CSS_VAR_BY_KEY, key)) return undefined
   return CSS_VAR_BY_KEY[key as ChatStyleKey]
 }

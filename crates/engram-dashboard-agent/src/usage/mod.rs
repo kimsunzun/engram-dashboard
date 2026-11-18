@@ -1,7 +1,7 @@
 //! The vendor-neutral vocabulary of usage-limit observations — made by backends and received by the daemon ([`crate::types::StatusSink::usage_observed`]).
 //!
 //! ★Do not put vendor names · policy (cooldown · deadline) here★ — each vendor's backend module carries them (ADR-0004
-//!   「백엔드 확장」). This module knows a vendor only as one opaque word.
+//!   「backend extension」). This module knows a vendor only as one opaque word.
 //! Shared producer-side tools live here too — field value normalization ([`used_pct_from_fraction`] etc.) · upstream string tools
 //! ([`display_text`]·[`has_word`]) · the grounds of an abnormal result and the upstream original text ([`UsageDetail`]·[`UpstreamText`]) · the decoder wrapper that blocks the pickup of agents that are not the
 //! default account ([`UsageGate`]).
@@ -70,7 +70,7 @@ impl Default for UsageAccountKey {
     }
 }
 
-/// The key of one usage-state entry — `(벤더, 계정)`.
+/// The key of one usage-state entry — `(vendor, account)`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageKey {
     pub vendor: UsageVendorKey,
@@ -106,10 +106,10 @@ pub enum UsageSource {
 
 /// One usage observation of one vendor.
 ///
-/// ★A missing field (`None`) means 「안 실렸다」 (not carried) regardless of source★ — the receiving side leaves the value it held as is
-///   (the same for `model_scoped` · `plan`). A null window in a query result is not 「없음」 (none) either.
+/// ★A missing field (`None`) means 「not carried」 regardless of source★ — the receiving side leaves the value it held as is
+///   (the same for `model_scoped` · `plan`). A null window in a query result is not 「none」 either.
 /// `model_scoped: Some` replaces the whole list — it is not merged per item. `Some(vec![])` is
-///   「모델별 창 없음」 (no per-model window) — the receiver empties the list it holds (the producer emits this when it read the container and it had 0 items).
+///   「no per-model window」 — the receiver empties the list it holds (the producer emits this when it read the container and it had 0 items).
 /// ★Does not carry the observation time★ — the receiving daemon stamps it. The producer (decoder) has no clock.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageObservation {
@@ -119,10 +119,10 @@ pub struct UsageObservation {
     pub model_scoped: Option<Vec<ScopedWindowObs>>,
     pub plan: Option<String>,
     pub source: UsageSource,
-    /// `Some` = the query succeeded but upstream answered 「이 계정엔 한도 정보가 없다」 (this account has no limit information) — the value is its grounds (Claude
+    /// `Some` = the query succeeded but upstream answered 「this account has no limit information」 — the value is its grounds (Claude
     /// `rate_limits_available: false` — API key · Bedrock · Vertex · a token without profile permission · logged out).
     /// If `Some`, the window fields (`five_hour` · `weekly` · `model_scoped`) are all `None` and `source` is
-    /// `Active` — a promise kept by the maker. The receiver empties all window values and folds into the 「정보 없음」 (no information)
+    /// `Active` — a promise kept by the maker. The receiver empties all window values and folds into the 「no information」
     /// state — it is not a failure (a failure leaves the held values as they are).
     /// A `Passive` observation is always `None`.
     pub limits_unavailable: Option<UsageDetail>,
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(
             sink.calls.load(Ordering::SeqCst),
             0,
-            "기본 구현이 다른 훅으로 새면 안 된다"
+            "the default implementation must not leak into another hook"
         );
     }
 
@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(
             UsageVendorKey::new(leaked).cmp(&UsageVendorKey::new("a-vendor")),
             std::cmp::Ordering::Equal,
-            "다른 주소의 같은 낱말은 같은 키다"
+            "the same word at a different address is the same key"
         );
     }
 }

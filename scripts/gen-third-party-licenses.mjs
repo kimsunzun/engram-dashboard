@@ -4,7 +4,7 @@
 // ADR-0294: the notice is not committed but built at release build time, and the same generation also runs in push CI · it fails if wrong (fail-closed).
 // Two callers: `scripts/build-release.ps1` (every release build — before the long build) · the CI gates job (every push — the result is discarded).
 //   Why it runs on push too: so that failures such as a license outside the allowed set or a package with no license text do not first blow up in the release build after the tag is cut.
-// Usage: `node scripts/gen-third-party-licenses.mjs <출력 파일 경로>` (cwd-independent)
+// Usage: `node scripts/gen-third-party-licenses.mjs <output file path>` (cwd-independent)
 //   Prerequisites: cargo-about at the CARGO_ABOUT_VERSION below · node_modules after `npm ci` (generate-license-file is also installed
 //   there as a devDependency — package-lock.json pins its version and its transitive dependencies).
 //
@@ -40,7 +40,7 @@ function note(message) {
   process.stderr.write(`gen-third-party-licenses: ${message}\n`)
 }
 
-if (process.argv.length !== 3) fail('사용: node scripts/gen-third-party-licenses.mjs <출력 파일 경로>')
+if (process.argv.length !== 3) fail('usage: node scripts/gen-third-party-licenses.mjs <output file path>')
 const OUTPUT = resolve(process.argv[2])
 
 const work = mkdtempSync(join(tmpdir(), 'engram-licenses-'))
@@ -59,7 +59,7 @@ function normalize(text) {
 function readAccepted() {
   const toml = readFileSync(join(CONFIG_DIR, 'about.toml'), 'utf8')
   const block = toml.match(/^accepted\s*=\s*\[([^\]]*)\]/m)
-  if (!block) fail('scripts/licenses/about.toml 에서 accepted 목록을 읽지 못했습니다')
+  if (!block) fail('could not read the accepted list from scripts/licenses/about.toml')
   return [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1])
 }
 const ACCEPTED = readAccepted()
@@ -73,11 +73,11 @@ function evalSpdx(expr, leaf) {
     if (tokens[i] === '(') {
       i++
       const v = orExpr()
-      if (tokens[i++] !== ')') throw new Error('괄호')
+      if (tokens[i++] !== ')') throw new Error('parenthesis')
       return v
     }
     const id = tokens[i++]
-    if (id === undefined || ['AND', 'OR', 'WITH', ')'].includes(id)) throw new Error('식별자 자리')
+    if (id === undefined || ['AND', 'OR', 'WITH', ')'].includes(id)) throw new Error('identifier position')
     let exception = null
     if (tokens[i] === 'WITH') {
       exception = tokens[i + 1]
@@ -131,10 +131,10 @@ const PART_RULE = '#'.repeat(80)
 
 const aboutVersion = spawnSync('cargo', ['about', '--version'], { encoding: 'utf8' })
 if (aboutVersion.error || aboutVersion.status !== 0) {
-  fail(`cargo-about 이 없습니다 — 설치: ${CARGO_ABOUT_INSTALL}`)
+  fail(`cargo-about is missing — install: ${CARGO_ABOUT_INSTALL}`)
 }
 if (aboutVersion.stdout.trim() !== `cargo-about ${CARGO_ABOUT_VERSION}`) {
-  fail(`cargo-about ${CARGO_ABOUT_VERSION} 이 필요합니다(설치된 것: ${aboutVersion.stdout.trim()}) — 설치: ${CARGO_ABOUT_INSTALL}`)
+  fail(`cargo-about ${CARGO_ABOUT_VERSION} is required (installed: ${aboutVersion.stdout.trim()}) — install: ${CARGO_ABOUT_INSTALL}`)
 }
 
 const rustJson = join(work, 'rust.json')
@@ -150,8 +150,8 @@ const about = spawnSync(
   ],
   { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
 )
-if (about.error) fail(`cargo about 을 실행하지 못했습니다 - ${about.error.message}`)
-if (about.status !== 0) fail(`cargo about 실패(exit ${about.status})\n${about.stderr}`)
+if (about.error) fail(`could not run cargo about - ${about.error.message}`)
+if (about.status !== 0) fail(`cargo about failed (exit ${about.status})\n${about.stderr}`)
 // Our crates have no license field so a warning appears every time — only that one is filtered out and the other warnings stay visible. The decision is made from the JSON below.
 const aboutNoise = about.stderr.split('\n').filter((l) => l.trim() !== '' && !l.includes("'engram-dashboard"))
 if (aboutNoise.length > 0) process.stderr.write(aboutNoise.join('\n') + '\n')
@@ -165,14 +165,14 @@ const rust = JSON.parse(readFileSync(rustJson, 'utf8'))
 const unknownExternal = rust.crates.filter((c) => c.license === 'Unknown' && c.package.source != null)
 if (unknownExternal.length > 0) {
   fail(
-    `라이선스를 못 정한 외부 crate 가 있습니다 — about.toml 에 clarify 를 더하세요:\n` +
+    `some external crates have no determined license — add a clarify to about.toml:\n` +
       unknownExternal.map((c) => `  ${c.package.name} ${c.package.version}`).join('\n'),
   )
 }
 const local = rust.licenses.flatMap((l) => l.used_by).filter((u) => u.crate.source == null)
 if (local.length > 0) {
   fail(
-    `이 저장소의 crate 가 고지에 들어왔습니다(license 필드를 달았다면 우리 crate 를 따로 빼야 합니다):\n` +
+    `crates of this repository got into the notice (if a license field was added, our crates must be dropped separately):\n` +
       local.map((u) => `  ${u.crate.name} ${u.crate.version}`).join('\n'),
   )
 }
@@ -184,7 +184,7 @@ if (local.length > 0) {
 //   ① a file that holds the full text of the chosen license — files holding a single license first (files holding several next)
 //   ② if none, switch to another allowed license in the OR expression that has a full-text file (about.toml order) — a crate like brotli-decompressor
 //      with no file for the chosen side (MIT) but only a file for the other side (BSD-3-Clause)
-//   ③ if the package has none, the licenses/rust/<crate>.txt replacement file (text moved from the upstream repository · the version is pinned with `// crate: <이름> <버전>` —
+//   ③ if the package has none, the licenses/rust/<crate>.txt replacement file (text moved from the upstream repository · the version is pinned with `// crate: <name> <version>` —
 //      it fails if the version diverges. The new version's text may have changed)
 //   ④ if still none, leave the standard text as is and mark it "synthesized" — it fails if the crate is not in licenses/synthesized-crates.txt.
 const LICENSE_FILE = /^(licen[cs]e|copying)([-_.].*)?$/i
@@ -203,7 +203,7 @@ const MARKERS = {
   'MPL-2.0': { all: [/mozilla public license,? version 2\.0/] },
   'Unicode-3.0': { all: [/unicode license v3/] },
   'BSL-1.0': { all: [/boost software license - version 1\.0/] },
-  // The three below overlap in sentences with their siblings above, so they are told apart by 「없어야 하는 문장」 (sentences that must be absent) (MIT-0 = MIT without the copyright notice condition · 0BSD = ISC without the same condition).
+  // The three below overlap in sentences with their siblings above, so they are told apart by 「sentences that must be absent」 (MIT-0 = MIT without the copyright notice condition · 0BSD = ISC without the same condition).
   'MIT-0': { all: [/permission is hereby granted, free of charge/], none: [/shall be included in all copies or substantial portions/] },
   '0BSD': { all: [/permission to use, copy, modify, and\/or distribute this software for any purpose with or without fee is hereby granted/], none: [/provided that the above copyright notice and this permission notice appear in all copies/] },
   'Unlicense': { all: [/this is free and unencumbered software released into the public domain/] },
@@ -239,7 +239,7 @@ function readKnownList(file) {
       .filter((l) => l !== ''),
   )
 }
-// The shape of hand-placed text files (rust/ · extra/) — the leading `//` lines are management comments and are stripped, and of them `// crate: <이름> <버전>` is
+// The shape of hand-placed text files (rust/ · extra/) — the leading `//` lines are management comments and are stripped, and of them `// crate: <name> <version>` is
 //   the crate that file is bound to.
 function readHandFile(path) {
   const lines = readFileSync(path, 'utf8').replace(/\r\n?/g, '\n').split('\n')
@@ -290,9 +290,9 @@ for (const lic of rust.licenses) {
       } else if (replacement) {
         replacement.used = true
         if (replacement.ties.length !== 1 || replacement.ties[0] !== crate) {
-          badReplacements.push(`  rust/${replacement.file}: 매인 버전 ${replacement.ties.join(', ') || '(없음)'} ≠ 그래프의 ${crate}`)
+          badReplacements.push(`  rust/${replacement.file}: bound version ${replacement.ties.join(', ') || '(none)'} ≠ ${crate} in the graph`)
         } else if (!classify(replacement.text).includes(lic.id)) {
-          badReplacements.push(`  rust/${replacement.file}: ${lic.id} 전문이 아니다`)
+          badReplacements.push(`  rust/${replacement.file}: not the full text of ${lic.id}`)
         }
         record.text = replacement.text
         fixes.replaced++
@@ -311,21 +311,21 @@ for (const lic of rust.licenses) {
 }
 if (unexpectedSynthesized.length > 0) {
   fail(
-    `라이선스 본문 파일이 없는 crate 가 새로 들어왔습니다 — 본문을 구할 곳부터 찾으세요(패키지에 있으면 about.toml 의 ` +
-      `clarify · 상류 저장소에 있으면 scripts/licenses/rust/<crate>.txt). 정말 없을 때만 synthesized-crates.txt 에 ` +
-      `더합니다(표준 본문을 싣는다):\n${unexpectedSynthesized.join('\n')}`,
+    `a new crate without a license text file came in — first find where to get the text (if the package has it, a ` +
+      `clarify in about.toml · if the upstream repository has it, scripts/licenses/rust/<crate>.txt). Only when there really is none, add it to ` +
+      `synthesized-crates.txt (the standard text is carried):\n${unexpectedSynthesized.join('\n')}`,
   )
 }
 // An unused replacement file = that crate dropped out of the graph or the version changed (the new version may have started shipping the file) and diverged from the bound version
 //   — both mean the file needs another look, so it is raised as a failure.
 for (const [name, r] of rustReplacements) {
-  if (!r.used) badReplacements.push(`  rust/${r.file}: 쓰이지 않았다 — ${name} 이 그래프에 없거나 이제 패키지가 본문을 싣는다(매인 버전 ${r.ties.join(', ')})`)
+  if (!r.used) badReplacements.push(`  rust/${r.file}: not used — ${name} is not in the graph or the package now carries the text itself (bound version ${r.ties.join(', ')})`)
 }
 if (badReplacements.length > 0) {
-  fail(`scripts/licenses/rust/ 의 교체 파일이 그래프와 어긋납니다 — 상류에서 그 버전의 본문을 다시 받거나 지우세요:\n${badReplacements.join('\n')}`)
+  fail(`replacement files in scripts/licenses/rust/ diverge from the graph — download that version's text from upstream again or delete them:\n${badReplacements.join('\n')}`)
 }
 for (const name of knownSynthesized) {
-  if (!synthesizedSeen.has(name)) note(`synthesized-crates.txt 의 ${name} 은 이제 표준 본문을 쓰지 않습니다 — 목록에서 빼도 됩니다`)
+  if (!synthesizedSeen.has(name)) note(`${name} in synthesized-crates.txt no longer uses the standard text — it can be removed from the list`)
 }
 const rustPlaceholders = records
   .filter((r) => !r.synthesized && placeholderIn(r.text))
@@ -386,13 +386,13 @@ for (const n of rustNotices) {
   if (placeholderIn(n.text)) rustPlaceholders.push(`  ${n.crate} ${n.file}: ${placeholderIn(n.text)}`)
 }
 if (rustPlaceholders.length > 0) {
-  fail(`표준 본문 자리표시가 남은 글이 있습니다(저작권 줄이 비었다):\n${rustPlaceholders.join('\n')}`)
+  fail(`some texts still have a standard text placeholder (the copyright line is empty):\n${rustPlaceholders.join('\n')}`)
 }
 
 // ── Part 2. npm: generate-license-file ───────────────────────────────────────────────────────
 
 const glfBin = join(GLF_DIR, 'bin', 'generate-license-file')
-if (!existsSync(glfBin)) fail('node_modules 에 generate-license-file 이 없습니다 — 먼저 `npm ci`')
+if (!existsSync(glfBin)) fail('generate-license-file is not in node_modules — run `npm ci` first')
 const GLF_VERSION = JSON.parse(readFileSync(join(GLF_DIR, 'package.json'), 'utf8')).version
 
 const npmTxt = join(work, 'npm.txt')
@@ -408,25 +408,25 @@ const glf = spawnSync(
   ],
   { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
 )
-if (glf.error) fail(`generate-license-file 을 실행하지 못했습니다 - ${glf.error.message}`)
-if (glf.status !== 0) fail(`generate-license-file 실패(exit ${glf.status})\n${glf.stderr}`)
+if (glf.error) fail(`could not run generate-license-file - ${glf.error.message}`)
+if (glf.status !== 0) fail(`generate-license-file failed (exit ${glf.status})\n${glf.stderr}`)
 if (glf.stderr.trim() !== '') process.stderr.write(glf.stderr)
 // A package whose license text was not found leaves only a warning and drops out of the output (exit code 0) — a silent omission, so it is raised as a failure.
 if (glf.stderr.includes('Unable to determine license content')) {
-  fail('generate-license-file 이 라이선스를 못 찾은 패키지가 있습니다(위 경고) — scripts/licenses/glf.jsonc 의 replace 로 대 주세요')
+  fail('generate-license-file could not find a license for some packages (warnings above) — supply it with a replace in scripts/licenses/glf.jsonc')
 }
 
 // The two self-promotion lines the tool attaches before and after are stripped — the "This file" in that text would read as if it pointed at this whole file.
 const GLF_CREDIT = 'This file was generated with the generate-license-file npm package!\nhttps://www.npmjs.com/package/generate-license-file\n'
 let npmText = readFileSync(npmTxt, 'utf8')
 if (!npmText.startsWith(GLF_CREDIT + '\n') || !npmText.endsWith(GLF_CREDIT)) {
-  fail(`generate-license-file 출력 형식이 예상과 다릅니다 — ${GLF_VERSION} 의 형식이 바뀌었으면 아래 쪼개 읽기부터 다시 볼 것`)
+  fail(`the generate-license-file output format differs from what is expected — if the format of ${GLF_VERSION} changed, look again at the splitting below first`)
 }
 npmText = npmText.slice(GLF_CREDIT.length + 1, -GLF_CREDIT.length)
 
 // Prevents the tool from shipping something that is not license text as text — if there is no license file, the one-line identifier in package.json ("MIT")
 //   or the URL in the license field, or if `LICENSE.spdx` exists, that SPDX metadata document. All of them lack the permission wording.
-//   Group format = 「패키지 목록 → "...the following license:" → 본문 → (선택) "With the following notices:" → 구분선」 (package list → "...the following license:" → text → (optional) "With the following notices:" → separator line).
+//   Group format = 「package list → "...the following license:" → text → (optional) "With the following notices:" → separator line」.
 const npmPackages = new Set()
 const badBodies = []
 const npmPlaceholders = []
@@ -444,7 +444,7 @@ for (const block of blocks) {
   const start = block.indexOf('the following license:\n\n')
   // The package list is read only before the text — license text also has lines starting with ` - ` (clause lists).
   const packages = start < 0 ? [] : [...block.slice(0, start).matchAll(/^ - (.+)$/gm)].map((m) => m[1])
-  if (packages.length === 0) fail(`generate-license-file 출력의 한 묶음을 읽지 못했습니다:\n${block.slice(0, 300)}`)
+  if (packages.length === 0) fail(`could not read a group of the generate-license-file output:\n${block.slice(0, 300)}`)
   packages.forEach((p) => npmPackages.add(p))
   checkNpmBlock(packages, block.slice(start + 'the following license:\n\n'.length))
 }
@@ -456,7 +456,7 @@ try {
   const raw = readFileSync(join(CONFIG_DIR, 'glf.jsonc'), 'utf8').split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join('\n')
   glfReplace = JSON.parse(raw).replace ?? {}
 } catch (err) {
-  fail(`scripts/licenses/glf.jsonc 를 읽지 못했습니다(주석은 줄 전체 \`//\` 만 쓸 것) - ${err.message}`)
+  fail(`could not read scripts/licenses/glf.jsonc (use only whole-line \`//\` comments) - ${err.message}`)
 }
 
 // The license each package declared (license in package.json) — used by both the replacement · peer text check and the allow decision below. It scans node_modules
@@ -497,32 +497,32 @@ for (const [path, entry] of Object.entries(lock.packages ?? {})) {
   if (path === '' || entry.dev) continue
   if (!existsSync(join(ROOT, path, 'package.json'))) {
     if (entry.optional || entry.devOptional) continue
-    fail(`package-lock.json 의 운영 의존 ${path} 가 깔려 있지 않습니다 — 먼저 \`npm ci\``)
+    fail(`production dependency ${path} of package-lock.json is not installed — run \`npm ci\` first`)
   }
   const name = entry.name ?? path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length)
   lockPackages.set(`${name}@${entry.version}`, { path, peer: !!entry.peer })
 }
 
-// The replace key is the exact name@version (glf.jsonc preamble). It is decided before the 「본문 아닌 것」 (not text) · placeholder checks below — if the key
-//   diverges the tool cannot supply the text for that package and those checks blow up too, but the place to fix is the key (the 「라이선스를 못 찾은
-//   패키지」 (package with no license found) check right after the tool runs is even earlier than this, already done above). If the installed production dependencies have no such name@version = the version changed or
+// The replace key is the exact name@version (glf.jsonc preamble). It is decided before the 「not text」 · placeholder checks below — if the key
+//   diverges the tool cannot supply the text for that package and those checks blow up too, but the place to fix is the key (the 「package with no license found」
+//   check right after the tool runs is even earlier than this, already done above). If the installed production dependencies have no such name@version = the version changed or
 //   the package dropped out so that text is used nowhere — a signal to re-check the new version's text, so it is raised as a failure.
 const badReplaceKeys = Object.keys(glfReplace)
   .filter((k) => !/^@?[^@]+@[^@]+$/.test(k) || !lockPackages.has(k))
-  .map((k) => `  ${k}${/^@?[^@]+@[^@]+$/.test(k) ? ' — 설치된 운영 의존에 이 버전이 없다' : ' — 키에 버전이 없다'}`)
+  .map((k) => `  ${k}${/^@?[^@]+@[^@]+$/.test(k) ? ' — this version is not among the installed production dependencies' : ' — the key has no version'}`)
 if (badReplaceKeys.length > 0) {
-  fail(`scripts/licenses/glf.jsonc 의 replace 키가 설치본과 어긋납니다 — 그 버전의 본문을 다시 확인하고 키를 고치거나 지우세요:\n${badReplaceKeys.join('\n')}`)
+  fail(`replace keys in scripts/licenses/glf.jsonc diverge from what is installed — recheck that version's text and fix or delete the key:\n${badReplaceKeys.join('\n')}`)
 }
 
 // Whether the hand-attached text (replace file · peer backing below) covers the license that package declared — prevents the mistake of attaching the wrong file (only MIT text for an Apache-2.0
 //   package, etc.). It evaluates the declared expression with the licenses confirmed as full text within the text (the same content decision as the Rust side).
-// `ids` is taken as the union of what was decided per file — if several files were joined and decided at once, the 「없어야 하는 문장」 (sentences that must be absent) condition
+// `ids` is taken as the union of what was decided per file — if several files were joined and decided at once, the 「sentences that must be absent」 condition
 //   would let an MIT file hide MIT-0, BSD-3 hide BSD-2 and ISC hide 0BSD, so a legitimate expression like `MIT-0 AND MIT` would fail.
 const uncovered = []
 function checkCoverage(p, ids, source) {
   const declared = npmLicenses.get(p)
   if (!declared || coveredBy(declared, ids) !== true) {
-    uncovered.push(`  ${p}: 선언 ${declared ?? '(없음)'} · 본문에서 확인된 전문 ${ids.join(', ') || '(없음)'} — ${source}`)
+    uncovered.push(`  ${p}: declared ${declared ?? '(none)'} · full texts confirmed in the text ${ids.join(', ') || '(none)'} — ${source}`)
   }
 }
 for (const [k, file] of Object.entries(glfReplace)) {
@@ -547,10 +547,10 @@ for (const [p, { path, peer }] of [...lockPackages].sort((a, b) => a[0].localeCo
   } else {
     const files = readLicenseFiles(dir).filter((f) => f.ids.length > 0)
     if (files.length === 0) {
-      fail(`peer 로만 닿는 운영 의존 ${p} 에 라이선스 전문 파일이 없습니다 — scripts/licenses/npm/ 에 상류 본문을 두고 glf.jsonc 의 replace 에 "${p}" 키로 거세요(이 패키지는 도구가 아니라 생성 스크립트가 그 키를 읽어 싣는다)`)
+      fail(`production dependency ${p}, reached only as a peer, has no full license text file — put the upstream text in scripts/licenses/npm/ and hook it in the replace of glf.jsonc under the key "${p}" (for this package the generator script, not the tool, reads that key and carries it)`)
     }
     license = files.map((f) => f.text).join('\n\n')
-    checkCoverage(p, [...new Set(files.flatMap((f) => f.ids))], `${path} 의 라이선스 파일`)
+    checkCoverage(p, [...new Set(files.flatMap((f) => f.ids))], `license files of ${path}`)
   }
   const notices = readdirSync(dir, { withFileTypes: true })
     .filter((e) => e.isFile() && /^notice($|[-.])/i.test(e.name))
@@ -561,37 +561,37 @@ for (const [p, { path, peer }] of [...lockPackages].sort((a, b) => a[0].localeCo
   peerFallback.push(`The following npm package may be included in this product:\n\n - ${p}\n\nThis package contains the following license:\n\n${tail}\n\n-----------\n\n`)
 }
 if (uncovered.length > 0) {
-  fail(`손으로 댄 본문이 패키지가 선언한 라이선스를 덮지 않습니다 — 그 라이선스의 전문 파일을 대 주세요:\n${uncovered.join('\n')}`)
+  fail(`a hand-supplied text does not cover the license the package declares — supply the full text file of that license:\n${uncovered.join('\n')}`)
 }
 if (missingFromNotice.length > 0) {
   fail(
-    `package-lock.json 의 운영 의존 중 고지에 없는 패키지가 있습니다(도구가 건너뛰었다). node_modules 가 package-lock.json 과 ` +
-      `어긋났거나(낡은 설치) 링크 · 정션으로 깔린 패키지일 수 있다 — 먼저 \`npm ci\` 로 다시 깔고 돌려 볼 것:\n${missingFromNotice.join('\n')}`,
+    `some production dependencies of package-lock.json are not in the notice (the tool skipped them). node_modules may have diverged from package-lock.json ` +
+      `(a stale install), or they may be packages installed via a link · junction — reinstall with \`npm ci\` first and run again:\n${missingFromNotice.join('\n')}`,
   )
 }
 npmText += peerFallback.join('')
 if (badBodies.length > 0) {
-  fail(`라이선스 본문이 아닌 것이 실린 패키지가 있습니다 — scripts/licenses/glf.jsonc 의 replace 로 대 주세요:\n${badBodies.join('\n')}`)
+  fail(`some packages carry something that is not a license text — supply it with a replace in scripts/licenses/glf.jsonc:\n${badBodies.join('\n')}`)
 }
 if (npmPlaceholders.length > 0) {
-  fail(`표준 본문 자리표시가 남은 npm 글이 있습니다(저작권 줄이 비었다):\n${npmPlaceholders.join('\n')}`)
+  fail(`some npm texts still have a standard text placeholder (the copyright line is empty):\n${npmPlaceholders.join('\n')}`)
 }
 for (const p of [...npmPackages].filter((p) => !lockPackages.has(p)).sort()) {
-  note(`고지에는 있는데 package-lock.json 의 운영 의존에는 없는 패키지: ${p}`)
+  note(`a package in the notice but not among the production dependencies of package-lock.json: ${p}`)
 }
 
 // The npm-side tool has no allow list — each shipped package's declared license (npmLicenses above) is decided with the accepted of about.toml.
 const npmRejected = []
 for (const p of [...npmPackages].sort()) {
   const lic = npmLicenses.get(p)
-  if (lic === undefined) npmRejected.push(`  ${p}: node_modules 에서 package.json 을 찾지 못했습니다`)
-  else if (!lic) npmRejected.push(`  ${p}: license 필드가 없습니다`)
+  if (lic === undefined) npmRejected.push(`  ${p}: could not find package.json in node_modules`)
+  else if (!lic) npmRejected.push(`  ${p}: there is no license field`)
   else if (satisfies(lic) !== true) npmRejected.push(`  ${p}: ${lic}`)
 }
 if (npmRejected.length > 0) {
   fail(
-    `허용 목록(about.toml accepted) 밖 라이선스의 npm 패키지가 있습니다 — GPL · LGPL · AGPL 은 더하지 말고 끌고 온 경로부터 ` +
-      `보고할 것(\`npm ls --omit=dev <패키지>\`):\n${npmRejected.join('\n')}`,
+    `some npm packages have a license outside the allowlist (about.toml accepted) — do not add GPL · LGPL · AGPL; first report the path ` +
+      `that dragged them in (\`npm ls --omit=dev <package>\`):\n${npmRejected.join('\n')}`,
   )
 }
 
@@ -603,10 +603,10 @@ for (const file of existsSync(EXTRA_DIR) ? readdirSync(EXTRA_DIR).filter((f) => 
   const { ties, text } = readHandFile(join(EXTRA_DIR, file))
   for (const tie of ties) {
     if (!rustCrates.has(tie)) {
-      fail(`licenses/extra/${file} 이 매인 crate(${tie})가 그 버전으로 배포 그래프에 없습니다 — 버전이 바뀌었으면 동봉물과 고지를 다시 확인하고 그 줄을 고칠 것`)
+      fail(`licenses/extra/${file}: the crate it is bound to (${tie}) is not in the shipped graph at that version — if the version changed, recheck the bundled material and the notice and fix that line`)
     }
   }
-  if (placeholderIn(text)) fail(`licenses/extra/${file} 에 표준 본문 자리표시가 남았습니다: ${placeholderIn(text)}`)
+  if (placeholderIn(text)) fail(`licenses/extra/${file} still has a standard text placeholder: ${placeholderIn(text)}`)
   extras.push(text)
 }
 
@@ -651,6 +651,6 @@ mkdirSync(dirname(OUTPUT), { recursive: true })
 writeFileSync(OUTPUT, out.replace(/\n/g, '\r\n'))
 const synthesizedCount = records.filter((r) => r.synthesized).length
 note(
-  `완료 — Rust crate ${rustCrates.size}(본문 보정 ${fixes.file} · 대안 라이선스로 ${fixes.switched} · 교체 파일 ${fixes.replaced} · 표준 본문 ${synthesizedCount}) · ` +
-    `npm 패키지 ${npmPackages.size}(lock 대조 ${lockPackages.size} · peer 직접 실음 ${peerFallback.length}) · Rust 고지 파일 ${rustNotices.length} · 동봉물 ${extras.length} → ${OUTPUT}`,
+  `done — Rust crates ${rustCrates.size} (text fixes ${fixes.file} · via an alternative license ${fixes.switched} · replacement files ${fixes.replaced} · standard text ${synthesizedCount}) · ` +
+    `npm packages ${npmPackages.size} (lock check ${lockPackages.size} · peers carried directly ${peerFallback.length}) · Rust notice files ${rustNotices.length} · bundled material ${extras.length} → ${OUTPUT}`,
 )

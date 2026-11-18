@@ -1,77 +1,77 @@
-# 추적 항목 (Deferred / 의사결정 보류)
+# Tracking items (Deferred / decisions on hold)
 
-코드 구현 중 발견된, 나중에 반드시 다시 다뤄야 할 열린 항목. 셋으로 나눈다(사용자 결정 2026-10-01) — **메인**(큰 기능·방향·보안) · **버그**(겪은 결함 먼저, 이론상 경로는 뒤) · **사소한 기능·정리**(작은 기능·테스트·CI·인프라·문서 위생). 메인과 사소한 기능·정리 절 안은 번호 내림차순.
+Open items found during code implementation that must be revisited later. Split into three (user decision 2026-10-01) — **Main** (big features · direction · security) · **Bug** (defects already hit first, theoretical paths after) · **Minor feature · cleanup** (small features · tests · CI · infra · docs hygiene). Within the Main and Minor feature · cleanup sections, numbers are in descending order.
 
-**트리거 대기 = 어떤 사건(예: 스킬 · CLAUDE.md 개편)이 오면 꺼낼 항목** — 상태 칸에 「트리거 대기 — <사건>」으로 적고, 꺼낼 땐 `rg -n "트리거 대기" docs/tracking.md` 한 번으로 전부 본다(사용자 2026-10-14 — 사용자가 「트래킹에서 트리거 대기 꺼내」라고 하면 이것을 돌린다).
+**Waiting for trigger = an item to pull out when some event (e.g. a skill · CLAUDE.md overhaul) arrives** — write it in the status field as 「트리거 대기 — <사건>」, and to pull them out, a single `rg -n "트리거 대기" docs/tracking.md` shows them all (user 2026-10-14 — when the user says 「트래킹에서 트리거 대기 꺼내」, run this).
 
-해결되면 여기서 뺀다 — 다른 문서·코드가 그 번호를 가리키면 [`tracking-archive.md`](tracking-archive.md) 에 한 줄로 옮기고, 아니면 지운다(해결 기록은 ADR·커밋 메시지·작업 폴더 `README.md` 가 진다).
+When an item is resolved, remove it from here — if another document or code points at its number, move it to [`tracking-archive.md`](tracking-archive.md) as one line; otherwise delete it (the resolution record is carried by the ADR · commit message · work folder `README.md`).
 
-간소화 전 전문(조사 기록·되돌린 시도·실측 상세) = `git show 8671e5c:docs/tracking.md`
+Full text before the simplification (investigation records · reverted attempts · measurement details) = `git show 8671e5c:docs/tracking.md`
 
-| ID | 제목(짧게) | 구역 | 상태 |
+| ID | Title (short) | Area | Status |
 |---|---|---|---|
-| T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | 메인 | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
-| T-85 | A new window starts a daemon the user stopped (boot start in every window) | 메인 | Deferred to the multi-daemon topic (user 2026-11-10) |
-| T-84 | Update system — replace a version-mismatched daemon | 메인 | Not started — deferred by the user (ADR-0356) |
-| T-81 | Split the tray out of the app (client) process | 메인 | Not started — idea/refactor; keep as is for now (user 2026-11-09) |
-| T-77 | LLM control — remaining gaps (moved from todo) | 메인 | Waiting for trigger — close each gap when its feature is touched |
-| T-66 | 창 크롬 · 이름(크롬식 제목 표시줄 · 창 번호 재사용 · 창 제목) | 메인 | 진행 — `v0.5.0/feat/window-chrome`(S26) · U1–U9 구현 · U10 문서 착지(2026-10-26) · 사람 손 GUI 확인 2026-10-26(S13 · S14 통과) · 남은 것 = push · CI · master 머지 |
-| T-65 | 슬롯 도킹 LLM 명령(`tab.dock` · `layout.get`) | 메인 | 진행 — S28 `v0.5.0/feat/llm-layout-commands` · U1–U3 구현 · push(`2710e14f` CI 진행 중) · `/qa standard` PASS · 남은 것 = U4 문서 커밋 · GUI 실측 · master 머지 · TRD §11 결정 일곱 사용자 확인 |
-| T-49 | 꺼진 에이전트의 슬롯 쪽 활성화 · 완전한 이어받기 | 메인 | 보류 — 저장 작업 뒤 |
-| T-47 | 크레이트 경계 리팩터링(아키텍처 논의) | 메인 | 0~2단계 · A(데이터 파일 처리 통일) 착지 · 패닉 정책 · 우편 id(S29 · ADR-0309) 착지 · 다음 = 3단계 transport |
-| T-44 | 채팅 안 승인(codex) | 메인 | 보류 — 다음 과제 |
-| T-42 | 단축키 시스템 | 메인 | 보류 |
-| T-36 | 반영 전 재입력 공용 처리 | 메인 | 후속 주제 |
-| T-15 | 프로세스 토폴로지 · 다중 데몬 | 메인 | 보류 — 트리거 없음 |
-| T-14 | 데이터 저장/메모리 | 메인 | 조사 완료 · 보류 |
-| T-13 | 메시지 시스템 풀 메일박스 | 메인 | MVP 착지 · 풀 보류 |
-| T-12 | JSON 라이브 상태 표시 | 메인 | 보류 — 옵션 결정 대기 |
-| T-11 | child별 권한 스코프(R7) | 메인 | 보류 — 원격 단계 |
-| T-9 | claude 프로세스 풀링 | 메인 | 보류 |
-| T-6 | cwd 워크스페이스 검증 | 메인 | 보류 — 운영 단계 |
-| T-113 | Agent tree rename input may remount on every keystroke (suspected, pre-existing) | 버그 | Open — not reproduced; found by S35 review |
-| T-78 | In-app codex terminal on codex 0.163.0 — alt-screen · mouse tracking (S21 TRD §6-F) | 버그 | Open — user decision on the default |
-| T-52 | Graceful daemon stop returned `Timeout` | 버그 | Closed by S21 3-2 U5a (`b85c0aaa`) — real-daemon stop test passes with `outcome=Closed`; remove once master has it |
-| T-45 | 스폰 이름 중복 · codex 가 claude 로 보임 | 버그 | 보류 — id 전환과 묶음 |
-| T-39 | 실패·거절된 사용량 값 흐리게 | 버그 | 보류 — 사용량 작업과 묶음 |
-| T-28 | 갓 스폰된 수신자가 편지 미제출 | 버그 | 원인 규명 · 미착수 |
-| T-25 | 메인 창 연결 배너 놓침 | 버그 | 원인 미규명 |
-| T-41 | 첫 턴 훅 도중 Esc 무동작 | 버그 | 미착수 · 재현 3/6 |
-| T-35 | 재연결 타이밍 테스트 간헐 실패 | 버그 | 미착수 |
-| T-20 | 깨우는 도중 삭제 → 되살아남 | 버그 | 보류 |
-| T-21 | 종료 중 시작된 에이전트 누락 | 버그 | 보류 |
-| T-30 | `in_flight_targets` 백스톱 없음 | 버그 | 예방적 등록 · 후속 = 이 축 걷기(S29 뒤 쓸모 없음 · ADR-0142 개정 먼저) |
-| T-31 | 남이 먼저 배달 → 「대기 중」 응답 | 버그 | 보류 |
-| T-32 | 명부 방송 직렬화 없음 | 버그 | 미착수 · T-16 선결 |
-| T-33 | `agents.json` 새 kind 하위호환 | 버그 | 트리거 충족 추정 · 사용자 판단 대기 · 새 판 몫만 A 가 닫음 |
-| T-19 | 우편 CLI 빈 응답 = 성공 | 버그 | 보류 |
-| T-53 | 띄우기 — 무리에 넣기 전에 뜬 손자 | 버그 | 미착수 · 이론상 경로 |
-| T-54 | 상시 `taskkill /T` 호출자 넷 | 버그 | 미착수 · 선재 위험 |
-| T-55 | 원자 쓰기의 폴더 동기화 실패를 무시하고 「썼다」로 보고 | 이식 | 미착수 · Windows 해당 없음 |
-| T-56 | codex 터미널 실 CLI 계약 시험 5건 실패 | 버그 | 미착수 · 선재 · 원인 미규명 |
-| T-57 | 늦은 reap × 실패한 활성화 → 죽은 에이전트에 `auto_restore=true` | 버그 | 미착수 · 이론상 경로 · 부팅 자동 복원 OFF 라 지금은 무해 |
-| T-58 | 메뉴발 명령 · 프리셋 변경 실패가 화면에 안 보인다 | 버그 | 미착수 · 선재(프론트) |
-| T-59 | Job 멤버 명단이 「멤버 수 ≠ 명단 수」로 4 번 안에 완전해지지 않는 flake | 버그 | 미착수 · 선재(platform) · CI 1 회 관측 |
-| T-64 | 합쳐진 replay 의 후속 Subscribe 가 창 닫힌 뒤 나가 구독이 샌다 | 버그 | 미착수 · 선재 |
-| T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | 버그 | Fixed — merged to master (S34, `baa97e41`); remove when convenient |
-| T-83 | Daemon test `ws_e2e case09_slow_consumer_closed_others_unaffected` fails intermittently | 버그 | Not started · flaky (3 failures 2026-11-09~10) |
-| T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | 버그 | Not started · pre-existing · left out of 3-3 (replace-only scope, user 2026-11-10) |
-| T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
-| T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
-| T-69 | 스텝 번호 규약 — 새 주제마다 S번호 | 사소한 기능·정리 | 일부 됨 · 남은 것 = 자잘한 커밋 접두 |
-| T-68 | 로컬라이제이션 — 앱 전체를 다른 언어로 | 사소한 기능·정리 | 할 일 — 할 게 없을 때 뽑아서(사용자 2026-10-16) |
-| T-61 | Third-party wrapping criterion — in the code-conventions binding (done) · check existing code | 사소한 기능·정리 | Waiting for trigger — next refactoring round |
-| T-60 | 브랜치 이름에서 버전 접두 떼기(버전 묶음 = 태그 기준) | 사소한 기능·정리 | 사용자 결정 대기 — 나중에 고친다(2026-10-12) |
-| T-51 | 슬롯 보기 모드 덮어쓰기 영속(옛 P3e) | 사소한 기능·정리 | 보류 — 필요해질 때 |
-| T-43 | claude 도구 결과 중립 사건화 | 사소한 기능·정리 | 보류 |
-| T-37 | `todo` 폐기·합치기 | 사소한 기능·정리 | 트리거 대기 |
-| T-27 | 셸 로직 분리 모양 | 사소한 기능·정리 | 사용자 결정 대기 |
-| T-26 | dev 런처 kill 경로 미검증 | 사소한 기능·정리 | 보류 |
-| T-23 | 사람용 데몬 명령줄 표면 | 사소한 기능·정리 | 사용자 결정 대기 |
-| T-17 | GUI 실측 CI 편입 | 사소한 기능·정리 | 보류 — 시나리오 없음 |
-| T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
+| T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | Main | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
+| T-85 | A new window starts a daemon the user stopped (boot start in every window) | Main | Deferred to the multi-daemon topic (user 2026-11-10) |
+| T-84 | Update system — replace a version-mismatched daemon | Main | Not started — deferred by the user (ADR-0356) |
+| T-81 | Split the tray out of the app (client) process | Main | Not started — idea/refactor; keep as is for now (user 2026-11-09) |
+| T-77 | LLM control — remaining gaps (moved from todo) | Main | Waiting for trigger — close each gap when its feature is touched |
+| T-66 | Window chrome · name (Chrome-style title bar · window number reuse · window title) | Main | In progress — `v0.5.0/feat/window-chrome` (S26) · U1–U9 implemented · U10 docs landed (2026-10-26) · manual GUI check by a person 2026-10-26 (S13 · S14 passed) · remaining = push · CI · master merge |
+| T-65 | Slot docking LLM commands (`tab.dock` · `layout.get`) | Main | In progress — S28 `v0.5.0/feat/llm-layout-commands` · U1–U3 implemented · pushed (`2710e14f` CI running) · `/qa standard` PASS · remaining = U4 docs commit · GUI measurement · master merge · the seven TRD §11 decisions need user confirmation |
+| T-49 | Slot-side activation of a stopped agent · full resume | Main | Deferred — after the storage work |
+| T-47 | Crate boundary refactoring (architecture discussion) | Main | Stages 0–2 · A (data file handling unification) landed · panic policy · mail id (S29 · ADR-0309) landed · next = stage 3 transport |
+| T-44 | In-chat approval (codex) | Main | Deferred — next task |
+| T-42 | Shortcut key system | Main | Deferred |
+| T-36 | Shared handling of re-input before echo | Main | Follow-up topic |
+| T-15 | Process topology · multiple daemons | Main | Deferred — no trigger |
+| T-14 | Data storage/memory | Main | Research done · deferred |
+| T-13 | Message system full mailbox | Main | MVP landed · full version deferred |
+| T-12 | JSON live status display | Main | Deferred — waiting for an option decision |
+| T-11 | Per-child permission scope (R7) | Main | Deferred — remote stage |
+| T-9 | claude process pooling | Main | Deferred |
+| T-6 | cwd workspace validation | Main | Deferred — operations stage |
+| T-113 | Agent tree rename input may remount on every keystroke (suspected, pre-existing) | Bug | Open — not reproduced; found by S35 review |
+| T-78 | In-app codex terminal on codex 0.163.0 — alt-screen · mouse tracking (S21 TRD §6-F) | Bug | Open — user decision on the default |
+| T-52 | Graceful daemon stop returned `Timeout` | Bug | Closed by S21 3-2 U5a (`b85c0aaa`) — real-daemon stop test passes with `outcome=Closed`; remove once master has it |
+| T-45 | Duplicate spawn names · codex shown as claude | Bug | Deferred — bundled with the id switch |
+| T-39 | Dim failed/rejected usage values | Bug | Deferred — bundled with the usage work |
+| T-28 | Freshly spawned recipient does not submit the letter | Bug | Cause identified · not started |
+| T-25 | Main window misses the connection banner | Bug | Cause not identified |
+| T-41 | Esc does nothing during a hook in the first turn | Bug | Not started · reproduced 3/6 |
+| T-35 | Reconnect timing test fails intermittently | Bug | Not started |
+| T-20 | Delete during wake-up → revives | Bug | Deferred |
+| T-21 | Agent started during shutdown is missed | Bug | Deferred |
+| T-30 | No `in_flight_targets` backstop | Bug | Registered preventively · follow-up = clear this axis (useless after S29 · amend ADR-0142 first) |
+| T-31 | Someone else delivers first → 「대기 중」 reply | Bug | Deferred |
+| T-32 | No serialization of registry broadcasts | Bug | Not started · T-16 is a prerequisite |
+| T-33 | `agents.json` new kind backward compatibility | Bug | Trigger presumed met · waiting for user judgment · A closes only the new edition's share |
+| T-19 | Mail CLI empty response = success | Bug | Deferred |
+| T-53 | Spawning — a grandchild that started before being put in the group | Bug | Not started · theoretical path |
+| T-54 | Four permanent `taskkill /T` callers | Bug | Not started · pre-existing risk |
+| T-55 | Atomic write ignores a folder sync failure and reports 「썼다」 | Porting | Not started · not applicable on Windows |
+| T-56 | Five codex terminal real-CLI contract tests fail | Bug | Not started · pre-existing · cause not identified |
+| T-57 | Late reap × failed activation → `auto_restore=true` on a dead agent | Bug | Not started · theoretical path · harmless for now because boot auto-restore is OFF |
+| T-58 | Menu-originated command · preset change failures are not shown on screen | Bug | Not started · pre-existing (frontend) |
+| T-59 | Flake where the Job member list does not become complete within 4 tries because of 「멤버 수 ≠ 명단 수」 | Bug | Not started · pre-existing (platform) · observed once in CI |
+| T-64 | A follow-up Subscribe of a merged replay goes out after the window is closed, so the subscription leaks | Bug | Not started · pre-existing |
+| T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | Bug | Fixed — merged to master (S34, `baa97e41`); remove when convenient |
+| T-83 | Daemon test `ws_e2e case09_slow_consumer_closed_others_unaffected` fails intermittently | Bug | Not started · flaky (3 failures 2026-11-09~10) |
+| T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | Bug | Not started · pre-existing · left out of 3-3 (replace-only scope, user 2026-11-10) |
+| T-71 | Do not point at tracking numbers — just delete when resolved | Minor feature · cleanup | To do — later as an issue |
+| T-70 | Criterion for guessing the version ahead of a branch — 0.5.0 side if it is a feature | Minor feature · cleanup | To do — later as an issue |
+| T-69 | Step number convention — an S number for each new topic | Minor feature · cleanup | Partly done · remaining = minor commit prefixes |
+| T-68 | Localization — the whole app in another language | Minor feature · cleanup | To do — pick it up when there is nothing to do (user 2026-10-16) |
+| T-61 | Third-party wrapping criterion — in the code-conventions binding (done) · check existing code | Minor feature · cleanup | Waiting for trigger — next refactoring round |
+| T-60 | Strip the version prefix from branch names (version bundle = tag basis) | Minor feature · cleanup | Waiting for user decision — fix later (2026-10-12) |
+| T-51 | Persist slot view mode overrides (formerly P3e) | Minor feature · cleanup | Deferred — when it becomes necessary |
+| T-43 | Neutral eventization of claude tool results | Minor feature · cleanup | Deferred |
+| T-37 | Discard · merge `todo` | Minor feature · cleanup | Waiting for trigger |
+| T-27 | Shape of the shell logic separation | Minor feature · cleanup | Waiting for user decision |
+| T-26 | dev launcher kill path unverified | Minor feature · cleanup | Deferred |
+| T-23 | Human-facing daemon command-line surface | Minor feature · cleanup | Waiting for user decision |
+| T-17 | Include GUI measurement in CI | Minor feature · cleanup | Deferred — no scenario |
+| T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
-## 메인
+## Main
 
 ### T-86. Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon
 - **Status:** deferred to the multi-daemon topic, together with the tray work — user 2026-11-10: 「어차피 멀티데몬할때 트레이도 개선해야되니 나중에 다시 오픈하자」.
@@ -104,101 +104,101 @@
 - **Global handles outside the bus** — handles other than `__engramCmd` remain. Do not list them here; find them with `rg ").__ENGRAM_|).__engram" src/ -g '!*.test.*'` (`__engramCmd` in the output is the formal surface, the rest are gaps). A handle's own comment is not evidence of whether it is a gap.
 - Keybinding remapping = T-42.
 
-### T-66. 창 크롬 · 이름 — 크롬식 제목 표시줄 · 보이는 창 번호 재사용 · 창 제목
-- **상태:** 진행 — `v0.5.0/feat/window-chrome`(S26 · 2026-10-23~) · PRD 0.5판 · TRD 0.3판(`docs/process/S26-window-chrome/trd.md`) · 구현 U1–U9 커밋(`4cefce48` … `c7295bdb`) · U10 문서 = ADR-0300~0306 · CLAUDE.md · step-log · 도움말 본문(2026-10-26) · 단위마다 `/review code full` 과 QA 를 거쳤다 — 단 U8a 1부 · U8b · U9 는 리뷰 전에 로컬 커밋하고 리뷰 수정을 뒤 커밋으로 더했다 · U2 · U3b 의 QA standard = CI · U8a 2부부터는 2026-10-26 로컬 `/qa standard`(U8a 2부 `bca0686e` · U8a + U8b `49b64836` · U9 `c7295bdb` · U10 `cf26db3d` — 모두 PASS)(CI 초록은 U7b `24782701` 까지 — U8a 부터는 아직 push 전이다 · 로컬 ref 기준 2026-10-26) · ★GUI(`/qa full`)는 PARTIAL — 세션이 잠겨 끝까지 재지 못했다★ · 사람 손 GUI 확인 2026-10-26(사용자 · 주로 다크) = S13 · S14 · AC13 · AC22 · 커서 자리 새 창 통과 → U8b 측정 문 통과(`TOP_GAP` · 놓기 구역 그대로) · AC23 Alt+Space 는 이 PC 의 PowerToys Run 이 가로채 못 봤다(앱 결함 아님) · 상세 = step-log S26. 2026-10-23 줄: PRD 0.4판(사용자 결정 반영 · 리뷰 전) · 슬롯 도킹은 T-66 없이 먼저 머지됨(`c60797a6`). 옛 줄: 예정 — 슬롯 도킹(TRD 7판 U7) 직후 바로(사용자 결정 2026-10-17) · 최종 머지에 포함. 제목 표시줄 없애기와 창 구분은 슬롯 도킹 구현 뒤 바로 이어서 한다(사용자 2026-10-20 — 「그거하고 탭바 제거하는거하고 현재 구현 끝나고 이어서 진행할거.」).
-- **문제:** 팝아웃 창 제목이 내부 label 그대로(「Engram — slot-popup-11」 · `src-tauri/src/commands/popout.rs:231`)이고 팝아웃 새 탭 이름도 label 꼬리 번호(「Popup 6」 · 같은 파일 `tab_name`)라 계속 커지는 번호가 사람에게 보인다. 창 이름은 바꿀 수 없다(탭은 `tab.rename` 으로 된다).
-- **결정(사용자 2026-10-17):** 보이는 창 번호 = 살아 있는 창 중 비어 있는 가장 작은 번호 재사용 · 내부 label 은 계속 단조 · 크롬/탐색기식 제목 표시줄(탭 줄이 맨 위 · 빈 곳 = 창 끌기 · 창 버튼 직접) · 탭바 넘침 = 크롬과 똑같이(스크롤 없음 · 최소 폭까지 줄고 넘치면 안 보임).
-- **창 구분:** 메인 창과 팝아웃을 겉보기로 구분할 표시가 필요하다(사용자 2026-10-20 — 「나중에 메인창인지 팝아웃인지 구분해주는게 필요해보이긴하는데 똑같으니깐 뭐가 메인인지 모르겠네」). → 사용자 결정 2026-10-23(Q3 · Q7)이 채운다 — 모든 창에 번호 표식(탭줄 오른쪽 끝 · 메인 = 늘 1) + 메인 ✕ = 모든 창 숨기기(아이콘 · 툴팁이 다르다) · PRD 0.4판 R24 · R10.
-- **다음(2026-10-26 · 사람 손 GUI 확인 뒤):** ① 브랜치 push(ADR-0300~0306 번호를 원격에 아직 선점하지 않았다) → CI 초록 → master 머지 ② 이번에 다루지 않은 손 확인 = S9(위 크기 조절 띠와 위 여백의 겹침) · U7a C8(다른 앱이 앞일 때 전경). 받아들인 것 = 최소 폭에서 첫 탭이 아닌 활성 탭이 숨는다(Chrome 규칙 — PRD AC22 고침 · TRD M35).
-- **사용자 결정(2026-10-26):** 창 그림자는 모든 테마에서 그대로 둔다(그림자 끄기 스파이크는 되돌렸다 · 커밋 안 함) · 당분간 다크 모드에서만 작업 · 확인한다 — light · e-ink 는 그대로 두고 뒤의 색 프리셋 기능과 함께 다룬다(e-ink 는 선택지가 될 수 있다) — TRD §12-2.
-- **미룬 것 → 색 프리셋 작업(사용자 2026-10-26):** WebView2 기본 오른쪽 클릭 메뉴(탭 머리 · 제목 줄에서 뒤로 · 새로 고침 · 다른 이름으로 저장 · 인쇄 · 검사) 걷기 — 범위(앱 전체 대 제목 줄 · 탭)는 뒤에 정한다 · 릴리스 빌드 동작은 모른다 · Alt+Space 를 직접 다룰지 · e-ink 비활성 창 표시(흐림이 거의 안 보인다) · e-ink 그림자가 얼룩처럼 보임 · light · e-ink 에서도 DWM 다크 모드 깃발이 켜진 채(테두리 · 그림자가 어둡다).
-- **옛 다음:** ★2026-10-23 — PRD 0.4판이 사용자 결정을 반영했다(§5-1 — 아래 0.3판 제안 중 「탭 없으면 「Engram 2」」 · 「팝아웃 새 탭 이름 = 옮긴 슬롯의 에이전트 이름」 · 「명령은 둘 다 받는다」 · 「스냅 레이아웃은 따로 본다」는 결정으로 바뀌었다 — 제목 「<탭> - Engram:<n>」 · 탭 자동 이름 · 명령은 번호를 받지 않음 · 스냅 메뉴는 이 스텝 안 짧은 스파이크). 남은 것 = PRD 리뷰 · Q5 · Q10 메인 스파이크 · Q1 스파이크 · TRD(차례는 메인이 정한다). `A` 는 ADR-0298 뒤 지금 52(부품 합)다★ 옛 줄: PRD `process/S21-window-chrome/prd.md`(0.3판 초안 — 사용자 결정 대기)의 메인 제안(미확정)을 사용자에게 올린다 — 창 제목 「<활성 탭 이름> - Engram」(탭 없으면 「Engram 2」) · 팝아웃 새 탭 이름 = 옮긴 슬롯의 에이전트 이름(비면 「새 탭」) · `window.list` 가 보이는 번호와 label 을 함께 주고 명령은 둘 다 받는다. 결정 뒤 CLAUDE.md 「개발 스텝」(TRD → 결정 → 구현). Windows 11 스냅 레이아웃 맞추기는 따로 본다. 탭바 스타일을 다시 짜면 슬롯 도킹의 활성 탭 최소 폭 `A`(지금 42 · 엄밀히 끌어내면 44 — `.claude/handoff/attachments/trd-5.8-before-chrome-2026-10-18.md`(TRD 5.8판 백업 — 지금 TRD 에는 이 절이 없다) §7 #73 · §8-1 2026-10-18 화면 QA)를 잰 스타일에서 다시 끌어낸다.
-- **슬롯 도킹 실측에서 더해진 것(사용자 2026-10-22 — 「둘 다 탑바 제거할때 가능하면 그때 하면됨」 · 「T66에서 되는지 안되는지 보자」):** ① 마지막 탭을 끌면 창 이동 · ② 탭바 밑 빈 공간을 끌어도 창 이동 · ③ main 의 하나뿐인 탭도 끌면 창 이동(PRD Q35 「main 하나뿐인 탭은 끌기 안 됨」을 바꾼다 — M7) · ④ 탭을 창 밖으로 끌 때의 금지(🚫) 커서 · ⑤ 탭바 안 순서 바꾸기에도 도킹용 이름표(끌기 그림)가 붙어 어색하다. ④ · ⑤ 는 같은 뿌리(HTML5 끌기의 주인 = WebView2 · 끌기 그림은 시작 때 한 번만 정함)이고 길은 셋 — A `DragStarting`(composition 전용 · wry 포크) · B 크롬식 직접 창 이동(① · ② 와 같은 기술) · C 셸 직접 `DoDragDrop`(ADR-0296 거부 대안 재론) — 조사 `research/tab-drag-outside-cursor-2026-10-22.md`. T-66 에서 B · C 가 되는지 보고 정한다. → **닫힘(사용자 결정 2026-10-23 — 「어차피 탭 남는부분 끌면되니 … 구지 따로 구현할 필요 없음」):** ② 만 한다(탭줄 빈 곳 · 탭 둘레 끌기 = 창 이동) · ① · ③ · ④ · ⑤ 는 안 한다(① = 피어 Vivaldi · Chrome WebUI 탭바도 같다 — 조사 `research/slot-docking-drag-ownership-peers-2026-10-19.md` A4–A6 · ③ = 슬롯 도킹 Q35 그대로 · ④ ⑤ = 길 셋이 모두 큼) — PRD `process/S21-window-chrome/prd.md` 0.4판 R25–R28 · §5-1.
-- **근거:** `research/window-naming-titlebar-2026-10-17.md` · 제목 표시줄 구현 선택지 `research/custom-titlebar-tauri-2026-10-18.md`(추천 = HTML 단추 + `data-tauri-drag-region` · 스냅 메뉴는 `platform` 에 오버레이 — 메뉴 필요 여부는 사용자 결정) · 탭 끌기와의 맞물림(빈 탭바 `app-region: drag` · 탭 하나 창 = 창 이동 — ★이 뒤쪽은 PRD 4.9 Q34 가 대신했다(탭 하나뿐인 팝아웃도 다른 탭처럼 끈다)★) `research/slot-docking-chrome-desktop-drag-2026-10-18.md` B6 · A12(슬롯 도킹 9c 실측 불합격 뒤 데스크톱 Chrome 모델 재조사 · 코드 점검 = `refactoring/slot-docking-drag-code-audit-2026-10-18.md`)
+### T-66. Window chrome · name — Chrome-style title bar · reuse of visible window numbers · window title
+- **Status:** In progress — `v0.5.0/feat/window-chrome` (S26 · 2026-10-23~) · PRD edition 0.5 · TRD edition 0.3 (`docs/process/S26-window-chrome/trd.md`) · U1–U9 implementation committed (`4cefce48` … `c7295bdb`) · U10 docs = ADR-0300~0306 · CLAUDE.md · step-log · help body text (2026-10-26) · each unit went through `/review code full` and QA — except that U8a part 1 · U8b · U9 were committed locally before review and the review fixes were added in later commits · QA standard for U2 · U3b = CI · from U8a part 2 on, local `/qa standard` on 2026-10-26 (U8a part 2 `bca0686e` · U8a + U8b `49b64836` · U9 `c7295bdb` · U10 `cf26db3d` — all PASS) (CI green only up to U7b `24782701` — U8a onward has not been pushed yet · based on the local ref 2026-10-26) · ★GUI (`/qa full`) is PARTIAL — the session was locked, so it could not be measured to the end★ · manual GUI check by a person 2026-10-26 (the user · mostly dark) = S13 · S14 · AC13 · AC22 · new window at the cursor position passed → U8b measurement gate passed (`TOP_GAP` · drop area unchanged) · AC23 Alt+Space could not be seen because PowerToys Run on this PC intercepts it (not an app defect) · details = step-log S26. 2026-10-23 line: PRD edition 0.4 (user decisions applied · before review) · slot docking was merged first without T-66 (`c60797a6`). Old line: planned — right after slot docking (TRD edition 7 U7) (user decision 2026-10-17) · included in the final merge. Removing the title bar and distinguishing windows continue right after the slot docking implementation (user 2026-10-20 — 「그거하고 탭바 제거하는거하고 현재 구현 끝나고 이어서 진행할거.」).
+- **Problem:** The popout window title is the internal label as is (「Engram — slot-popup-11」 · `src-tauri/src/commands/popout.rs:231`) and the new tab name in a popout is also the label's trailing number (「Popup 6」 · `tab_name` in the same file), so an ever-growing number is visible to people. The window name cannot be changed (the tab can be, with `tab.rename`).
+- **Decision (user 2026-10-17):** visible window number = reuse the smallest free number among live windows · internal label stays monotonic · Chrome/Explorer-style title bar (tab row at the very top · empty area = drag the window · window buttons directly) · tab bar overflow = exactly like Chrome (no scrolling · shrinks down to the minimum width, and tabs that overflow are not shown).
+- **Window distinction:** a mark is needed to tell the main window and a popout apart by appearance (user 2026-10-20 — 「나중에 메인창인지 팝아웃인지 구분해주는게 필요해보이긴하는데 똑같으니깐 뭐가 메인인지 모르겠네」). → Filled by the user decision 2026-10-23 (Q3 · Q7) — a number mark on every window (right end of the tab row · main = always 1) + main ✕ = hide all windows (the icon · tooltip differ) · PRD edition 0.4 R24 · R10.
+- **Next (2026-10-26 · after the manual GUI check by a person):** ① push the branch (the ADR-0300~0306 numbers have not been claimed on the remote yet) → CI green → master merge ② manual checks not covered this time = S9 (overlap of the top resize strip and the top margin) · U7a C8 (foreground when another app is in front). Accepted = at the minimum width, the active tab that is not the first tab is hidden (Chrome rule — PRD AC22 fixed · TRD M35).
+- **User decision (2026-10-26):** the window shadow is left as is in all themes (the shadow-off spike was reverted · not committed) · for now work only in dark mode · confirm — light · e-ink are left as is and handled together with the later color preset feature (e-ink may become an option) — TRD §12-2.
+- **Deferred → color preset work (user 2026-10-26):** clearing the WebView2 default right-click menu (Back · Reload · Save as · Print · Inspect from the tab head · title row) — the scope (whole app vs title row · tab) is decided later · release build behavior is unknown · whether to handle Alt+Space directly · e-ink inactive window display (the dimming is barely visible) · e-ink shadow looks like a smudge · the DWM dark mode flag stays on even in light · e-ink (border · shadow are dark).
+- **Old next:** ★2026-10-23 — PRD edition 0.4 reflected the user decisions (§5-1 — among the edition 0.3 proposals below, 「탭 없으면 「Engram 2」」 · 「팝아웃 새 탭 이름 = 옮긴 슬롯의 에이전트 이름」 · 「명령은 둘 다 받는다」 · 「스냅 레이아웃은 따로 본다」 were replaced by decisions — title 「<탭> - Engram:<n>」 · automatic tab name · commands do not accept the number · the snap menu is a short spike within this step). Remaining = PRD review · Q5 · Q10 main spike · Q1 spike · TRD (the order is decided by the main). `A` is now 52 (sum of parts) after ADR-0298★ Old line: raise the main's proposal (unconfirmed) in PRD `process/S21-window-chrome/prd.md` (edition 0.3 draft — waiting for user decision) to the user — window title 「<활성 탭 이름> - Engram」(「Engram 2」 if there is no tab) · new popout tab name = the agent name of the moved slot (「새 탭」 if empty) · `window.list` returns the visible number and the label together and commands accept both. After the decision, CLAUDE.md 「개발 스텝」 (TRD → decision → implementation). Fitting the Windows 11 snap layouts is looked at separately. If the tab bar style is redone, the minimum width of the active tab in slot docking `A` (now 42 · strictly derived 44 — `.claude/handoff/attachments/trd-5.8-before-chrome-2026-10-18.md` (TRD edition 5.8 backup — the current TRD has no such section) §7 #73 · §8-1 2026-10-18 screen QA) is derived again from the measured style.
+- **Added from the slot docking measurement (user 2026-10-22 — 「둘 다 탑바 제거할때 가능하면 그때 하면됨」 · 「T66에서 되는지 안되는지 보자」):** ① dragging the last tab moves the window · ② dragging the empty space under the tab bar also moves the window · ③ dragging main's only tab also moves the window (changes PRD Q35 「main 하나뿐인 탭은 끌기 안 됨」 — M7) · ④ the forbidden (🚫) cursor when dragging a tab out of the window · ⑤ reordering inside the tab bar also gets the docking label (drag image), which is awkward. ④ · ⑤ have the same root (the owner of HTML5 drag = WebView2 · the drag image is decided only once at the start) and there are three paths — A `DragStarting` (composition only · wry fork) · B Chrome-style direct window move (same technology as ① · ②) · C shell-direct `DoDragDrop` (revisiting the ADR-0296 rejected alternative) — research `research/tab-drag-outside-cursor-2026-10-22.md`. Decide after seeing in T-66 whether B · C work. → **Closed (user decision 2026-10-23 — 「어차피 탭 남는부분 끌면되니 … 구지 따로 구현할 필요 없음」):** only ② is done (dragging the empty part of the tab row · around a tab = window move) · ① · ③ · ④ · ⑤ are not done (① = the peers Vivaldi · the Chrome WebUI tab bar behave the same way — research `research/slot-docking-drag-ownership-peers-2026-10-19.md` A4–A6 · ③ = slot docking Q35 as is · ④ ⑤ = all three paths are large) — PRD `process/S21-window-chrome/prd.md` edition 0.4 R25–R28 · §5-1.
+- **Rationale:** `research/window-naming-titlebar-2026-10-17.md` · title bar implementation options `research/custom-titlebar-tauri-2026-10-18.md` (recommendation = HTML buttons + `data-tauri-drag-region` · the snap menu is an overlay on `platform` — whether the menu is needed is the user's decision) · interlocking with tab drag (empty tab bar `app-region: drag` · one-tab window = window move — ★the latter part was replaced by PRD 4.9 Q34 (a popout with only one tab is dragged like other tabs)★) `research/slot-docking-chrome-desktop-drag-2026-10-18.md` B6 · A12 (re-research of the desktop Chrome model after the slot docking 9c measurement failure · code audit = `refactoring/slot-docking-drag-code-audit-2026-10-18.md`)
 
-### T-65. 슬롯 도킹의 LLM 명령(`tab.dock` · `layout.get`) — CLAUDE.md 「LLM-우선 제어」의 의식적 예외
-- **상태:** 구현 · 문서 착지 — S28(2026-10-26~27 · `v0.5.0/feat/llm-layout-commands` · TRD = `process/S28-llm-layout-commands/trd.md` 4판). U1 `7b587e99`(데몬 `agent.resolve` · 후보 문구) · U2 `4cb8caed`(셸 적용 층) · ADR-0308 `de6f652c`(에이전트 이름은 데몬이 중계 전에 id 로) · U3 `2710e14f`(`tab.move` · `tab.dock` · `tab.detach` · `layout.get` · 칸 · 탭 명령 이름 · 공간 낱말 지목 · 답에 바뀐 배치) · U4 문서(help 「## window」 · CLAUDE.md — 미커밋). `/qa standard` PASS. U3 까지 push · `2710e14f` CI 진행 중. **남은 것 = U4 문서 커밋 · GUI 실측 · master 머지** — 머지하면 여기서 빼고 `tracking-archive.md` 에 한 줄(코드 주석 · 커밋 메시지가 이 번호를 가리킨다).
-- **문제(S28 이 닫음):** 슬롯 도킹은 마우스 경로만 만든다(PRD 4.3 Q10 · R16 · R17 · AC10). 적용 서비스 `apply::dock_tab` 은 남아 명령이 그 위에 선다(TRD 7판 §3-6 — 옛 5판 §3). 그 사이 LLM 은 탭을 도킹할 수 없다.
-- **사용자 확인 대기(메인이 기본값으로 진행 — S28 TRD §11):** ① 칸이 여럿인 탭은 탭째 옮긴다 ② `tab.dock` 붙임 몫 기본 = 마우스와 같은 값(크기를 모르면 0.5) ③ 풀리지 않는 에이전트를 `slot.assignAgent` · `layout.setSlotContent` 가 거절한다(전엔 빈 칸) ④ 보이는 탭을 안 바꾸는 규칙(슬롯 도킹 PRD R11b)의 예외 셋 ⑤ 끄는 중 LLM 이 옮긴 탭을 웹뷰 밖에 놓으면 새 창이 안 생긴다(그대로 둠) ⑥ LLM 의 새 창 크기 · 붙임 몫이 마우스와 조금 다르다 ⑦ 칸 하나만 다른 칸 옆에 붙이는 길이 없다.
-- **후속(지금 코드에 없음):** ⑦ 칸 단위 도킹(지금은 `slot.popout` → `tab.dock` 두 호출) · ⑥ 모니터 작업 영역 · 창 틀 입력을 셸로 올리는 포트(마우스와 같게 하려면) · 「크면 파일로」 안전장치(ADR-0307 결정 6 · 자리 미정 — S28 범위 밖) · `agent.spawnInto` 가 `slot_id` 단독을 받게(`slot.assignAgent` 처럼) — 지금은 `view_id` 가 필요해 칸을 나눠 그 반쪽에 띄우기가 3 호출(`slot.split` → `layout.get --ids true` → `agent.spawnInto`).
-- **사용자 기준:** 「LLM 시나리오는 여러 번 거치지 않아야 실수가 적다」.
-- **근거:** `process/S21-slot-docking/prd.md` Q10 · `process/S21-slot-docking/trd.md` §3-6(7판 — LLM 경로 · 끄는 중 LLM 이 같은 탭을 옮긴 뒤의 놓기 · 예열 창) · §9-5(그 놓기 결과 — U7 대조 · 2026-10-23 사용자 결정으로 PRD R13c 에 ADR-0297 결정 2 를 적었다 · 우리 웹뷰 밖에서 뗀 경우의 예외는 여전히 TRD 에만) · 메모 `.claude/handoff/attachments/llm-layout-surface-notes-2026-10-16.md` · 외부 조사(조회 vs 명령 · 결과를 밖으로 낼지 · 형식) `research/llm-command-design-query-vs-action-2026-10-26.md` · 칸 위치 지정(좌표 vs 순번 vs 방향) `research/pane-positional-addressing-2026-10-26.md`
+### T-65. LLM commands for slot docking (`tab.dock` · `layout.get`) — a conscious exception to CLAUDE.md 「LLM-우선 제어」
+- **Status:** Implemented · docs landed — S28 (2026-10-26~27 · `v0.5.0/feat/llm-layout-commands` · TRD = `process/S28-llm-layout-commands/trd.md` edition 4). U1 `7b587e99` (daemon `agent.resolve` · candidate wording) · U2 `4cb8caed` (shell apply layer) · ADR-0308 `de6f652c` (the daemon turns an agent name into an id before relaying) · U3 `2710e14f` (`tab.move` · `tab.dock` · `tab.detach` · `layout.get` · area · tab command name · spatial word addressing · changed layout in the reply) · U4 docs (help 「## window」 · CLAUDE.md — uncommitted). `/qa standard` PASS. Pushed through U3 · `2710e14f` CI running. **Remaining = U4 docs commit · GUI measurement · master merge** — once merged, remove it from here and add one line to `tracking-archive.md` (code comments · commit messages point at this number).
+- **Problem (closed by S28):** Slot docking builds only the mouse path (PRD 4.3 Q10 · R16 · R17 · AC10). The apply service `apply::dock_tab` remains and the commands stand on top of it (TRD edition 7 §3-6 — old edition 5 §3). In the meantime an LLM cannot dock a tab.
+- **Waiting for user confirmation (the main proceeds with the defaults — S28 TRD §11):** ① a tab with several areas is moved as a whole tab ② the `tab.dock` attach share default = the same value as the mouse (0.5 if the size is unknown) ③ `slot.assignAgent` · `layout.setSlotContent` reject an agent that cannot be resolved (previously an empty area) ④ three exceptions to the rule of not changing the visible tab (slot docking PRD R11b) ⑤ if a tab moved by an LLM during a drag is dropped outside the webview, no new window is created (left as is) ⑥ the new window size · attach share of an LLM differ slightly from the mouse ⑦ there is no way to attach just one area next to another area.
+- **Follow-up (not in the code now):** ⑦ area-level docking (now two calls, `slot.popout` → `tab.dock`) · ⑥ monitor work area · a port that raises window frame input to the shell (to make it the same as the mouse) · the 「크면 파일로」 safeguard (ADR-0307 decision 6 · place undecided — outside the S28 scope) · let `agent.spawnInto` accept `slot_id` alone (like `slot.assignAgent`) — now it needs `view_id`, so splitting an area and spawning into that half takes 3 calls (`slot.split` → `layout.get --ids true` → `agent.spawnInto`).
+- **User criterion:** 「LLM 시나리오는 여러 번 거치지 않아야 실수가 적다」.
+- **Rationale:** `process/S21-slot-docking/prd.md` Q10 · `process/S21-slot-docking/trd.md` §3-6 (edition 7 — LLM path · the drop after an LLM moves the same tab during a drag · prewarmed window) · §9-5 (that drop result — U7 comparison · the 2026-10-23 user decision wrote ADR-0297 decision 2 into PRD R13c · the exception for a drop detached outside our webview is still only in the TRD) · memo `.claude/handoff/attachments/llm-layout-surface-notes-2026-10-16.md` · external research (query vs command · whether to put the result outside · format) `research/llm-command-design-query-vs-action-2026-10-26.md` · area positioning (coordinates vs ordinal vs direction) `research/pane-positional-addressing-2026-10-26.md`
 
-### T-49. 꺼진 에이전트의 슬롯 쪽 활성화 · 완전한 이어받기 — 지금은 트리에서만 켠다
-- **상태:** 보류 — 저장 시스템(`v0.3.3/feat/storage`)을 마친 뒤 사용자에게 올린다(사용자 결정 2026-10-06 — 「저장 시스템 다 하고 언급하면 될듯」).
-- **문제:** 복원된 슬롯이 꺼진 에이전트(프로필 있음 · 실행 중 아님 · 기억 없음)를 가리키면 부재 막만 서고 슬롯에는 켜는 조작이 없다 — 트리에서 활성화하면 슬롯이 스스로 붙는다(ADR-0280 결정 1). 미룬 것 = 슬롯 쪽 활성화 조작과 완전한 이어받기(resume) — 범위는 사용자 발언(「기존에 종료된 에이전트 활성은 아직 기능이 없는거고 그냥 구현 안해도됨. 나중에 전체 resume 관련해서 따로 구현할거임」)의 세션 해석이다(ADR-0280 결정 1).
-- **함정:** P3c3 에서 슬롯 활성화 단추(트리와 같은 `agentClient.spawnProfile`)를 먼저 지었을 때 트리 · 슬롯 활성화 상태 맞추기가 리뷰 3 라운드 동안 표면을 가로지르는 결함을 냈다 — 중복 활성화 · 새로고침 전에 풀리는 공용 활성화 문 · 남는 거절 표식 · 트리에 안 보이는 슬롯 실패 · 활성화 도중 켜지는 메뉴(TRD §14-18). 옛 계획의 걸림 = 활성화 진행 표식이 트리 컴포넌트 지역 상태라 슬롯이 못 본다(TRD §6-8 의 옛 [고름]).
-- **근거:** ADR-0280(거부한 대안 「정지됨」 + 「활성화」 단추) · `docs/process/S21-storage/trd.md` §6-8 · §14-18
+### T-49. Slot-side activation of a stopped agent · full resume — for now it is turned on only from the tree
+- **Status:** Deferred — raise it to the user after finishing the storage system (`v0.3.3/feat/storage`) (user decision 2026-10-06 — 「저장 시스템 다 하고 언급하면 될듯」).
+- **Problem:** When a restored slot points at a stopped agent (has a profile · not running · no memory), only the absence curtain is shown and the slot has no operation to turn it on — activating it from the tree makes the slot attach by itself (ADR-0280 decision 1). Deferred = a slot-side activation operation and full resume — the scope is the session's interpretation of the user's remark (「기존에 종료된 에이전트 활성은 아직 기능이 없는거고 그냥 구현 안해도됨. 나중에 전체 resume 관련해서 따로 구현할거임」) (ADR-0280 decision 1).
+- **Pitfall:** When P3c3 first built a slot activation button (the same `agentClient.spawnProfile` as the tree), aligning the tree · slot activation state produced cross-surface defects over three review rounds — duplicate activation · a shared activation gate that is released before refresh · a leftover rejection marker · a slot failure not visible in the tree · a menu that opens during activation (TRD §14-18). The snag in the old plan = the activation progress marker is local state in the tree component, so the slot cannot see it (the old [Picked] of TRD §6-8).
+- **Rationale:** ADR-0280 (rejected alternative 「정지됨」 + 「활성화」 button) · `docs/process/S21-storage/trd.md` §6-8 · §14-18
 
-### T-47. 크레이트 경계 리팩터링 — 아키텍처 논의에서 나온 결정 후보 1~9
-- **상태:** 경계 논의 완료(2026-10-02) · ADR 작성 완료(ADR-0266~0273, 2026-10-02/03 — 후보 7 은 transport TRD 로 미룸 · 후보 3 은 번복: 감싸지 않는다, ADR-0268 · 후보 2 는 철회: 필요해질 때만 연결한다, ADR-0267) · 1단계 TRD 완료(1-1 base 도우미 · 1-3 platform crate, 2026-10-03~04 — 갈림길은 사용자 위임 2026-10-04 「알아서 진행해」 → 권고안 채택, ADR-0275) · 착지 = 1-1 base 도우미 · 1-3 platform crate · 2-1 셸 → agent 끊기 · 2-2 discovery 나누기(2026-10-04~07 — 각 step-log 항목 · 2-2 세부 = ADR-0282) · 순서 = 0단계 ADR 끝 → 1단계 바닥 → 2단계 클라·데몬 떼기 → 3단계 transport → 4단계 안쪽 정리.
-- **결정 후보:** 1 OS 의존 코드 → `platform` crate · 2 command·messaging 도 base 사용(철회 — 필요해질 때만, ADR-0267) · 3 로그는 base 경유만(번복 — 감싸지 않는다, ADR-0268) · 4 base 공용 함수 모듈 · 5 셸 → agent 끊기 · 6 discovery 를 데몬·셸로 · 7 transport 부착 뒤 net 걷기(transport TRD 로 미룸) · 8 패킷은 남의 구조체를 품지 않음(명령 칸만 `RawValue`) · 9 engram CLI 독립 패키지.
-- **다음:** ~~2-2 구현 완료(U1~U4 · 2026-10-07) → 2-2 master 머지(사용자 확인) → 2-3 engram CLI 독립 패키지(메모 10절). ★파일 도우미 통일(원자적 쓰기 → platform 1-3 · 손상 사본 치우기 1-1)은 storage P3(셸 화면 상태)가 master 에 착지한 뒤★ — 나머지 1단계는 먼저 간다(순서 정본 = 메모 10절).~~ → 2-3(2026-10-08) · 2-4(2026-10-08) · **A 데이터 파일 처리 통일**(파일 도우미 통일 — 거처는 base `file` · 2026-10-10~11 · ADR-0291 · `process/S21-crate-boundaries/trd-A-data-file-unification.md`) 착지. **패닉 정책 구현**(ADR-0292 · ADR-0293 — 2026-10-12) 착지. **우편 주소 id 통일**(S29 · ADR-0309 — 2026-10-29 · master `0a18d7f7`) 착지 — 사용자 결정 2026-10-12 로 transport 뒤였으나 먼저 했다. 다음 = 3단계 transport(순서 정본 = 메모 10절). ★3-3 후속 한 줄 — net 단일 인스턴스 열기 재시도는 3-3 에서 platform `fs::retry_busy` 를 쓴다(예산 4 × 100 ms · TRD A §3-6 의 메모 · ADR-0291 결정 15) — 3-3 TRD 가 서면 그쪽으로 옮긴다★.
-- **정본(베끼지 않는다):** `refactoring/architecture-discussion-2026-09-26.md` — 사실 · 결정 · 작업 순서 · 진행 방식 · 지나가며 본 정리 후보(11절). 근거 조사 = `research/wire-shared-types-placement-2026-10-02.md`. 1단계 TRD = `process/S21-crate-boundaries/trd-1-1-base-helpers.md` · `process/S21-crate-boundaries/trd-1-3-platform-crate.md`(그 결정 = ADR-0275).
+### T-47. Crate boundary refactoring — decision candidates 1~9 from the architecture discussion
+- **Status:** Boundary discussion done (2026-10-02) · ADRs written (ADR-0266~0273, 2026-10-02/03 — candidate 7 deferred to the transport TRD · candidate 3 reversed: do not wrap, ADR-0268 · candidate 2 withdrawn: connect only when needed, ADR-0267) · stage 1 TRD done (1-1 base helpers · 1-3 platform crate, 2026-10-03~04 — the fork was delegated to the main by the user 2026-10-04 「알아서 진행해」 → recommended option adopted, ADR-0275) · landed = 1-1 base helpers · 1-3 platform crate · 2-1 cut shell → agent · 2-2 split discovery (2026-10-04~07 — each step-log entry · 2-2 details = ADR-0282) · order = stage 0 ADRs done → stage 1 foundation → stage 2 detach client·daemon → stage 3 transport → stage 4 inner cleanup.
+- **Decision candidates:** 1 OS-dependent code → `platform` crate · 2 command·messaging also use base (withdrawn — only when needed, ADR-0267) · 3 logging only through base (reversed — do not wrap, ADR-0268) · 4 base shared function module · 5 cut shell → agent · 6 move discovery to daemon·shell · 7 remove net after transport is attached (deferred to the transport TRD) · 8 packets do not embed other people's structs (only the command field is `RawValue`) · 9 engram CLI as an independent package.
+- **Next:** ~~2-2 implementation done (U1~U4 · 2026-10-07) → 2-2 master merge (user confirmation) → 2-3 engram CLI independent package (memo section 10). ★Unifying file helpers (atomic write → platform 1-3 · clearing corrupted copies 1-1) comes after storage P3 (shell screen state) lands on master★ — the rest of stage 1 goes first (canonical order = memo section 10).~~ → 2-3 (2026-10-08) · 2-4 (2026-10-08) · **A data file handling unification** (file helper unification — home is base `file` · 2026-10-10~11 · ADR-0291 · `process/S21-crate-boundaries/trd-A-data-file-unification.md`) landed. **Panic policy implementation** (ADR-0292 · ADR-0293 — 2026-10-12) landed. **Mail address id unification** (S29 · ADR-0309 — 2026-10-29 · master `0a18d7f7`) landed — it was after transport by the user decision 2026-10-12 but was done first. Next = stage 3 transport (canonical order = memo section 10). ★One follow-up line for 3-3 — net single-instance open retry uses platform `fs::retry_busy` in 3-3 (budget 4 × 100 ms · note in TRD A §3-6 · ADR-0291 decision 15) — move it there once the 3-3 TRD exists★.
+- **Canonical sources (not copied):** `refactoring/architecture-discussion-2026-09-26.md` — facts · decisions · work order · way of proceeding · cleanup candidates seen in passing (section 11). Research for the rationale = `research/wire-shared-types-placement-2026-10-02.md`. Stage 1 TRD = `process/S21-crate-boundaries/trd-1-1-base-helpers.md` · `process/S21-crate-boundaries/trd-1-3-platform-crate.md` (its decision = ADR-0275).
 
-### T-44. 채팅에서 승인 받기 — codex 승인 질문을 지금은 자동 거절한다
-- **상태:** 보류(사용자 결정 2026-09-27 — 다음 과제로). 챗 화면 라운드는 거절된 호출을 「거부됨」으로 보이기만 한다. 옛 번호 = T-38(`v0.3.3/feat/chat-ux` 브랜치의 커밋·인계 첨부에서 이 주제를 가리키는 「T-38」).
-- **문제:** JSON(채팅) 모드에서 codex 의 서버 요청은 전부 곧바로 「처리하지 않음」으로 거절된다(답하지 않으면 에이전트가 영원히 멈춘다). 채팅 스폰 정책이 `OnRequest` + `WorkspaceWrite` 라 작업 폴더 밖 쓰기 같은 승인 질문이 전부 거절된다. 터미널 모드는 codex 가 자기 승인 프롬프트를 그려 사람이 답할 수 있고, claude 는 두 모드 모두 `bypassPermissions` 라 묻지 않는다(ADR-0097).
-- **다음:** 피어가 채팅 안에서 승인 요청을 어떻게 그리고 답받는지 조사(`docs/research/reference-implementations.md`) → 설계. 오면 TRD §4-7 ②-2 의 거부 귀속과 그 알려진 한계 넷을 다시 본다(필요 없어질 가능성 높음). 「거절」 답에 벤더가 `declined` 를 내는지는 미검.
-- **근거:** ADR-0241(거부한 대안 「채팅 승인을 이번에 짓는다」) · `docs/process/S21-chat-ux/trd.md` §1 U7 · §4-7 ②-2 · §12 · `crates/engram-dashboard-agent/src/backend/codex/transport.rs` 의 `refuse`(서버 Request 분기가 부른다)
+### T-44. Getting approval in chat — codex approval questions are auto-rejected for now
+- **Status:** Deferred (user decision 2026-09-27 — as the next task). The chat screen round only shows a rejected call as 「거부됨」. Old number = T-38 (the 「T-38」 that points at this topic in commits · handoff attachments on the `v0.3.3/feat/chat-ux` branch).
+- **Problem:** In JSON (chat) mode every codex server request is immediately rejected as 「처리하지 않음」 (if not answered, the agent stops forever). The chat spawn policy is `OnRequest` + `WorkspaceWrite`, so approval questions such as writes outside the work folder are all rejected. In terminal mode codex draws its own approval prompt so a person can answer, and claude is `bypassPermissions` in both modes so it does not ask (ADR-0097).
+- **Next:** Research how peers draw and answer approval requests inside chat (`docs/research/reference-implementations.md`) → design. When it comes, look again at the rejection attribution in TRD §4-7 ②-2 and its four known limits (likely to become unnecessary). Whether the vendor emits `declined` for a 「거절」 answer is unchecked.
+- **Rationale:** ADR-0241 (rejected alternative 「채팅 승인을 이번에 짓는다」) · `docs/process/S21-chat-ux/trd.md` §1 U7 · §4-7 ②-2 · §12 · `refuse` in `crates/engram-dashboard-agent/src/backend/codex/transport.rs` (the server Request branch calls it)
 
-### T-42. 단축키 시스템 — 명령 표는 있는데 「키 → 명령」 연결은 칸마다 흩어져 있다
-- **상태:** 보류(사용자 결정 2026-09-27). 챗 화면 라운드는 Esc 만 채팅 칸 안에서 되게 했다. 옛 번호 = T-36(`v0.3.3/feat/chat-ux` 브랜치 기록에서 이 주제를 가리키는 「T-36」).
-- **문제:** 전역 표(`src/commands/keybindings.ts` 의 `BINDINGS`)는 `ctrl+tab → tab.next` 하나뿐이고 재지정·chord 가 없다. 명령의 `keybinding` 칸(`src/commands/registry.ts:50`)은 표시용 힌트일 뿐 표와 안 이어지고, 채팅 입력창 Enter · 팝오버 Esc 닫기 · 이름 바꾸기 Esc 취소 · 채팅 칸 Esc → `agent.interrupt` 가 칸마다 따로 붙어 있다. CLAUDE.md 「LLM-우선 제어」 남은 갭 「키바인딩 커스터마이징 미구현」이 이것이다.
-- **함정:** 입력 요소 · contenteditable · `.xterm` 안 키를 전역 표가 무시하는 입력 가드(`keybindings.ts:7-35`)는 load-bearing 이다 — 풀면 터미널·입력 타이핑을 단축키가 삼킨다.
-- **참고:** 끄는 중(HTML5 끌어 놓기) Esc 는 OS 끌기 루프가 받는 것이라 표에 넣을 키가 아니다 — 끌기가 끝난 뒤 셸이 Esc · 버튼 상태를 읽어 취소로 가른다(`process/S21-slot-docking/trd.md` §3-5 ② — 7판). 옛 판(5.8 §1-4 「세션 동안 그 밖」 — 백업 `.claude/handoff/attachments/trd-5.8-before-chrome-2026-10-18.md`)의 「세션 동안(+200ms) `window` capture 단계에서 Escape 삼키기」는 옛 끌기 엔진과 함께 걷혔다(`rg Escape src/components/layout` 에 끌기 몫 0 — 2026-10-23). 단축키 표를 만들 때 「드래그 중 Esc = 끌기 몫」 규칙 한 줄로 우선순위를 둔다(사용자 2026-10-16 — 그때 다시 본다).
-- **다음(펼칠 때 쟁점):** ① 범위·우선순위(전역 / 포커스 칸 / 입력창 — Esc 는 팝오버 닫기가 끊기보다 먼저) ② 입력 가드와 공존 ③ 터미널 칸 예외 선언 ④ 한글 IME 조합 중 무시 ⑤ 재지정·저장·LLM 제어(명령 표 위에 — 새 전역 핸들 금지) ⑥ 표시 힌트를 실제 표와 일치. 채팅 칸 Esc 를 표 한 줄로 옮기는 것부터.
-- **근거:** ADR-0237(거부한 대안 「단축키 시스템을 지금 만든다」) · ADR-0055 · `docs/research/chat-ux-four-features-2026-09-27.md` §2-2(피어 paseo · t3code · VS Code `when`)
+### T-42. Shortcut key system — a command table exists but the 「키 → 명령」 wiring is scattered per area
+- **Status:** Deferred (user decision 2026-09-27). The chat screen round made only Esc work inside the chat area. Old number = T-36 (the 「T-36」 that points at this topic in the `v0.3.3/feat/chat-ux` branch records).
+- **Problem:** The global table (`BINDINGS` in `src/commands/keybindings.ts`) has only `ctrl+tab → tab.next` and has no rebinding · chord. A command's `keybinding` field (`src/commands/registry.ts:50`) is only a display hint and is not connected to the table, and chat input Enter · popover Esc close · rename Esc cancel · chat area Esc → `agent.interrupt` are attached separately per area. This is the CLAUDE.md 「LLM-우선 제어」 remaining gap 「키바인딩 커스터마이징 미구현」.
+- **Pitfall:** The input guard (`keybindings.ts:7-35`) by which the global table ignores keys inside input elements · contenteditable · `.xterm` is load-bearing — if removed, shortcuts swallow typing in the terminal · inputs.
+- **Reference:** Esc during a drag (HTML5 drag and drop) is received by the OS drag loop, so it is not a key to put in the table — after the drag ends the shell reads the Esc · button state and decides it as cancel (`process/S21-slot-docking/trd.md` §3-5 ② — edition 7). The old edition's (5.8 §1-4 「세션 동안 그 밖」 — backup `.claude/handoff/attachments/trd-5.8-before-chrome-2026-10-18.md`) 「세션 동안(+200ms) `window` capture 단계에서 Escape 삼키기」 was cleared together with the old drag engine (`rg Escape src/components/layout` has 0 drag-related hits — 2026-10-23). When building the shortcut table, set the priority with a one-line rule 「드래그 중 Esc = 끌기 몫」 (user 2026-10-16 — look again then).
+- **Next (issues when it is taken up):** ① scope · priority (global / focused area / input box — Esc closes the popover before it interrupts) ② coexistence with the input guard ③ declaring terminal area exceptions ④ ignore during Korean IME composition ⑤ rebinding · saving · LLM control (on top of the command table — no new global handler) ⑥ make the display hints match the actual table. Start by moving the chat area Esc to one table line.
+- **Rationale:** ADR-0237 (rejected alternative 「단축키 시스템을 지금 만든다」) · ADR-0055 · `docs/research/chat-ux-four-features-2026-09-27.md` §2-2 (peers paseo · t3code · VS Code `when`)
 
-### T-36. 반영 전 재입력 — 앱 전체 공용 처리
-- **상태:** 후속 주제(사용자 결정 2026-09-30: 사용량 슬롯 브랜치는 현행 유지, 공용 처리는 후속).
-- **출처:** 사용량 슬롯 팝업 체크박스 리뷰(ADR-0258 · `docs/process/S21-usage-limit-slot/trd.md` §3 #102 ⑤).
-- **내용:** 반영(echo) 전에 다시 들어온 입력을 앱 전체에서 어떻게 다룰지 — 같은 칸 체크박스 재클릭뿐 아니라 중복 효과(탭 `+` 두 번 · 같은 슬롯 분할 두 번 · 에이전트 종료·생성 · LLM `spawn_into` 동시 호출의 중복 생성)와 옛 값에서 계산한 상대 조작(Ctrl+Tab 두 번 = 한 칸)까지 — 실태·선례·선택지 = `docs/research/pre-echo-reinput-2026-09-30.md`.
+### T-36. Re-input before echo — shared handling across the app
+- **Status:** Follow-up topic (user decision 2026-09-30: the usage slot branch stays as is, the shared handling is a follow-up).
+- **Source:** Usage slot popup checkbox review (ADR-0258 · `docs/process/S21-usage-limit-slot/trd.md` §3 #102 ⑤).
+- **Content:** How to handle input that arrives again before the echo across the whole app — not only re-clicking the same-area checkbox but also duplicate effects (tab `+` twice · splitting the same slot twice · agent exit·creation · duplicate creation from simultaneous LLM `spawn_into` calls) and relative operations computed from an old value (Ctrl+Tab twice = one area) — state · precedents · options = `docs/research/pre-echo-reinput-2026-09-30.md`.
 
-### T-15. 프로세스 토폴로지 — 「실행자가 UI·데몬을 켜고 제어」 방향 + 로컬 다중 데몬
-- **상태:** 보류(착수 트리거 없음). 사용자 발제 2026-08-07 · 2026-08-17 — 둘 다 「등록만」이고 결정 아님.
-- **문제:** 사용자 방향 둘 — 실행자가 UI·데몬(각각 별도 프로세스)을 처음 켜고 제어 · UI 가 독립적으로 떠서 붙을 데몬을 고른다. 읽기가 갈리고 둘 다 활성 ADR-0026(트레이 + 메인 창 = 한 프로세스)과 부딪힌다: (가) 런처 + UI + 데몬 3프로세스 = ADR-0026 이 정식 기각 · (나) 데몬이 트레이 소유 = ADR-0026 정면 충돌 + winit 메인스레드 ↔ tokio 충돌(폐기 ADR-0023 이 든 기술 사실 — 지금도 유효).
-- **현황(실측):** 트레이 메뉴(데몬 켜기/끄기/자동 시작/완전 종료)와 데몬 생사 옵저버는 이미 있다. 부팅 시 프론트가 데몬을 켜는 것은 갭이 아니라 ADR-0025 의 확정 결정이다(첫 spawn 호출 = `daemon_start`). 폴더가 다른 데몬은 이미 공존한다(ADR-0134/0135 — 잠금 = `<데이터 폴더>/daemon.json` · 정본 `crates/engram-dashboard-daemon/src/instance.rs` 헤더). 남은 장벽은 클라 쪽 — 앱 단일 인스턴스가 식별자 기준이고 `tauri-plugin-single-instance` 에 이름 override 가 없다(ADR-0137).
-- **다음:** 착수 시 사용자에게 먼저 (가)/(나) 중 무엇인지 · 앱 인스턴스를 몇 개까지 허용할지 묻는다(여럿이면 플러그인을 걷고 「두 번째 실행이 기존 창을 꺼내는」 통로를 새로 짠다). 미조사 = 다중 인스턴스 구분·발견·전환의 외부 선례. 트리거 = 로컬 다중 데몬이 실제 요구가 될 때 · 부팅·기동 주체를 옮길 때.
-- **함정:** ① ADR-0027 의 `{identifier}+hash(작업폴더)` 키는 embedded(앱 in-process) 모드용이지 데몬용이 아니다 — 실제 세션에서 한 번 「예전 데몬 설계」로 오독했다 ② 앱 setup 의 `TODO(T6/connect)` 는 Rust측 자동 connect 미배선일 뿐 부팅 방아쇠 `daemon_start` 와 별개다 ③ step-log 2026-06-19 의 「1:N」은 한 클라이언트가 여러(원격 포함) 데몬에 붙는 구도지 로컬 다중 기동이 아니다.
-- **근거:** ADR-0026 · ADR-0025 · ADR-0134/0135
+### T-15. Process topology — the direction 「실행자가 UI·데몬을 켜고 제어」 (the launcher starts and controls the UI·daemon) + local multiple daemons
+- **Status:** Deferred (no trigger to start). User proposals 2026-08-07 · 2026-08-17 — both are 「등록만」 (registration only) and not decisions.
+- **Problem:** Two user directions — the launcher first starts and controls the UI·daemon (each a separate process) · the UI starts independently and chooses the daemon to attach to. The reading splits and both collide with the active ADR-0026 (tray + main window = one process): (ga) launcher + UI + daemon as 3 processes = formally rejected by ADR-0026 · (na) the daemon owns the tray = head-on conflict with ADR-0026 + winit main thread ↔ tokio conflict (a technical fact in the discarded ADR-0023 — still valid).
+- **Current state (measured):** The tray menu (daemon on/off/auto start/full exit) and the daemon liveness observer already exist. The frontend starting the daemon at boot is not a gap but a confirmed decision of ADR-0025 (the first spawn call = `daemon_start`). Daemons with different folders already coexist (ADR-0134/0135 — lock = `<데이터 폴더>/daemon.json` · canonical source is the header of `crates/engram-dashboard-daemon/src/instance.rs`). The remaining barrier is on the client side — app single instance is keyed on the identifier and `tauri-plugin-single-instance` has no name override (ADR-0137).
+- **Next:** When starting, first ask the user which of (ga)/(na) it is · how many app instances to allow (if several, remove the plugin and build a new channel for 「두 번째 실행이 기존 창을 꺼내는」 (the second launch brings up the existing window)). Not researched = external precedents for telling apart · discovering · switching among multiple instances. Trigger = when local multiple daemons become an actual requirement · when the boot·startup owner is moved.
+- **Pitfall:** ① the `{identifier}+hash(작업폴더)` key of ADR-0027 is for embedded (app in-process) mode, not for the daemon — it was once misread as 「예전 데몬 설계」 in a real session ② the `TODO(T6/connect)` in app setup is only the Rust-side automatic connect being unwired and is separate from the boot trigger `daemon_start` ③ 「1:N」 in step-log 2026-06-19 is a layout where one client attaches to several (including remote) daemons, not local multiple startup.
+- **Rationale:** ADR-0026 · ADR-0025 · ADR-0134/0135
 
-### T-14. 데이터 저장/메모리 시스템 — 그린필드 선행조사 완료, 착수 보류 (2026-07-19)
-- **상태:** 조사만 완료(결정 없음). 트리거 = 에이전트 데이터를 영속 저장·기억하게 할 스텝이 실제로 올 때(T-11 「더 큰 그림」 · T-13 풀 메일박스와 인접).
-- **문제:** 범용 데이터 저장 시스템이 없다(그린필드 — `agents.json` = 프로필 포인터 · replay 링 = 휘발). 3층 = ① 저장 엔진(저위험 · seam 뒤 교체) ② 데이터 모델·스키마(고위험 — 신중히) ③ 데이터 제어·메모리 관리(LLM 제어 직결). 착수 순서 ②→③.
-- **다음:** 현재 lean(확정 아님) = SQLite 정본 + FTS5(BM25) 먼저 → 필요 시 sqlite-vec(storage trait seam 뒤) · 서버형 제외 · 그래프는 재귀 CTE. 착수 시 claude 자체 auto-memory/resume 과의 경계부터 계산 · 누락 후보(SurrealDB · 로컬 MCP 메모리 서버 · sleep-time)까지 deep 재조사 · 크레이트 버전/라이선스 재확인.
-- **근거:** `docs/research/agent-persistence-memory-storage-survey-2026-07-19.md`
+### T-14. Data storage/memory system — greenfield prior research done, start deferred (2026-07-19)
+- **Status:** Only research done (no decision). Trigger = when a step that makes agent data persisted·remembered actually comes (adjacent to T-11 「더 큰 그림」 · T-13 full mailbox).
+- **Problem:** There is no general-purpose data storage system (greenfield — `agents.json` = profile pointer · replay ring = volatile). Three layers = ① storage engine (low risk · swapped behind a seam) ② data model·schema (high risk — be careful) ③ data control·memory management (directly tied to LLM control). Start order ②→③.
+- **Next:** Current lean (not confirmed) = SQLite canonical + FTS5 (BM25) first → sqlite-vec if needed (behind the storage trait seam) · server-based databases excluded · graph via recursive CTE. When starting, first compute the boundary with claude's own auto-memory/resume · deep re-research including missed candidates (SurrealDB · local MCP memory server · sleep-time) · recheck crate versions/licenses.
+- **Rationale:** `docs/research/agent-persistence-memory-storage-survey-2026-07-19.md`
 
-### T-13. 메시지 시스템 — MVP 착지, 풀 메일박스는 보류
-- **상태:** MVP 착지 — 에이전트 간 우편은 `engram mail` CLI + 메시징 커널(`crates/engram-dashboard-messaging`)로 돈다. 풀 메일박스(에이전트별 받은편지함·영속·ACK)는 보류(사용자 결정 2026-07-14 — T-11 「더 큰 그림」과 같은 후기 갈래).
-- **다음:** 풀 버전 착수 때 입력 = `docs/research/agent-messaging-survey-2026-06-28.md`(tokio now / NATS later · supervised actor · control/data plane 분리).
+### T-13. Message system — MVP landed, full mailbox deferred
+- **Status:** MVP landed — agent-to-agent mail runs on the `engram mail` CLI + the messaging kernel (`crates/engram-dashboard-messaging`). The full mailbox (per-agent inbox · persistence · ACK) is deferred (user decision 2026-07-14 — a late-stage branch like T-11 「더 큰 그림」).
+- **Next:** When starting the full version, the input = `docs/research/agent-messaging-survey-2026-06-28.md` (tokio now / NATS later · supervised actor · control/data plane separation).
 
-### T-12. JSON 라이브 상태 표시 정식 재설계 (「wait」/경과/토큰 인디케이터)
-- **상태:** 보류(폐기 아님 · 리서치 완료 2026-07-14). 대기 표시는 입력창 위 고정 줄로 옮겼다(ADR-0263 · 2026-10-01) — 나머지는 사용자가 쓰면서 다듬는다.
-- **문제:** `WaitRow`(`src/components/slot/chat/WaitRow.tsx`)는 마운트부터 초만 세는 벽시계라 무엇을 기다리는지 0정보다. 목표 = 「지금 뭘 하는지(thinking / 도구 / 응답 작성)」 + 경과 + 토큰 흐름 + 완료 요약(사용자 방향 2026-07-14 — gemini-cli·codex 급 리치 상태).
-- **선결조건(없으면 리치 불가):** 부분 메시지 델타 미수신(완료 블록만 받는다) · 턴 식별자 부재 · Error 의 terminal/recoverable 판별자 없음 · 「경과」의 의미 미정의(fixture 에 시계 5개) · done fallback 은 `status_changed` 금지 → `agent-list-updated` 만 · 다중턴 fixture 없음.
-- **다음:** 옵션셋 사용자 결정 — A 최소 견고화 / B 서버-권위 요약 푸터(turn-id 단 `ResultSummary` 이벤트) / C 풀 리치. B·C 는 PRD/TRD/ADR 트랙. 거부한 대안 = 종료-상태 fallback · 클라 재계산 토큰/비용 · 완료 블록 관찰로 세분 상태.
-- **근거:** ADR-0044/0045(StructuredEvent 계약) · ADR-0049 · ADR-0263 · 리서치(gemini-cli·codex-rs·aider·Claude Code 패턴) = 간소화 전 전문 T-12
+### T-12. Formal redesign of the JSON live status display (「wait」/elapsed/token indicator)
+- **Status:** Deferred (not discarded · research done 2026-07-14). The wait display was moved to a fixed line above the input box (ADR-0263 · 2026-10-01) — the rest is refined by the user while using it.
+- **Problem:** `WaitRow` (`src/components/slot/chat/WaitRow.tsx`) is a wall clock that only counts seconds from mount, so it has zero information about what is being waited for. Goal = 「지금 뭘 하는지(thinking / 도구 / 응답 작성)」 + elapsed + token flow + completion summary (user direction 2026-07-14 — rich status on the level of gemini-cli·codex).
+- **Prerequisites (rich is impossible without them):** partial message deltas are not received (only completed blocks are) · no turn identifier · Error has no terminal/recoverable discriminator · the meaning of 「경과」 is undefined (5 clocks in the fixture) · the done fallback must not use `status_changed` → only `agent-list-updated` · no multi-turn fixture.
+- **Next:** User decision on the option set — A minimal hardening / B server-authoritative summary footer (turn-id-bearing `ResultSummary` event) / C full rich. B·C go on the PRD/TRD/ADR track. Rejected alternatives = end-state fallback · client recomputed tokens/cost · fine-grained status by observing completed blocks.
+- **Rationale:** ADR-0044/0045 (StructuredEvent contract) · ADR-0049 · ADR-0263 · research (gemini-cli·codex-rs·aider·Claude Code patterns) = full text before simplification T-12
 
-### T-11. child별 권한 스코프(R7) — 보안 보류, 모바일/원격 단계
-- **상태:** 보류(폐기 아님 · 2026-07-13 결정 · 2026-07-14 재확인 = 수용된 알려진 위험). 트리거 = 신뢰경계 확장(모바일/원격 데몬).
-- **문제:** 데몬 auth 는 단일 마스터 토큰 하나라 통과/거부만 판정한다 — child 신원·스코프 0. prompt-injection 된 child 하나가 그 토큰으로 형제 에이전트 kill·write·UI 조작을 할 수 있다(cross-family 리뷰의 BLOCK 재도전 — 사용자는 로컬·신뢰 콘텐츠 전제로 보류 유지).
-- **다음:** 재도입 lean(확정 아님) = 데몬은 per-child 토큰으로 신원 도장만, 인가는 UI 권위 `ViewManager` 가. 전제 = 라우팅을 relay-through-daemon 으로 유지(ADR-0080 이 이미 그 모양). 토큰 발급·수명·portfile ACL 은 별도 보안 검토 — 모바일 원격의 TLS·인증도 함께(옛 D-8 의 미결 (2)). 사용자 프레이밍(2026-07-14) = 권한·오케스트레이션·명령 제약을 아우르는 후기 단계의 첫 항목.
-- **근거:** S17 제어표면 PRD R7 · ADR-0080
+### T-11. Per-child permission scope (R7) — security deferred, mobile/remote stage
+- **Status:** Deferred (not discarded · decided 2026-07-13 · reconfirmed 2026-07-14 = accepted known risk). Trigger = trust boundary expansion (mobile/remote daemon).
+- **Problem:** Daemon auth is a single master token, so it only decides pass/reject — child identity·scope is 0. One prompt-injected child can use that token to kill·write sibling agents and manipulate the UI (a renewed BLOCK challenge from the cross-family review — the user keeps it deferred on the premise of local·trusted content).
+- **Next:** Reintroduction lean (not confirmed) = the daemon only stamps identity with a per-child token, and authorization is by the UI-authoritative `ViewManager`. Premise = keep routing as relay-through-daemon (ADR-0080 already has that shape). Token issuing·lifetime·portfile ACL go to a separate security review — together with TLS·auth for mobile remote (open (2) of the old D-8). User framing (2026-07-14) = the first item of a late stage covering permissions·orchestration·command constraints.
+- **Rationale:** S17 control surface PRD R7 · ADR-0080
 
-### T-9. claude 프로세스 풀링 — 에이전트 부팅 속도 (보류)
-- **상태:** 보류(폐기 아님). headless 가 메인 경로인 한 무의미.
-- **문제:** 워밍된 claude.exe 풀을 다른 에이전트로 돌리려면 cwd 변경이 필요한데 headless 는 런타임 `/cd` 가 안 된다(session-id 는 블로커 아님).
-- **다음:** 재도입 트리거 = cold spawn→first-output 지연이 실측상 병목(후보 >~2s) · 동시 활성 에이전트 증가 · 「headless 메인」 전제 변경. 그 전엔 `--bare` + warm 티어 · 근본 출구는 API transport.
-- **근거:** `docs/research/control-surface-and-fleet.md` §6
+### T-9. claude process pooling — agent boot speed (deferred)
+- **Status:** Deferred (not discarded). Meaningless as long as headless is the main path.
+- **Problem:** To reuse a warmed claude.exe pool for another agent, a cwd change is needed, but headless cannot do runtime `/cd` (session-id is not a blocker).
+- **Next:** Reintroduction trigger = cold spawn→first-output latency is the measured bottleneck (candidate >~2s) · the number of concurrently active agents grows · the 「headless 메인」 premise changes. Until then `--bare` + warm tier · the fundamental exit is the API transport.
+- **Rationale:** `docs/research/control-surface-and-fleet.md` §6
 
-### T-6. cwd 워크스페이스 검증 (CwdDenied) — 보안 보류
-- **상태:** 보류(폐기 아님). 실제 멀티 에이전트 운영 단계에서 정책 결정.
-- **출처:** dr26 commands+lib 리뷰. PtyError::CwdDenied가 dead variant — spawn_agent가 임의 cwd 허용(검증 없음).
-- **위험:** 에이전트를 임의 디렉토리에서 spawn 가능. 현재 개발/검증 단계엔 과하나 운영 시 워크스페이스 화이트리스트 필요.
-- **재도입:** 운영 단계에서 허용 cwd 정책(예: Engram 워크스페이스 하위만) 결정 후 manager.spawn_agent 또는 command 층에서 검증.
+### T-6. cwd workspace validation (CwdDenied) — security deferred
+- **Status:** Deferred (not discarded). The policy is decided at the stage of real multi-agent operation.
+- **Source:** dr26 commands+lib review. PtyError::CwdDenied is a dead variant — spawn_agent allows an arbitrary cwd (no validation).
+- **Risk:** Agents can be spawned in an arbitrary directory. Excessive for the current development/verification stage, but a workspace whitelist is needed in operation.
+- **Reintroduction:** In the operation stage, decide the allowed cwd policy (e.g. only under the Engram workspace) and then validate in manager.spawn_agent or the command layer.
 
-## 버그
+## Bug
 
 ### T-113. Agent tree rename input may remount on every keystroke (suspected, pre-existing)
 - **Status:** open — not reproduced on screen (S35 code review, 2026-11-17). Predates S35.
@@ -216,140 +216,140 @@
 - **Root cause (evidence in `src-tauri/tests/stop_smoke.rs` diagnostics; TRD `docs/process/S21-crate-boundaries/trd-3-2-u5-stop-and-band.md` §2 / §3-4):** the old client closed its socket right behind `StopDaemon`; the daemon's reply write then failed and the daemon aborted its dispatch on that failed write, so the client never saw the clean close. Bisect from the time: `e3e42de` passes, `73ecdb8` (ADR-0206) fails.
 - **Fix:** U5a removed the old sync client. The shell's stop path now runs on the transport (`src-tauri/src/daemon_client/link/stop.rs`, `src-tauri/src/daemon_client/shutdown.rs`), and the daemon runs the `StopDaemon` shutdown in a task that a connection abort cannot cancel. The re-aimed real-daemon test `stop_flight_makes_a_real_daemon_exit_gracefully` passes with `outcome=Closed`.
 
-### T-45. 에이전트가 에이전트를 스폰할 때 같은 이름이 통과한다 · codex 로 띄운 쪽이 메인 화면에서 claude 로 보인다
-- **상태:** 보류(사용자 결정 2026-09-28 — 이름 → 내부 id 전환 때 같이 묶는다 · T-29 가 그중 우편함 조각). 옛 번호 = T-39(`v0.3.3/feat/chat-ux` 브랜치 기록에서 이 주제를 가리키는 「T-39」).
-- **문제(사용자 관측 · 재현 절차 기록 없음):** ① 에이전트가 에이전트를 스폰할 때 이미 있는 이름이 통과했다(지금 구조에선 이름이 유일해야 한다) ② 그렇게 codex 로 띄운 에이전트가 메인 화면에서 claude 로 보였다(실제 백엔드는 codex).
-- **다음:** 어느 스폰 경로였는지(버스 명령 · CLI · MCP 도구) · ②가 ①의 이름 충돌에서 나왔는지(가설) 별개 결함인지 확인 — 코드 조사는 안 했다. 볼 곳 = 스폰 경로마다 이름 유일성 검사 · 메인 화면이 백엔드 종류를 이름으로 찾는지 id 로 찾는지.
+### T-45. When an agent spawns an agent the same name passes · the one launched with codex looks like claude on the main screen
+- **Status:** Deferred (user decision 2026-09-28 — bundled with the name → internal id switch · T-29 is the mailbox piece of it). Old number = T-39 (the 「T-39」 that points at this topic in the `v0.3.3/feat/chat-ux` branch records).
+- **Problem (user observation · no reproduction steps recorded):** ① when an agent spawned an agent, an already existing name passed (in the current structure the name must be unique) ② the agent launched with codex that way looked like claude on the main screen (the actual backend is codex).
+- **Next:** Check which spawn path it was (bus command · CLI · MCP tool) · whether ② came from the name collision of ① (hypothesis) or is a separate defect — code investigation was not done. Where to look = the name uniqueness check on each spawn path · whether the main screen looks up the backend kind by name or by id.
 
-### T-39. 사용량 조회가 실패·거절된 회사의 막대·%를 현재 값처럼 그리지 않기
-- **상태:** 보류 — 다른 사용량 슬롯 작업과 묶어 구현(사용자 결정 2026-10-01). 방향 = 숨기지 않고 흐리게(사용자 결정 2026-10-01 — 세부는 착수 때).
-- **문제:** 조회가 `Failed`·`Rejected` 여도 막대·%는 마지막 값을 그대로 그리고(데몬 시험 `failure_keeps_values_and_folds_by_error`) 「!」 배지·팝업 문장으로만 알린다. 흐림은 값이 30분 넘게 묵어야 걸린다(ADR-0259). 리셋 전 사용량은 늘기만 하므로 옛 「남은 %」는 위험한 쪽으로 틀린다.
-- **함정:** Claude 는 429 도 `Failed` 로 보인다(사용량 슬롯 TRD §6 #21) — 거절만 다루면 Claude 쪽은 안 잡힌다.
-- **다음:** 착수 때 선택지 제시 → 사용자 결정 → PRD/TRD 개정 → ADR(ADR-0259 의 「실패해도 값 유지 · 오래되면 흐리게만」을 바꾸므로). 메인 의견 = 실패·거절 즉시 흐림 + 인지되는지 화면 실측 · 팝업 머리 나이 옆 「마지막 값」 한 단어.
-- **근거:** ADR-0259 · `docs/research/usage-limit-display-ui-survey-2026-09-26.md`(관례 = 이전 값 유지 + 옛 값 표시 — Orca · CodexBar · Claude Code · t3code)
+### T-39. Do not draw the bars·% of a company whose usage query failed·was rejected like current values
+- **Status:** Deferred — implement bundled with other usage slot work (user decision 2026-10-01). Direction = dim rather than hide (user decision 2026-10-01 — details at start).
+- **Problem:** Even when the query is `Failed`·`Rejected`, the bars·% draw the last value as is (daemon test `failure_keeps_values_and_folds_by_error`) and it is signaled only by the 「!」 badge·popup sentence. Dimming applies only when the value is older than 30 minutes (ADR-0259). Usage before reset only grows, so the old 「남은 %」 is wrong in the dangerous direction.
+- **Pitfall:** Claude shows 429 as `Failed` too (usage slot TRD §6 #21) — handling only rejection misses the Claude side.
+- **Next:** At start, present options → user decision → PRD/TRD amendment → ADR (since it changes 「실패해도 값 유지 · 오래되면 흐리게만」 of ADR-0259). Main's opinion = dim immediately on failure·rejection + measure on screen whether it is noticed · one word 「마지막 값」 next to the age in the popup head.
+- **Rationale:** ADR-0259 · `docs/research/usage-limit-display-ui-survey-2026-09-26.md` (convention = keep the previous value + show the old value — Orca · CodexBar · Claude Code · t3code)
 
-### T-28. 갓 스폰된 터미널 수신자가 배달된 편지를 제출하지 않는다
-- **상태:** 보류(원인 규명 완료 · 수정 미착수). 「수신자 준비됨」 신호가 없어 조사부터 하는 단독 주제.
-- **문제:** 잠든(Raw) 에이전트에게 우편을 파킹한 채 스폰하면 편지는 입력창에 얹히지만 턴이 시작되지 않는다(S22 실측 2026-08-18 · 2회). 원인(데몬 debug 로그로 확정) = 제출 CR 이 스폰+약 501ms 에 쓰이는데 claude CLI 는 MCP 초기화를 그로부터 약 492ms 뒤에 끝낸다. 부팅을 마친 idle 수신자에게는 정상이다.
-- **다음:** 고정 지연을 늘리지 않는다(매직넘버 금지). 「수신자 준비됨」 신호부터 조사 — 앞선 `/research` 는 비교 도구에서 완결 선례를 못 찾았다. Raw 에이전트는 턴 신호가 없어 값싼 테스트 경로가 없다.
-- **근거:** ADR-0038
+### T-28. A freshly spawned terminal recipient does not submit the delivered letter
+- **Status:** Deferred (cause identified · fix not started). A standalone topic where investigation comes first because there is no 「수신자 준비됨」 signal.
+- **Problem:** If mail is parked for a sleeping (Raw) agent and then it is spawned, the letter sits in the input box but the turn does not start (S22 measurement 2026-08-18 · twice). Cause (confirmed with the daemon debug log) = the submit CR is written at spawn + about 501 ms, but the claude CLI finishes MCP initialization about 492 ms after that. It is normal for an idle recipient that has finished booting.
+- **Next:** Do not lengthen the fixed delay (no magic numbers). Investigate the 「수신자 준비됨」 signal first — the earlier `/research` found no complete precedent in comparison tools. A Raw agent has no turn signal, so there is no cheap test path.
+- **Rationale:** ADR-0038
 
-### T-25. 메인 창이 연결 배너를 놓친다 (간헐)
-- **상태:** 보류(근본 원인 미규명 · 재현 2회 중 1회라 추측 수정 금지 — 착수 시 ADR-0038 절차).
-- **문제:** `window.__ENGRAM_AGENT__.connectionError` 에 문자열이 있는데 메인 창 알림 영역이 비어 있었다(같은 시점 에이전트 트리 창은 띄웠다 · S21 배포판 실측 2026-08-16). 손으로 `reportConnectionError('TEST-XYZ')` 를 부르면 즉시 나타났다 — 구독은 하고 있었고 첫 통지만 못 받았다.
-- **다음:** 의심(미확정) = 마운트/통지 경합 + 같은 문자열 재통지 억제(`if (this.connError === next) return`) — 첫 통지를 놓치면 재통지가 영영 없다. 인과부터 확정.
-- **근거:** `src/api/protocolClient.ts` · `src/components/layout/ConnectionNotice.tsx`
+### T-25. The main window misses the connection banner (intermittent)
+- **Status:** Deferred (root cause not identified · 1 of 2 reproductions, so no guess fixes — at start, follow the ADR-0038 procedure).
+- **Problem:** `window.__ENGRAM_AGENT__.connectionError` had a string but the main window notification area was empty (the agent tree window at the same time did show it · S21 deployed build measurement 2026-08-16). Calling `reportConnectionError('TEST-XYZ')` by hand made it appear immediately — the subscription was in place and only the first notification was missed.
+- **Next:** Suspicion (unconfirmed) = mount/notification race + suppression of re-notifying the same string (`if (this.connError === next) return`) — if the first notification is missed, there is never a re-notification. Confirm causality first.
+- **Rationale:** `src/api/protocolClient.ts` · `src/components/layout/ConnectionNotice.tsx`
 
-### T-41. 새 에이전트의 첫 턴에서 훅 도중 Esc 가 아무 일도 안 한다
-- **상태:** 미착수 · 마이너(사용자 판단 — 첫 턴에만). 재현 3/6(2026-10-01 · claude 2.1.284). T-40(ADR-0262)이 만든 것이 아니다.
-- **문제:** 갓 띄운 claude JSON 에이전트의 첫 턴에서 보낸 뒤 0.5–1 초에 Esc → 「중단하는 중…」은 뜨지만 턴이 끝까지 돈다(0.2 초 이내 Esc 는 매번 멈췄다). 추정(코드 읽기 · 미검) = claude 턴 열림 문은 decoder 가 첫 진행 줄(벤더 `command_lifecycle` `started`)을 볼 때 열리는데, 첫 턴의 `UserPromptSubmit` 훅이 도는 동안 내내 그 틈이 열려 있다.
-- **다음:** `RUST_LOG=debug` 로 재현 · 버스 답 캡처 · 둘째 턴 대조 → 문 여는 지점을 앞당길지 사용자 결정. 앞당기면 T-40 의 에피소드·쓰기 명단이 그 끊기에도 서야 한다(ADR-0262 결정 2·3).
-- **근거:** `backend/claude/mod.rs` 의 `GateSlot` doc · `docs/process/S21-chat-ux/trd.md` §9 「F2 턴 열림 전 끊기」 · ADR-0262
+### T-41. Esc does nothing during a hook in the first turn of a new agent
+- **Status:** Not started · minor (user judgment — only in the first turn). Reproduced 3/6 (2026-10-01 · claude 2.1.284). Not caused by T-40 (ADR-0262).
+- **Problem:** In the first turn of a freshly launched claude JSON agent, pressing Esc 0.5–1 s after sending → 「중단하는 중…」 appears but the turn runs to the end (Esc within 0.2 s stopped it every time). Presumption (from reading code · unverified) = the claude turn-open gate opens when the decoder sees the first progress line (vendor `command_lifecycle` `started`), and that gap stays open the whole time the first turn's `UserPromptSubmit` hook runs.
+- **Next:** Reproduce with `RUST_LOG=debug` · capture the bus reply · compare with the second turn → user decision on whether to move the gate-opening point earlier. If moved earlier, T-40's episode·write list must also stand for that interruption (ADR-0262 decisions 2·3).
+- **Rationale:** `GateSlot` doc in `backend/claude/mod.rs` · `docs/process/S21-chat-ux/trd.md` §9 「F2 턴 열림 전 끊기」 · ADR-0262
 
-### T-35. 재연결 타이밍 테스트가 간헐적으로 깨진다 (ADR-0195 결함과 별건)
-- **상태:** 미착수. **ADR-0195 가 다루는 결함과 다른 테스트**다 — 같은 스위트에서 같이 나왔을 뿐이다.
-- **출처:** ADR-0195 결함 규명 중 부수 관측(2026-09-11). 단일 스위트 30 회 반복에서 **1 회 실패**.
-- **증상:** `src-tauri/src/daemon_client/tests.rs:2232` 의 「재연결이 Auth 송신 직후 창에 도달해야」 단언이 간헐 실패(`reconnect_close_after_auth_send_self_closes_socket`).
-- **왜 따로 세우나:** ADR-0195 의 수정(끊긴 동안 명령을 안 받음)은 이 테스트가 재는 축을 건드리지 않는다. 그 수정 뒤에도 남을 가능성이 높으니 **그때 남아 있으면 별건으로 본다.**
-- **안 한 것:** 원인 규명을 안 했다. 실패율도 30 회 표본 한 건이라 신뢰구간이 넓다.
+### T-35. Reconnect timing test breaks intermittently (separate from the ADR-0195 defect)
+- **Status:** Not started. **A different test from the defect ADR-0195 covers** — they only showed up together in the same suite.
+- **Source:** Side observation while identifying the ADR-0195 defect (2026-09-11). **1 failure** in 30 repetitions of a single suite.
+- **Symptom:** The assertion 「재연결이 Auth 송신 직후 창에 도달해야」 at `src-tauri/src/daemon_client/tests.rs:2232` fails intermittently (`reconnect_close_after_auth_send_self_closes_socket`).
+- **Why it is filed separately:** The ADR-0195 fix (not accepting commands while disconnected) does not touch the axis this test measures. It is likely to remain after that fix, so **if it is still there then, treat it as a separate matter.**
+- **Not done:** The cause was not identified. The failure rate is also a single case from a 30-run sample, so the confidence interval is wide.
 
-### T-20. 깨우는 도중 삭제된 에이전트가 되살아난다
-- **상태:** 보류(선재 · 매니저 생명주기 변경이라 단독 슬라이스).
-- **문제:** 깨우기는 프로필 스냅샷을 먼저 읽고 띄운다 — 그 사이 삭제가 커밋되면 `register_for_spawn` 의 신규 id 분기가 삭제된 프로필을 다시 등록한다(WS `SpawnProfile` 도 같은 모양). `control/` 안의 재검사는 전부 profiles 락 밖이라 창만 좁힌다.
-- **다음:** `register_for_spawn` 이 「재등록」과 「되살림」을 구분하고 후자를 삭제와 같은 락 안에서 거부(tombstone 또는 등록 id 대조). ADR-0122 의 미정 삭제 의미론과 함께 본다.
-- **근거:** ADR-0132 조각 ② 리뷰(2026-08-11) · ADR-0122
+### T-20. An agent deleted during wake-up revives
+- **Status:** Deferred (pre-existing · a manager lifecycle change, so a standalone slice).
+- **Problem:** Wake-up reads the profile snapshot first and then launches — if a delete commits in between, the new-id branch of `register_for_spawn` registers the deleted profile again (WS `SpawnProfile` has the same shape). The re-checks inside `control/` are all outside the profiles lock, so they only narrow the window.
+- **Next:** Make `register_for_spawn` distinguish 「재등록」 from 「되살림」 and reject the latter inside the same lock as the delete (tombstone or comparison against the registered id). Look at it together with the undecided delete semantics of ADR-0122.
+- **Rationale:** ADR-0132 piece ② review (2026-08-11) · ADR-0122
 
-### T-21. 종료 중에 시작된 에이전트가 종료 명단에서 빠진다
-- **상태:** 보류(선재 — WS 경로 동일). 종료 절차 자체를 손봐야 해서 단독 슬라이스.
-- **출처:** 같은 리뷰(cross-family 적출).
-- **증상:** `shutdown_all`이 `shutting_down`을 세우고 세션 목록을 스냅샷하는데, 그 뒤에 삽입된 세션은 **죽지 않는다.** 오프로드된 스폰이 늦게 착지하면 데몬이 내려간 뒤에도 자식이 남는다.
-- **왜 지금 안 고쳤나:** 플래그 접근자가 없고, 만들어도 **검사-후-삽입 틈이 그대로** 남는다. 데몬 쪽 완화(제어 서버를 먼저 내리기)도 검토했으나 문서화된 종료 순서를 뒤집으면서 실제로 닫지도 못해 기각.
-- **필요한 것:** 삽입을 `shutdown_all`이 스냅샷하는 **세션 쓰기 락 안에서** 플래그로 막거나, 제어 작업을 추적해 `shutdown_all` 전에 join.
+### T-21. An agent started during shutdown is missing from the shutdown list
+- **Status:** Deferred (pre-existing — the WS path is the same). The shutdown procedure itself has to be reworked, so a standalone slice.
+- **Source:** The same review (cross-family catch).
+- **Symptom:** `shutdown_all` sets `shutting_down` and snapshots the session list, but a session inserted after that **does not die.** If an offloaded spawn lands late, the child remains even after the daemon goes down.
+- **Why it was not fixed now:** There is no flag accessor, and even if one were made, the **check-then-insert gap would remain.** A daemon-side mitigation (shutting the control server down first) was also considered but rejected because it reverses the documented shutdown order and does not actually close the gap.
+- **What is needed:** Block the insert with the flag **inside the session write lock** that `shutdown_all` snapshots, or track control tasks and join them before `shutdown_all`.
 
-### T-30. `in_flight_targets`에 fail-open 백스톱 없음
-- **상태:** 보류(예방적 등록 — 현재 코드상 도달 가능한 정체 경로 없음).
-- **문제:** 대상(target) 축 in-flight 배제는 이웃 두 축과 달리 fail-open 도 sweep 도 없다(이름 축 = `saturating_sub` 수렴 · busy 게이트 = `BUSY_MAX_TURN`). 대상 id 가 그 집합에 갇히면 그 세션은 다시는 우편을 못 받고, 조용히 일어난다.
-- **함정:** 유일한 보호는 불변식 하나다 — `insert` 가 실행된 **경로**에서는 해제를 소유하는 `FlightSettle` 이 생기기 전까지 언와인딩하는 실패(early return · `?` · 패닉)가 없어야 한다. 줄 구간으로 읽으면 `insert` 가 안 도는 경로의 early return 이 반례처럼 보인다(리뷰가 실제로 그 오독을 적출했다).
-- **다음:** 재론 트리거 = 그 경로에 실패 지점이 하나라도 들어오는 변경.
-- **근거:** ADR-0142 결정 2
-- **후속 — 이 축을 걷는다(2026-10-29 · S29 · ADR-0309):** 우편 키가 id 로 바뀌어 이 축의 계기(두 이름 큐가 한 세션으로 수렴)가 더는 생기지 않는다 — `in_flight_targets` · `deferred_by_target` · `FlightSettle.targets` 와 `deferred_flush` 의 id 집합은 쓸모가 사라졌고, 그 축을 덮던 시험은 S29 에서 지워져 시험 없는 코드로 남았다. 걷으면 이 항목도 함께 닫힌다. 걷으려면 ADR-0142 개정이 먼저다(TRD `process/S29-mail-id-keys/trd.md` §3 · §7 Q2).
+### T-30. `in_flight_targets` has no fail-open backstop
+- **Status:** Deferred (registered preventively — there is no reachable stall path in the current code).
+- **Problem:** Unlike its two neighboring axes, the target in-flight exclusion has neither fail-open nor a sweep (name axis = `saturating_sub` convergence · busy gate = `BUSY_MAX_TURN`). If a target id gets stuck in that set, that session never receives mail again, and it happens silently.
+- **Pitfall:** The only protection is one invariant — on the **path** where `insert` ran, there must be no failure that unwinds (early return · `?` · panic) before the `FlightSettle` that owns the release is created. Read as a line range, an early return on a path where `insert` does not run looks like a counterexample (the review actually caught that misreading).
+- **Next:** Re-discussion trigger = a change that brings even one failure point into that path.
+- **Rationale:** ADR-0142 decision 2
+- **Follow-up — clear this axis (2026-10-29 · S29 · ADR-0309):** The mail key became an id, so the occasion for this axis (two name queues converging on one session) no longer arises — `in_flight_targets` · `deferred_by_target` · `FlightSettle.targets` and the id set of `deferred_flush` have lost their use, and the tests that covered that axis were deleted in S29, leaving code without tests. Clearing it closes this item too. To clear it, amending ADR-0142 comes first (TRD `process/S29-mail-id-keys/trd.md` §3 · §7 Q2).
 
-### T-31. 남이 먼저 배달하면 내 발송 응답이 "대기 중"으로 나온다
-- **상태:** 보류(선존 — 편지 유실 없음, 응답 문구만 틀림).
-- **문제:** 여러 수신자 발송이 한 수신자를 주입하는 동안 다른 발송의 드레인이 내 편지를 먼저 배달하면, 내 보고서(`report.injected` 는 자기 드레인 몫만 담는다)에 안 잡혀 이미 배달된 행을 `pending` 으로 응답하고 잉여 도어벨을 한 번 누른다. 발신자 LLM 이 그걸 보고 다시 보내면 상대가 같은 내용을 두 번 받는다.
-- **다음:** 「내 편지가 나갔나」를 자기 드레인 범위가 아니라 장부(ledger) 상태로 판정 — 그 이동이 `delivered` 계약(ADR-0088/0111)과 어떻게 맞물리는지부터 본다.
-- **근거:** ADR-0142 마감 리뷰
+### T-31. When someone else delivers first, my send reply comes out as "pending"
+- **Status:** Deferred (pre-existing — no letter is lost, only the reply wording is wrong).
+- **Problem:** While a multi-recipient send is injecting into one recipient, if another send's drain delivers my letter first, my report (`report.injected` holds only its own drain's share) does not catch it, so the already-delivered row is answered as `pending` and a surplus doorbell is rung once. If the sender LLM sees that and sends again, the other side receives the same content twice.
+- **Next:** Decide 「내 편지가 나갔나」 by the ledger state rather than by its own drain's range — first look at how that move interlocks with the `delivered` contract (ADR-0088/0111).
+- **Rationale:** ADR-0142 closing review
 
-### T-32. 프론트 명부 방송이 스레드를 가로지르는데 직렬화가 없다
-- **상태:** 열림 · 미착수(2026-08-26 T-16 조사에서 갈라져 나옴). T-16 증상 ② 의 선결 조건이다 — 프론트 표식 필터는 명부를 신뢰 기준으로 삼는다.
-- **문제:** 프론트로 가는 명부의 생산자가 셋이고 서로 순서 짓는 락이 없다 — `StatusSink::agent_list_updated` 호출 둘(spawn 꼬리 `manager.rs` · 전용 reaper 스레드 `reaper.rs`) + `StatusSink` 를 거치지 않는 새 연결 인사 프레임(`connection_core.rs` 의 `agent_list_event` · ADR-0154). 늦게 도착한 옛 스냅샷이 새 명부를 덮어쓸 수 있다.
-- **함정:** 호출부 grep 으로 세면 둘만 보인다 — 셋째(인사 프레임)를 빠뜨리면 아래 수법이 셋 중 둘만 덮는다.
-- **다음:** 선례가 같은 저장소에 있다 — `messaging_host.rs` 가 메시징 파킹 flush 소비자를 위해 enqueue 를 스냅샷 Mutex 안으로 넣어 순서를 고정했다(ADR-0006 으로부터의 의도된 이탈). 첫 갈래 = 같은 수법을 프론트 broadcast 경로(셋 모두)에 적용할 수 있나.
-- **근거:** `docs/research/roster-broadcast-ordering.md` · `crates/engram-dashboard-daemon/src/messaging_host.rs` 의 `RosterDiff::dispatch`(스냅샷 락을 든 채 enqueue — `RosterDiff` 헤더가 근거 정본) · ADR-0006
+### T-32. The frontend roster broadcast crosses threads but has no serialization
+- **Status:** Open · not started (split off from the T-16 investigation 2026-08-26). It is a prerequisite for T-16 symptom ② — the frontend marker filter takes the roster as its trust basis.
+- **Problem:** The roster going to the frontend has three producers and no lock that orders them — two `StatusSink::agent_list_updated` calls (spawn tail `manager.rs` · dedicated reaper thread `reaper.rs`) + the new-connection greeting frame that does not go through `StatusSink` (`agent_list_event` in `connection_core.rs` · ADR-0154). An old snapshot that arrives late can overwrite the new roster.
+- **Pitfall:** Counting by call-site grep shows only two — if the third (the greeting frame) is missed, the technique below covers only two of the three.
+- **Next:** A precedent is in the same repository — `messaging_host.rs` fixed the order for the messaging parking flush consumer by putting the enqueue inside the snapshot Mutex (an intended departure from ADR-0006). First branch = can the same technique be applied to the frontend broadcast path (all three).
+- **Rationale:** `docs/research/roster-broadcast-ordering.md` · `RosterDiff::dispatch` in `crates/engram-dashboard-daemon/src/messaging_host.rs` (enqueue while holding the snapshot lock — the `RosterDiff` header is the canonical rationale) · ADR-0006
 
-### T-33. `agents.json` 에 새 백엔드 종류가 실린 뒤의 하위호환
-- **상태:** 보류(사용자 결정 2026-09-07 — 개발 중이라 명부를 잃어도 수용 · 코드 변경 0). ★재도입 트리거(「`kind: "Codex"` 가 실린 빌드가 릴리스로 나간다」)가 충족된 것으로 보인다★ — `v0.3.2` 태그의 `profile.rs` 에 이미 `Codex` 종류가 있다(`git grep -n Codex v0.3.2 -- '*profile.rs'` → `profile.rs:66`). 사용자 판단 대기.
-- **문제:** 프로필 파일은 통째로 파싱된다(`crates/engram-dashboard-agent/src/persistence/mod.rs:120`). 모르는 `kind` 가 한 건이라도 있으면 파싱 전체가 실패해 파일을 `.corrupt` 로 밀어내고(`:86-94`) 빈 명부로 부팅한다 — 구버전으로 되돌리면 codex 하나가 나머지 전부를 데리고 사라진다. 임시 스폰도 프로필을 디스크에 올려 codex 를 처음 띄우는 순간 새겨진다.
-- ★**A 개정(2026-10-11 · ADR-0291 R2 · R9):** 선택지 ② 가 생겼다 — 새 판 `schema_version` 이 쓴 파일은 읽지도 · 덮지도 않고 그 실행 내내 읽기 전용이다. 단 새 `kind` 를 더할 때 판을 올려야만 막히고, 판을 안 올린 채면 옛 빌드는 그 파일을 손상으로 보고 첫 저장 직전에 `agents.json.corrupt` 로 복사한 뒤 빈 명부로 덮는다(사본 이름만 바뀌고 손실은 그대로 — 위 「문제」의 `.corrupt` 로 밀어내기 · 줄 번호는 A 전 서술). 그래서 이 항목은 새 판 몫만 닫혔다(TRD A §8-2 4).★
-- **다음:** 선택지 셋 — ① 관용 파싱(한 건씩 읽고 모르는 건 건너뜀) ② `schema_version` 을 실제로 읽어 못 읽는 버전이면 파일을 안 건드림(읽는 코드 유무 미확인) ③ 계속 수용. 어느 안이든 미지 `kind` 회귀 테스트(지금 0건)가 함께 온다.
-- **근거:** S21 codex 백엔드 TRD 사용자 결정 A
+### T-33. Backward compatibility after a new backend kind is written into `agents.json`
+- **Status:** Deferred (user decision 2026-09-07 — it is in development, so losing the roster is accepted · 0 code changes). ★The reintroduction trigger (「`kind: "Codex"` 가 실린 빌드가 릴리스로 나간다」) appears to be met★ — `profile.rs` at the `v0.3.2` tag already has the `Codex` kind (`git grep -n Codex v0.3.2 -- '*profile.rs'` → `profile.rs:66`). Waiting for user judgment.
+- **Problem:** The profile file is parsed as a whole (`crates/engram-dashboard-agent/src/persistence/mod.rs:120`). If even one unknown `kind` exists, the whole parse fails, the file is pushed out as `.corrupt` (`:86-94`), and boot proceeds with an empty roster — if rolled back to an old version, one codex takes everything else with it. A temporary spawn also writes the profile to disk, so it is stamped the moment codex is first launched.
+- ★**A amendment (2026-10-11 · ADR-0291 R2 · R9):** Option ② now exists — a file written by a newer edition's `schema_version` is neither read nor overwritten and stays read-only for that whole run. However, it is blocked only if the edition is raised when a new `kind` is added; if the edition is not raised, an old build sees that file as corrupt, copies it to `agents.json.corrupt` just before the first save, and overwrites it with an empty roster (only the copy name changes and the loss is the same — the pushing out as `.corrupt` and the line numbers in "Problem" above describe the state before A). So only the new edition's share of this item is closed (TRD A §8-2 4).★
+- **Next:** Three options — ① tolerant parsing (read one by one and skip unknown ones) ② actually read `schema_version` and leave the file untouched if it is an unreadable version (whether reading code exists is unchecked) ③ keep accepting. Whichever option, a regression test for an unknown `kind` (0 now) comes with it.
+- **Rationale:** S21 codex backend TRD user decision A
 
-### T-19. 우편 CLI 조회 판정이 빈 응답을 성공으로 본다
-- **상태:** 보류(선재 결함 · exit code 계약을 건드리므로 단독 슬라이스).
-- **문제:** `exit_code_for_query_response` 가 2xx JSON 객체면 무조건 0 으로 본다 — 데몬이 `mail status m-1` 에 `200 {}` 를 주면 CLI 는 성공으로 끝난다. 발송 판정(`exit_code_for_response`)은 성공 shape 를 실제로 검증하는데 조회 판정만 그 대칭이 없다.
-- **다음:** 조회 성공 shape 를 정의(`mail status` · `mail pending` 이 서로 다른 모양이라 갈라야 한다)한 뒤 판정에 반영. 정본 = spec §6 의 응답 shape 절(§6 의 CLI 인자 블록만 ADR-0132 로 폐기).
-- **근거:** ADR-0132 슬라이스 ① 리뷰(2026-08-11)
+### T-19. The mail CLI query decision treats an empty response as success
+- **Status:** Deferred (pre-existing defect · it touches the exit code contract, so a standalone slice).
+- **Problem:** `exit_code_for_query_response` unconditionally treats a 2xx JSON object as 0 — if the daemon gives `200 {}` to `mail status m-1`, the CLI ends as a success. The send decision (`exit_code_for_response`) actually verifies the success shape, but only the query decision lacks that symmetry.
+- **Next:** Define the query success shape (`mail status` · `mail pending` have different shapes, so they must be split) and then reflect it in the decision. Canonical source = the response shape section of spec §6 (only the CLI argument block of §6 was discarded by ADR-0132).
+- **Rationale:** ADR-0132 slice ① review (2026-08-11)
 
-### T-53. 띄우기에서 무리에 넣기 전에 뜬 손자는 무리 밖에 남는다
-- **상태:** 미착수 · 이론상 경로(그 경합을 얼마나 자주 지는지 재지 않았다 — 넣기는 띄운 직후 µs 안이고 `cmd.exe` 가 CLI 를 띄우기까지는 그보다 길다). 크레이트 경계 A 범위 밖(메인 결정 2026-10-10 — TRD A §8-3).
-- **문제:** 통로 셋(stdio · pty · codex)은 자식을 깨운 채 띄운 뒤 곧바로 무리(Windows Job)에 넣는다(`crates/engram-dashboard-agent/src/transport/spawn.rs`). Windows 의 claude · codex 는 `cmd.exe /c <CLI>` 로 떠 실제 CLI 가 손자라, 넣기 전에 `cmd.exe` 가 이미 띄운 손자는 무리 밖에 남는다(platform `group` 의 `adopt` doc). 성공 경로에서는 통로를 닫아도(`KILL_ON_JOB_CLOSE`) 안 끝나고, 띄우기 실패 경로에서도 안 끝난다 — 넣은 뒤의 실패는 무리가 후손을 끝내지만 넣기 전에 뜬 후손은 무리 밖이고, 가드(`ChildGuard`)는 직속 자식만 끈다(번호로 후손을 찾아 끄지 않는다 — ADR-0291 결정 13 의 U7 개정 · 잠정). 무리 넣기 자체가 실패한 경우도 같다.
-- **다음:** 처방 = 멈춘 채 띄우기(platform `spawn::prepare_tree_root` · `TreeRoot` — 사용량 조회의 선례) — stdio · codex 만 된다. portable-pty(pty 통로)엔 멈춘 채 띄우는 길이 없어 따로 정한다. 성공 경로를 바꾸는 일이라 PRD/TRD 부터.
-- **근거:** `docs/process/S21-crate-boundaries/trd-A-data-file-unification.md` §3-7 · §8-3 · ADR-0291 결정 13 · 「거부한 대안」 (g) · 메모 `docs/refactoring/architecture-discussion-2026-09-26.md:336`
+### T-53. In spawning, a grandchild that started before being put in the group stays outside the group
+- **Status:** Not started · theoretical path (how often that race is lost was not measured — the put-in happens within µs right after spawn, and `cmd.exe` takes longer than that to start the CLI). Outside crate boundary A scope (main decision 2026-10-10 — TRD A §8-3).
+- **Problem:** The three links (stdio · pty · codex) spawn the child running (not suspended) and then put it into the group (Windows Job) right away (`crates/engram-dashboard-agent/src/transport/spawn.rs`). On Windows, claude · codex start as `cmd.exe /c <CLI>` and the real CLI is a grandchild, so a grandchild that `cmd.exe` already started before the put-in stays outside the group (the `adopt` doc of platform `group`). On the success path it does not end even when the link is closed (`KILL_ON_JOB_CLOSE`), and it does not end on the spawn failure path either — for a failure after the put-in the group ends the descendants, but a descendant that started before the put-in is outside the group, and the guard (`ChildGuard`) kills only the direct child (it does not look up and kill descendants by number — the U7 amendment of ADR-0291 decision 13 · provisional). The case where the put-in into the group itself failed is the same.
+- **Next:** Prescription = spawn suspended (platform `spawn::prepare_tree_root` · `TreeRoot` — the precedent of the usage query) — works only for stdio · codex. portable-pty (the pty link) has no way to spawn suspended, so decide that separately. It changes the success path, so PRD/TRD first.
+- **Rationale:** `docs/process/S21-crate-boundaries/trd-A-data-file-unification.md` §3-7 · §8-3 · ADR-0291 decision 13 · 「거부한 대안」 (g) · memo `docs/refactoring/architecture-discussion-2026-09-26.md:336`
 
-### T-54. 상시 `taskkill /T` 호출자가 재사용된 부모 번호 아래 남의 프로세스를 끌 수 있다
-- **상태:** 미착수 · 선재 위험(이론상 경로 — 일어난 것을 본 적은 없다). 크레이트 경계 A U7 리뷰가 띄우기 실패 가드에서 같은 위험을 짚어 가드는 바꿨고(ADR-0291 결정 13 의 U7 개정 — 가드는 이제 번호로 후손을 끄지 않는다), 아래 호출자들은 범위 밖이라 그대로 두었다(메인 결정(위임) 2026-10-10).
-- **문제:** `taskkill /T` 는 부모 번호(WMI `ParentProcessId`)만으로 나무를 엮고 시작시각을 보지 않는다. 죽은 부모의 번호를 그대로 단 프로세스가 흔하다(이 PC 실측 2026-10-10 · U7 리뷰어 — 읽기 전용 조사). 끄는 뿌리가 그런 죽은 부모의 번호를 다시 받았으면 그 고아들(예: `explorer.exe` 와 그 나무)까지 끈다. 뿌리 번호 자신을 먼저 대조해도 `/T` 가 엮는 후손은 대조하지 않는다. 상시로 `/T` 를 쓰는 자리(2026-10-10 셈 · 일회성 스크립트와 `/T` 없는 `scripts/rebuild-run-*.bat` 은 뺐다):
-  - 운영: 셸의 데몬 끄기 fallback — `src-tauri/src/discovery/mod.rs:498` 의 `TaskKiller` 가 platform `process::kill_tree`(`taskkill /PID <pid> /F /T`)를 부른다(설명 = `src-tauri/src/commands/discovery.rs:161`). 데몬 번호 자신은 daemon.json 의 시작시각으로 먼저 가른다(`stop_with`).
-  - QA: GUI 실측 teardown — `.claude/skill-bindings/qa.md` 「GUI 뒷정리」의 `taskkill /PID <앱 PID> /T /F`(띄운 앱 + 그 WebView2 렌더러).
-  - 시험: `src-tauri/tests/stop_smoke.rs:75-76`(`force_kill` — 실 데몬 시험의 RAII 정리) · `crates/engram-dashboard-agent/tests/backend_contract.rs:895-898`(`kill_tree` — 실 CLI 계약 시험의 shim 사슬 정리 · 부르는 자리 `:857`).
-- **다음:** 처방 후보 = `/T` 없이 뿌리만 끄고 후손은 Job 에 맡기기(데몬은 에이전트를 `KILL_ON_JOB_CLOSE` Job 으로 담는다 — `discovery/mod.rs:497` 그 자리 주석 「데몬 Job 안전망과 겹치나 무해하다」 · 이 항목이 그 「무해」를 의심한다 · 시험은 띄운 것을 자기 Job 에 담는다). ★번호 스냅숏을 찍고 후손마다 시작시각을 다시 대조해 끄는 길은 처방이 아니다★ — 찍은 뒤 다시 읽기 전에 번호가 넘어가면 같은 위험이다(ADR-0291 「거부한 대안」 (g)). 어느 쪽이든 동작 변경이라 별 슬라이스.
-- **근거:** ADR-0291 결정 13 · 「거부한 대안」 (g) · `crates/engram-dashboard-platform/src/process.rs`(`kill_tree`) · `src-tauri/src/commands/discovery.rs:161`
-### T-55. 원자 쓰기가 폴더 동기화 실패를 무시하고 「썼다」로 보고한다 — macOS · Linux 이식 때
-- **상태:** 미착수 · Windows 에선 해당 없음(폴더 동기화가 무동작 — platform `fs::sync_dir`). 크레이트 경계 A U3 리뷰(codex)가 짚었고 사용자 결정(2026-10-10)으로 지금은 기록만.
-- **문제:** base `file` 의 원자 쓰기는 이름 바꾸기 뒤 폴더 동기화(ADR-0291 R10)를 부르되 결과를 버리고 `Written` 을 돌려준다. POSIX 에서 그 동기화가 실패한 채 정전이 나면 이름 바꾸기가 사라질 수 있는데, 부르는 쪽(예: 셸 상태 기록기)은 이미 저장이 끝난 줄 알고 복원용 사본을 지우는 등 다음 일을 한다.
-- **다음:** 이식 때 동기화 실패를 별도 결과(또는 오류)로 올리고, 부르는 쪽이 그때 복원 상태를 지우지 않게 한다.
-- **근거:** `crates/engram-dashboard-base/src/file.rs`(이름 바꾸기 도우미) · TRD A §3-5 R10 · ADR-0291
+### T-54. Permanent `taskkill /T` callers can kill other people's processes under a reused parent number
+- **Status:** Not started · pre-existing risk (theoretical path — nothing has been seen to happen). The crate boundary A U7 review pointed out the same risk in the spawn failure guard and the guard was changed (U7 amendment of ADR-0291 decision 13 — the guard now does not kill descendants by number), and the callers below were left as is because they are out of scope (main decision (delegated) 2026-10-10).
+- **Problem:** `taskkill /T` builds the tree only from the parent number (WMI `ParentProcessId`) and does not look at start times. Processes carrying the number of a dead parent are common (measured on this PC 2026-10-10 · U7 reviewer — read-only investigation). If the root being killed received the number of such a dead parent again, it kills those orphans too (e.g. `explorer.exe` and its tree). Even if the root number itself is checked first, the descendants that `/T` ties in are not checked. Places that use `/T` permanently (counted 2026-10-10 · one-off scripts and `scripts/rebuild-run-*.bat` without `/T` were excluded):
+  - Operations: the shell's daemon-stop fallback — `TaskKiller` at `src-tauri/src/discovery/mod.rs:498` calls platform `process::kill_tree` (`taskkill /PID <pid> /F /T`) (explanation = `src-tauri/src/commands/discovery.rs:161`). The daemon's own number is checked first against the start time in daemon.json (`stop_with`).
+  - QA: GUI measurement teardown — `taskkill /PID <앱 PID> /T /F` in `.claude/skill-bindings/qa.md` 「GUI 뒷정리」 (the launched app + its WebView2 renderer).
+  - Tests: `src-tauri/tests/stop_smoke.rs:75-76` (`force_kill` — RAII cleanup of the real-daemon test) · `crates/engram-dashboard-agent/tests/backend_contract.rs:895-898` (`kill_tree` — shim chain cleanup of the real CLI contract test · call site `:857`).
+- **Next:** Prescription candidate = kill only the root without `/T` and leave the descendants to the Job (the daemon puts agents in a `KILL_ON_JOB_CLOSE` Job — the comment at that spot, `discovery/mod.rs:497`, 「데몬 Job 안전망과 겹치나 무해하다」 · this item doubts that 「무해」 · the tests put what they launch into their own Job). ★A path that takes a number snapshot and re-checks the start time of each descendant before killing is not a prescription★ — if the number is handed over after the snapshot and before the re-read, it is the same risk (ADR-0291 「거부한 대안」 (g)). Either way it is a behavior change, so a separate slice.
+- **Rationale:** ADR-0291 decision 13 · 「거부한 대안」 (g) · `crates/engram-dashboard-platform/src/process.rs` (`kill_tree`) · `src-tauri/src/commands/discovery.rs:161`
+### T-55. Atomic write ignores a folder sync failure and reports 「썼다」 — at macOS · Linux porting time
+- **Status:** Not started · not applicable on Windows (folder sync is a no-op — platform `fs::sync_dir`). Pointed out by the crate boundary A U3 review (codex) and, by user decision (2026-10-10), only recorded for now.
+- **Problem:** The atomic write of base `file` calls the folder sync after the rename (ADR-0291 R10) but discards the result and returns `Written`. On POSIX, if that sync failed and then a power loss occurs, the rename can disappear, yet the caller (e.g. the shell state recorder) thinks the save is already done and does the next thing, such as deleting the copy kept for restore.
+- **Next:** At porting time, raise a sync failure as a separate result (or error) and make the caller not delete the restore state then.
+- **Rationale:** `crates/engram-dashboard-base/src/file.rs` (rename helper) · TRD A §3-5 R10 · ADR-0291
 
-### T-56. codex 터미널(PTY) 실 CLI 계약 시험 5건이 실패한다 — 화면이 `model: loading` 에서 멈춘다
-- **상태:** 미착수 · 선재(크레이트 경계 A U7 의 QA full 이 찾았고 HEAD `bfd96dbc` 에서도 같은 증상 — 2026-10-10) · 원인 미규명.
-- **문제:** `cargo test -p engram-dashboard-agent --test backend_contract -- --ignored` 의 codex 터미널 행 q4 · q5 · q8 · q11 · q12 가 실패한다. 화면이 `model: loading … directory: loading` 에서 넘어가지 않아 시작 모달 · 컴포저(`Ask Codex to do anything`)가 안 선다(하나씩 돌려도 같다). 화면 첫머리에 codex 경고 「could not create PATH aliases: Refusing to create helper binaries under temporary dir …」가 있다 — 시험의 sandbox 홈이 %TEMP% 아래라 그럴 수 있다(추정 · codex-cli 0.156.1).
-- **다음:** sandbox 홈을 %TEMP% 밖에 두고 다시 재 본다 · 안 되면 codex 판 · 로그인 상태를 가른다.
-- **근거:** `crates/engram-dashboard-agent/tests/backend_contract.rs`(q4 `:1262` · q11 `:2165` 근처)
+### T-56. Five codex terminal (PTY) real-CLI contract tests fail — the screen stops at `model: loading`
+- **Status:** Not started · pre-existing (found by the QA full of crate boundary A U7 and the same symptom at HEAD `bfd96dbc` — 2026-10-10) · cause not identified.
+- **Problem:** The codex terminal rows q4 · q5 · q8 · q11 · q12 of `cargo test -p engram-dashboard-agent --test backend_contract -- --ignored` fail. The screen does not advance past `model: loading … directory: loading`, so the startup modal · composer (`Ask Codex to do anything`) does not appear (the same when run one at a time). At the top of the screen there is a codex warning 「could not create PATH aliases: Refusing to create helper binaries under temporary dir …」 — it may be because the test's sandbox home is under %TEMP% (presumption · codex-cli 0.156.1).
+- **Next:** Measure again with the sandbox home outside %TEMP% · if that does not work, separate the codex edition · login state.
+- **Rationale:** `crates/engram-dashboard-agent/tests/backend_contract.rs` (near q4 `:1262` · q11 `:2165`)
 
-### T-57. 늦은 reap 과 실패한 활성화가 겹치면 죽은 에이전트에 `auto_restore=true` 가 남는다
-- **상태:** 미착수 · 이론상 경로(코드 읽기 — 재현 · 실측 없음) · ★지금은 무해★ — 운영 데몬이 부팅 자동 복원을 부르지 않는다(`crates/engram-dashboard-daemon/src/lib.rs` 의 기동 9) 주석 · `:782` 근처 · 사용자 결정 2026-07-09). 크레이트 경계 A U5b-1 리뷰가 짚었고 범위 밖으로 미뤘다(`424c6da5` 커밋 본문 「미룬 것」).
-- **문제:** reaper 의 `auto_restore` 내리기는 죽은 화신의 표식과 프로필의 지금 표식이 같을 때만 돈다(ADR-0084 — `crates/engram-dashboard-agent/src/reaper.rs` 의 `apply_disposition` · `:130-145` 근처). 옛 세션이 죽은 뒤 그 reap 이 닿기 전에 부르는 쪽 활성화가 새 표식을 갈고(`epoch_for_spawn` — `manager.rs:1402` · 메모리만, ADR-0291 결정 10) 그 뒤 실패하면(옛 손잡이 이력화의 저장 거절 · 이어받기 손잡이 경합 `:1455-1481` · 프로세스 열기 실패) 산 세션은 없는데 표식만 바뀌어, 늦게 닿은 reap 이 내리기를 건너뛴다 — 명부에 `auto_restore=true` 인 죽은 에이전트가 남는다. 부팅 자동 복원이 켜지면 다음 부팅이 그 에이전트를 되살린다. ★프로세스 열기 실패 뒤의 같은 모양은 A 앞부터 있었다(그때도 표식은 프로세스를 열기 전에 갔다) — A 는 저장 거절이라는 계기를 하나 더했다(코드 읽기)★.
-- **다음:** 부팅 자동 복원을 다시 켜는 설계(명시 복원 명령 — ADR-0016 · 위 9) 주석) 때 함께 본다. 처방 후보 = 실패한 활성화가 자기가 간 표식을 되돌리거나, 내리기 판정이 「산 세션이 그 표식을 쥐고 있나」까지 보게 하기 — 어느 쪽도 정하지 않았다.
-- **근거:** ADR-0084 · ADR-0291 결정 10 · TRD A §3-9(띄우기 경로의 부분 성공) · `crates/engram-dashboard-agent/src/reaper.rs`(`:54-81` reap · `apply_disposition`)
+### T-57. When a late reap and a failed activation overlap, `auto_restore=true` is left on a dead agent
+- **Status:** Not started · theoretical path (code reading — no reproduction · measurement) · ★harmless for now★ — the operating daemon does not call boot auto-restore (the startup 9) comment of `crates/engram-dashboard-daemon/src/lib.rs` · near `:782` · user decision 2026-07-09). Pointed out by the crate boundary A U5b-1 review and deferred as out of scope (commit `424c6da5` body 「미룬 것」).
+- **Problem:** The reaper's clearing of `auto_restore` runs only when the dead incarnation's marker equals the profile's current marker (ADR-0084 — `apply_disposition` in `crates/engram-dashboard-agent/src/reaper.rs` · near `:130-145`). After an old session dies, before its reap arrives, the caller's activation replaces the marker with a new one (`epoch_for_spawn` — `manager.rs:1402` · memory only, ADR-0291 decision 10) and then fails (the save rejection of archiving the old handle · the resume handle race `:1455-1481` · process open failure); then no live session exists but only the marker has changed, so the late-arriving reap skips the clearing — a dead agent with `auto_restore=true` stays in the roster. If boot auto-restore is turned on, the next boot revives that agent. ★The same shape after a process open failure existed from before A (the marker went before opening the process then too) — A added one more occasion, the save rejection (code reading)★.
+- **Next:** Look at it together when redesigning to turn boot auto-restore back on (explicit restore command — ADR-0016 · comment 9) above). Prescription candidates = the failed activation reverts the marker it advanced, or make the clearing decision also look at 「산 세션이 그 표식을 쥐고 있나」 — neither has been decided.
+- **Rationale:** ADR-0084 · ADR-0291 decision 10 · TRD A §3-9 (partial success of the spawn path) · `crates/engram-dashboard-agent/src/reaper.rs` (`:54-81` reap · `apply_disposition`)
 
-### T-58. 메뉴에서 보낸 명령과 프리셋 변경이 실패해도 화면에 아무 표시가 없다
-- **상태:** 미착수 · 선재(프론트) · 크레이트 경계 A U5b-2 의 GUI 실측(2026-10-11)이 찾았다 — A 가 저장 거절을 오류로 돌려주게 되면서 드러났다(`18e11e87` 커밋 본문 「남은 것」).
-- **문제:** 메뉴에서 보낸 명령(예: `agent.spawnInto`)이나 프리셋 만들기 · 지우기가 실패하면 콘솔에 warn · error 만 남고 사람이 보는 화면에는 아무것도 없다. 에이전트 행 지우기는 「실패」 배지가 선다 — 같은 실패를 표면마다 다르게 보인다. 저장소가 읽기 전용 · 이번 쓰기 거절일 때(ADR-0291 결정 6) 사람은 이것 말고는 알 길이 없다(그 상태는 LLM 만 `agent.list` 로 본다).
-- **다음:** 메뉴발 명령 · 프리셋 변경의 실패를 사람에게 보이는 공용 표시(알림 · 배지)를 정한다 — 사람이 보는 표면이라 사용자 결정. 저장소 읽기 전용의 화면 안내(TRD A §8-3 「화면 안내가 없다」)와 묶어 볼 수 있다.
-- **근거:** TRD A §8-3 · ADR-0291 「영향 / 불변식」의 사용자가 보는 것 · 부르는 자리 찾는 법 = `rg "spawnInto|Preset" src/`
+### T-58. Nothing is shown on screen when a command sent from a menu or a preset change fails
+- **Status:** Not started · pre-existing (frontend) · found by the GUI measurement of crate boundary A U5b-2 (2026-10-11) — it surfaced because A now returns a save rejection as an error (commit `18e11e87` body 「남은 것」).
+- **Problem:** If a command sent from a menu (e.g. `agent.spawnInto`) or preset creation · deletion fails, only a warn · error remains in the console and nothing is on the screen a person looks at. Deleting an agent row shows a 「실패」 badge — the same failure looks different on each surface. When the store is read-only · this write is rejected (ADR-0291 decision 6), a person has no way to know besides this (that state is visible only to the LLM through `agent.list`).
+- **Next:** Decide a common display (notification · badge) that shows a person the failure of menu-originated commands · preset changes — it is a surface a person sees, so it is a user decision. It can be looked at together with the on-screen notice for a read-only store (TRD A §8-3 「화면 안내가 없다」).
+- **Rationale:** TRD A §8-3 · what the user sees in ADR-0291 「영향 / 불변식」 · how to find call sites = `rg "spawnInto|Preset" src/`
 
-### T-59. Job 멤버 명단이 「멤버 수 2 · 명단 1」로 되묻기 4 번 안에 완전해지지 않는다(flake)
-- **상태:** 미착수 · 선재(platform — 1-3 U3 `6cc06f14` 이후 그 코드 무변경) · CI windows 러너에서 1 회 관측(2026-10-12 · run `38225403350` · 커밋 `1b3664be` — 그 커밋은 데몬 `lib.rs` 와 문서만 바꿨다) · 같은 잡 재실행은 초록.
-- **문제:** 시험 `group::tests::a_dead_parent_held_open_is_off_the_list_and_reads_dead`(`crates/engram-dashboard-platform/src/group/mod.rs:751`)가 「끝났지만 핸들이 붙든 멤버가 있어도 명단은 완전해야 한다」에서 실패 — `member_pids`(`group/windows.rs` · 되묻기 상한 `MEMBER_LIST_ATTEMPTS` = 4)가 `Job 멤버 명단이 4 번 안에 완전해지지 않았다 — 마지막 답: 멤버 2 · 명단 1 · 물은 칸 512 · 잘린 답 false` 를 냈다. 칸은 충분했고(잘림 없음) 멤버 수와 명단 수가 갈렸다 → 막 끝난 프로세스를 Job 이 세는 수와 PID 목록에 싣는 시점이 잠깐 어긋나는 경합으로 보인다(추론 · 미실측).
-- **운영 영향:** 같은 함수를 claude 잔여물 정리(ADR-0262)가 쓴다 — 그 자리에서 이 오류가 나면 무엇이 되는지 확인할 것.
-- **다음:** 원인을 실측으로 가른다(되묻기 사이에 간격 없음이 원인인지 · Windows 의 어느 문서가 「수 ≠ 목록」을 허용하는지). ★상한 · 대기를 늘려 맞추지 말 것(ADR-0038)★.
+### T-59. The Job member list does not become complete within 4 retries, with 「멤버 수 2 · 명단 1」 (flake)
+- **Status:** Not started · pre-existing (platform — that code unchanged since 1-3 U3 `6cc06f14`) · observed once on the CI windows runner (2026-10-12 · run `38225403350` · commit `1b3664be` — that commit changed only daemon `lib.rs` and docs) · rerunning the same job was green.
+- **Problem:** The test `group::tests::a_dead_parent_held_open_is_off_the_list_and_reads_dead` (`crates/engram-dashboard-platform/src/group/mod.rs:751`) failed at 「끝났지만 핸들이 붙든 멤버가 있어도 명단은 완전해야 한다」 — `member_pids` (`group/windows.rs` · retry limit `MEMBER_LIST_ATTEMPTS` = 4) produced `Job 멤버 명단이 4 번 안에 완전해지지 않았다 — 마지막 답: 멤버 2 · 명단 1 · 물은 칸 512 · 잘린 답 false`. The buffer was large enough (no truncation) and the member count and list count diverged → it looks like a race where the Job's count of a just-finished process and the moment that process lands in the PID list are briefly out of step (inference · not measured).
+- **Operational impact:** The claude leftover cleanup (ADR-0262) uses the same function — check what happens when this error occurs there.
+- **Next:** Separate the cause by measurement (whether the lack of an interval between retries is the cause · which Windows document allows 「수 ≠ 목록」). ★Do not fit it by raising the limit · wait (ADR-0038)★.
 
-### T-64. 합쳐진 replay 의 후속 Subscribe 가 창이 닫힌 뒤 나간다 — 구독이 새어 남는다
-- **상태:** 미착수 · 선재(슬롯 도킹 3단계 이전부터 — 슬롯 재배치에서도 생김) · 발견 2026-10-16 슬롯 도킹 3단계 리뷰(codex). 사용자: 쉬는 에이전트에게 맡길 과제.
-- **문제:** `replay_flight`(`src-tauri/src/daemon_client/replay_flight.rs`)는 에이전트당 in-flight Subscribe 를 하나로 강제하고 그동안 온 요청을 「다음 1회 Subscribe」로 병합한다. 병합된 후속 Subscribe 가 나가기 전에 그 에이전트를 보이던 마지막 창이 닫히면, 후속 Subscribe 가 닫힌 뒤에 데몬으로 나간다. 구독 해제는 레이아웃의 「보임 1→0 전이」에서 한 번만 나가므로 이 구독은 풀리지 않는다 → 데몬이 그 에이전트 출력을 계속 보내고 셸은 받을 창이 없어 버린다. 화면 영향 없음 · 낭비 트래픽. 재연결 또는 그 에이전트를 다시 보였다 숨기면 풀린다.
-- **3단계가 막은 것과의 경계:** 3단계는 `daemon_client/connection.rs` 의 `RequestReplay` 갈래에 「`router.targets` 가 비면 Subscribe 안 보냄」 가드를 넣어 닫히는 창이 *새로* 내는 요청만 막았다. 이미 병합돼 대기 중인 후속은 그 가드를 지나지 않는다.
-- **다음(해법 스케치):** 병합된 후속 Subscribe 를 실제로 보내기 직전에 같은 가시성 검사(`router.targets` 비었나)를 하고, 비었으면 보내지 않고 버린다. ★함정 — 버릴 때 in-flight 슬롯 해제를 함께 해야 한다★: 슬롯을 남긴 채 버리면 그 에이전트의 다음 replay 요청이 영영 안 나가 출력이 안 나온다(`replay_flight` 헤더 「단일 outstanding」 전제 · 해제 경로 셋 = resolution · 거절 · disconnect). 대안 = 후속 Ack 때 보이지 않으면 즉시 Unsubscribe. 시험을 붙여 고친다.
-- **근거:** `process/S21-slot-docking/trd.md` 5.8판 §1-2 「닫히는 창」(지금 7판에는 그 절이 없다 — 백업 `.claude/handoff/attachments/trd-5.8-before-chrome-2026-10-18.md`) · 3단계 리뷰(codex FIX 1 · doc-aware 「추적만」)
+### T-64. A follow-up Subscribe of a merged replay goes out after the window is closed — the subscription leaks
+- **Status:** Not started · pre-existing (from before slot docking stage 3 — it also occurs on slot relayout) · found 2026-10-16 in the slot docking stage 3 review (codex). User: a task to hand to an idle agent.
+- **Problem:** `replay_flight` (`src-tauri/src/daemon_client/replay_flight.rs`) forces one in-flight Subscribe per agent and merges requests that arrive in the meantime into 「다음 1회 Subscribe」. If the last window that showed that agent closes before the merged follow-up Subscribe goes out, the follow-up Subscribe goes out to the daemon after the close. The unsubscribe goes out only once, at the layout's 「보임 1→0 전이」, so this subscription is not released → the daemon keeps sending that agent's output and the shell discards it because there is no window to receive it. No screen impact · wasted traffic. It is released by reconnecting or by showing and hiding that agent again.
+- **Boundary with what stage 3 blocked:** Stage 3 added a guard 「`router.targets` 가 비면 Subscribe 안 보냄」 to the `RequestReplay` branch of `daemon_client/connection.rs`, which blocked only the requests the closing window issues *anew*. A follow-up that is already merged and waiting does not pass through that guard.
+- **Next (solution sketch):** Just before actually sending the merged follow-up Subscribe, do the same visibility check (is `router.targets` empty?) and, if empty, discard it instead of sending. ★Pitfall — the in-flight slot must be released together when discarding★: if it is discarded while leaving the slot, that agent's next replay request never goes out and no output appears (the premise 「단일 outstanding」 in the `replay_flight` header · the three release paths = resolution · rejection · disconnect). Alternative = unsubscribe immediately at the follow-up Ack if it is not visible. Fix it with tests attached.
+- **Rationale:** `process/S21-slot-docking/trd.md` edition 5.8 §1-2 「닫히는 창」 (the current edition 7 has no such section — backup `.claude/handoff/attachments/trd-5.8-before-chrome-2026-10-18.md`) · stage 3 review (codex FIX 1 · doc-aware 「추적만」)
 
 ### T-79. Shell–daemon link freezes while still showing "connected"
 - **Status:** fixed and merged to master (topic S34, branch `v0.5.0/fix/pty-kill-hang`, fix commit `75de8476`, merge `baa97e41`, 2026-11-08). Remove this entry when convenient. Reproduced on the old driver (`0d4f79d1`, 1/1) and on the 3-2 U4a tree (2/5); found 2026-11-07 by the U4a GUI QA.
@@ -366,98 +366,98 @@
 ### T-80. A spewing agent shown in a slot triggers a reconnect/replay storm
 - **Status:** not started · pre-existing — reproduced on master's daemon with the old shell driver (S34 QA base run: 67 reconnects in 4 s, no kill involved). Found 2026-11-07 by the S34 GUI QA.
 - **Symptom:** while an agent that writes ~1.5 MB per call is shown in a slot, the connection drops and reconnects every ~20–35 ms; commands sent meanwhile fail fast ("connection lost" / handshake ended) and output stalls until the slot is emptied. No wedge — it stops once the agent is no longer shown.
-- **Observed mechanism (daemon log):** `ReplayComplete 를 큐에 못 실었다(포화) — 연결을 닫는다` (908×) then `연결 끊김` (1792×) — the daemon's per-connection send queue fills (by design: "포화면 이 연결이 끝난다"), the daemon closes, the shell reconnects and re-subscribes, the replay fills the queue again. Each cycle shows two dials accepted at once. Evidence: S34 QA logs (session scratchpad `t79/qa/gui`, `gui-base2`).
+- **Observed mechanism (daemon log):** `ReplayComplete 를 큐에 못 실었다(포화) — 연결을 닫는다` (908×) then `연결 끊김` (1792×) — the daemon's per-connection send queue fills (by design: "if saturated, this connection ends"), the daemon closes, the shell reconnects and re-subscribes, the replay fills the queue again. Each cycle shows two dials accepted at once. Evidence: S34 QA logs (session scratchpad `t79/qa/gui`, `gui-base2`).
 - **Next:** design question — how the daemon should treat a slow/full consumer during a replay burst (backpressure vs close), likely within S21 stage 3-3 (daemon on the transport, byte budget / per-peer queue) or its own topic.
 - **2026-11-10:** 3-3 landed as a pure replacement of net (user: 「일단 기존거 교체하는 정도로 구현하라고」), so this was not fixed there — the daemon adapter keeps net's queue sizes and close-on-saturation. Its own topic now.
 
-## 사소한 기능·정리
+## Minor feature · cleanup
 
-### T-71. 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기
-- **옛 번호:** T-67 — 2026-10-23 슬롯 도킹 브랜치와 번호가 겹쳐 옮김.
-- **상태:** 할 일 — 나중에 이슈로 본다(사용자 2026-10-19 「그 번호를 가르키면 안되지」 · 「이거 나중에 수정할수있게 트레킹으로 적어놔」). 정리는 사용자가 펼칠 때마다 요청한다(정기 정리 규칙은 두지 않음 — 사용자 같은 날).
-- **사실:** 지금 머리 규칙 = 「해결되면 뺀다 — 다른 문서 · 코드가 그 번호를 가리키면 `tracking-archive.md` 에 한 줄로 옮기고, 아니면 지운다」. 트래킹 밖에서 `T-<번호>` 를 가리키는 파일 = 97개(코드 · 스크립트 · CI 19 · CLAUDE.md 2 — 그 둘은 2026-10-19 에 넣은 T-69 참조 · ADR 여럿 — `git grep -lE '\bT-[0-9]+\b'`, 트래킹 · archive · 핸드오프 기록 제외, 2026-10-19). archive 26줄이 그 참조를 받친다.
-- **할 것:** ① 규칙 = 코드 · 문서는 트래킹 번호를 가리키지 않는다(트래킹 → 코드 · 문서 한 방향) · 정식 기능으로 들어가거나 해결되면 그냥 지운다 — 트래킹 머리 규칙 · CLAUDE.md 에 ② 기존 97개 파일의 참조를 걷는다(번호 대신 근거 문서 · ADR · 코드 앵커로 바꾸거나 지움 — ADR 본문은 append-only 관례라 손댈지 따로 판단) ③ 다 걷은 뒤 `tracking-archive.md` 를 걷는다 ④ 그 전엔 archive 를 지우지 않는다(지우면 참조가 끊긴다) ⑤ CLAUDE.md 는 load-bearing → `/review doc`.
+### T-71. Do not point at tracking numbers — just delete when resolved
+- **Old number:** T-67 — moved on 2026-10-23 because the number overlapped with the slot docking branch.
+- **Status:** To do — look at it later as an issue (user 2026-10-19 「그 번호를 가르키면 안되지」 · 「이거 나중에 수정할수있게 트레킹으로 적어놔」). Cleanup is requested each time the user brings it up (no periodic cleanup rule is set — user, same day).
+- **Fact:** The current header rule = 「해결되면 뺀다 — 다른 문서 · 코드가 그 번호를 가리키면 `tracking-archive.md` 에 한 줄로 옮기고, 아니면 지운다」. Files outside tracking that point at `T-<번호>` = 97 (code · scripts · CI 19 · CLAUDE.md 2 — those two are the T-69 references added on 2026-10-19 · several ADRs — `git grep -lE '\bT-[0-9]+\b'`, excluding tracking · archive · handoff records, 2026-10-19). The 26 lines of the archive back those references.
+- **To do:** ① rule = code · documents do not point at tracking numbers (tracking → code · documents, one direction) · when it enters as a proper feature or is resolved, just delete it — in the tracking header rule · CLAUDE.md ② clear the references in the existing 97 files (replace the number with the rationale document · ADR · code anchor, or delete — ADR bodies are append-only by convention, so decide separately whether to touch them) ③ after clearing everything, clear `tracking-archive.md` ④ do not delete the archive before that (deleting it breaks the references) ⑤ CLAUDE.md is load-bearing → `/review doc`.
 
-### T-70. 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽
-- **옛 번호:** T-66 — 2026-10-23 슬롯 도킹 브랜치와 번호가 겹쳐 옮김.
-- **상태:** 할 일 — 나중에 이슈로 본다(사용자 2026-10-19 「이때까지 잘못했네. 트래킹항목으로 놔둬」).
-- **사실:** CLAUDE.md 「브랜치·커밋」 = 브랜치 이름 버전은 「이 작업이 실려 나갈 다음 릴리스」. 그런데 다음 번호를 정하는 기준이 없어 기능 브랜치도 패치 번호를 달았다 — `v0.4.0` 뒤 진행 중 브랜치 `v0.4.1/feat/slot-docking` · `v0.4.1/feat/preset-library`(2026-10-19 확인 · 뒤쪽은 2026-10-20 master 머지 전에 `v0.5.0/feat/preset-library` 로 이름 바꿈 — 사용자). Semantic Versioning 관행 = 수정만이면 패치 · 기능이 들면 마이너(1.0 전엔 깨는 변경도 마이너가 흔함) · 번호는 보통 릴리스 직전에 실제로 든 것을 보고 정한다(release-please 등은 커밋 타입으로 계산 — 지식 기반 · 이번에 출처를 다시 보지 않았다).
-- **할 것:** ① 브랜치를 팔 때 버전 짐작 규칙(예: `feat` = 다음 마이너 · `fix` · `docs` · `chore` = 다음 패치) ② 릴리스 때 실제 번호와 브랜치 앞 버전이 어긋나면 어떻게 하나(브랜치 이름은 그대로 — 그래프 묶음용) ③ 이미 `v0.4.1/feat/*` 로 판 브랜치 처리 ④ CLAUDE.md 는 load-bearing → `/review doc`.
+### T-70. Criterion for guessing the version ahead of a branch — 0.5.0 side if it is a feature
+- **Old number:** T-66 — moved on 2026-10-23 because the number overlapped with the slot docking branch.
+- **Status:** To do — look at it later as an issue (user 2026-10-19 「이때까지 잘못했네. 트래킹항목으로 놔둬」).
+- **Fact:** CLAUDE.md 「브랜치·커밋」 = the branch name version is 「이 작업이 실려 나갈 다음 릴리스」. But there was no criterion for deciding the next number, so even feature branches carried a patch number — in-progress branches after `v0.4.0` `v0.4.1/feat/slot-docking` · `v0.4.1/feat/preset-library` (confirmed 2026-10-19 · the latter was renamed to `v0.5.0/feat/preset-library` before the 2026-10-20 master merge — by the user). Semantic Versioning practice = patch if only fixes · minor if a feature is included (before 1.0, breaking changes are also commonly minor) · the number is usually decided right before release by looking at what actually went in (release-please etc. compute it from commit types — knowledge-based · the source was not re-checked this time).
+- **To do:** ① a rule for guessing the version when cutting a branch (e.g. `feat` = next minor · `fix` · `docs` · `chore` = next patch) ② what to do when the actual number at release and the version ahead of the branch diverge (leave the branch name as is — for graph grouping) ③ handling of branches already cut as `v0.4.1/feat/*` ④ CLAUDE.md is load-bearing → `/review doc`.
 
-### T-69. 스텝 번호 규약 — 새 주제마다 S번호를 받게 고치기
-- **옛 번호:** T-65 — 2026-10-23 슬롯 도킹 브랜치와 번호가 겹쳐 옮김.
-- **상태:** 일부 됨(2026-10-19) — ① 은 CLAUDE.md 「브랜치·커밋」 에 반영(사용자 「당장은 필요하니 수정하면 될듯」) · 프리셋 라이브러리 폴더를 `S25-preset-library` 로 올림(S22~S24 는 이미 쓰였다). **남은 것 = ② 자잘한 커밋 제목 접두**(나중에 이슈로 — 사용자 「그냥 트래킹에 남겨 나중에 이슈로 보게」).
-- **사실(2026-10-19 고치기 전):** CLAUDE.md 「브랜치·커밋」 = 스텝 번호는 step-log 마지막 스텝을 잇고 세션이 임의로 올리지 않는다(새 스텝 = 사용자 결정). 그래서 S21(2026-08-16 시작) 뒤로 S22 가 열린 적이 없다 — `S21:` 커밋 701개 · 42일 · `docs/process/S21-*` 폴더 여덟(chat-ux · codex-backend · crate-boundaries · flat-split-renderer · preset-library · storage · transport-crate · usage-limit-slot)(확인 2026-10-19). 사용자 기대 = 주제마다 번호가 는다.
-- **할 것(사용자 방향 2026-10-19 「수정해야됨」):** ① 규약을 「새 주제 = 자기 브랜치(`v<버전>/<타입>/<슬러그>`)를 새로 팔 때 세션이 다음 S번호를 받는다 · 잡동사니 브랜치(`v<버전>/chore/misc`)의 자잘한 것은 번호를 받지 않는다」 로 ② 자잘한 커밋 제목 앞에 무엇을 붙이나 정하기(세션 추천 = `misc:` · 대안 = 그때 마지막 S번호 — 남의 주제에 묶여 보인다) — 미정 ③ 이미 쌓인 `S21-*` 폴더 · 옛 커밋 제목은 그대로(이름을 바꾸면 링크가 깨진다) ④ CLAUDE.md 는 load-bearing → `/review doc`.
+### T-69. Step number convention — fix it so each new topic gets an S number
+- **Old number:** T-65 — moved on 2026-10-23 because the number overlapped with the slot docking branch.
+- **Status:** Partly done (2026-10-19) — ① was reflected in CLAUDE.md 「브랜치·커밋」 (user 「당장은 필요하니 수정하면 될듯」) · the preset library folder was raised to `S25-preset-library` (S22~S24 were already used). **Remaining = ② prefix for minor commit titles** (later as an issue — user 「그냥 트래킹에 남겨 나중에 이슈로 보게」).
+- **Fact (2026-10-19 before the fix):** CLAUDE.md 「브랜치·커밋」 = the step number continues the last step in step-log and a session does not raise it arbitrarily (a new step = a user decision). So no S22 was ever opened after S21 (started 2026-08-16) — 701 `S21:` commits · 42 days · eight `docs/process/S21-*` folders (chat-ux · codex-backend · crate-boundaries · flat-split-renderer · preset-library · storage · transport-crate · usage-limit-slot) (confirmed 2026-10-19). User expectation = the number grows per topic.
+- **To do (user direction 2026-10-19 「수정해야됨」):** ① change the convention to 「새 주제 = 자기 브랜치(`v<버전>/<타입>/<슬러그>`)를 새로 팔 때 세션이 다음 S번호를 받는다 · 잡동사니 브랜치(`v<버전>/chore/misc`)의 자잘한 것은 번호를 받지 않는다」 ② decide what to put in front of minor commit titles (session recommendation = `misc:` · alternative = the last S number at that time — it looks tied to someone else's topic) — undecided ③ leave the already accumulated `S21-*` folders · old commit titles as they are (renaming breaks links) ④ CLAUDE.md is load-bearing → `/review doc`.
 
-### T-68. 로컬라이제이션 — 앱 전체를 다른 언어로
-- **옛 번호:** T-64 — 2026-10-23 슬롯 도킹 브랜치와 번호가 겹쳐 옮김.
-- **상태:** 할 일 — 할 게 없을 때 여기서 뽑아 한다(사용자 2026-10-16). 프리셋 PRD R49 가 새 화면 몫의 규칙만 먼저 박았다.
-- **사실:** 프론트에 다국어 장치가 있다 — `src/i18n/index.ts` 의 `t(key, …)` + `src/i18n/ko.ts` 문자열 표(확인 2026-10-16). 한국어 표 하나뿐이다. 그 밖(언어 고르기 설정 · 하드코딩된 화면 문자열 수 · 데몬 · CLI 가 문장으로 내는 메시지)은 미확인.
-- **할 것:** ① 화면에 직접 박힌 문자열 찾기(컴포넌트의 한글 리터럴 — `rg` 로 센다) → `t()` 키로 ② 데몬이 사람 문장으로 돌려주는 사유 · 경고를 코드 + 인자로 바꾸고 화면이 번역 ③ 언어 표 하나 더(영어) + 언어 고르기 설정 ④ CLI · `/control/help` 처럼 데몬이 그리는 화면의 언어 정책.
-- **번역하지 않는 것:** 사용자가 만든 파일 · 폴더 이름 · 파일 안 형식 낱말(`kind: settings` 등) · 명령 이름.
-- **T-66 몫(2026-10-26):** 탭 자동 이름 · OS 창 제목의 칸 낱말(빈 칸 · 에이전트 · 에이전트 트리 · 프리셋 · 사용량 · 「알 수 없는 내용」)은 웹 i18n 이 아니라 셸 상수 표 한 곳(`src-tauri/src/layout/tab_name.rs` 의 `word`)에 있다 — 셸이 이름을 지어야 OS 제목 · `tab.list` · `window.list` 가 웹 없이 맞아서다(ADR-0301 결정 2 · TRD S26-window-chrome §1-4). 로컬라이제이션 때 그 표를 웹 i18n 과 합친다 — 지금 두 곳이다. 거부한 갈래(웹이 낱말을 셸에 보고)의 까닭 = 창 웹뷰가 하나도 보고하지 않은 동안 제목 · 명령 답이 낱말 없이 선다(같은 TRD 절).
-- **근거:** `docs/process/S25-preset-library/prd.md` R49.
+### T-68. Localization — the whole app in another language
+- **Old number:** T-64 — moved on 2026-10-23 because the number overlapped with the slot docking branch.
+- **Status:** To do — pull it out of here and do it when there is nothing to do (user 2026-10-16). Preset PRD R49 only set the rule for the new screen's share first.
+- **Fact:** The frontend has a multilingual mechanism — `t(key, …)` in `src/i18n/index.ts` + the `src/i18n/ko.ts` string table (confirmed 2026-10-16). There is only one Korean table. The rest (language choice setting · number of hardcoded screen strings · messages that the daemon · CLI emit as sentences) is unchecked.
+- **To do:** ① find strings hardcoded directly on the screen (Korean literals in components — count them with `rg`) → move to `t()` keys ② change the reasons · warnings the daemon returns as human sentences into code + arguments and let the screen translate ③ one more language table (English) + a language choice setting ④ language policy for screens the daemon draws, such as the CLI · `/control/help`.
+- **Not translated:** user-created files · folder names · format words inside files (`kind: settings` etc.) · command names.
+- **T-66 share (2026-10-26):** The area words of tab automatic names · OS window titles (empty area · agent · agent tree · preset · usage · 「알 수 없는 내용」) are not in the web i18n but in one shell constant table (`word` in `src-tauri/src/layout/tab_name.rs`) — because the shell must name them for the OS title · `tab.list` · `window.list` to be right without the web (ADR-0301 decision 2 · TRD S26-window-chrome §1-4). At localization time, merge that table with the web i18n — there are two places now. The reason for the rejected branch (the web reports the words to the shell) = while no window webview has reported, the title · command replies stand without words (the same TRD section).
+- **Rationale:** `docs/process/S25-preset-library/prd.md` R49.
 
-### T-61. 서드파티 라이브러리 감싸기 기준 — CLAUDE.md 에 올리고 기존 코드를 그 기준으로 점검
+### T-61. Third-party library wrapping criterion — raise it into CLAUDE.md and check existing code against that criterion
 - **Status:** step ① done in S30 (2026-11-03) — the criterion now lives in `.claude/skill-bindings/code-conventions.md` 「설계」, which coders and reviewers read, instead of CLAUDE.md. Step ② (check existing code against it) waits for the next refactoring round (user 2026-10-14 「나중에 리팩토링할 때 언급」).
-- **기준(세션 정리 · 사용자 동의 2026-10-14):** 셋 중 **하나라도 「예」면 목적 인터페이스 뒤에, 셋 다 「아니오」면 그냥 쓴다** — ① 바깥(디스크 · 네트워크 · 프로세스 · OS · 외부 서비스)과 닿나 ② 바뀔 가능성이 큰가(RC · 관리자 적음 · 선택에 자신 없음) ③ 그 타입이 여러 곳 · 여러 crate 로 퍼지나. 감싸는 단위는 **라이브러리가 아니라 목적**(Cockburn 포트) — 1:1 얇은 래퍼는 세부가 새어 비용만 든다. 언어 표준 · 기반(serde · tokio · React · Zustand) · 한 곳에서만 쓰는 순수 도우미는 감싸지 않는다(사용자 「stl 랩핑은 쓸데없는 짓」).
-- **첫 적용:** 프리셋 라이브러리 — walkdir · serde-saphyr · `std::fs` 는 데몬 「라이브러리 저장소」(목록 · 읽기 · 쓰기) 하나로 묶고, 화면 부품 라이브러리(react-arborist · TanStack Table · react-selecto)는 따로 감싸지 않고 라이브러리 트리 · 목록 부품 안에서 쓴다(`.claude/handoff/attachments/20261012-preset-decisions.md` 2026-10-14 절).
-- **할 것:** ① CLAUDE.md 「설계 원칙」에 이 기준을 짧게(또는 ADR 로 박고 그 번호를 가리키게 — 거부한 대안 = 「모든 라이브러리 감싸기」 · 「전혀 안 감싸기」) ② 기존 코드 점검 — 예: react-arborist 는 지금 `src/components/agent/AgentList.tsx` 한 곳뿐이라 ③ 이 「아니오」 → 지금은 그대로, 라이브러리 트리가 두 번째로 쓰는 순간 공용 부품으로.
-- **근거:** `docs/research/third-party-wrapping-criteria-survey-2026-10-14.md`
-### T-60. 브랜치 이름에서 버전 접두를 떼고, 버전 묶음은 태그로 본다
-- **상태:** 나중에 고친다(사용자 2026-10-12 — 「피드백에 올려 나중에 수정」). 그때까지 현행 규약(`v<다음 릴리스>/<타입>/<슬러그>`)을 따른다.
-- **문제:** 현행 규약은 다음 릴리스 번호를 브랜치를 팔 때 미리 짐작하게 한다. 짐작이 두 번 틀렸다 — 2026-08-17(매니페스트 현재 버전을 넣음) · 2026-10-12(transport 브랜치를 `v0.3.3/…` 로 팠다가 0.4.0 이 따로 진행 중이라 `v0.4.1/…` 로 바꿈). 일반 관행은 작업 브랜치를 주제로만 짓고 버전은 내보낼 때 정한다.
-- **다음:** `docs/handbook/branch-commit.md` 를 「브랜치 = `<타입>/<슬러그>` · 잡동사니 = `chore/misc` · 버전 묶음 = 태그 기준」으로 고친다(`/review doc` 거쳐 커밋). 묶음 보기 명령: `git log --first-parent --merges --oneline <옛 태그>..<새 태그>` · `git branch --merged <새 태그> --no-merged <옛 태그>` · 아직 안 실린 것 = `git branch --merged master --no-merged <최신 태그>`. 잃는 것 = git GUI 의 릴리스별 폴더 접힘. 이미 있는 `v0.x/…` 브랜치는 지우지 않는다(현행 규약).
-- **근거:** CLAUDE.md 「브랜치·커밋」(사용자 결정 2026-08-16/17) · 이 세션 대화(2026-10-12)
+- **Criterion (session summary · user agreement 2026-10-14):** If **any one of the three is 「예」 (yes), put it behind a purpose-specific interface; if all three are 「아니오」 (no), just use it** — ① does it touch the outside (disk · network · process · OS · external service) ② is it likely to change (RC · few maintainers · unsure about the choice) ③ does that type spread to many places · many crates. The unit of wrapping is **the purpose, not the library** (Cockburn port) — a 1:1 thin wrapper leaks details and only costs. Language standard · foundations (serde · tokio · React · Zustand) · pure helpers used in only one place are not wrapped (user 「stl 랩핑은 쓸데없는 짓」).
+- **First application:** Preset library — walkdir · serde-saphyr · `std::fs` are bundled into one daemon 「라이브러리 저장소」 (list · read · write), and screen component libraries (react-arborist · TanStack Table · react-selecto) are not wrapped separately but used inside the library tree · list components (the 2026-10-14 section of `.claude/handoff/attachments/20261012-preset-decisions.md`).
+- **To do:** ① put this criterion briefly in CLAUDE.md 「설계 원칙」 (or record it as an ADR and point at its number — rejected alternatives = 「모든 라이브러리 감싸기」 · 「전혀 안 감싸기」) ② check existing code — e.g. react-arborist is now in only one place, `src/components/agent/AgentList.tsx`, so criterion ③ is 「아니오」 (no) → leave as is for now, and the moment the library tree is used a second time, turn it into a shared component.
+- **Rationale:** `docs/research/third-party-wrapping-criteria-survey-2026-10-14.md`
+### T-60. Strip the version prefix from branch names, and view version bundles by tag
+- **Status:** Fix later (user 2026-10-12 — 「피드백에 올려 나중에 수정」). Until then follow the current convention (`v<다음 릴리스>/<타입>/<슬러그>`).
+- **Problem:** The current convention makes one guess the next release number in advance when cutting a branch. The guess was wrong twice — 2026-08-17 (the manifest's current version was put in) · 2026-10-12 (the transport branch was cut as `v0.3.3/…` and then renamed to `v0.4.1/…` because 0.4.0 was in progress separately). General practice is to name work branches by topic only and decide the version when shipping.
+- **Next:** Change `docs/handbook/branch-commit.md` to 「브랜치 = `<타입>/<슬러그>` · 잡동사니 = `chore/misc` · 버전 묶음 = 태그 기준」 (commit after `/review doc`). Commands for viewing a bundle: `git log --first-parent --merges --oneline <옛 태그>..<새 태그>` · `git branch --merged <새 태그> --no-merged <옛 태그>` · not yet shipped = `git branch --merged master --no-merged <최신 태그>`. What is lost = the per-release folder folding in git GUIs. Existing `v0.x/…` branches are not deleted (current convention).
+- **Rationale:** CLAUDE.md 「브랜치·커밋」 (user decision 2026-08-16/17) · this session's conversation (2026-10-12)
 
-### T-51. 슬롯 보기 모드 덮어쓰기 영속(옛 P3e) — 지금은 프론트 메모리뿐이다
-- **상태:** 보류 — 사용자가 S21-storage 에서 뺐다(사용자 결정 2026-10-07 — 「json · 터미널에서 값을 주고 있는데 아직은 필요없어 보임」). 트리거 = 손으로 바꾼 보기 모드가 재시작 뒤에도 남아야 할 필요가 실제로 생길 때.
-- **문제:** 슬롯의 기본 보기는 에이전트 출력 형식에서 매번 정해진다(JSON → 챗 · 그 밖 → 터미널). 남는 것은 손으로 건 덮어쓰기(`renderModeOverride` — `terminal` · `rich` · `dom`)뿐이고, 그것은 창(웹뷰)마다 따로인 프론트 메모리라 재시작하면 사라진다. 옛 P3e 는 그것을 셸 소유 슬롯 값으로 옮겨 `state.json` 에 싣는 계획이었다(2026-10-02 저장 범위 결정의 한 줄 — 그 부분을 2026-10-07 에 뒤집었다).
-- **다음:** 되살리면 설계 메모(자리 · wire 변경 · 쓰기 경로와 버스 승선 · 개정 도장 ADR-0056 · ADR-0035 예외 목록 · 모르는 모드 값 · 다른 창으로 옮기기 · 다시 쓸 주석)부터 다시 연다. 남길 값 집합(F19)은 2026-10-07 에 (a) 셋 그대로로 답했으나 뺀 결정으로 무효가 됐다 — 되살릴 때 다시 묻는다.
-- **근거:** `docs/process/S21-storage/trd.md` §6-0 「슬롯 보기 모드」 블록(설계 메모 ①–⑦ — 수행 안 함) · §10 F19 · §14-20
+### T-51. Persist slot view mode overrides (formerly P3e) — for now it is frontend memory only
+- **Status:** Deferred — the user removed it from S21-storage (user decision 2026-10-07 — 「json · 터미널에서 값을 주고 있는데 아직은 필요없어 보임」). Trigger = when a need actually arises for a manually changed view mode to survive a restart.
+- **Problem:** A slot's default view is decided each time from the agent output format (JSON → chat · otherwise → terminal). What remains is only the manually applied override (`renderModeOverride` — `terminal` · `rich` · `dom`), and it is frontend memory separate per window (webview), so it disappears on restart. The old P3e planned to move it to a shell-owned slot value and write it into `state.json` (one line of the 2026-10-02 storage scope decision — that part was reversed on 2026-10-07).
+- **Next:** If revived, first reopen the design memo (place · wire change · write path and bus boarding · amendment stamp ADR-0056 · ADR-0035 exception list · unknown mode values · moving to another window · comments to rewrite). The set of values to keep (F19) was answered on 2026-10-07 as (a) the three as is, but became void with the removed decision — ask again when reviving.
+- **Rationale:** `docs/process/S21-storage/trd.md` §6-0 「슬롯 보기 모드」 block (design memo ①–⑦ — not performed) · §10 F19 · §14-20
 
-### T-43. claude 도구 결과도 중립 사건으로 — 프론트의 벤더 모양 파싱을 걷는다
-- **상태:** 보류(메인 판정 2026-09-27 — 챗 화면 라운드 범위 밖). 옛 번호 = T-37(`v0.3.3/feat/chat-ux` 브랜치 기록에서 이 주제를 가리키는 「T-37」).
-- **문제:** claude 의 `tool_result` 는 사용자 블록째 `Structured{kind:"user"}` 로 가고 프론트가 그 벤더 모양을 파싱해 오류 여부를 읽는다(`src/components/slot/StructuredTextView.tsx:96-111`) — 「백엔드 확장」 원칙에 어긋나는 선재 누수다. 챗 라운드 뒤엔 오류 표시가 백엔드마다 다른 길(claude = 프론트 파싱 · codex = `ToolResult`)로 온다.
-- **안 한 이유:** 결과 내용은 여전히 벤더 블록에서 와야 해 상태만 담은 사건은 오류 비트를 겹칠 뿐이고, claude 는 호출마다 결과가 와서 링·옛 셸 비용이 곱절로 는다.
-- **다음:** claude 번역기도 `ToolResult` 를 내고 프론트 파싱은 옛 데몬용 대체로만 남길지 · 결과 내용까지 중립 칸으로 옮길지 · 링 비용 실측.
-- **근거:** `docs/process/S21-chat-ux/trd.md` §4-7 ④ · §4-7 (c) · §11 ⑦
+### T-43. Make claude tool results neutral events too — clear the frontend's vendor-shaped parsing
+- **Status:** Deferred (main decision 2026-09-27 — outside the chat screen round scope). Old number = T-37 (the 「T-37」 that points at this topic in the `v0.3.3/feat/chat-ux` branch records).
+- **Problem:** claude's `tool_result` goes as a whole user block in `Structured{kind:"user"}` and the frontend parses that vendor shape to read whether it is an error (`src/components/slot/StructuredTextView.tsx:96-111`) — a pre-existing leak that violates the 「백엔드 확장」 principle. After the chat round, the error display comes through a different path per backend (claude = frontend parsing · codex = `ToolResult`).
+- **Why it was not done:** The result content still has to come from the vendor block, so an event carrying only the status merely overlaps an error bit, and claude sends a result per call, so the ring · old shell cost doubles.
+- **Next:** Decide whether the claude translator also emits `ToolResult` and the frontend parsing remains only as a fallback for the old daemon · whether to move even the result content into a neutral field · measure the ring cost.
+- **Rationale:** `docs/process/S21-chat-ux/trd.md` §4-7 ④ · §4-7 (c) · §11 ⑦
 
-### T-37. `todo` 를 걷고 이 파일로 합치기 — 이름도 검토
-- **상태:** 트리거 대기 — 스킬 전체 리팩토링이 끝난 뒤(사용자 결정 2026-09-30). 그때까지도 새 항목은 이 파일에 쌓는다.
-- **결정:** `docs/todo.md`(색인) · `docs/todo/*.md`(상세)를 폐기하고 나중에 할 일은 전부 이 파일에 T- 로 적립한다(사용자 결정 2026-09-30).
-- **할 것:** ① `todo` 항목마다 옮길 곳을 확인하고 옮긴 뒤 지운다(`docs/todo.md` 규칙 3 — 편입 없이 지우면 증발) ② `docs/README.md` · `docs/handbook/documentation-system.md` 링크 갱신(`rg "todo\.md|docs/todo/"`) ③ `todo` 의 상태 넷을 이 파일의 **상태** 줄로 흡수 ④ 이름 — 업계 통칭은 backlog · 바꾸면 CLAUDE.md · `docs/README.md` · ADR 링크를 함께 ⑤ `/review doc`(문서 체계 변경 = load-bearing).
+### T-37. Clear `todo` and merge it into this file — the name is also to be reviewed
+- **Status:** Waiting for trigger — after the whole skill refactoring ends (user decision 2026-09-30). Until then new items keep accumulating in this file.
+- **Decision:** Discard `docs/todo.md` (index) · `docs/todo/*.md` (details) and accumulate everything to do later in this file as T- entries (user decision 2026-09-30).
+- **To do:** ① for each `todo` item, confirm where to move it and delete it after moving (`docs/todo.md` rule 3 — deleting without incorporating makes it evaporate) ② update the links in `docs/README.md` · `docs/handbook/documentation-system.md` (`rg "todo\.md|docs/todo/"`) ③ absorb the four statuses of `todo` into this file's **Status** line ④ name — the industry term is backlog · if renamed, change the CLAUDE.md · `docs/README.md` · ADR links together ⑤ `/review doc` (a documentation system change = load-bearing).
 
-### T-27. 셸(`src-tauri`) 로직의 회귀망 — 검증 공백은 닫혔다, 남은 것은 분리 모양 결정과 옛 테스트의 처분
-- **상태:** 보류 — 사용자 결정 대기(구조 결정뿐). 검증 공백은 2026-08-24 에 닫혔다 — 셸 단위 스위트가 `--test lib_unit` 으로 로컬·워크스페이스 회귀·CI(통째로) 모두에서 돈다(명령 정본 = `.github/workflows/ci.yml` 의 `cargo test -p engram-dashboard --test lib_unit` 스텝).
-- **문제:** 레이아웃 권위가 `src-tauri` 에 있어(ADR-0035) 셸 로직을 테스트 가능한 crate 로 분리할지가 남았다. 경계 실측 = 셸 실코드 10,637줄 중 8,286줄(78%)이 `use tauri` 0 · 순환 없음(`layout/` 은 셸 내부 참조조차 0). 워크스페이스 회귀 편입은 분리 없이 이미 되므로 분리 동기는 사실상 의존 방향의 컴파일러 강제 하나다.
-- **미결(여기서 정하지 않는다):** ① 분리 여부·모양(ADR-0012 — 사용자 결정 · ADR-0151 기준을 셸에 적용한 결정 기록 없음) ② 기존 셸 테스트(당시 209개)의 처분 — 결정된 적 없다(2026-08-23 사용자 발언은 우선순위 진술이지 폐기 지시가 아니다 — 사용자 확인 2026-08-24 · 원문 = 아래 조사 문서 :19) ③ `cargo check --all-targets` CI 게이트 — 실행 스위트가 생겨 값어치가 옅으나 세울지는 다시 판단 ④ `app: None` 단락 수정 모양을 ADR 로 박을지(ADR-0174 는 테스트 타깃을 세운 결정이지 이 수정의 결정이 아니다).
-- **함정:** `--lib` · `--all-targets` 는 여전히 `0xc0000139` 로 즉사한다 — 부르는 법은 `--test lib_unit` 하나(설명 정본 = `src-tauri/Cargo.toml` 주석).
-- **근거:** ADR-0174 · `docs/refactoring/shell-crate-boundary-survey-2026-08-23.md` · ADR-0012
+### T-27. Regression net for shell (`src-tauri`) logic — the verification gap is closed, what remains is the separation shape decision and the disposal of old tests
+- **Status:** Deferred — waiting for user decision (structure decision only). The verification gap was closed on 2026-08-24 — the shell unit suite runs with `--test lib_unit` in local · workspace regression · CI (as a whole) (canonical command = the `cargo test -p engram-dashboard --test lib_unit` step of `.github/workflows/ci.yml`).
+- **Problem:** The layout authority is in `src-tauri` (ADR-0035), so whether to separate the shell logic into a testable crate remains. Boundary measurement = of 10,637 lines of real shell code, 8,286 lines (78%) have 0 `use tauri` · no cycles (`layout/` has 0 even internal shell references). Workspace regression inclusion already happens without separation, so the separation motive is effectively just the compiler enforcement of the dependency direction.
+- **Undecided (not decided here):** ① whether and how to separate (ADR-0012 — user decision · no decision record applying the ADR-0151 criterion to the shell) ② disposal of the existing shell tests (209 at the time) — never decided (the user's 2026-08-23 remark is a priority statement, not a discard instruction — user confirmation 2026-08-24 · original text = line 19 of the research document below) ③ `cargo check --all-targets` CI gate — its value is thin now that an executing suite exists, but whether to set it up is to be judged again ④ whether to record the shape of the `app: None` short-circuit fix as an ADR (ADR-0174 is the decision that set up the test target, not the decision for this fix).
+- **Pitfall:** `--lib` · `--all-targets` still die instantly with `0xc0000139` — the only way to call is `--test lib_unit` (canonical explanation = the `src-tauri/Cargo.toml` comment).
+- **Rationale:** ADR-0174 · `docs/refactoring/shell-crate-boundary-survey-2026-08-23.md` · ADR-0012
 
-### T-26. `scripts/rebuild-run-debug.bat`(구 `run-dashboard-clean.bat`)의 kill 경로가 한 번도 실행되지 않았다
-- **상태:** 보류(검증 공백 — 결함이 발견된 것이 아니다).
-- **출처:** S21(2026-08-16). ADR-0139 구현 시 **릴리스 런처 쪽만 표본 확인**했다.
-- **증상 아님 — 미검증:** dev 런처의 pid 읽기·이미지 이름·exe 경로 3중 확인과 kill 후 재확인이 실제로 도는 것을 본 사람이 없다. 릴리스 쪽과 구조가 같지만 **연결키 경로(`.engram-dev\daemon\run\daemon.json`)와 기대 exe 경로(`target\debug\`)가 다르고 라벨·레이블명도 전부 별개**라, 한쪽의 통과가 다른 쪽을 보증하지 않는다.
-- **필요한 것:** dev 데몬을 띄운 상태에서 런처를 돌려 kill 성사 + 4개 거부 분기(연결키 없음·pid 불량·죽은 pid·경로 불일치)를 각각 한 번씩 태우기.
+### T-26. The kill path of `scripts/rebuild-run-debug.bat` (formerly `run-dashboard-clean.bat`) has never been executed
+- **Status:** Deferred (a verification gap — no defect was found).
+- **Source:** S21 (2026-08-16). When implementing ADR-0139, **only the release launcher side was sample-checked.**
+- **Not a symptom — unverified:** No one has seen the dev launcher's triple check of pid read · image name · exe path and the re-check after the kill actually run. The structure is the same as the release side, but **the connection key path (`.engram-dev\daemon\run\daemon.json`) and the expected exe path (`target\debug\`) differ and the label · label names are all separate**, so one side passing does not guarantee the other.
+- **What is needed:** Run the launcher with a dev daemon up and exercise the kill success + the 4 reject branches (no connection key · bad pid · dead pid · path mismatch) once each.
 
-### T-23. 사람·스크립트의 데몬 제어 **명령줄** 표면이 0이 됐다
-- **상태:** 보류(ADR-0132 결정 1의 의도된 귀결) — 셸 통로를 되살릴지가 사용자 결정. 급하지 않다 — 사람은 화면으로 전부 되고 화면이 곧 자격이다(사용자 정정 2026-08-12).
-- **문제:** 지운 `src-tauri/src/cli.rs` 는 `daemon.json` 을 읽어 무자격으로 붙었는데, 새 `engram` 은 스폰 때 발급되는 에이전트별 토큰(`ENGRAM_TOKEN` + `ENGRAM_CONTROL_URL`) 없이는 `NO_TOKEN` 으로 끝난다 — 옛 4동사와 앞으로 추가될 제어 동사 전부가 셸에서 막힌다(ADR-0132 §영향의 「kill 을 열면 닫힌다」는 에이전트 축 한정). 잔존 표면 `scripts/engram.mjs`(같은 무자격 경로 · PoC · 배포판 미포함 · 문법이 `engram` 과 별개)가 「입구 둘」을 남긴다.
-- **다음:** 되살린다면 형태 둘 — `engram` 이 `daemon.json` 을 직접 읽는 관리자 모드 / 데몬이 사람용 자격을 따로 발급. 그 결정이 `scripts/engram.mjs` 거취도 정한다. 값 = 사람의 디버깅과 CI 같은 자동화뿐.
-- **근거:** ADR-0132 · `crates/engram-dashboard-daemon/src/bin/engram.rs` · `control/registry.rs`
+### T-23. The human · script **command-line** surface for daemon control has become 0
+- **Status:** Deferred (an intended consequence of ADR-0132 decision 1) — whether to revive the shell path is a user decision. Not urgent — a person can do everything on screen and the screen is the credential (user correction 2026-08-12).
+- **Problem:** The deleted `src-tauri/src/cli.rs` read `daemon.json` and attached without credentials, but the new `engram` ends with `NO_TOKEN` without the per-agent token issued at spawn (`ENGRAM_TOKEN` + `ENGRAM_CONTROL_URL`) — the old 4 verbs and all control verbs to be added are blocked from the shell (「kill 을 열면 닫힌다」 in ADR-0132 §Impact is limited to the agent axis). The remaining surface `scripts/engram.mjs` (the same credential-free path · PoC · not included in the distribution · syntax separate from `engram`) leaves 「입구 둘」.
+- **Next:** If revived, two forms — an admin mode where `engram` reads `daemon.json` directly / the daemon issues a separate human credential. That decision also decides the fate of `scripts/engram.mjs`. Value = only human debugging and automation such as CI.
+- **Rationale:** ADR-0132 · `crates/engram-dashboard-daemon/src/bin/engram.rs` · `control/registry.rs`
 
-### T-17. GUI 실측 CI 편입 — 등록된 시나리오가 없다
-- **상태:** 보류. 자동화 대상 자체가 없어서 CI 얹기가 뒷일이다.
-- **출처:** ADR-0131 미결 ③. `scripts/cdp.mjs`는 `shot`/`eval`/`info` 3명령뿐이고 스위트·시나리오 개념이 없다 — 변경 내용을 보고 사람이 그때그때 정하는 방식.
-- **선행 조사 필요:** 러너에 WebView2가 있는지, 화면 없는 환경에서 창이 뜨는지 **둘 다 미실측**. Tauri E2E 전용 도구(WebDriver 계열) 채택 여부도 미조사 — 지금 방식으로 밀지 그쪽으로 갈지 갈림길.
-- **참고(업계 대조):** 조사한 데스크톱 앱 9곳 중 매 PR에 GUI E2E를 도는 곳은 1곳뿐. **CI에서 뺀 것이 다수파**라 서두를 일은 아니다.
+### T-17. Include GUI measurement in CI — there is no registered scenario
+- **Status:** Deferred. There is no automation target itself, so putting it on CI is a later matter.
+- **Source:** ADR-0131 open item ③. `scripts/cdp.mjs` has only 3 commands, `shot`/`eval`/`info`, and has no concept of suite or scenario — a method where a person decides case by case after looking at the changes.
+- **Prior research needed:** Whether the runner has WebView2 and whether a window opens in a headless environment are **both unmeasured**. Whether to adopt a Tauri E2E-specific tool (WebDriver family) is also unresearched — a fork between pushing the current method and going that way.
+- **Reference (industry comparison):** Of 9 desktop apps surveyed, only 1 runs GUI E2E on every PR. **Leaving it out of CI is the majority**, so there is no need to hurry.
 
-### T-16. 프론트 종료 판정이 불변식과 어긋남 + 세대 필터링 부재
-- **상태:** 증상 ①·② 둘 다 잔존 · 선결 = T-32. 2026-08-26 증상 ② 구현 시도가 적대 리뷰 2인 거부로 되돌려졌다 — 커밋된 적 없다(그 모양의 기록 = 간소화 전 전문). 사용자 결정 2026-08-11 = 불변식(CLAUDE.md 「상태 알림 분담」)은 그대로 두고 코드를 맞춘다.
-- **증상 ①:** 불변식은 「프론트는 `status_changed` 로 terminal 판정 금지 → `agent-list-updated` 로」(ADR-0005 · 옛 T-4)인데, `agentStore.onStatusChanged`(`src/store/agentStore.ts:71-74`)가 받은 status 를 명부 항목에 덮어쓰고 슬롯들이 그 값에서 `agentGone` 을 파생한다. 맞출 길(ADR-0005 문구 정밀화 vs 출처 교체)은 미결 사용자 결정이다.
-- **증상 ②:** 상태 이벤트는 화신 표식을 싣는데 `eventBus` 가 버려 불일치 필터링이 없다(ADR-0007 「결정」 마지막 조항 — 살아 있다). 되돌린 시도의 거부 뿌리 = 필터가 명부를 과신한다 — 명부 프레임은 느린 소비자에서 설계상 버려지므로(`crates/engram-dashboard-net/src/ws.rs` 의 `ConnRegistry::broadcast_text` — 전-연결 팬아웃 `try_send` 실패는 경고만 남기고 버린다) 명부가 낡으면 새 화신의 알림이 전부 버려져 산 슬롯이 종료 막을 쓴 채 남는다.
-- **함정:** 기존 슬롯 테스트는 `agents` 를 직접 세팅해 `onStatusChanged` 를 지나지 않으므로(예: `src/components/slot/RichSlot.test.tsx:471`) 초록이어도 스토어 층 필터를 증명하지 않는다.
-- **다음:** T-32 를 먼저 세운 뒤 증상 ② 재설계. 프론트 변경이라 QA 는 GUI 실측까지. 조사는 정적 판독뿐이고 런타임 재현은 한 번도 안 했다(「옛 화신 terminal 알림이 새 화신보다 늦게 도착」 시나리오는 현행 백엔드가 못 만든다는 추론).
-- **근거:** ADR-0005 · ADR-0007 · ADR-0163/0164
+### T-16. The frontend exit decision conflicts with the invariant + no generation filtering
+- **Status:** Both symptoms ① · ② remain · prerequisite = T-32. The 2026-08-26 attempt to implement symptom ② was reverted by the rejection of 2 adversarial reviewers — it was never committed (the record of that shape = the full text before simplification). User decision 2026-08-11 = leave the invariant (CLAUDE.md 「상태 알림 분담」) as is and fit the code to it.
+- **Symptom ①:** The invariant is 「프론트는 `status_changed` 로 terminal 판정 금지 → `agent-list-updated` 로」 (ADR-0005 · old T-4), but `agentStore.onStatusChanged` (`src/store/agentStore.ts:71-74`) overwrites the received status onto the roster entry and the slots derive `agentGone` from that value. The way to fit it (tightening the ADR-0005 wording vs replacing the source) is an undecided user decision.
+- **Symptom ②:** The status event carries the incarnation marker but `eventBus` discards it, so there is no mismatch filtering (the last clause of ADR-0007 「결정」 — alive). The root of the rejection of the reverted attempt = the filter over-trusts the roster — roster frames are dropped by design for slow consumers (`ConnRegistry::broadcast_text` in `crates/engram-dashboard-net/src/ws.rs` — in the all-connection fan-out a `try_send` failure only logs a warning and drops it), so if the roster is stale, all notifications of the new incarnation are dropped and a live slot is left wearing the exit curtain.
+- **Pitfall:** Existing slot tests set `agents` directly and do not pass through `onStatusChanged` (e.g. `src/components/slot/RichSlot.test.tsx:471`), so even when green they do not prove the store-layer filter.
+- **Next:** Set up T-32 first and then redesign symptom ②. It is a frontend change, so QA goes through GUI measurement. The investigation was static reading only and runtime reproduction was never done (the inference that the scenario 「옛 화신 terminal 알림이 새 화신보다 늦게 도착」 cannot be produced by the current backend).
+- **Rationale:** ADR-0005 · ADR-0007 · ADR-0163/0164
