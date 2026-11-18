@@ -1,109 +1,75 @@
 //! Supervisor task for one peer — ★the driving layer★.
 //!
-//! Carries out, on top of [`crate::link`] and [`crate::clock`], what [`crate::machine`] decided. If the pure layer
-//! is "what", this file is "how".
+//! Carries out, on top of [`crate::link`] and [`crate::clock`], what [`crate::machine`] decided (the pure layer is "what", this file "how").
 //!
 //! ## Invariants this file upholds
 //!
-//! - ★Single writer★ — only the supervisor task holds [`LinkTx`]. Everything from outside goes through the queue.
-//! - ★The pending slot is registered **before sending**★ — reverse it and a fast reply cannot find its slot (the shell has this today too).
-//! - ★**Every** branch that drops the connection wakes the waiters★ — not only those in the table but **also requests
-//!   left in the queue and requests that arrive after leaving the operating
-//!   phase**. If even one is missed, that slot waits forever: the given-up state
-//!   has no loop to run the deadline, and the waiting caller holds the handle, so the channel never closes either.
-//! - ★Every write carries a deadline★ — `write_deadline < ping_interval`, so a write in progress cannot
-//!   starve keepalive. The deleted `net` crate had exactly that starvation.
-//! - ★The handle is immortal across reconnects★ — a generation boundary does not kill the handle;
-//!   it shows up as a marker on [`crate::Arrival::generation`].
-//! - ★A command never leaves the generation it is bound to (TRD 3 §3-0 ③)★ — every command the handle queues is stamped with a generation (for `*_in`,
-//!   the value the caller gave; for the rest, the current generation at the moment of the call), and the supervisor compares it with the current generation just before writing and does not write if they differ
-//!   (`Supervisor::on_cmd`). The queue survives reconnects, but what the machine empties when the link drops is only the queue of that moment, so this comparison closes the gap in which something that
-//!   entered afterwards passed through the connection-establishment phase and was written on the next connection. A request that is not written wakes its waiter as a not-sent disconnect, and
-//!   a notification, a fanout and a resume are counted — the same disposal as a command that entered while not in the operating phase (`reject_command`). The handle entry point
-//!   makes the same comparison first, but that is the fast path; the authority is on the supervisor side.
-//! - ★Everything sent upward passes through the ordering area (the supervisor-local queue) and is never dropped★ (TRD 3 §3-0 ②) — the place that
-//!   enqueues (event · packet · deadline event · loss report) only enqueues synchronously, and if the line has room it loads right there. If the line
-//!   is full it holds the item back, and the 「room in the line → drain the ordering area」 branch of **every waiting loop** (connection
-//!   establishment · operating · backoff · given-up) does the loading — if even one is missing, what was held back does not go out while staying in that state. While a write is being pushed
-//!   that branch is absent, so loading stops — for one write up to `write_deadline`, and at a place that pushes writes
-//!   back to back (draining the queue in `Turn::Outbound` · `reissue_resumes`), up to that number of writes × `write_deadline`.
-//!   So what one supervisor sends upward is loaded in the order it was produced. Things are dropped only when the receiving side has closed and when the teardown
-//!   limit (`CLOSE_DRAIN_LIMIT`) has been exceeded.
-//! - ★When the line is full, that peer's reading stops (backpressure — TRD 3 §3-0 ①)★ — while the ordering area holds anything, the operating
-//!   loop pulls the frame arm. Then the read-ahead queue ([`Policy::frame_buffer`]) fills and the read task
-//!   stops reading the channel. Separately, if the received bytes (minus the resume-window share) reach the read share (all of `BYTE_BUDGET` if streams are not used,
-//!   half of it if they are), the read task does not do its next read (`budget.rs` — one count covers the read-ahead queue · the ordering area · the upward-going
-//!   queue · the window). So what the ordering area
-//!   holds is what one frame (or one timer turn) processed after the line filled produced, plus a few lifecycle events, and what was salvaged from the read-ahead queue
-//!   when the channel was dropped (next item) — what teardown must empty from an old supervisor's backlog is that much too, so if the receiving
-//!   side is draining, it finishes within `CLOSE_DRAIN_LIMIT` (those bytes are within the count).
-//!   ★What was dropped past the limit is neither counted nor reported★ — teardown releases the enqueue end, and the receiver end (`None`) reports that drop
-//!   (TRD 3 §3-0 ②).
-//! - ★Stream pieces the resume window holds do not stop reading★ — within the same count they are counted separately as the window share and
-//!   subtracted from the read gate, and the window share is measured per supervisor against the window cap (half of the stream budget) — a piece that would exceed it if held is not held, and the window is
-//!   closed as truncated (`Supervisor::route`). Stopping reading would leave the replay that fills the hole unread, and a hole that could have been filled would
-//!   become a permanent loss. One supervisor's byte ceiling is `BYTE_BUDGET` (= read share + window cap) + one message
-//!   (`budget.rs` header).
-//! - ★While holding, the silence decision and the resume window's clock are stopped★ — what is blocked is our side, so we can read neither the peer's liveness
-//!   nor the answer to a re-request. At the moment it clears, `last_rx` is set to that time and the requested time of an open window is
-//!   pushed back by the held time (`Supervisor::track_pause`). The held time is counted from when the hold actually started, not from when it was noticed —
-//!   even if it started while waiting on a write, and a hold the supervisor never saw because the read gate closed and reopened in between is counted too.
-//!   The window may close later than the held time but never earlier (the safe side — see `track_pause`).
-//!   Our ping goes out even meanwhile — the peer does not cut us for silence.
-//!   The cost is that that peer's replies cannot come in either — if you wait on [`Peer::request`] on the task that drains the receiving side, that
-//!   request hangs until its deadline (crate header 「Receiver-side invariants」 1).
-//! - ★If the receiving side drops or closes the receiver end, fold immediately★ (crate header 「Receiver-side invariants」 5) — every waiting loop (connection
-//!   establishment · operating · backoff · given-up) and writes (`write` · `ping`) watch for the receiver being closed (`Sender::closed`), so even with nothing to enqueue
-//!   (even if the peer is quiet) they go straight to closing on the spot — they do not reconnect. The channel and handshake being dialed are discarded
-//!   as the closed arm wins — if the handshake has just finished and the finished arm wins (`select!` is not biased), `shake_hands` draws a
-//!   generation and the first turn of the operating phase sends the close and folds (harmless · no re-check is placed before the draw).
-//!   The check also runs before polling the dial phase, so a receiver end dropped before the supervisor starts dialing does not dial a channel. A reply-less frame
-//!   that was being written and is dropped is counted like one dropped for any other reason (`write_or_count`). The only thing that does not watch is the single close of `drop_link` —
-//!   it pushes the close code through to the end, so it deliberately does not listen to control · receiver closure (it listens only to the start of the pre-close flush and shortens to that deadline), and it takes at most `write_deadline`.
-//!   Teardown has nowhere to load, so it does not wait on the ordering area (`Closed` is not loaded either).
-//! - ★What was already read is handed over before dropping the channel★ — when leaving the operating phase (the app closed · reconnect · write failure ·
-//!   silence …), the read task is folded and the read-ahead queue is drained without waiting and sent the same way as during operation
-//!   (`Supervisor::salvage_read_ahead`). This happens before the machine wakes the waiters and emits the disconnect event, so replies go to the waiting
-//!   caller and everything else goes ahead of the disconnect event. Even under a policy that disconnects on decode failure, what was already read after that is handed over.
-//!   What remains in the channel (not yet read) is dropped with it. If the reader's end (the peer's close · channel error · disconnect on decode failure —
-//!   the frontmost item) was already in that line, only our side's disconnect cause (write failure · silence · overflow …) is rewritten to that —
-//!   it is an end that was already read before the channel was dropped. If the app closed or asked to reconnect, it stays `Explicit` (`earlier_end`).
-//! - ★A held stream piece goes up under the generation of the connection that first carried it★ — the resume window survives re-attaching and may be closed on the next
-//!   connection, but [`crate::Arrival::generation`] points to the connection that carried that piece.
-//! - ★Teardown order = drop the channel → wake the waiters · close the outbound queue and reject the remaining commands → fold the open resume window (what was held
-//!   goes up together with the truncation report) → drain the ordering area → [`TransportEvent::Closed`] last → release the enqueue end★ — what waits on the receiving
-//!   side is only the draining of the ordering area (`teardown`). The enqueue end is held by one supervisor alone (`PeerConfig::inbound`), so when the supervisor
-//!   ends, the next `recv` on that handle's receiver end is `None`.
-//! - ★An accepted peer (`Registry::attach`) does not reconnect (TRD 3 §3-1 ①)★ — it starts from the handshake already holding the channel
-//!   (the machine's dial is repaid on the spot as 「opened」 — `Supervisor::run`), and every end where the machine would go to reconnect · give up
-//!   (handshake failure · disconnect during operation) is closed immediately with the same fold as the pre-close flush (`Supervisor::fold_into_close`).
-//!   ★The machine (pure layer) keeps its dialing-side shape★ — putting an accepted-peer branch in the machine would make every one of those ends (reject · deadline · disconnect ·
-//!   reconnect) carry one more branch each, while the supervisor side already has the 「close without reconnecting」 fold. The handshake deadline
-//!   runs from the end of the upgrade (`Supervisor::shake_hands`). The end cause rides on [`TransportEvent::Closed`]
-//!   (`Supervisor::end_cause`) and when it ends it removes itself from the registry (`RosterExit`).
-//! - ★The pre-close flush is done with one marker in the data queue (TRD 3 §3-0 ④)★ — [`Peer::close_after_flush`] first writes the close to
-//!   be loaded (that is the 「draining」 indication — after that the handle's sends are rejected) and puts the marker at the end of the data queue. While
-//!   operating, the supervisor writes the commands before the marker in order and closes at the marker (`Supervisor::on_cmd` — the marker is not bound to a generation). The waiting loops outside
-//!   operation (connection establishment · backoff · given-up) see that indication and fold immediately — even if disconnected mid-drain it does not reconnect:
-//!   it withdraws the part the machine produced for reconnect · give-up (waiting · `GaveUp` · `ConnectFailed` reports) and folds straight into the close
-//!   (`Supervisor::fold_into_close` — the machine is left pure). While draining, 「retry now」 is dropped too (even
-//!   one that entered before it and has not been read yet — `Supervisor::drain_ctl`). One deadline ([`Policy::flush_timeout`]) covers, from when the supervisor
-//!   notices, the later writes · keepalive · close frame together (`Supervisor::guard` · `drop_link` — even if the drain starts during that
-//!   wait, it shortens on the spot) — that deadline runs even when the receiving line is backed up (`wake_at`).
+//! - ★Single writer★ — only the supervisor task holds [`LinkTx`]; everything from outside goes through the queue.
+//! - ★The pending slot is registered **before sending**★ — reversed, a fast reply cannot find its slot.
+//! - ★**Every** branch that drops the connection wakes the waiters★ — table entries, queued requests, and requests arriving after leaving the
+//!   operating phase. One miss and that slot waits forever: the given-up state has no loop to run the deadline, and the waiting caller holds the
+//!   handle, so the channel never closes either.
+//! - ★Every write carries a deadline★ — `write_deadline < ping_interval`, so a write cannot starve keepalive (the deleted `net` crate did).
+//! - ★The handle is immortal across reconnects★ — a generation boundary shows up as a marker on [`crate::Arrival::generation`].
+//! - ★A command never leaves the generation it is bound to (TRD 3 §3-0 ③)★ — every queued command is stamped with a generation and the supervisor
+//!   compares it with the current one just before writing (`Supervisor::on_cmd`); the handle entry check is only a fast path. The queue survives
+//!   reconnects but the machine empties only the queue of the moment the link drops, so this closes the gap where a later entry crossed the
+//!   establishment phase and was written on the next connection.
+//! - ★Everything sent upward passes through the ordering area (supervisor-local queue) and is never dropped★ (TRD 3 §3-0 ②) — enqueue sites
+//!   only enqueue synchronously and load right there if the line has room; otherwise the 「room in the line → drain the ordering area」 branch of
+//!   **every waiting loop** (establishment · operating · backoff · given-up) loads it — one missing and held items stall in that state. While a
+//!   write is pushed that branch is absent (up to `write_deadline` per write; back-to-back writes in `Turn::Outbound` · `reissue_resumes` multiply
+//!   it). Upward output keeps produced order. Items are dropped only when the receiving side has closed or `CLOSE_DRAIN_LIMIT` is exceeded;
+//!   ★what is dropped past the limit is neither counted nor reported★ — teardown releases the enqueue end and the receiver end (`None`) reports it.
+//! - ★When the line is full, that peer's reading stops (backpressure — TRD 3 §3-0 ①)★ — while the ordering area holds anything the operating
+//!   loop pulls the frame arm; the read-ahead queue ([`Policy::frame_buffer`]) fills and the read task stops. Separately, if received bytes (minus
+//!   the resume-window share) reach the read share (all of `BYTE_BUDGET` without streams, half with), the read task skips its next read
+//!   (`budget.rs`). The ordering area thus holds what one frame (or timer turn) produced after the line filled, a few lifecycle events, and what
+//!   was salvaged from the read-ahead queue on channel drop, so a draining receiver finishes teardown within `CLOSE_DRAIN_LIMIT`.
+//! - ★Stream pieces the resume window holds do not stop reading★ — counted separately as the window share, subtracted from the read gate, and
+//!   measured against the window cap (half the stream budget); a piece that would exceed it is not held and the window closes as truncated
+//!   (`Supervisor::route`). Stopping reading would leave the filling replay unread and turn a fillable hole into a permanent loss. Byte ceiling per
+//!   supervisor = `BYTE_BUDGET` + one message (`budget.rs` header).
+//! - ★While holding, the silence decision and the resume window's clock stop★ (`Supervisor::track_pause`; reasoning there) — our side is blocked,
+//!   so we see neither the peer's liveness nor a re-request's answer. Our ping still goes out. Cost: that peer's replies cannot come in either, so
+//!   awaiting [`Peer::request`] on the draining task hangs until its deadline (crate header 「Receiver-side invariants」 1).
+//! - ★If the receiving side drops or closes the receiver end, fold immediately★ (crate header 「Receiver-side invariants」 5) — every waiting loop and
+//!   write (`write` · `ping`) watches `Sender::closed`, so even with nothing to enqueue they go straight to closing and never reconnect. A dial or
+//!   handshake in progress is discarded as the closed arm wins; if a just-finished handshake wins (`select!` is not biased), `shake_hands` draws a
+//!   generation and the first operating turn sends the close and folds (harmless). The check also runs before polling the dial phase. A reply-less
+//!   frame being written is counted like any other drop (`write_or_count`). `drop_link`'s single close does not watch — it pushes the code through,
+//!   listening only to the pre-close flush start, at most `write_deadline`. Teardown does not wait on the ordering area (`Closed` is not loaded).
+//! - ★What was already read is handed over before dropping the channel★ (`Supervisor::salvage_read_ahead`; details there) — replies reach the
+//!   waiting caller and the rest goes ahead of the disconnect event.
+//! - ★A held stream piece goes up under the generation of the connection that first carried it★ — the resume window may close on a later
+//!   connection, but [`crate::Arrival::generation`] points to the carrying one.
+//! - ★Teardown order = drop the channel → wake waiters · close the outbound queue and reject remaining commands → fold the open resume window
+//!   (held pieces go up with the truncation report) → drain the ordering area → [`TransportEvent::Closed`] last → release the enqueue end★
+//!   (`teardown`). The enqueue end is held by one supervisor alone (`PeerConfig::inbound`), so the next `recv` is `None`.
+//! - ★An accepted peer (`Registry::attach`) does not reconnect (TRD 3 §3-1 ①)★ — it starts from the handshake holding the channel (the machine's
+//!   dial is repaid on the spot as 「opened」 — `Supervisor::run`), and every end where the machine would reconnect · give up closes immediately
+//!   via `Supervisor::fold_into_close`. ★The machine keeps its dialing-side shape★ — an accepted-peer branch there would add a branch to every
+//!   end while the supervisor already has the 「close without reconnecting」 fold. The handshake deadline runs from the end of the upgrade
+//!   (`Supervisor::shake_hands`); the end cause rides on [`TransportEvent::Closed`] (`Supervisor::end_cause`); on ending it removes itself from
+//!   the registry (`RosterExit`).
+//! - ★The pre-close flush uses one marker in the data queue (TRD 3 §3-0 ④)★ — [`Peer::close_after_flush`] writes the close to load (the
+//!   「draining」 indication; afterwards the handle's sends are rejected) and puts the marker at the queue's end. While operating the supervisor
+//!   writes the commands before the marker and closes at it (`Supervisor::on_cmd`; not generation-bound). Waiting loops outside operation see
+//!   the indication and fold immediately via `Supervisor::fold_into_close`, withdrawing the machine's reconnect · give-up output; 「retry now」
+//!   is dropped while draining (`Supervisor::drain_ctl`). One deadline ([`Policy::flush_timeout`]) covers later writes · keepalive · close frame
+//!   (`Supervisor::guard` · `drop_link`), and runs even when the receiving line is backed up (`wake_at`).
 //!
 //! ## Priority of the operating loop (do not revive)
 //!
-//! The old edition set `select!` to `biased` and put the frame arm ahead of the timer and the outbound queue. `biased` polls in declaration
-//! order and **stops at the first ready arm**, so even if frames arrive only as fast as they are processed, the two later arms
-//! **are never polled even once.** Then no ping goes out and the peer cuts us for silence, the request deadline does not run so
-//! waiters hang past the limit, and the outbound queue fills so the default policy disconnects the connection by itself — the shape is ★it picks the moment of greatest
-//! output and disconnects★. The current loop ① collects control first on every turn, ② skips
-//! `select` if a deadline has already passed, and ③ yields one turn to the outbound queue after every [`FRAME_BURST`] frames processed.
+//! `select!` must not be `biased` with the frame arm ahead of the timer and outbound queue: `biased` stops at the first ready arm, so with
+//! frames arriving as fast as they are processed the later two arms are never polled — no ping (the peer cuts us for silence), no request
+//! deadlines, and the outbound queue fills until the default policy disconnects at the moment of greatest output. The loop ① collects control
+//! first every turn, ② skips `select` if a deadline has passed, ③ yields one turn to the outbound queue after every [`FRAME_BURST`] frames.
 //!
 //! ## Why there are two channels
 //!
-//! The data queue (bounded) and the control queue (unbounded) are separated. ★Even at the moment the queue is full, 「close」 and 「reconnect now」 must
-//! get in★ — with one channel, backpressure blocks control too.
+//! The data queue (bounded) and the control queue (unbounded) are separate: ★「close」 and 「reconnect now」 must get in even when the queue is
+//! full★ — with one channel, backpressure blocks control too.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -130,45 +96,26 @@ use crate::policy::{DecodeFailurePolicy, Policy, QueueFullPolicy};
 use crate::stream::{Streams, Truncation, Verdict};
 use crate::wire::{DecodeClass, Wire};
 
-/// After this many frames processed in a row, yield one turn to the outbound queue.
 const FRAME_BURST: usize = 32;
 
-/// The upper limit on how long teardown waits for the ordering area to be fully loaded. If exceeded, the rest — up to the last [`TransportEvent::Closed`] —
-/// is dropped and it ends (releasing the enqueue end makes the receiver end `None` report that drop). It is a value that keeps the supervisor
-/// from hanging on a receiving side that stays alive and does not drain.
-///
-/// Why 60 s = it covers the worst case where the daemon read task waits on the priority line (8 slots × kill-join 5 s) (TRD 3 §3-0 ②).
+/// Upper limit on how long teardown waits for the ordering area to be fully loaded; past it the rest up to `Closed` is dropped (the receiver end's `None` reports it).
+/// 60 s covers the daemon read task's worst case on the priority line (8 slots × kill-join 5 s) (TRD 3 §3-0 ②).
 pub(crate) const CLOSE_DRAIN_LIMIT: Duration = Duration::from_secs(60);
 
-/// The budget of payload bytes one supervisor may hold (B in `budget.rs`). One count is split between the read share and the window cap —
-/// the read gate measures by the read share (if the received bytes minus the resume-window share reach it, the read task stops reading the channel).
-/// ★If streams are not used, read share = all of this (window cap 0), and after the first stream piece is seen, it is half and half★
-/// (`budget::split` · the reason is in the `budget.rs` header). Reading decides by the 「fill level before adding」, so either way one supervisor's
-/// ceiling is this + one message (TRD 3 §3-0 ① 「B + M」).
-///
-/// Why 16 MiB = the same value as the daemon's per-connection receive-lane budget (`CONN_RX_MAX_BYTES` in `link::server`) — shell · daemon use the same value
-/// (TRD 3 §3-0 ① draft · an internal constant the main session decides and reports). The two consumers that do not use streams (ADR-0310 decision 16) get
-/// a read gate of the same 16 MiB as that lane, which is why the split is deferred. A flood of small frames is handled by the count limits
+/// Payload-byte budget one supervisor may hold (B in `budget.rs`; split, read gate and B + M ceiling are defined there — TRD 3 §3-0 ① 「B + M」).
+/// 16 MiB = the daemon's per-connection receive-lane budget (`CONN_RX_MAX_BYTES` in `link::server`). A flood of small frames is bounded by the count limits
 /// ([`Policy::frame_buffer`] · [`Policy::inbound_queue`]).
 pub(crate) const BYTE_BUDGET: usize = 16 << 20;
 
-/// What this turn of the operating loop does first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Turn {
-    /// A deadline has already passed — skip `select` and look at the timer first.
     Timer,
-    /// Drain this many from the outbound queue.
     Outbound(usize),
-    /// Normal — wait fairly on the four arms.
     Wait,
 }
 
-/// ★The only place where the anti-starvation rule lives★.
-///
-/// That it is a pure function is intended: the property this rule protects (the timer and the outbound queue
-/// keep running even when frames never stop) is **not reproduced by an in-memory harness** — there the read task is a structural bottleneck so
-/// the frame queue is always empty, and then whatever `select` does, the later arms get polled (measured: a mutant that revived `biased`
-/// turned not a single flood test red). So **the rule itself is asserted here**.
+/// ★The only place where the anti-starvation rule lives★. A pure function on purpose: an in-memory harness cannot reproduce what it protects (its read task
+/// keeps the frame queue empty, so the later arms get polled whatever `select` does; a mutant reviving `biased` turned no flood test red), so the rule is asserted here.
 fn next_turn(
     now: Instant,
     wake: Instant,
@@ -176,32 +123,26 @@ fn next_turn(
     outbound_len: usize,
     outbound_cap: usize,
 ) -> Turn {
-    // TODO(stream-replay-vs-timer): the deadline is ahead of frames, so if the window deadline passes mid-write and replay arrived in the read-ahead
-    //   queue in the meantime, the resume window closes before that replay is processed — even without backpressure (crate header 「known limits」).
+    // TODO(stream-replay-vs-timer): a window deadline passing mid-write closes the window before a replay already in the read-ahead queue (crate header 「known limits」).
     if wake <= now {
         return Turn::Timer;
     }
     if outbound_len == 0 {
         return Turn::Wait;
     }
-    // ★A fixed ratio alone is not enough★ — if one is taken out every 32 frames, then against a producer above that ratio
-    //   the queue still grows and ends in `QueueFull` (the same shape with the threshold only 32x higher). So the rule looks at
-    //   **depth**: past half it does not wait for the burst, and when it yields it drains as much as has piled up.
+    // ★A fixed ratio alone is not enough★ — a faster producer still grows the queue into `QueueFull`; so look at depth: past half, yield and drain what piled up.
     if outbound_len.saturating_mul(2) >= outbound_cap || frames_in_row >= FRAME_BURST {
         return Turn::Outbound(outbound_len);
     }
     Turn::Wait
 }
 
-/// Could not push in something that does not wait for a reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError {
-    /// The outbound queue is full.
     QueueFull,
-    /// Not in the operating phase now (connecting · backing off · given up) — or the bound connection is not the current one ([`Peer::notify_in`]).
+    /// Not in the operating phase (connecting · backing off · given up) — or the bound connection is not the current one ([`Peer::notify_in`]).
     Disconnected,
-    /// Nothing more can be sent to this peer — the supervisor task is gone or [`Peer::close_after_flush`] put in the close marker.
-    /// ★Waiting for a re-attach will not help★ — this differs from [`SendError::Disconnected`].
+    /// Nothing more can be sent — the supervisor is gone or [`Peer::close_after_flush`] put in the marker. ★Waiting for a re-attach will not help★ (unlike [`SendError::Disconnected`]).
     Closed,
 }
 
@@ -217,15 +158,10 @@ impl std::fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
-/// One data command going to the supervisor — ★carries the generation the caller captured★ (TRD 3 §3-0 ③).
-///
-/// The outbound queue outlives the connection (the handle is immortal across reconnects). When the machine drops a connection it empties the queue (`fail_pending`),
-/// but it cannot see what entered after that, and the connection-establishment phase (dial · handshake) does not read the queue, so that stays until the next operating phase —
-/// a command that entered in generation G is written on G+1's channel (the transport version of the defect the shell blocked with ADR-0195). Just before writing, the supervisor compares this
-/// generation with the current generation and does not write if they differ (`Supervisor::on_cmd`) — that one comparison is the place that catches the gap.
+/// One data command going to the supervisor — ★carries the generation the caller captured★ (TRD 3 §3-0 ③). The queue outlives the connection and the machine
+/// cannot see later entries, so a command from generation G could be written on G+1 (the defect the shell blocked with ADR-0195); `Supervisor::on_cmd` compares before writing.
 struct PeerCmd<W: Wire> {
-    /// The only connection this command may go out on. Stamped by the handle's entry point — for `*_in`, the value the caller gave; for the rest, the current
-    /// generation at the moment of the call ([`Peer::generation`]).
+    /// The only connection it may go out on: `*_in` = the caller's value, otherwise the current generation at the call.
     generation: Generation,
     op: PeerOp<W>,
 }
@@ -238,25 +174,17 @@ enum PeerOp<W: Wire> {
     Notify {
         out: W::Out,
     },
-    /// Fanout — the registry encodes once and hands it out as many times as there are peers.
     Raw(Frame),
     Resume {
         key: W::StreamKey,
         after: Option<u64>,
     },
-    /// The marker of the pre-close flush (TRD 3 §3-0 ④ · [`Peer::close_after_flush`]) — an operating supervisor that reaches it closes.
-    /// What to load and close with is held not by the marker but by `PeerInner::goodbye` (it loads that close even if the queue is full and the marker cannot be put in).
-    ///
-    /// ★Not bound to a generation★ — if bound, the marker would be rejected at a moment that crosses a re-attach and that peer would never close. The
-    /// commands before the marker each still get the generation comparison as is (the old generation's are not written).
-    ///
-    /// ★It holds the control channel's sender end — it does not send★: when all handles are gone the control channel closes and the supervisor
-    /// reads that as 「close」 and folds immediately. While the marker is in the queue that channel does not close, so the drain of a side that released its handle
-    /// to flush and leave is not cut off before the marker.
+    /// The marker of the pre-close flush (TRD 3 §3-0 ④) — an operating supervisor that reaches it closes; what to close with is `PeerInner::goodbye`.
+    /// ★Not generation-bound★ (else a re-attach would reject it and the peer would never close). ★Holds the control channel's sender end★ without sending,
+    /// so a side that released its handle to flush and leave does not close the channel early.
     Close {
         _keep_ctl: mpsc::UnboundedSender<Ctl>,
     },
-    /// [`Peer::drop_link_in`] — the bound connection ends as a lost link with `cause`.
     DropLink {
         cause: DisconnectCause,
     },
@@ -267,7 +195,6 @@ enum Ctl {
     Close,
 }
 
-/// The minimal representation that lets the handle side read the last known disconnect cause as well.
 fn cause_code(cause: DisconnectCause) -> u8 {
     match cause {
         DisconnectCause::PeerClosed => 0,
@@ -288,7 +215,6 @@ fn cause_from_code(code: u8) -> DisconnectCause {
         3 => DisconnectCause::WriteDeadline,
         4 => DisconnectCause::QueueFull,
         5 => DisconnectCause::Explicit,
-        // Only `cause_code` writes this field — the only remaining value is 6.
         _ => DisconnectCause::WriteFailed,
     }
 }
@@ -299,45 +225,29 @@ struct PeerInner<W: Wire> {
     ctl_tx: mpsc::UnboundedSender<Ctl>,
     state_rx: watch::Receiver<PeerState>,
     generation: Arc<AtomicU64>,
-    /// The number of times the handle could not enqueue **because the queue was full**. The supervisor collects it and handles it per [`QueueFullPolicy`].
     overflow: Arc<AtomicU64>,
-    /// The newest of the generations stamped on commands that could not be enqueued (`fetch_max` — written before the count). ★The supervisor enforces
-    /// [`QueueFullPolicy`] only when this is the current generation★ — so the next generation does not collect an ended generation's overflow and cut that new connection (the count is
-    /// reported regardless of generation — `Supervisor::drain_overflow`).
+    /// Newest generation stamped on an unenqueued command (`fetch_max`, written before the count). ★The supervisor enforces [`QueueFullPolicy`] only when it is the current
+    /// generation★, so a new connection is not cut over an ended one's overflow (`Supervisor::drain_overflow`).
     overflow_generation: Arc<AtomicU64>,
-    /// The number of times the handle dropped something **because the generation it bound was not operating** (not in the operating phase, or re-attached under a newer generation).
-    /// ★It does not cut the connection★ — the bound connection is already not attached.
+    /// Times the handle dropped something because its bound generation was not operating. ★Does not cut the connection★ — the bound one is already detached.
     refused: Arc<AtomicU64>,
-    /// Wake the supervisor because `overflow` · `refused` was raised — given-up · backoff waits are not woken by that count alone, and without waking, that
-    /// report would not come out until the next 「reconnect」 (if given up) · the end of the backoff (if backing off). The leftover ticket is at most one so it does not pile up,
-    /// and a leftover wake-up is harmless (the start of the turn collects again). The connection-establishment phase (dial · handshake) does not listen to this —
-    /// what was counted in that phase is reported by the first turn after the phase ends.
+    /// Wakes the supervisor on `overflow` · `refused` — given-up and backoff waits would otherwise report only at the next 「reconnect」 or backoff end. The
+    /// establishment phase does not listen; its first turn reports.
     loss_wake: Arc<Notify>,
-    /// The last disconnect cause. If it never attached, it is [`DisconnectCause::WriteFailed`] — neither the read nor the write end is accurate,
-    /// so we chose the outbound end, which is closer to the receiver of this value (a request that could not go out because there was no channel to load it on).
+    /// Last disconnect cause; before any attach `WriteFailed` (neither end is accurate; the outbound end is closer to this value's receiver).
     last_cause: Arc<AtomicU8>,
-    /// The app called [`Peer::close`] · [`Peer::close_after_flush`]. It is set at the moment of the call, regardless of whether the supervisor has
-    /// handled it.
     close_requested: AtomicBool,
-    /// The close that [`Peer::close_after_flush`] asked to be loaded — only the first call is written. ★What is written is itself the 「draining」
-    /// indication★: when this stands, the handle's sends are rejected and the supervisor does not reconnect. It is written before the marker — so that it is visible
-    /// when the supervisor takes the marker out.
+    /// The close [`Peer::close_after_flush`] asked to load — first call only. ★Being set is itself the 「draining」 indication★ (sends rejected, no reconnect); written before the marker.
     goodbye: Arc<OnceLock<Close>>,
-    /// Wake the supervisor because `goodbye` was written — for the places that do not read the data queue (the connection-establishment phase · mid-write).
-    /// The leftover ticket points to a fact that is always true afterwards, so it is harmless.
+    /// Wakes the supervisor when `goodbye` is written, for places that do not read the data queue.
     flush_wake: Arc<Notify>,
-    /// It is an accepted peer (`Origin::Accepted`) — it does not reconnect.
     accepted: bool,
-    /// The counter from which this supervisor draws generations (`PeerConfig::generations`) — whoever replaces the same name tag inherits it.
     generations: Arc<AtomicU64>,
     #[cfg(test)]
     ledger: Arc<Ledger>,
 }
 
-/// A cheap-to-clone handle = the command channel to the supervisor task.
-///
-/// ★It survives across reconnects★ — this handle does not die because of a disconnect. In exchange for keeping consumer code short,
-/// a **generation marker is attached on the data side** so that no silent loss occurs (the idiom of ADR-0163/0164).
+/// A cheap-to-clone handle = the command channel to the supervisor task. ★It survives reconnects★; a **generation marker on the data side** prevents silent loss (ADR-0163/0164).
 pub struct Peer<W: Wire> {
     inner: Arc<PeerInner<W>>,
 }
@@ -355,55 +265,39 @@ impl<W: Wire> Peer<W> {
         &self.inner.id
     }
 
-    /// One snapshot of the current state.
     pub fn peer_state(&self) -> PeerState {
         *self.inner.state_rx.borrow()
     }
 
-    /// A handle that watches state changes.
     pub fn state(&self) -> watch::Receiver<PeerState> {
         self.inner.state_rx.clone()
     }
 
-    /// The current connection generation. If it never attached, it is the floor value the registry gave.
     pub fn generation(&self) -> Generation {
         Generation(self.inner.generation.load(Ordering::Acquire))
     }
 
-    /// Waits for the reply — bound to the current generation at the moment of the call (the same as passing
-    /// [`Peer::generation`] to [`Peer::request_in`]).
+    /// Waits for the reply — bound to the current generation at the call.
     ///
-    /// Error conditions: deadline expiry · disconnect · queue saturation · number clash · reuse of an expired number ·
-    /// [`Wire::request_tag`] is `None` ([`RequestError::NotARequest`] — meaning use `notify`).
+    /// Errors: deadline expiry · disconnect · queue saturation · number clash · reuse of an expired number · [`Wire::request_tag`] is `None`
+    /// ([`RequestError::NotARequest`] — use `notify`). ★The deadline arrives only when the connection is fine and just that request is silent★ (every connection drop wakes waiters).
     ///
-    /// ★The only case where the deadline really arrives is 「the connection is fine but only that request is silent」★ — because
-    /// any branch that drops the connection wakes the waiters immediately.
+    /// ★A call overlapping a reconnect never carries over★ — a re-attach before the entry check ends the call there, one after it at the supervisor's
+    /// just-before-write comparison (both not-sent errors).
     ///
-    /// ★A call that overlaps a reconnect does not carry over to the new connection★ — the generation is read first and whether it is operating is checked after, so if it
-    /// re-attached in between, the call ends at the entry point, and if it re-attached after that, it ends at the supervisor's just-before-write comparison (both are not-sent
-    /// errors). It is not used on a connection newer than the one at the moment of the call.
-    ///
-    /// ★It is not an `async fn` — do not revive it★: the generation is read at the place of the call and loaded into the returned future. With `async fn`
-    /// the body runs on the first poll, so if it re-attaches after the future is made and then you wait, it reads the new generation and is used on the new connection.
+    /// ★Not an `async fn` — do not revive it★: the generation must be read at the call; an `async fn` body runs on first poll and would read a newer generation.
     pub fn request(&self, out: W::Out) -> impl Future<Output = Result<W::In, RequestError>> + '_ {
         let generation = self.generation();
         self.request_in(generation, out)
     }
 
-    /// Waits for the reply — ★goes out only on the `generation` connection★ (TRD 3 §3-0 ③).
+    /// Waits for the reply — ★goes out only on the `generation` connection★ (TRD 3 §3-0 ③). If that connection is not operating (dropped · re-attached)
+    /// nothing is sent: [`RequestError::Disconnected`] with `sent` false. ★The entry check is a fast path; the authority is the supervisor's just-before-write comparison★.
+    /// Use: pass a received message's [`crate::Arrival::generation`] to tie a request to the connection that carried it. After [`Peer::close_after_flush`] it is a
+    /// not-sent disconnect (`cause` = [`DisconnectCause::Explicit`]); other errors as [`Peer::request`].
     ///
-    /// If that connection is not operating now (it dropped · it re-attached under another generation), it does not send and ends as a not-sent disconnect
-    /// ([`RequestError::Disconnected`] with `sent` false). ★The entry check is the fast path and the authority is the supervisor's just-before-write
-    /// comparison★ — if the generation changes after passing the entry and before writing, the supervisor does not write and wakes it with the same error.
-    ///
-    /// Use = when issuing a request tied to a received message only on the connection that carried that message, pass its [`crate::Arrival::generation`].
-    /// It is the place where the shell grabbed the socket before the awaited send (TRD 3 §3-0 ③). The remaining error conditions are the same as
-    /// [`Peer::request`] — if first polled after [`Peer::close_after_flush`], it does not send and is a not-sent disconnect (`cause` =
-    /// [`DisconnectCause::Explicit`]).
-    ///
-    /// ★The first poll queues the request (or ends the call) before the first wait★ — a consumer may poll the future
-    /// once to place the request in the outbound queue at that point, ahead of what it queues next, and await the reply
-    /// elsewhere (the shell driver's registration). Keep every check and the queue push ahead of the reply wait.
+    /// ★The first poll queues the request (or ends the call) before the first wait★ — a consumer may poll once to place it ahead of what it queues next and await the
+    /// reply elsewhere (the shell driver's registration); keep every check and the push before the reply wait.
     pub async fn request_in(
         &self,
         generation: Generation,
@@ -434,30 +328,21 @@ impl<W: Wire> Peer<W> {
                 return Err(self.disconnected(generation, false))
             }
         }
-        // Even if the supervisor vanishes and the slot is dropped with it, it wakes here with an error. ★The sent field is true★ — there is no way to know whether it was in the queue or in the wait table,
-        //   so it is written toward 「it may have gone」 (the 「may be inflated」 of the `sent` field).
+        // Wakes with an error even if the supervisor vanishes. ★`sent` is true★: queue vs wait table is unknowable, so err toward 「may have gone」.
         rx.await
             .unwrap_or_else(|_| Err(self.disconnected(generation, true)))
     }
 
-    /// Does not wait for a reply — bound to the current generation at the moment of the call (the same as passing [`Peer::generation`] to
-    /// [`Peer::notify_in`]). ★No await★ — if it cannot be queued, `Err` at once.
-    ///
-    /// A call that overlaps a reconnect does not carry over to the new connection, same as [`Peer::request`] — if it ends at the entry, `Err`; if it ends at the just-before-write
-    /// comparison, it is counted as [`TransportEvent::Dropped`] ([`Peer::notify_in`]).
+    /// Does not wait for a reply — bound to the current generation at the call. ★No await★: `Err` at once if it cannot be queued; a reconnect-overlapping call
+    /// is `Err` at the entry or counted as [`TransportEvent::Dropped`] at the just-before-write comparison.
     pub fn notify(&self, out: W::Out) -> Result<(), SendError> {
         self.notify_in(self.generation(), out)
     }
 
     /// Does not wait for a reply — ★goes out only on the `generation` connection★ (TRD 3 §3-0 ③). ★No await★.
-    ///
-    /// If that connection is not operating at the entry, `Err` ([`SendError::Disconnected`] — not counted; the caller
-    /// got the error). After [`Peer::close_after_flush`] it is [`SendError::Closed`] (also not counted). ★If the generation changes after passing the entry and before
-    /// writing, the supervisor does not write and counts it as [`TransportEvent::Dropped`] ([`crate::Direction::Outbound`])★ —
-    /// the caller already took an `Ok`, so not counting would be a silent loss (the same rule as a notification disconnected while in the queue).
-    ///
-    /// Use = when answering a received request only on the connection that request came on, pass its [`crate::Arrival::generation`] — if it
-    /// goes out on another connection, that peer gets an answer to a request it did not send (the shell's `CommandOutcome` — TRD 3 §3-0 ③).
+    /// Not operating at the entry: `Err` ([`SendError::Disconnected`], uncounted). After [`Peer::close_after_flush`]: [`SendError::Closed`] (uncounted). ★A generation
+    /// change after the entry makes the supervisor skip the write and count [`TransportEvent::Dropped`] ([`crate::Direction::Outbound`])★ — the caller already took an `Ok`.
+    /// Use: pass a received request's [`crate::Arrival::generation`] to answer only on its connection (the shell's `CommandOutcome` — TRD 3 §3-0 ③).
     pub fn notify_in(&self, generation: Generation, out: W::Out) -> Result<(), SendError> {
         if self.flushing() {
             return Err(SendError::Closed);
@@ -471,16 +356,11 @@ impl<W: Wire> Peer<W> {
         })
     }
 
-    /// Resumes a stream. The return value is the connection generation this request is bound to — the current generation at the moment of the call, and this request goes
-    /// out only on that connection (the same comparison as [`Peer::notify`]).
-    ///
-    /// ★It does not mean accepted★ — if not in the operating phase, the queue is full, or the generation changed before writing, the request is
-    /// dropped and shows up only as [`TransportEvent::Dropped`]. The return value only says "bound to this generation".
-    /// ★This request, if disconnected mid-write, does not show up even as that★ — it is neither counted nor reissued on the next connection (what
-    /// is reissued is only the re-request this crate itself issued after seeing a hole).
+    /// Resumes a stream. Returns the generation this request is bound to (current at the call); it goes out only on that connection.
+    /// ★The return value does not mean accepted★ — not operating, queue full, or a generation change drops it, visible only as [`TransportEvent::Dropped`];
+    /// ★disconnected mid-write it is neither counted nor reissued★ (only the crate's own hole re-requests are reissued).
     pub fn resume_stream(&self, key: W::StreamKey, after: Option<u64>) -> Generation {
         let generation = self.generation();
-        // This is after the app said it would close — neither sent nor counted ([`Peer::close_after_flush`]).
         if self.flushing() {
             return generation;
         }
@@ -490,33 +370,24 @@ impl<W: Wire> Peer<W> {
                 op: PeerOp::Resume { key, after },
             });
         } else {
-            // An entry point where the caller gets no error (it and the fanout `send_frame` make two) — not counting would be a silent loss.
             self.refuse();
         }
         generation
     }
 
-    /// Is the `generation` connection operating now — the fast path of the data entry. ★Not the authority★ — even if this is true, the generation may change before
-    /// writing, and the supervisor's just-before-write comparison catches that (`Supervisor::on_cmd`).
-    /// ★Look at the state first★ — the supervisor publishes the generation before the state (`Supervisor::publish`), so a generation read after seeing operating
-    /// is that operating phase's or a newer one. If the generation is read first, an operating phase re-attached afterwards would be read as the old generation's,
-    /// and something that could have ended here with `Err` is put in the queue (the supervisor drops and counts it).
+    /// Is the `generation` connection operating — the fast path, ★not the authority★ (`Supervisor::on_cmd`). ★Look at the state first★: the supervisor publishes the
+    /// generation before the state (`Supervisor::publish`); read first, a later re-attach would be misread as the old generation.
     fn bound_to(&self, generation: Generation) -> bool {
         self.peer_state().is_live() && self.generation() == generation
     }
 
-    /// [`Peer::close_after_flush`] put in (tried to put in) the marker — after that the data entry rejects everything.
     fn flushing(&self) -> bool {
         self.inner.goodbye.get().is_some()
     }
 
-    /// ★The 「retry now」 entry★ — resets the budget and tries at once (ADR-0180 decision 7). It listens even in the given-up state.
-    /// ★It does not listen after [`Peer::close_after_flush`]★ — that is a peer we decided to drain and close. Even if called before it, if the supervisor
-    /// has not read it yet it is dropped (the supervisor drops a reconnect it read after seeing the drain — listening would drop the channel, so what was to be drained is rejected too and
-    /// it ends without the close it was given). If the supervisor already read it and went to drop the channel, that drain closes at once with no connection to write on.
-    ///
-    /// ★An accepted peer ([`crate::Registry::attach`]) does not listen★ — it has no address to dial. If an operating channel were dropped, that
-    /// peer would end with no way to re-attach.
+    /// ★The 「retry now」 entry★ — resets the budget and tries at once (ADR-0180 decision 7); listens even when given up. ★Not listened to after
+    /// [`Peer::close_after_flush`]★ (one called earlier and unread is dropped too — listening would drop the channel and lose the drain's close). ★An accepted peer
+    /// ([`crate::Registry::attach`]) does not listen★ — no address to dial.
     pub fn reconnect_now(&self) {
         if self.flushing() || self.inner.accepted {
             return;
@@ -524,18 +395,11 @@ impl<W: Wire> Peer<W> {
         let _ = self.inner.ctl_tx.send(Ctl::ReconnectNow);
     }
 
-    /// Ends connection `generation` as a lost link with `cause` — the same path as a read failure: `Disconnected`, flap
-    /// accounting, and the backoff before the next dial (an accepted peer ends, as on any link loss). ★Unlike
-    /// [`Peer::reconnect_now`] it keeps the budget and the backoff★ — a consumer that drops a connection over what the
-    /// remote sent must not turn a remote that keeps sending it into a reconnect loop.
-    ///
-    /// ★Only that connection★ — a no-op when `generation` is not the live one, at the entry and again when the
-    /// supervisor takes it (it never drops a newer connection). It goes through the outbound queue, behind what is
-    /// already queued; a full queue counts as an overflow of `generation` and [`crate::QueueFullPolicy`] decides — the
-    /// default `Disconnect` drops the link anyway, ★under `DropAndReport` the drop itself is lost★ (counted as one dropped
-    /// outbound frame). Ignored after [`Peer::close_after_flush`]; ★a drop queued before it ends that flush early★ —
-    /// the supervisor reaches the drop ahead of the flush marker, loses the link with the drop's `cause` and closes
-    /// without writing what was queued behind it.
+    /// Ends connection `generation` as a lost link with `cause` — the read-failure path (`Disconnected`, flap accounting, backoff before the next dial; an accepted peer
+    /// ends). ★Unlike [`Peer::reconnect_now`] it keeps the budget and backoff★ so a remote that keeps sending the offending input cannot cause a reconnect loop.
+    /// ★Only that connection★ — a no-op unless `generation` is live, at the entry and when taken. It goes through the outbound queue; a full queue counts an
+    /// overflow of `generation` and [`crate::QueueFullPolicy`] decides (★under `DropAndReport` the drop itself is lost★). Ignored after [`Peer::close_after_flush`];
+    /// ★a drop queued before it ends that flush early★ (closes with the drop's `cause`, queued writes behind it unwritten).
     pub fn drop_link_in(&self, generation: Generation, cause: DisconnectCause) {
         if self.flushing() || !self.bound_to(generation) {
             return;
@@ -546,54 +410,34 @@ impl<W: Wire> Peer<W> {
         });
     }
 
-    /// Explicit close — does not re-attach. It does not wait for what is in the queue (the control channel overtakes the data queue) — to drain and
-    /// close, use [`Peer::close_after_flush`]. If that was already called, it loads the close that call wrote without waiting for its marker.
-    ///
-    /// ★There is no completion signal★ — at the moment of return the supervisor may still be closing the channel, and in that time it may finish the handshake and
-    /// **issue one more generation**. The side that raises the same name tag again absorbs that overlap with
-    /// the **per-name-tag shared generation counter** (`Registry::add_with_policy`) — it does not remove the overlap
-    /// but is a device that keeps numbers from clashing even when they overlap.
+    /// Explicit close — no re-attach, does not wait for the queue (control overtakes the data queue); to drain and close use [`Peer::close_after_flush`] (if already
+    /// called, this loads its close without waiting for the marker). ★No completion signal★ — the supervisor may still be closing and may issue **one more generation**;
+    /// the per-name-tag shared counter (`Registry::add_with_policy`) keeps numbers from clashing.
     pub fn close(&self) {
         self.inner.close_requested.store(true, Ordering::Release);
         let _ = self.inner.ctl_tx.send(Ctl::Close);
     }
 
-    /// After writing all the outbound work accepted so far, it loads `code` · `reason` and closes (TRD 3 §3-0 ④). The returned future is released when the supervisor
-    /// ends — it finished teardown and loaded [`TransportEvent::Closed`], or the receiving side is gone, or it ended abnormally.
-    /// If the supervisor is already gone, it is released at once.
+    /// After writing all outbound work accepted so far, loads `code` · `reason` and closes (TRD 3 §3-0 ④). The returned future is released when the supervisor
+    /// ends (teardown done and `Closed` loaded, receiving side gone, or abnormal end), at once if it is already gone.
     ///
-    /// ★The marker enters the end of the data queue at the place of the call★ — the close proceeds even if you do not await the future, and dropping it does not
-    /// cancel. An operating supervisor writes the commands before the marker in order (each still gets its generation comparison — [`Peer::notify_in`]) and
-    /// closes when it reaches the marker. ★It does not wait for replies to requests★ — a request before the marker, after being written, wakes at the close as a sent disconnect.
+    /// ★The marker enters the data queue at the call★ — the close proceeds even if the future is never awaited or is dropped. Commands before the marker are
+    /// written in order (each with its generation comparison); ★replies are not awaited★ (a request before the marker wakes at the close as a sent disconnect).
+    /// ★One deadline★ — [`Policy::flush_timeout`] covers from the supervisor's notice through the close frame (not `write_deadline` per write); past it, the frame being
+    /// written is dropped, remaining commands rejected and the close frame gets the remaining time (one push if past), so a blocked channel disconnects with no code.
     ///
-    /// ★One deadline★ — [`Policy::flush_timeout`] covers from when the supervisor notices this close through the close frame (it is not
-    /// [`Policy::write_deadline`] per write). If exceeded, it drops the frame being written, rejects the remaining commands, and closes —
-    /// the close frame also gets only the remaining time (if past, it is just pushed once), so on a blocked channel it disconnects with no code.
+    /// ★Closes at once★ when the queue is full (marker not put in; acts like [`Peer::close`], queued items unwritten) or the peer is not operating. ★A connection
+    /// lost mid-drain closes without reconnecting★: `Disconnected` goes up with its cause (and the close frame carries that cause's code), then `Closed`; ★no
+    /// [`TransportEvent::GaveUp`] · [`TransportEvent::ConnectFailed`], and [`Peer::state`] skips [`PeerState::Backoff`] · [`PeerState::GaveUp`]★ (the shell shows a reconnect popup on `GaveUp` — ADR-0180).
     ///
-    /// ★Cases that close at once★ — the queue is full and the marker could not be put in (it loads the same close and acts like [`Peer::close`] — what is in the queue is not written) ·
-    /// not in the operating phase (no connection to write on). ★If the connection drops mid-drain, it closes without reconnecting★ — because
-    /// what was to be loaded onto that connection. If it was dialing, that attempt is discarded. That disconnect goes up with its cause as is ([`TransportEvent::Disconnected`]'s `cause` ·
-    /// the close frame too carries the code of that cause, not the close it was given) and then `Closed` at once — ★the [`TransportEvent::GaveUp`] · [`TransportEvent::ConnectFailed`]
-    /// the reconnect machine would emit on that disconnect are not sent up, and [`Peer::state`] does not pass through
-    /// [`PeerState::Backoff`] · [`PeerState::GaveUp`]★ (the shell shows a reconnect popup on `GaveUp` —
-    /// ADR-0180).
+    /// ★A send after the marker is rejected on every clone, uncounted★ (`lib.rs` 「known limits」): `notify` · `notify_in` · fanout = [`SendError::Closed`]; `request` ·
+    /// `request_in` = [`RequestError::Disconnected`] (`Explicit` · `sent` false); `resume_stream` = not sent; `reconnect_now` is ignored. Another clone's send crossing this
+    /// call may land after the marker — the supervisor rejects it and counts [`TransportEvent::Dropped`].
     ///
-    /// ★A send after the marker is rejected on every clone★ — `notify` · `notify_in` · fanout = [`SendError::Closed`] ·
-    /// `request` · `request_in` = [`RequestError::Disconnected`] (`cause` = [`DisconnectCause::Explicit`] · `sent`
-    /// false) · `resume_stream` = not sent. Since this is after the app said it would close, this rejection is not counted (that decision in `lib.rs` 「known limits」). `reconnect_now` is not
-    /// listened to — even what was called before this call and the supervisor has not read yet is dropped. Another clone's send that crosses with this call may land after the marker — the supervisor
-    /// rejects it while closing and counts it as [`TransportEvent::Dropped`].
-    ///
-    /// ★Until it ends, hold and drain that handle's receiver end★ (crate header 「Receiver-side invariants」 5) — if you drop or close it, the supervisor folds
-    /// at once and the commands before the marker are dropped too. ★Do not await this future on the task that drains that receiver end★ — the supervisor's end
-    /// depends on loading everything teardown holds (on the receiving side draining), so if the side that would drain stands in this wait, it
-    /// stalls up to the teardown limit (crate header 「known limits」).
-    ///
-    /// Calling again leaves the first close as is and waits for the same end. Calling [`Peer::close`] after that closes at once without waiting for the marker,
-    /// but loads the first close. Even if all handles are released, the drain continues (the marker holds the control channel).
-    ///
-    /// ★The output being `()` is intended★ — whether it all went out is told by the receiver end: what could not be written and has no reply is counted by the
-    /// [`TransportEvent::Dropped`] ([`Direction::Outbound`]) before `Closed`. We do not create a second source.
+    /// ★Until it ends, hold and drain that handle's receiver end, and never await this future on the task that drains it★ (crate header 「Receiver-side invariants」 5 ·
+    /// 「known limits」) — dropping it folds at once and drops pre-marker commands; awaiting it there stalls up to the teardown limit.
+    /// Calling again waits for the same end; a later [`Peer::close`] closes at once but loads the first close. The drain survives all handles being released.
+    /// ★`()` is intended★ — what could not be written is counted by [`TransportEvent::Dropped`] ([`Direction::Outbound`]) before `Closed`; no second source.
     pub fn close_after_flush(
         &self,
         code: CloseCode,
@@ -610,11 +454,9 @@ impl<W: Wire> Peer<W> {
             };
             match self.inner.data_tx.try_send(marker) {
                 Ok(()) => {}
-                // Could not put in the marker — close at once without writing what is in the queue. Not counted as loss (it is a close, not a message).
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     let _ = self.inner.ctl_tx.send(Ctl::Close);
                 }
-                // The supervisor is already gone — `finished` is released at once.
                 Err(mpsc::error::TrySendError::Closed(_)) => {}
             }
             self.inner.flush_wake.notify_one();
@@ -622,8 +464,7 @@ impl<W: Wire> Peer<W> {
         finished
     }
 
-    /// Released when the supervisor ends — only the supervisor holds the state sender end, so its dropping is the supervisor's end (normal teardown · panic · runtime
-    /// shutdown alike). If already ended, it is released at once.
+    /// Released when the supervisor ends (only it holds the state sender: teardown · panic · shutdown alike); at once if already ended.
     fn finished(&self) -> impl Future<Output = ()> + Send + 'static {
         let mut state = self.inner.state_rx.clone();
         async move { while state.changed().await.is_ok() {} }
@@ -633,7 +474,6 @@ impl<W: Wire> Peer<W> {
         self.inner.close_requested.load(Ordering::Acquire)
     }
 
-    /// The counter from which this supervisor draws generations — whoever replaces it under the same name tag inherits it and does not rewind generations (`registry.rs`).
     pub(crate) fn generations(&self) -> Arc<AtomicU64> {
         self.inner.generations.clone()
     }
@@ -642,30 +482,21 @@ impl<W: Wire> Peer<W> {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    /// Test handle — all payload bytes this supervisor now holds (the count's fill level) — the read-ahead queue · the ordering area · what is in the line,
-    /// and the pieces the resume window holds. Of those, only the window share is [`Peer::window_bytes`].
+    /// Test handle — all payload bytes this supervisor holds; the window part is [`Peer::window_bytes`].
     #[cfg(test)]
     pub(crate) fn held_bytes(&self) -> usize {
         self.inner.ledger.level()
     }
 
-    /// Test handle — of those, the bytes of the pieces the resume window holds (the share that is subtracted from the read gate).
     #[cfg(test)]
     pub(crate) fn window_bytes(&self) -> usize {
         self.inner.ledger.held()
     }
 
-    /// One fanout frame (`Registry::broadcast`). ★What could not be put in is counted by this peer's supervisor and reported to this handle's receiver end as
-    /// [`TransportEvent::Dropped`]★ — the registry does not hold the receiver's enqueue end (if it did, 「Closed is last → release the enqueue end → None」 would break — TRD 3 §3-0 ②). Queue saturation is already counted by the enqueue (`push`). For a peer whose supervisor
-    /// is gone (`SendError::Closed`), the receiver end to report to has already ended.
-    ///
-    /// ★What could not be put in because it is not the operating phase after the app called [`Peer::close`] is not counted★ — the count of losses after the app said it would close
-    /// has no reader and a clean shutdown comes first (user decision 2026-09-26 — `lib.rs` 「known limits」). What
-    /// was in the queue before that is counted by the supervisor.
-    ///
-    /// Bound to the current generation — if the generation changes before writing, the supervisor does not write and counts it (the same comparison as [`Peer::notify_in`]).
+    /// One fanout frame (`Registry::broadcast`), bound to the current generation. ★What could not be put in is counted by this peer's supervisor and reported on this
+    /// handle's receiver end as [`TransportEvent::Dropped`]★ — the registry holds no enqueue end (TRD 3 §3-0 ②); queue saturation is counted by `push`. ★Uncounted when
+    /// the peer is not operating after [`Peer::close`]★ (`lib.rs` 「known limits」).
     pub(crate) fn send_frame(&self, frame: Frame) -> Result<(), SendError> {
-        // This is after the app said it would close — not counted (that decision in the rustdoc below).
         if self.flushing() {
             return Err(SendError::Closed);
         }
@@ -682,17 +513,13 @@ impl<W: Wire> Peer<W> {
         })
     }
 
-    /// Counts one thing dropped because the bound generation is not operating (not in the operating phase, or re-attached under a newer generation) — the supervisor
-    /// collects it and reports it as [`TransportEvent::Dropped`].
     fn refuse(&self) {
         self.inner.refused.fetch_add(1, Ordering::AcqRel);
         self.inner.loss_wake.notify_one();
     }
 
-    /// Counts one thing bound to `generation` that could not get in because the queue was full — the supervisor collects and reports it, and if that generation is the current one,
-    /// handles it per [`QueueFullPolicy`] (`PeerInner::overflow_generation`). ★The generation is written before the count★ — so the generation the
-    /// supervisor that collected the count reads afterwards is at least this overflow's generation. ★It wakes★ — a count made when enqueueing after seeing a stale `Live` may arrive after the supervisor
-    /// has drained the queue and gone to sleep.
+    /// Counts one unenqueued (queue full) item bound to `generation`; the supervisor reports it and, if that generation is current, applies [`QueueFullPolicy`].
+    /// ★The generation is written before the count★ and ★it wakes★ (a count after a stale `Live` may arrive after the supervisor slept).
     fn count_overflow(&self, generation: Generation) {
         self.inner
             .overflow_generation
@@ -701,14 +528,11 @@ impl<W: Wire> Peer<W> {
         self.inner.loss_wake.notify_one();
     }
 
-    /// Test handle — the number the handle dropped because its bound generation is not operating and the supervisor has not collected yet.
     #[cfg(test)]
     pub(crate) fn refused_count(&self) -> u64 {
         self.inner.refused.load(Ordering::Acquire)
     }
 
-    /// A request bound to `generation` ended with a disconnect — the disconnect cause is the last one the handle knows. The meaning of `sent` is
-    /// that field of [`RequestError::Disconnected`].
     fn disconnected(&self, generation: Generation, sent: bool) -> RequestError {
         RequestError::Disconnected {
             generation,
@@ -730,33 +554,24 @@ impl<W: Wire> Peer<W> {
     }
 }
 
-/// How the supervisor gets its channel — that path decides how the supervisor ends.
 pub(crate) enum Origin<W: Wire> {
-    /// Dials with the registry's [`Dialer`] (`Registry::add`) — if disconnected it dials again after backoff, and the only end is a close.
     Dial {
         addr: Address,
         dialer: Arc<dyn Dialer>,
     },
-    /// One already accepted channel (`Registry::attach`) — starts from the handshake and does not reconnect (`Supervisor::run`).
     Accepted(AcceptedLink<W>),
 }
 
-/// What an accepted peer brings to the supervisor.
 pub(crate) struct AcceptedLink<W: Wire> {
     pub tx: Box<dyn LinkTx>,
     pub rx: Box<dyn LinkRx>,
-    /// The base of the auth deadline — deadline = this + [`Policy::connect_timeout`] (TRD 3 §5 3). A value stamped with the registry's clock.
     pub upgraded_at: Instant,
-    /// The upgrade field — released on entering the operating phase, and if it cannot enter, released after the supervisor drops the channel (`Supervisor::admission`).
     pub permit: ConnPermit,
-    /// The hand by which the supervisor removes itself from the registry when it ends (`RosterExit`).
     pub leave: LeaveRoster<W>,
 }
 
-/// Removes this handle from the registry — only when that name tag still points to this handle (a newer one that replaced it is left alone).
 pub(crate) type LeaveRoster<W> = Box<dyn FnOnce(&Peer<W>) + Send>;
 
-/// Everything needed to start a supervisor task.
 pub(crate) struct PeerConfig<W: Wire> {
     pub id: PeerId,
     pub origin: Origin<W>,
@@ -764,41 +579,30 @@ pub(crate) struct PeerConfig<W: Wire> {
     pub clock: Arc<dyn Clock>,
     pub handshake: Arc<dyn Handshake>,
     pub policy: Policy,
-    /// ★The enqueue end of this handle's receiver end — only this one supervisor holds it★ (`registry.rs` header). If shared with other supervisors, behind a line filled by a noisy
-    /// peer a quiet peer's items would be held in the ordering area, and even if the supervisor releases this when it ends, the receiver end does not
-    /// end (「Closed is last → release the enqueue end → None」 — TRD 3 §3-0 ②). Each item carries the byte share of the supervisor that
-    /// enqueued it and it is released when the receiving side takes it out (`budget.rs`).
+    /// ★The enqueue end of this handle's receiver end — only this one supervisor holds it★ (`registry.rs` header; shared, one noisy peer's full line would hold a quiet peer's
+    /// items and the receiver end would not end with a supervisor — TRD 3 §3-0 ②). Items carry the byte share of the supervisor that enqueued them (`budget.rs`).
     pub inbound: mpsc::Sender<Charged<Incoming<W>>>,
-    /// The byte budget to hold — the registry puts in [`BYTE_BUDGET`]. It is a field so that tests can put in a small value.
     pub byte_budget: usize,
-    /// ★This name tag's generation counter★ — even if the same name tag is raised again, **the same Arc is handed down**.
-    ///
-    /// The approach of reading the old supervisor's last generation and passing it as the floor had a race (D1): if the old supervisor
-    /// meets the handshake and a queued `Close` **both ready at once** inside `shake_hands`'s `select`,
-    /// the handshake can win and issue one more generation, but the registry has already read the value from just before that.
-    /// If the counter is shared, the same number is never drawn twice whoever wins.
+    /// ★This name tag's generation counter — re-raising hands down **the same Arc**★. Passing the old supervisor's last generation as a floor raced (D1): a handshake and a
+    /// queued `Close` both ready in `shake_hands` could issue one more generation after the registry read it.
     pub generations: Arc<AtomicU64>,
 }
 
-/// A supervisor not yet started — the registry starts it after raising that handle (`Registry::launch`).
 pub(crate) struct Unstarted<W: Wire>(Supervisor<W>);
 
 impl<W: Wire> Unstarted<W> {
-    /// ★Drop the `JoinHandle`★ — the supervisor's end is announced by the state watch (`Peer::finished`). If the runtime is folding, the supervisor
-    /// does not run here and is dropped, and for an accepted peer that Drop takes the registry lock (`RosterExit`) — do not call
-    /// while holding that lock.
+    /// ★Drop the `JoinHandle`★ — the end is announced by the state watch (`Peer::finished`). If the runtime is folding, an accepted peer's Drop takes the registry lock
+    /// (`RosterExit`) — do not call holding it.
     pub(crate) fn start(self, runtime: &tokio::runtime::Handle) {
         runtime.spawn(self.0.run());
     }
 }
 
-/// Builds the supervisor and its handle but does not start it — starting is [`Unstarted::start`].
 pub(crate) fn prepare_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Unstarted<W>) {
     let (handle, supervisor) = new_peer(cfg);
     (handle, Unstarted(supervisor))
 }
 
-/// Test handle — starts the supervisor task at once and returns the handle (without a registry).
 #[cfg(test)]
 pub(crate) fn spawn_peer<W: Wire>(cfg: PeerConfig<W>) -> Peer<W> {
     let (handle, supervisor) = new_peer(cfg);
@@ -807,9 +611,7 @@ pub(crate) fn spawn_peer<W: Wire>(cfg: PeerConfig<W>) -> Peer<W> {
 }
 
 fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
-    // ★Everything that can panic comes before building `exit`★ — the registry calls this while holding the lock (`Registry::launch`), and
-    //   if it panics after `exit` is built, the unwinding drop of it takes the registry lock again on the same thread (deadlock). The injected
-    //   clock · deadline addition · channel-capacity assertions are that place. After `exit`, only moves are left.
+    // ★Everything that can panic comes before building `exit`★ — the registry calls this holding its lock; a panic after `exit` exists would re-take it while unwinding (deadlock).
     let now = cfg.clock.now();
     let (data_tx, data_rx) = mpsc::channel(cfg.policy.outbound_queue.max(1));
     let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
@@ -927,28 +729,17 @@ fn new_peer<W: Wire>(cfg: PeerConfig<W>) -> (Peer<W>, Supervisor<W>) {
 }
 
 enum LinkMsg {
-    /// One received frame and its byte share — the share follows the items this frame produces all the way to the receiving side.
     Frame(Frame, Charge),
-    /// The peer closed.
-    ///
-    /// ★The close code is not carried here★ — this task runs **only after the handshake ends**, and what a disconnect during
-    /// operation carries is only [`DisconnectCause`], so there is no field to put a code in (exactly as in TRD §7's event table).
-    /// The place where the code decides is the handshake, and it reads [`LinkRx`] directly and sees the code of [`LinkRead::Closed`]
-    /// as is.
+    /// The peer closed. ★The close code is not carried★ — a disconnect during operation carries only [`DisconnectCause`] (TRD §7); the code decides in the handshake.
     Closed,
-    /// ★The text the channel gave is dropped here★ — what [`TransportEvent::Disconnected`] carries is only
-    /// [`DisconnectCause`] and there is no field to put text in (exactly as in TRD §7's event table).
     Failed,
 }
 
-/// `Room` is the answer of [`drain_order`] (the same field of `Down` · `Connecting` too) — `false` = the receiving side has closed. The arm that watches the receiver end
-/// closing (`Sender::closed`) also yields `Room(false)`.
 enum Wake<W: Wire> {
     Ctl(Option<Ctl>),
     Link(Option<LinkMsg>),
     Cmd(Option<PeerCmd<W>>),
     Room(bool),
-    /// The read gate opened (`budget.rs`).
     Budget,
     Timer,
 }
@@ -957,7 +748,6 @@ enum Down<W: Wire> {
     Ctl(Option<Ctl>),
     Cmd(Option<PeerCmd<W>>),
     Room(bool),
-    /// Counted what the handle could not put in — the report at the start of the next turn collects it.
     Lost,
     Elapsed,
 }
@@ -966,44 +756,34 @@ enum Connecting<T> {
     Ctl(Option<Ctl>),
     Done(T),
     Room(bool),
-    /// The app called [`Peer::close_after_flush`] — there is no connection to drain, so discard this attempt and fold.
     Flush,
 }
 
-/// The wake of one write (`Supervisor::guard`).
 enum Guarded {
     Done(Result<(), Input>),
-    /// The pre-close flush started (or a 「retry now」 that came during the drain was dropped) — put a deadline and keep
-    /// waiting on the same write.
     Flush,
 }
 
-/// One received, decoded message — it goes up holding its byte share and the generation of the connection that carried it. ★The generation is stamped at
-/// receive time★ — if it is held in the resume window and re-attaches, the window closes on the next connection, and stamping the generation of that time would make
-/// [`Arrival::generation`] not point to the connection that carried it.
+/// One received, decoded message with its byte share and the generation of the connection that carried it — ★stamped at receive time★ (a window-held message may
+/// close on a later connection; [`Arrival::generation`] must name the carrier).
 struct Received<M> {
     msg: M,
     charge: Charge,
     generation: Generation,
 }
 
-/// What is left of how the supervisor gets its channel after removing the channel · field (`Origin`).
 enum Mode {
     Dial {
         addr: Address,
         dialer: Arc<dyn Dialer>,
     },
-    /// `auth_deadline` = upgrade end + [`Policy::connect_timeout`] — the handshake's deadline.
     Accepted { auth_deadline: Instant },
 }
 
-/// The hand by which an accepted peer removes itself from the registry when it ends (`Registry::attach`). For a dialed peer it is empty — it stays in the registry waiting for `remove` ·
-/// replacement.
-///
-/// ★It removes on drop too★ — so that no ended handle is left in the registry even if the supervisor panics or the runtime folds before teardown finishes.
+/// How an accepted peer removes itself from the registry when it ends (empty for a dialed peer). ★Removes on drop too★ — no ended handle stays if the supervisor panics or the runtime folds.
 struct RosterExit<W: Wire> {
     leave: Option<LeaveRoster<W>>,
-    /// ★It is a weak handle★ — if strong, the control channel would not close even when the consumer releases all handles, and the supervisor could not hear it as 「close」.
+    /// ★Weak★ — a strong handle would keep the control channel open after the consumer releases all handles.
     me: Weak<PeerInner<W>>,
 }
 
@@ -1012,7 +792,6 @@ impl<W: Wire> RosterExit<W> {
         let Some(leave) = self.leave.take() else {
             return;
         };
-        // If it cannot be raised, the registry does not hold this handle either — there is nothing to remove.
         if let Some(inner) = self.me.upgrade() {
             leave(&Peer { inner });
         }
@@ -1034,64 +813,43 @@ struct Supervisor<W: Wire> {
     policy: Policy,
     machine: Machine,
     pending: Pending<W::Tag, oneshot::Sender<Result<W::In, RequestError>>>,
-    /// A held piece is also held carrying its own byte share (counted as the window share) and the generation of the connection that carried it.
     streams: Streams<W::StreamKey, Received<W::In>>,
     inbound: mpsc::Sender<Charged<Incoming<W>>>,
     data_rx: mpsc::Receiver<PeerCmd<W>>,
     ctl_rx: mpsc::UnboundedReceiver<Ctl>,
     state_tx: watch::Sender<PeerState>,
-    /// The shared counter of the generations this name tag issued (D1).
     generations: Arc<AtomicU64>,
     generation: Arc<AtomicU64>,
     overflow: Arc<AtomicU64>,
-    /// The newest of the generations stamped on commands that could not be put in (the same field of `PeerInner`).
     overflow_generation: Arc<AtomicU64>,
     refused: Arc<AtomicU64>,
-    /// The handle raised `overflow` · `refused` — wakes the given-up · backoff wait so it reports (the same field of `PeerInner`).
     loss_wake: Arc<Notify>,
     last_cause: Arc<AtomicU8>,
-    /// The close that [`Peer::close_after_flush`] wrote (the same field of `PeerInner`) — if standing, do not reconnect.
     goodbye: Arc<OnceLock<Close>>,
     flush_wake: Arc<Notify>,
-    /// The pre-close flush deadline — set when the supervisor first notices `goodbye` ([`Policy::flush_timeout`]).
     flush_deadline: Option<Instant>,
     tx: Option<Box<dyn LinkTx>>,
-    /// The reading side, held only during the handshake. On entering the operating phase it moves to the [`read_link`] task.
     rx_raw: Option<Box<dyn LinkRx>>,
     frames_rx: Option<mpsc::Receiver<LinkMsg>>,
     reader: Option<tokio::task::JoinHandle<()>>,
-    /// Just attached — pending resumes must be sent out again.
     fresh_link: bool,
-    /// The place to send upward has closed altogether. ★This is not a matter of re-attaching but of folding★.
     consumer_gone: AtomicBool,
-    /// The ordering area — holds, in the order produced, what could not yet be loaded into the line (this file's header). It is emptied when the receiving side closes.
     order: VecDeque<Charged<Incoming<W>>>,
-    /// The time the ordering area last started holding — meaningful only when the ordering area is not empty (`put` writes it).
     order_since: Instant,
-    /// The count of bytes this supervisor holds (including the window share) — the same count even when the connection is replaced. A re-attached channel is not read until the share the old channel left
-    /// opens the read gate (one supervisor = one ordering area, so that share too waits on the same receiving side).
+    /// Bytes this supervisor holds — one count across connection replacement (a re-attached channel waits for the old share to open the read gate).
     ledger: Arc<Ledger>,
-    /// Was it held by backpressure at the start of the turn — kept to recognize the moment it clears (`track_pause`). ★The deadline decision ·
-    /// wake-up time · window clock all read this field★ — if even one re-looks at the backpressure at its own place, the progress checks
-    /// measured against different states break (`Turn::Timer` of `run_live`).
+    /// Held by backpressure at the turn start (`track_pause`). ★The deadline decision · wake-up time · window clock all read this field★ — separate re-looks would measure
+    /// progress against different states.
     paused: bool,
-    /// The time this hold started — the time it actually started, not when it was noticed (`track_pause`). While held, the window clock is stopped
-    /// here (`resume_clock`).
     paused_since: Instant,
     last_rx: Instant,
     last_ping: Instant,
     dropped_out: u64,
-    /// The accepted peer's upgrade field (TRD 3 §5 14) — released on entering the operating phase (`shake_hands`),
-    /// and if it ends without entering, released at the place
-    /// where the channel was dropped (`run` — before teardown): so that whatever teardown waits for on the receiving side, the field is not tied to that wait. For a dialed peer it is `None`.
-    ///
-    /// ★The auth-waiting field · operating field do not exist yet★ (3-3 U4) — this field covers their role too. When it arrives, `Registry::attach`
-    /// holds the auth-waiting field and releases this field, and the supervisor holds that field here and swaps it for the operating field on entering the operating phase.
+    /// The accepted peer's upgrade permit (TRD 3 §5 14) — released on entering the operating phase (`shake_hands`) or where the channel is dropped (`run`, before teardown),
+    /// never tied to teardown's wait. `None` for a dialed peer. The auth-wait and operating permits do not exist yet; this field covers their role.
     admission: Option<ConnPermit>,
     exit: RosterExit<W>,
-    /// The `cause` of [`TransportEvent::Closed`]. For a dialed peer it is always `Explicit` (the disconnect cause is carried by the preceding `Disconnected`).
-    /// For an accepted peer it is the real cause — for a disconnect during operation that cause (`run`), for a handshake failure the place of that failure (`shake_hands`),
-    /// and if the app · receiving side closed, `Explicit` as is.
+    /// The `cause` of [`TransportEvent::Closed`]: dialed peer = `Explicit` (the preceding `Disconnected` carries the cause); accepted peer = the real cause.
     end_cause: DisconnectCause,
 }
 
@@ -1100,8 +858,7 @@ impl<W: Wire> Supervisor<W> {
         let now = self.clock.now();
         let mut acts = self.machine.on(now, Input::Start);
         if self.accepted() {
-            // ★An accepted peer already holds the channel★ (`new_peer`) — the machine's dial is repaid on the spot as 「opened」 and it goes to the handshake.
-            //   The machine is left in its dialing-side shape (pure layer), and 「dialing」 passes before being published.
+            // ★An accepted peer already holds the channel★ — the machine's dial is repaid on the spot as 「opened」.
             debug_assert!(matches!(acts.as_slice(), [Action::Dial { .. }]), "{acts:?}");
             acts = self.machine.on(now, Input::Dialed);
         }
@@ -1118,15 +875,12 @@ impl<W: Wire> Supervisor<W> {
                 None => match self.machine.state() {
                     PeerState::Live => {
                         let input = self.run_live().await;
-                        // Hands over what was already read before the machine wakes the waiters and emits the disconnect event.
                         let read_end = self.salvage_read_ahead().await;
                         earlier_end(input, read_end)
                     }
                     PeerState::GaveUp(_) | PeerState::Idle => self.park().await,
                     other => {
-                        // For Dialing/Backoff/Handshaking, `apply` always emits a follow-up input.
-                        // ★We do not kill the peer here★ — if we got here, that is our mistake, and paying for it by
-                        //   「ending this connection permanently」 is the most destructive default.
+                // ★Do not kill the peer here★ — reaching this is our bug.
                         debug_assert!(false, "fell to {other:?} without a follow-up input");
                         Input::ReconnectNow
                     }
@@ -1137,9 +891,8 @@ impl<W: Wire> Supervisor<W> {
                 self.end_cause = *cause;
             }
             acts = self.machine.on(now, input);
-            // ★This comes before the publish★ — if the `publish` at the start of the turn ran before folding, `Backoff` · `GaveUp` would be seen once.
-            // ★An accepted peer always folds★ — it has no address to redial. Every end where the machine goes to reconnect · give up (handshake failure ·
-            //   disconnect during operation) becomes a close here.
+            // ★Before the publish★ — publishing before folding would show `Backoff` · `GaveUp` once.
+            // ★An accepted peer always folds★ (no address to redial): every machine end toward reconnect · give-up becomes a close here.
             if (self.flushing() || self.accepted())
                 && matches!(
                     self.machine.state(),
@@ -1149,32 +902,21 @@ impl<W: Wire> Supervisor<W> {
                 acts = self.fold_into_close(now, acts);
             }
         }
-        // The channel is already dropped (the machine's last batch emits `DropLink`) — the field is released before the teardown that waits on the receiving side, and the registry removal
-        //   also comes before that.
+        // The channel is already dropped — release the permit and registry removal before teardown waits on the receiver.
         self.admission = None;
         self.exit.leave();
         self.teardown().await;
-        // Here the supervisor is dropped and releases the enqueue end — the next `recv` on that handle's receiver end is `None`.
     }
 
     fn accepted(&self) -> bool {
         matches!(self.mode, Mode::Accepted { .. })
     }
 
-    /// The connection was lost during the pre-close flush (a disconnect during operation · the failure of a dial attempt — the machine went to `Backoff` · `GaveUp`) —
-    /// does not go to reconnect · give up but folds straight into the close ([`Peer::close_after_flush`]). The machine is left as is (pure layer);
-    /// from its actions only the reconnect · give-up part (the wait · [`MachineEvent::GaveUp`] · [`MachineEvent::ConnectFailed`] reports) is
-    /// withdrawn and then the close is fed on. Waking the waiters · the disconnect report · dropping the channel keep that disconnect cause — the close code too
-    /// (`drop_link`).
-    ///
-    /// ★Filtering out `GaveUp` is the point★ — the shell sees it and shows the reconnect popup (ADR-0180). That popup must not appear for a peer the app said it would
-    /// close, and announcing 「retry in n seconds」 for a peer that will not redial is false too. The machine is already
-    /// `Closed`, so the intermediate state (`Backoff` · `GaveUp`) is not published (`run` calls this before the publish). A drain that started during the channel drop of
-    /// a batch that decided to give up is not caught here — `apply` collects that report.
-    ///
-    /// ★An accepted peer always comes here when it loses its connection★ (`run`) — it has no address to dial. For that peer the terminal reject
-    /// ([`MachineEvent::Rejected`]) is also filtered: that event promises a `GaveUp` right after it (`TransportEvent::Rejected`),
-    /// and an accepted peer's handshake failure ends with the single cause of `Closed` (`Supervisor::end_cause`).
+    /// The connection was lost during the pre-close flush: instead of reconnecting or giving up, fold into the close ([`Peer::close_after_flush`]). The machine stays pure;
+    /// only its reconnect · give-up part (wait · `GaveUp` · `ConnectFailed`) is withdrawn; the disconnect cause and close code are kept (`drop_link`).
+    /// ★Filtering `GaveUp` is the point★ — the shell shows a reconnect popup on it (ADR-0180), false for a peer the app is closing. A drain that began during the drop of a
+    /// give-up batch is collected in `apply`. ★An accepted peer always comes here on loss★ (`run`); the terminal reject ([`MachineEvent::Rejected`]) is filtered too
+    /// (it promises a `GaveUp`; the end rides on `Closed` — `Supervisor::end_cause`).
     fn fold_into_close(&mut self, now: Instant, acts: Vec<Action>) -> Vec<Action> {
         let accepted = self.accepted();
         let mut folded: Vec<Action> =
@@ -1203,9 +945,7 @@ impl<W: Wire> Supervisor<W> {
         let mut failed_pending = false;
         for act in acts {
             match act {
-                // ★Look again when emitting★ — a batch that decided to give up on a disconnect (`[.., DropLink, .., Emit(GaveUp)]`) comes out before the drain
-                //   and `fold_into_close` cannot collect it. If a drain starts during that `DropLink`'s blocked close, it is collected here —
-                //   `park` · `wait` at the start of the turn see that drain and fold into the close.
+                // ★Look again when emitting★ — a give-up batch comes out before the drain and `fold_into_close` cannot collect it.
                 Action::Emit(MachineEvent::GaveUp { .. } | MachineEvent::ConnectFailed { .. })
                     if self.flushing() => {}
                 Action::Emit(event) => self.emit_machine(event),
@@ -1214,7 +954,6 @@ impl<W: Wire> Supervisor<W> {
                     self.fail_pending(cause);
                 }
                 Action::DropLink { code } => {
-                    // `drop_link` splits the close code by the cause (`last_cause`) that the same batch's `FailPending` wrote.
                     debug_assert!(
                         self.tx.is_none() || failed_pending,
                         "DropLink came without FailPending while holding the link"
@@ -1229,15 +968,9 @@ impl<W: Wire> Supervisor<W> {
         follow
     }
 
-    /// Collects the piled-up control signals at once. `Close` beats `ReconnectNow`.
-    ///
-    /// ★Folding consecutive `ReconnectNow` into one is the point★ — without folding, when the shell
-    /// presses faster than the supervisor, each time the dial is canceled **before it is even polled**, and 「cut → stop mid-dial」 repeats forever.
-    ///
-    /// ★During a pre-close flush, `ReconnectNow` is dropped★ — also one called before the drain and not yet read. The handle
-    /// does not accept calls after the drain (`Peer::reconnect_now`), but what entered before it stays in this queue, and listening would drop the channel and
-    /// go to redial, so the drain would end without the close it was given. The other places that read control (`guard` · `run_live` · `connecting` ·
-    /// `wait` · `park`) follow the same rule.
+    /// Collects piled-up control signals; `Close` beats `ReconnectNow`. ★Folding consecutive `ReconnectNow` into one is the point★ — otherwise each press cancels the dial
+    /// before it is polled and 「cut → stop mid-dial」 repeats forever. ★During a pre-close flush `ReconnectNow` is dropped★ (also entries from before the drain): listening
+    /// would drop the channel and lose the drain's close; every control reader follows this.
     fn drain_ctl(&mut self) -> Option<Ctl> {
         let mut seen = None;
         while let Ok(signal) = self.ctl_rx.try_recv() {
@@ -1252,17 +985,14 @@ impl<W: Wire> Supervisor<W> {
 
     // ── Connection establishment ─────────────────────────────────────────────
 
-    /// ★Listens to control signals throughout both phases (dial · handshake)★ — otherwise `close()` is heard late by
-    /// `connect_timeout`. If control wins, the channel is closed along with the canceled future.
+    /// ★Listens to control throughout both phases★ — else `close()` is heard only after `connect_timeout`.
     async fn dial(&mut self, deadline: Instant) -> Input {
         let Mode::Dial { addr, dialer } = &self.mode else {
-            // The paths that make an accepted peer dial (reconnect · end of backoff) are all blocked by the supervisor — the fold in `run` ·
-            //   `Peer::reconnect_now`. If we got here, it is our mistake, and since there is no address to dial, we fold.
+            // Blocked by the `run` fold · `Peer::reconnect_now`; reaching this is our bug, and with no address we fold.
             debug_assert!(false, "a dial came to an accepted peer");
             return Input::Close;
         };
         let (addr, dialer) = (addr.clone(), dialer.clone());
-        // A 「reconnect now」 that was already piled up is exactly what we are about to do, so we swallow it.
         if let Some(Ctl::Close) = self.drain_ctl() {
             return Input::Close;
         }
@@ -1283,7 +1013,6 @@ impl<W: Wire> Supervisor<W> {
     }
 
     async fn shake_hands(&mut self, deadline: Instant) -> Input {
-        // ★Pairs with the same line in `dial`★ — it folds the piled-up 「reconnect now」 here too.
         if let Some(Ctl::Close) = self.drain_ctl() {
             return Input::Close;
         }
@@ -1293,14 +1022,11 @@ impl<W: Wire> Supervisor<W> {
             )));
         };
         let deadline = match self.mode {
-            // ★An accepted peer's deadline runs from the end of the upgrade★ (TRD 3 §5 3) — time sitting in the ready queue counts too. It must always be earlier than or equal to the machine's deadline
-            //   (from when the supervisor started), and even if the listener stamped it with a different clock, we use the earlier one so as not to exceed it.
+            // ★An accepted peer's deadline runs from the end of the upgrade★ (TRD 3 §5 3), capped by the machine's deadline.
             Mode::Accepted { auth_deadline } => auth_deadline.min(deadline),
             Mode::Dial { .. } => deadline,
         };
-        // ★An accepted peer does not run the handshake if the deadline has already passed★ — `with_deadline` polls once even on a past deadline
-        //   (its rustdoc), so frames that had already arrived while it sat in the ready queue could get it through. The channel is dropped without a close, like a
-        //   handshake that ended on the deadline.
+        // ★No handshake past the deadline★ — `with_deadline` polls once even on a past deadline, so queued frames could get through; the channel is dropped without a close.
         if self.accepted() && deadline <= self.clock.now() {
             self.end_cause = DisconnectCause::Idle;
             return Input::ConnectFailed(ConnectFailure::Unreachable(LinkError::new(
@@ -1312,9 +1038,7 @@ impl<W: Wire> Supervisor<W> {
             Connecting::Done(Ok((tx, rx))) => {
                 self.tx = Some(tx);
                 self.attach_reader(rx);
-                // The accepted peer's upgrade field is released now that it has entered the operating phase (`Supervisor::admission`).
                 self.admission = None;
-                // The number is drawn here — this place is the only point of 「this link entered the operating phase」.
                 let minted = Generation(self.generations.fetch_add(1, Ordering::AcqRel) + 1);
                 Input::Connected(minted)
             }
@@ -1332,19 +1056,13 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
-    /// Runs one phase of connection establishment to the end while listening to control, loading the ordering area, and watching for the receiver end closing. The returned
-    /// `Room` is always `false` (the receiving side closed) — a turn that loaded the ordering area just goes on with the phase.
-    ///
-    /// ★The phase future is pinned outside the turn★ — if it were dropped every time the ordering-area branch wins, the channel being dialed and the
-    /// handshake would start over from the beginning.
+    /// Runs one establishment phase while listening to control, loading the ordering area and watching for receiver closure; the returned `Room` is always `false`.
+    /// ★The phase future is pinned outside the turn★ — dropping it each time the ordering-area branch wins would restart the dial and handshake.
     async fn connecting<T>(&mut self, step: impl Future<Output = T>) -> Connecting<T> {
-        // ★Look before polling the phase★ — if not, even though the receiving side is already gone, the future that dials the channel is polled once
-        //   (the `select!` below does not know which of the ready arms it looks at first). A receiver end released before the first event is even put in
-        //   means the channel is not dialed at all.
+        // ★Look before polling the phase★ — else a gone receiver still gets the dial future polled once (`select!` order is unspecified).
         if self.receiver_gone() {
             return Connecting::Room(false);
         }
-        // During a pre-close flush it does not reconnect — that marker was to be loaded onto the dropped connection ([`Peer::close_after_flush`]).
         if self.flushing() {
             return Connecting::Flush;
         }
@@ -1355,9 +1073,7 @@ impl<W: Wire> Supervisor<W> {
                 let ctl = &mut self.ctl_rx;
                 let (lane, order) = (&self.inbound, &mut self.order);
                 let flush = &self.flush_wake;
-                // ★Wakes when the receiver end closes (`closed`)★ — folds at once even with nothing to put in (crate header 「Receiver-side invariants」
-                //   5). It is cancel-safe — calling it again checks whether it is closed first (external fact — tokio `Sender::closed`).
-                // ★Also listens for the drain start★ — this phase does not read the data queue, so the marker does not wake it.
+                // ★Wakes on receiver closure★ (crate header 「Receiver-side invariants」 5; `Sender::closed` is cancel-safe). ★Also listens for the drain start★ — this phase does not read the data queue.
                 tokio::select! {
                     signal = ctl.recv() => Connecting::Ctl(signal),
                     out = &mut step => Connecting::Done(out),
@@ -1372,7 +1088,6 @@ impl<W: Wire> Supervisor<W> {
                     self.consumer_gone.store(true, Ordering::Release);
                     return Connecting::Room(false);
                 }
-                // A 「retry now」 read during a drain is dropped (`Self::drain_ctl`) — there is no connection to drain, so it folds.
                 Connecting::Ctl(Some(Ctl::ReconnectNow)) if self.flushing() => {
                     return Connecting::Flush;
                 }
@@ -1381,7 +1096,6 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
-    /// Reading is split off into its own task — the reason is in the [`read_link`] header.
     fn attach_reader(&mut self, rx: Box<dyn LinkRx>) {
         let (frames_tx, frames_rx) = mpsc::channel(self.policy.frame_buffer.max(1));
         self.reader = Some(tokio::spawn(read_link(rx, frames_tx, self.ledger.clone())));
@@ -1392,16 +1106,12 @@ impl<W: Wire> Supervisor<W> {
         self.last_ping = now;
     }
 
-    /// Backoff wait. ★Even while waiting, requests that enter the queue are failed at once★ — otherwise that slot hangs
-    /// until the next operating phase (or forever in the given-up state).
+    /// Backoff wait. ★Requests entering the queue fail at once even while waiting★ — else the slot hangs until the next operating phase (forever when given up).
     async fn wait(&mut self, until: Instant) -> Input {
         loop {
-            // ★It reports here too★ — otherwise losses piled up during backoff · give-up come out nowhere until the user presses
-            //   「reconnect」.
+            // ★Report here too★ — else losses during backoff · give-up surface nowhere until 「reconnect」.
             let _ = self.drain_overflow();
             self.report_drops();
-            // If the receiving side is gone or the app said to drain and close, it does not re-attach and folds — this wait is outside operation so there is no
-            //   connection to drain ([`Peer::close_after_flush`]).
             if self.receiver_gone() || self.flushing() {
                 return Input::Close;
             }
@@ -1422,7 +1132,6 @@ impl<W: Wire> Supervisor<W> {
                 let data = &mut self.data_rx;
                 let (lane, order) = (&self.inbound, &mut self.order);
                 let lost = &self.loss_wake;
-                // Wakes when the receiver end closes — the same arm as in `connecting`.
                 tokio::select! {
                     signal = ctl.recv() => Down::Ctl(signal),
                     cmd = data.recv() => Down::Cmd(cmd),
@@ -1433,7 +1142,6 @@ impl<W: Wire> Supervisor<W> {
                 }
             };
             match woken {
-                // If draining, it is dropped (`Self::drain_ctl`) — the start of the next turn folds.
                 Down::Ctl(Some(Ctl::ReconnectNow)) if self.flushing() => {}
                 Down::Ctl(Some(Ctl::ReconnectNow)) => return Input::ReconnectNow,
                 Down::Ctl(Some(Ctl::Close)) | Down::Ctl(None) => return Input::Close,
@@ -1446,12 +1154,10 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
-    /// Waits only for control while given up (or not yet started). Pending requests are failed at once here too.
     async fn park(&mut self) -> Input {
         loop {
             let _ = self.drain_overflow();
             self.report_drops();
-            // The same line as in `wait`.
             if self.receiver_gone() || self.flushing() {
                 return Input::Close;
             }
@@ -1467,7 +1173,6 @@ impl<W: Wire> Supervisor<W> {
                 let data = &mut self.data_rx;
                 let (lane, order) = (&self.inbound, &mut self.order);
                 let lost = &self.loss_wake;
-                // Wakes when the receiver end closes — the same arm as in `connecting`.
                 tokio::select! {
                     signal = ctl.recv() => Down::Ctl(signal),
                     cmd = data.recv() => Down::Cmd(cmd),
@@ -1477,7 +1182,6 @@ impl<W: Wire> Supervisor<W> {
                 }
             };
             match woken {
-                // If draining, it is dropped (`Self::drain_ctl`) — the start of the next turn folds.
                 Down::Ctl(Some(Ctl::ReconnectNow)) if self.flushing() => {}
                 Down::Ctl(Some(Ctl::ReconnectNow)) => return Input::ReconnectNow,
                 Down::Ctl(Some(Ctl::Close)) | Down::Ctl(None) => return Input::Close,
@@ -1496,8 +1200,6 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
-    /// Is the receiving side gone — it has already seen it close while putting in, or the receiver end is closed now (released or
-    /// [`crate::Inbox::close`]). If it sees it closed, it writes that down — after that it does not put in (`put`).
     fn receiver_gone(&self) -> bool {
         if self.inbound.is_closed() {
             self.consumer_gone.store(true, Ordering::Release);
@@ -1505,12 +1207,10 @@ impl<W: Wire> Supervisor<W> {
         self.consumer_gone.load(Ordering::Acquire)
     }
 
-    /// Did the app call [`Peer::close_after_flush`] — if standing, do not reconnect.
     fn flushing(&self) -> bool {
         self.goodbye.get().is_some()
     }
 
-    /// If it notices the pre-close flush for the first time, it sets that deadline. Even if called several times, it stays the time first set.
     fn note_flush(&mut self) {
         if self.flush_deadline.is_none() && self.flushing() {
             self.flush_deadline = Some(self.clock.now() + self.policy.flush_timeout);
@@ -1527,29 +1227,24 @@ impl<W: Wire> Supervisor<W> {
         }
         let mut frames_in_row = 0usize;
         loop {
-            // ★Look at the hold before the loss report★ — the report puts into the ordering area and loads as much as fits in the line (`put`).
-            //   If the receiving side emptied the line while waiting on a write, that report empties the whole ordering area, and a hold that started during the write
-            //   is never seen — the window past its deadline closes before the read-ahead queue's replay, and the replay is dropped as a number already passed.
+            // ★Look at the hold before the loss report★ — the report may empty the ordering area, hiding a hold that began during the write, and the window would close before the read-ahead replay.
             let now = self.clock.now();
             self.track_pause(now);
             self.note_flush();
             let overflow = self.drain_overflow();
             self.report_drops();
-            // The same line as in `wait`. It comes before the overflow decision — a peer to fold is not sent to backoff.
             if self.receiver_gone() {
                 return Input::Close;
             }
             if let Some(input) = overflow {
                 return input;
             }
-            // When the handshake opens the operating phase, both halves stand together — if one is missing, it is written as the end of the missing half.
             if self.tx.is_none() {
                 return Input::LinkLost(DisconnectCause::WriteFailed);
             }
             if self.frames_rx.is_none() {
                 return Input::LinkLost(DisconnectCause::ReadFailed);
             }
-            // ① Control first on every turn — heard at once even if frames never stop.
             if let Some(signal) = self.drain_ctl() {
                 return match signal {
                     Ctl::ReconnectNow => Input::ReconnectNow,
@@ -1558,7 +1253,6 @@ impl<W: Wire> Supervisor<W> {
             }
 
             let wake = self.wake_at();
-            // ②③ Anti-starvation rule. `next_turn` decides and here we only carry it out.
             match next_turn(
                 now,
                 wake,
@@ -1571,10 +1265,7 @@ impl<W: Wire> Supervisor<W> {
                     if let Some(input) = self.on_timer().await {
                         return input;
                     }
-                    // ★Check progress★ — if some timer cannot push its own deadline, this loop spins forever without passing through
-                    //   `await` even once. On a current_thread runtime, at that moment **no other task can
-                    //   do anything and the process stalls** (measured: a mutant that disabled `expire_resumes` hung
-                    //   for over 10 minutes instead of failing the test).
+                    // ★Check progress★ — a timer that cannot push its deadline spins without `await`; on current_thread nothing else runs (measured: a mutant hung over 10 minutes).
                     if self.wake_at() <= now {
                         debug_assert!(
                             false,
@@ -1601,11 +1292,8 @@ impl<W: Wire> Supervisor<W> {
 
             let sleep = self.clock.sleep(wake.saturating_duration_since(now));
             let backlog = !self.order.is_empty();
-            // Wakes when the read gate opens. ★If, at the start of the turn, it was seen as held by the read gate (`paused` · ordering area empty),
-            //   this arm stands even if it has already cleared now★ — it wakes at once and the next turn writes the clearing. If it does not stand, the wake-up
-            //   time follows `paused` with silence · window deadlines excluded, so if the peer is quiet the clearing is not written until the ping.
-            //   If the report after the start (`report_drops`) emptied the ordering area, this arm stands even with the read gate open, but it
-            //   wakes at once and the next turn writes the clearing — one extra wake-up, not a spin.
+            // Wakes when the read gate opens. ★If the turn start saw a hold by the read gate (`paused` · ordering area empty), the arm stands even if it has since cleared★ — it
+            //   wakes at once and the next turn writes the clearing; otherwise a quiet peer's clearing waits for the ping. An extra wake-up is not a spin.
             let over = self.ledger.over() || (self.paused && !backlog);
             let woken = {
                 let ctl = &mut self.ctl_rx;
@@ -1613,12 +1301,9 @@ impl<W: Wire> Supervisor<W> {
                 let frames = self.frames_rx.as_mut().expect("checked above");
                 let (lane, order) = (&self.inbound, &mut self.order);
                 let ledger = &self.ledger;
-                // ★Do not re-attach `biased`★ — declaration-order polling under a frame flood starves the later arms
-                //   entirely (「priority of the operating loop」 in this file's header).
-                // ★If the ordering area holds anything, pull the frame arm (backpressure)★ — what that frame would produce could not be loaded into the line either, so
-                //   it is better left in the channel. The threshold is set at one item because the ordering area exists for the places that put in synchronously (events · deadline events),
-                //   not as a second buffer for frames. In exchange, the drain arm always stands alongside.
-                // ★Wakes when the receiver end closes★ — folds at once even with nothing to put in before a quiet peer (the same arm as in `connecting`).
+                // ★Do not re-attach `biased`★ (header 「priority of the operating loop」). ★If the ordering area holds anything, pull the frame arm (backpressure)★ —
+                //   its output could not be loaded either; the threshold is one item because the ordering area serves synchronous puts, not as a frame buffer.
+                // ★Wakes on receiver closure★ (same arm as in `connecting`).
                 tokio::select! {
                     signal = ctl.recv() => Wake::Ctl(signal),
                     msg = frames.recv(), if !backlog => Wake::Link(msg),
@@ -1631,7 +1316,6 @@ impl<W: Wire> Supervisor<W> {
             };
 
             let outcome = match woken {
-                // If draining, it is dropped (`Self::drain_ctl`).
                 Wake::Ctl(Some(Ctl::ReconnectNow)) if self.flushing() => None,
                 Wake::Ctl(Some(Ctl::ReconnectNow)) => Some(Input::ReconnectNow),
                 Wake::Ctl(Some(Ctl::Close)) | Wake::Ctl(None) => Some(Input::Close),
@@ -1658,7 +1342,6 @@ impl<W: Wire> Supervisor<W> {
                     self.note_room(open);
                     None
                 }
-                // The next turn's `track_pause` sees the clearing.
                 Wake::Budget => None,
                 Wake::Timer => {
                     frames_in_row = 0;
@@ -1671,10 +1354,7 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
-    /// Sends out again the resumes that were left disconnected.
-    ///
-    /// ★Without this, the hole stays forever★ — the re-request that was going out at the moment of disconnect may not have reached the peer, and
-    /// only the state waiting for its answer remains, so all the following pieces are held back and then folded into a truncation.
+    /// Sends out again the resumes left disconnected. ★Without this the hole stays forever★ — the in-flight re-request may not have reached the peer.
     async fn reissue_resumes(&mut self) -> Option<Input> {
         let outstanding = self.streams.pending_resumes();
         if outstanding.is_empty() {
@@ -1687,19 +1367,14 @@ impl<W: Wire> Supervisor<W> {
                 return Some(input);
             }
         }
-        // Wind it with the window clock — if it was held and disconnected on the previous channel, that clock is still stopped, and it is pushed by the held time
-        //   when it clears (`track_pause`). If wound with the current time, that push would push once more through the time it was disconnected.
+        // Wind with the window clock — a previously held, disconnected clock is still stopped and is pushed at clearing (`track_pause`).
         let now = self.clock.now();
         self.streams.rearm_resumes(self.resume_clock(now));
         None
     }
 
-    /// The next time to wake. ★Every timer source gathers in this one place★ — if you add a new source and do not fix this function,
-    /// that deadline wakes nobody, and the progress check of `Turn::Timer` cannot see it either.
-    ///
-    /// ★Deadlines that stop while held (silence · resume window) are masked by `paused`★ — `on_timer` decides by that field, so
-    /// if it re-looks at the backpressure at its own place the two diverge and the progress check breaks (if a clearing slips in after the start, it sets the wake
-    /// time with a stale `last_rx`, and `on_timer` sees it as still held and does not cut).
+    /// The next time to wake. ★Every timer source gathers here★ — one missed wakes nobody. ★Deadlines that stop while held (silence · resume window) are masked by `paused`★
+    /// (`on_timer` decides by it; re-looking at backpressure here would break the progress check).
     fn wake_at(&self) -> Instant {
         let mut wake = self.last_ping + self.policy.ping_interval;
         if !self.paused {
@@ -1708,44 +1383,29 @@ impl<W: Wire> Supervisor<W> {
         if let Some(deadline) = self.pending.next_deadline() {
             wake = wake.min(deadline);
         }
-        // ★Without it, nobody can close the re-request window★ — if the truncation decision hangs only on piece arrival,
-        //   in the ordinary case where the stream goes quiet after a hole (the turn ended) that window stays open forever.
+        // ★Without it nobody can close the re-request window★ — a stream that goes quiet after a hole would keep it open forever.
         if !self.paused {
             if let Some(deadline) = self.streams.next_resume_deadline() {
                 wake = wake.min(deadline);
             }
         }
-        // ★Unrelated to holding★ — the drain is the outbound side's work, so its deadline runs even when the receiving line is backed up.
+        // ★Unrelated to holding★ — the drain deadline runs even when the receiving line is backed up.
         if let Some(deadline) = self.flush_deadline {
             wake = wake.min(deadline);
         }
         wake
     }
 
-    /// At the moment backpressure clears, it sets `last_rx` to that time and pushes the requested time of an open resume window by the held time (TRD 3 §3-0
-    /// ① invariant 2). While held, we can read neither the peer's liveness nor the answer to a re-request, so if that time were counted as silence · window deadline,
-    /// we would cut the peer after having blocked it ourselves, or fold a hole that could have been filled into a truncation — replay that arrives late is
-    /// dropped as a number already passed. Hold = the ordering area is holding (the frame arm was pulled) or the read gate closed (the read task does not
-    /// read the channel).
+    /// On backpressure release, sets `last_rx` to that time and pushes an open resume window's requested time by the held time (TRD 3 §3-0 ① invariant 2) —
+    /// otherwise that time counts as silence · window deadline. Hold = ordering area holding (frame arm pulled) or read gate closed.
     ///
-    /// ★The held time is counted from when the hold started, not from when it was noticed★ — the supervisor cannot get to the start of the turn
-    /// while waiting on a write. If a hold started in that time and we counted from when it was noticed, the time spent waiting on the write would be counted as window deadline and
-    /// the window would close as soon as it clears. ★If the read gate closed and reopened in that time, the supervisor never sees that hold★ — the count
-    /// gathers that span and hands it over ([`Ledger::take_shut`]) and here we push by that much. If we do not push, the window past its deadline closes before the read-ahead queue's
-    /// replay and lower numbers are dropped as numbers already passed.
+    /// ★Held time counts from when the hold started, not when noticed★ (the supervisor cannot reach the turn start during a write wait). ★A hold in which the read gate
+    /// closed and reopened is never seen★ — the count gathers that span ([`Ledger::take_shut`]) and we push by it. ★One time is never pushed twice★ — a span closed and
+    /// opened while we knew we were held is inside the release push; an unseen span straddling a newly noticed hold is not pushed separately and the hold is treated
+    /// as starting when it closed. It errs only toward the window closing later ([`Self::resume_clock`]). The silence decision takes the clearing's notice as the last receive.
     ///
-    /// ★One time is never pushed twice★ — a span that closed and opened while we knew it was held (`paused`) all falls after that hold started,
-    /// so it is inside the time pushed at clearing, and if a span we did not see straddles a hold we just noticed (the ordering area held first),
-    /// we do not push it separately and treat this hold as having started when that first span closed.
-    ///
-    /// It diverges only toward the window closing later than the held time (nothing is lost) — the clearing time is taken as the noticing time, the unheld gap between
-    /// straddling spans is also counted as held, and a span before the window opened also pushes that window ([`Self::resume_clock`]).
-    /// The silence decision takes the time it noticed the clearing as the last receive, so it is independent of the start time.
-    ///
-    /// It is also called at the start of `on_timer` — if it cleared while asleep (the clearing arm and the deadline arm were ready together and the deadline arm won),
-    /// it makes that decision use the current state instead of the stale 「held」 seen at the start of the turn.
-    /// ★The silence decision is made
-    /// with this field (`paused`) — re-looking at the hold at that place would measure with the old `last_rx` at the moment of clearing and cut a peer held for over 50 s straight to `Idle`★.
+    /// Also called at the start of `on_timer` (if it cleared while asleep). ★The silence decision uses `paused`★ — re-looking would use the old `last_rx` and cut a
+    /// peer held for over 50 s straight to `Idle`.
     fn track_pause(&mut self, now: Instant) {
         let shut = self.ledger.take_shut();
         let order = (!self.order.is_empty()).then_some(self.order_since);
@@ -1755,7 +1415,6 @@ impl<W: Wire> Supervisor<W> {
         };
         let closed = shut.closed;
         match (self.paused, began) {
-            // A span that closed and opened in that time is within the time we knew it was held — pushed together at clearing.
             (true, None) => {
                 self.last_rx = now;
                 self.streams
@@ -1766,7 +1425,6 @@ impl<W: Wire> Supervisor<W> {
                 self.paused_since = closed.from.map_or(began, |from| from.min(began)).min(now);
             }
             (false, began) => {
-                // A hold we did not see clearing is also a clearing — we take the noticing time now as the last receive.
                 if closed.until.is_some() {
                     self.last_rx = now;
                     self.streams.shift_resumes(closed.total);
@@ -1779,10 +1437,7 @@ impl<W: Wire> Supervisor<W> {
         self.paused = began.is_some();
     }
 
-    /// The clock the resume window reads — while held, it stands still at the time the hold started. A window opened in that time is also written as opened
-    /// at that time, and at clearing it counts from the cleared time by the amount pushed (`track_pause`).
-    /// ★The pushed time may delay the window too much (the safe side)★ — the time of a read gate that had already closed and opened or been closed before the window opened
-    /// also pushes every open window.
+    /// The clock the resume window reads — while held it stands still at the hold's start (`track_pause`). ★It may delay the window too much (safe side)★.
     fn resume_clock(&self, now: Instant) -> Instant {
         if self.paused {
             self.paused_since
@@ -1793,7 +1448,6 @@ impl<W: Wire> Supervisor<W> {
 
     async fn on_timer(&mut self) -> Option<Input> {
         let now = self.clock.now();
-        // The pre-close flush deadline has passed — close without writing the rest ([`Peer::close_after_flush`]).
         if self.flush_deadline.is_some_and(|deadline| deadline <= now) {
             return Some(Input::Close);
         }
@@ -1810,7 +1464,6 @@ impl<W: Wire> Supervisor<W> {
                 after,
             });
         }
-        // While held, it does not close the window — that clock is stopped (`resume_clock`).
         if !self.paused {
             let expired = self.streams.expire_resumes(now);
             self.hand_over_truncations(expired);
@@ -1824,13 +1477,9 @@ impl<W: Wire> Supervisor<W> {
         None
     }
 
-    /// Handles one command taken out during operation.
-    ///
-    /// ★Just-before-write generation comparison (TRD 3 §3-0 ③)★ — if the stamped generation is not the current generation, do nothing and end it like a command that arrived
-    /// while not in the operating phase (`reject_command` — a request is woken as not sent and the rest are counted). Between the comparison and the write there is no gap for the generation to
-    /// change — only this one supervisor changes the generation and both are inside this function. The comparison comes before any other side effect (pending-table
-    /// registration · encoding) — putting a stale request in the table would clash with the same number on the current connection. ★The pre-close flush's marker is
-    /// not compared★ — it has no bound generation (`PeerOp::Close`). If rejected by the comparison, it would not close.
+    /// Handles one command taken out during operation. ★Just-before-write generation comparison (TRD 3 §3-0 ③)★ — a stale command ends as if it arrived outside the
+    /// operating phase (`reject_command`); only this supervisor changes the generation, so no gap exists. It precedes every other side effect (a stale request in the
+    /// pending table would clash with the current connection's number). ★The pre-close marker is not compared★ — no bound generation (`PeerOp::Close`).
     async fn on_cmd(&mut self, cmd: PeerCmd<W>) -> Option<Input> {
         let bound = !matches!(cmd.op, PeerOp::Close { .. });
         if bound && cmd.generation != self.machine.generation() {
@@ -1877,17 +1526,14 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
-    /// Handles one received frame. ★It does not wait★ — the place that drains the read-ahead queue before dropping the channel
-    /// ([`Self::salvage_read_ahead`]) calls this too. If a re-request that must be written arises, it returns that frame and the write is
-    /// the caller's job. `Err` = cut this channel (decode-failure policy).
+    /// Handles one received frame. ★Does not wait★ ([`Self::salvage_read_ahead`] calls it too); returns a re-request to write; `Err` = cut this channel (decode-failure policy).
     fn on_frame(&mut self, frame: Frame, charge: Charge) -> Result<Option<Frame>, Input> {
         let now = self.clock.now();
         if matches!(frame, Frame::Keepalive) {
             self.last_rx = now;
             return Ok(None);
         }
-        // ★Garbage is not proof of liveness★ — if we rewind before decoding, a peer sending only unreadable things
-        //   never gets caught by the silence decision, and since the default policy only drops the frame, there is no valve to cut it anywhere.
+        // ★Garbage is not proof of liveness★ — rewinding before decoding would let an unreadable-only peer evade the silence decision.
         let msg = match self.wire.decode(frame) {
             Ok(msg) => {
                 self.last_rx = now;
@@ -1901,7 +1547,6 @@ impl<W: Wire> Supervisor<W> {
                     generation,
                     reason,
                 });
-                // Even if the channel is fine, we cut because we cannot read what was read — written as the reader's end (the same value as a channel error).
                 return match self.policy.decode_failure {
                     DecodeFailurePolicy::DropFrame => Ok(None),
                     DecodeFailurePolicy::Disconnect => {
@@ -1913,8 +1558,7 @@ impl<W: Wire> Supervisor<W> {
         Ok(self.route(msg, charge))
     }
 
-    /// If it is a reply, the share is released here — a reply goes not to the line but to the caller that was waiting. What it returns = the
-    /// re-request that must be written ([`Self::on_frame`]).
+    /// A reply releases its share here (it goes to the waiting caller). Returns the re-request to write ([`Self::on_frame`]).
     fn route(&mut self, msg: W::In, charge: Charge) -> Option<Frame> {
         let reply = self.wire.reply_tag(&msg);
         let mark = self.wire.stream_mark(&msg);
@@ -1923,14 +1567,12 @@ impl<W: Wire> Supervisor<W> {
                 peer: self.id.clone(),
             });
         }
-        // The order is the contract — reply · stream piece · everything else.
         if let Some(tag) = reply {
             if let Some(slot) = self.pending.take(&tag) {
                 let _ = slot.send(Ok(msg));
                 return None;
             }
-            // A late reply to a number retired by expiry · overlap is silently dropped, as designed (ADR-0181 decision 4).
-            //   Anything else is a number we never requested, so we report it.
+            // A late reply to a retired number is dropped silently by design (ADR-0181 decision 4); any other number was never requested — report.
             if !self.pending.is_retired(&tag) {
                 self.emit(TransportEvent::UnmatchedReply {
                     peer: self.id.clone(),
@@ -1948,19 +1590,15 @@ impl<W: Wire> Supervisor<W> {
             self.deliver(msg);
             return None;
         };
-        // This supervisor uses streams — it splits the budget into the read share and the window cap (`budget.rs` header). The first
-        //   piece of a newly seen stream is always a delivery (`Streams::observe_capped`), so the split comes before any hold — its order relative to
-        //   the window-cap measurement below does not matter.
+        // This supervisor uses streams — split the budget (`budget.rs` header); the split precedes any hold.
         self.ledger.use_streams();
 
-        // ★The window cap is measured before holding★ — if holding up to this piece would exceed it, we see it as no room to hold and send it to the same truncation
-        //   as when the count limit is full (`Streams::observe_capped`). Cutting after holding would exceed the limit in between.
+        // ★The window cap is measured before holding★ — over it, send to the same truncation as a full count limit (`Streams::observe_capped`).
         let over_cap = !self.ledger.window_fits(msg.charge.bytes());
         let now = self.resume_clock(self.clock.now());
         let verdict = self.streams.observe_capped(&mark, msg, now, over_cap);
         if matches!(verdict, Verdict::Gap { .. } | Verdict::Held { .. }) {
-            // Counts the share of the piece just held as the window share — it comes out of the read gate (`budget.rs` header). When leaving the window,
-            //   `deliver` returns it, and when it is dropped inside the window (the answer came · the incarnation changed), the share is released and subtracted from both.
+            // Count the held piece's share as the window share (leaves the read gate — `budget.rs` header); `deliver` or an in-window drop returns it.
             if let Some(held) = self.streams.held_mut(&mark.key, mark.seq) {
                 held.charge.hold();
             }
@@ -2027,10 +1665,7 @@ impl<W: Wire> Supervisor<W> {
         })
     }
 
-    /// Reports the forgotten stream to make room, and sends out the pieces it was holding.
-    ///
-    /// ★If eviction swallows a pending re-request whole, that hole is never filled★ — it vanishes from `pending_resumes`
-    /// so a reconnect cannot request it again, and no truncation event is emitted either.
+    /// Reports the stream forgotten for room and sends up its held pieces. ★An evicted pending re-request is never refilled★ (gone from `pending_resumes`, no truncation event).
     fn flush_evictions(&mut self) {
         for evicted in self.streams.drain_evicted() {
             self.emit(TransportEvent::StreamForgotten {
@@ -2053,7 +1688,6 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
-    /// Reports the closed resume window and sends up what it held, in order.
     fn hand_over_truncations(&mut self, collapsed: Vec<Truncation<W::StreamKey, Received<W::In>>>) {
         for collapsed in collapsed {
             self.emit(TransportEvent::StreamTruncated {
@@ -2070,11 +1704,8 @@ impl<W: Wire> Supervisor<W> {
 
     // ── Writing ────────────────────────────────────────────────────────────────
 
-    /// ★Also listens for control and receiver-end closing while writing★ — if not, `close()` · the receiving side's disappearance is heard late by `write_deadline`
-    /// (multiplied by the number of writes where the queue is drained back to back). If that side wins, it drops the future being written and
-    /// drops the channel (the machine emits `DropLink`).
-    /// ★We do not know how far that frame got★ — it may never have been polled, or it may have gone into the adapter buffer and
-    /// go out ahead of `drop_link`'s close. If it is a notification · fanout, [`Self::write_or_count`] counts it.
+    /// ★Also listens for control and receiver closure while writing★ — else they are heard only after `write_deadline` (times back-to-back writes). ★How far the frame got is
+    /// unknown★ (it may sit in the adapter buffer and go out ahead of `drop_link`'s close); a notification · fanout is counted by [`Self::write_or_count`].
     async fn write(&mut self, frame: Frame) -> Result<(), Input> {
         let Some(mut tx) = self.tx.take() else {
             return Err(Input::LinkLost(DisconnectCause::WriteFailed));
@@ -2084,9 +1715,7 @@ impl<W: Wire> Supervisor<W> {
         result
     }
 
-    /// Writes a frame with no reply. ★If it does not end in `Ok`, it counts regardless of the reason★ — the handle already took an
-    /// `Ok` when it queued, so not counting here is a silent loss (that rule of `fail_pending`). A frame left half-written
-    /// may in fact have gone out, so it can be inflated ([`Direction::Outbound`] rustdoc).
+    /// Writes a reply-less frame. ★Not ending in `Ok` counts, whatever the reason★ — the handle already took an `Ok` (the `fail_pending` rule); a half-written frame may have gone out, so the count can be inflated.
     async fn write_or_count(&mut self, frame: Frame) -> Option<Input> {
         let result = self.write(frame).await;
         if result.is_err() {
@@ -2104,16 +1733,9 @@ impl<W: Wire> Supervisor<W> {
         result
     }
 
-    /// Pushes one write (frame · keepalive) to the end within `write_deadline` while listening for control · receiver-end closing · the pre-close flush's
-    /// deadline (`write`'s rustdoc). The channel's write end is briefly taken out and held by the caller — meanwhile `self.tx` is
-    /// empty.
-    ///
-    /// ★The flush deadline cuts the write even if it is set mid-write★ — it hears the wake announcing the start (`flush_wake`), sets the deadline, and
-    /// keeps waiting on the same write. If it does not listen, one write set before the drain started holds the close until `write_deadline`
-    /// (TRD 3 §3-0 ④ 「one deadline」). If the deadline has already passed, it does not start the write.
-    ///
-    /// ★During a drain, 「retry now」 is dropped★ — also one called before the drain and not yet read (`Self::drain_ctl`).
-    /// If heard, it would drop what was being written and go to redial, so that drain would end without the close it was given ([`Peer::close_after_flush`]).
+    /// Pushes one write (frame · keepalive) within `write_deadline` while listening for control · receiver closure · the pre-close flush deadline. The write end is briefly
+    /// taken out, so `self.tx` is empty. ★The flush deadline cuts the write even if set mid-write★ (`flush_wake`; TRD 3 §3-0 ④ 「one deadline」); a passed deadline means the
+    /// write does not start. ★During a drain 「retry now」 is dropped★ (`Self::drain_ctl`).
     async fn guard(
         &mut self,
         op: impl Future<Output = Result<(), LinkError>>,
@@ -2130,8 +1752,6 @@ impl<W: Wire> Supervisor<W> {
         tokio::pin!(op);
         loop {
             let flush_deadline = self.flush_deadline;
-            // ★Make the sleeper only when a deadline is set★ — we do not stand a timer per write. If not set, the arm below is
-            //   off and is not polled.
             let flush_due = OptionFuture::from(
                 flush_deadline
                     .map(|deadline| clock.sleep(deadline.saturating_duration_since(clock.now()))),
@@ -2141,11 +1761,9 @@ impl<W: Wire> Supervisor<W> {
                 let lane = &self.inbound;
                 let flush = &self.flush_wake;
                 let goodbye = &self.goodbye;
-                // The write arm being ahead of the deadline arm is intended — if both are ready in the same turn (the write finished at the deadline), we usually take the finished write
-                //   and do not count a frame that already went out as dropped (there is no `biased` so the starting arm is random).
+                // The write arm precedes the deadline arm on purpose — a write finishing at the deadline is not counted as dropped (random pick, no `biased`).
                 tokio::select! {
                     signal = ctl.recv() => match signal {
-                        // Drop it and keep waiting on the same write — we are draining, so set the deadline together (`Guarded::Flush`).
                         Some(Ctl::ReconnectNow) if goodbye.get().is_some() => Guarded::Flush,
                         Some(Ctl::ReconnectNow) => Guarded::Done(Err(Input::ReconnectNow)),
                         Some(Ctl::Close) | None => Guarded::Done(Err(Input::Close)),
@@ -2169,42 +1787,24 @@ impl<W: Wire> Supervisor<W> {
 
     // ── Cleanup ────────────────────────────────────────────────────────────────
 
-    /// Drops the channel — tries to send a close code, and folds the reading task.
+    /// Drops the channel — tries to send a close code and folds the reading task.
     ///
-    /// ★Here we do not listen to control — we push the close through to the end★. Without `biased`, `select!` picks
-    /// the starting arm at random on every poll (external fact), and if a control arm is set, **while even one signal
-    /// is left in the queue** that arm is immediately `Ready`, so the close future is dropped without being polled even once.
-    /// Measured 2026-09-07: if `reconnect_now()` is called twice (the second signal stays in the queue), the goodbye did not go out
-    /// in 41 · 54 · 49 · 49 of 100 runs even with no congestion at all. ★Do not revert★ — that loss flips not the text but the value the consumer
-    /// branches on: if the close frame goes out, the peer reads 「said goodbye and left」, and if not, tungstenite raises
-    /// `ResetWithoutClosingHandshake` and it reads 「link error」.
+    /// ★Does not listen to control — it pushes the close through to the end★ — without `biased`, `select!` picks the start arm at random, so a control arm with any signal
+    /// left in the queue could drop the close future unpolled (measured: after `reconnect_now()` twice the goodbye was lost in about half of 100 runs with no congestion).
+    /// ★Do not revert★ — the consumer branches on it: a sent close reads 「said goodbye and left」, otherwise 「link error」. When congested the code is still lost
+    /// (`write_deadline`; `lib.rs` 「known limits」).
     ///
-    /// ★What the control arm earned was only delay, and that delay was already bounded★ — even if control cuts a pending close, the close code
-    /// does not go out anyway, and if it does not cut, it is cut at `write_deadline`. So that arm was **delivering not one more frame**
-    /// while dropping half of the frames that are delivered.
+    /// ★The only thing listened for is the start of the pre-close flush★ — then the wait is the shorter of `write_deadline` and the flush deadline's remainder
+    /// ([`Peer::close_after_flush`]); the close future is held, not dropped.
     ///
-    /// ★When congested, the code is still lost★ — `write_deadline` cuts this wait (`lib.rs` 「The place where a close code reaches
-    /// the peer is narrow」).
-    ///
-    /// ★The only thing we listen for while waiting is the start of the pre-close flush★ — during a pre-close flush this wait is the shorter of `write_deadline`
-    /// and the time left on that deadline (that deadline covers through the close frame — [`Peer::close_after_flush`]). If the drain starts during this
-    /// wait, we set the deadline on the spot and cut the remaining wait to it — if we do not listen, the end of that drain
-    /// is held up by this close until `write_deadline`. The close future is held, not dropped, and pushed on, so the loss of the random arm above does
-    /// not occur.
-    ///
-    /// ★Known limit — this wait is tied to the clock★. In a harness that pushes its own clock by hand, if the channel is dropped while a write is blocked,
-    /// the supervisor stands here until the clock is pushed by `write_deadline` or the stall is released
-    /// (symptom: `close()` was called but the peer does not fold). The operating clock always flows, so there
-    /// `write_deadline` is the limit. The canonical way to compute it on the harness side = `testing::MemoryEndpoint::stall_writes`.
+    /// ★Known limit — this wait is tied to the clock★: in a hand-advanced harness a channel dropped during a blocked write keeps the supervisor here until the clock
+    /// advances by `write_deadline` or the stall is released (`testing::MemoryEndpoint::stall_writes`); the real clock always flows.
     async fn drop_link(&mut self, code: CloseCode) {
         self.note_flush();
         if let Some(mut tx) = self.tx.take() {
             let clock = self.clock.clone();
-            // Loads the close that [`Peer::close_after_flush`] wrote only when dropping because of the app's close. What decides it is the cause that just woke the waiters
-            //   (`last_cause`) — the machine wakes the waiters with that cause before dropping the channel (`FailPending` comes before
-            //   `DropLink`) and `fail_pending` writes it. The app's close is `Explicit`, and when the channel is lost mid-drain and
-            //   folded into a close (`fold_into_close`), it is that disconnect's cause so it loads the `code` the machine chose. ★Do not decide by machine state★ —
-            //   folding sends the machine to `Closed` first so the two look the same.
+            // Load the close [`Peer::close_after_flush`] wrote only when dropping because of the app's close — decide by `last_cause` (the machine wakes waiters with it
+            //   before `DropLink`); a channel lost mid-drain and folded carries that disconnect's cause. ★Do not decide by machine state★ — folding sends it to `Closed` first.
             let lost = cause_from_code(self.last_cause.load(Ordering::Acquire))
                 != DisconnectCause::Explicit;
             let close = match self.goodbye.get() {
@@ -2220,8 +1820,7 @@ impl<W: Wire> Supervisor<W> {
                         clock.sleep(deadline.saturating_duration_since(clock.now()))
                     }));
                 let flush = &self.flush_wake;
-                // ★The close arm is first and `biased`★ — even if the flush deadline has already passed, we push the close once
-                //   (the same promise as 0 in `with_deadline`). The flush-start arm does not drop the close, so being ahead of it is harmless.
+                // ★The close arm is first and `biased`★ — even past the flush deadline the close is pushed once (0 in `with_deadline`).
                 let started = tokio::select! {
                     biased;
                     _ = &mut closing => false,
@@ -2235,55 +1834,39 @@ impl<W: Wire> Supervisor<W> {
             }
         }
         self.rx_raw = None;
-        // For a branch that left the operating phase, `salvage_read_ahead` already drained and folded — what is left here is only the case where the receiving side
-        //   is gone and there is nowhere to hand over.
+        // A branch that left the operating phase was already folded by `salvage_read_ahead`; what is left is a gone receiver.
         self.frames_rx = None;
         self.fresh_link = false;
         if let Some(reader) = self.reader.take() {
             reader.abort();
-            // ★Wait for the cancellation★ — the reading task holds the other half of the channel, so until it is dropped
-            //   the socket does not close (that contract of `ws::split_link`). If we do not wait, the closing moment becomes the runtime's reclaim
-            //   moment, and if we count channels the peer attached to, it looks like two for a while. `read_link` always sits at an `await`
-            //   point, so this wait does not exceed one turn.
+            // ★Wait for the cancellation★ — the reading task holds the other half, so the socket does not close until it drops (`ws::split_link`); at most one turn.
             let _ = reader.await;
         }
     }
 
-    /// ★What was already read is handed over before dropping the channel★ — it is called before feeding the machine input on every branch that leaves the operating phase
-    ///   (the app closed · reconnect · write failure · silence · overflow …) (`run`). Because of that place, it comes before the waiter wake-up · disconnect event the machine
-    ///   would emit: replies go to the waiting caller, and everything else stands in the ordering area ahead of the disconnect event. The generation
-    ///   marker is also the same current generation as during operation (the new generation is drawn by the next handshake). Under backpressure
-    ///   the read-ahead queue may be full, so without this that queue ([`Policy::frame_buffer`] frames) would be silently dropped.
+    /// ★What was already read is handed over before dropping the channel★ — called on every branch that leaves the operating phase (`run`), before the machine's waiter
+    /// wake-up · disconnect event: replies reach the waiting caller, the rest goes into the ordering area ahead of the disconnect event under the current generation marker.
+    /// Without it the full read-ahead queue ([`Policy::frame_buffer`] frames) would be silently dropped.
     ///
-    /// ★Fold the read task first★ — that task reads only after taking a read-ahead queue slot (`read_link`), so after folding
-    /// what is in the queue is all that was read. If we drained without folding, it would read more of the channel into the freed slots.
-    /// ★We wait for nothing except one turn for that cancellation★ (that same wait of `drop_link` moved earlier — TRD 3
-    /// §3-0 ② 「no waiting up to here」). It does not write re-requests either — that window stays open and goes out again on the next link
-    /// (`reissue_resumes`).
+    /// ★Fold the read task first★ (it reads only after taking a read-ahead slot) so the queue holds everything read; wait one turn for the cancellation (TRD 3 §3-0 ②).
+    /// It writes no re-requests — the window stays open and goes out on the next link (`reissue_resumes`).
     ///
-    /// What it returns = the frontmost reader's end already in the read-ahead queue (the one frame that cuts on decode failure · the peer's close · channel
-    /// error) — whether to rewrite the disconnect cause to that is decided by [`earlier_end`].
+    /// Returns the frontmost reader's end already in the queue (decode-failure frame · peer close · channel error); [`earlier_end`] decides the cause rewrite.
     async fn salvage_read_ahead(&mut self) -> Option<DisconnectCause> {
         let mut frames = self.frames_rx.take()?;
         if let Some(reader) = self.reader.take() {
             reader.abort();
             let _ = reader.await;
         }
-        // The frontmost read end — the one frame that cuts on decode failure comes before the close after it (the same cause as when it was cut at that one frame
-        //   during operation).
         let mut cut = None;
         while let Ok(msg) = frames.try_recv() {
             match msg {
-                // ★Even under a policy that cuts on decode failure, we do not stop and hand over what is after it too★ — during operation, if it cuts under that policy,
-                //   `run_live` returns at that one frame and what was already read after it is handed over by this drain. If it stopped only here,
-                //   the same read-ahead queue would be handed over or dropped depending on whether the place where it cut was operating or draining.
-                //   Only the disconnect cause is written as that one frame's. The re-request returned is not written (rustdoc above).
+                // ★Even under cut-on-decode-failure, keep handing over what follows★ — same as `run_live` would; only the cause is that frame's. The returned re-request is not written.
                 LinkMsg::Frame(frame, charge) => {
                     if let Err(Input::LinkLost(cause)) = self.on_frame(frame, charge) {
                         cut.get_or_insert(cause);
                     }
                 }
-                // There is nothing after that (the reading task ended there).
                 LinkMsg::Closed => return cut.or(Some(DisconnectCause::PeerClosed)),
                 LinkMsg::Failed => return cut.or(Some(DisconnectCause::ReadFailed)),
             }
@@ -2294,8 +1877,7 @@ impl<W: Wire> Supervisor<W> {
     fn fail_pending(&mut self, cause: DisconnectCause) {
         self.last_cause.store(cause_code(cause), Ordering::Release);
         let generation = self.machine.generation();
-        // ★What is in the pending table is sent★ — what gets into the table is just before the write (`on_cmd`), so it may have gone to the peer. It must pass the stamped
-        //   generation comparison to get in, so that generation is the current generation.
+        // ★The pending table is sent★ — entries were written just before (`on_cmd`) and passed the generation comparison.
         for (_, slot) in self.pending.drain() {
             let _ = slot.send(Err(RequestError::Disconnected {
                 generation,
@@ -2303,16 +1885,14 @@ impl<W: Wire> Supervisor<W> {
                 sent: true,
             }));
         }
-        // ★It also collects what sleeps in the queue★ — requests are woken as not sent, and those with no reply are **counted** (the handle already took an `Ok`,
-        //   so not counting here is a silent loss as is).
+        // ★Also collect what sleeps in the queue★ — requests wake as not sent, reply-less ones are **counted** (the handle took an `Ok`).
         while let Ok(cmd) = self.data_rx.try_recv() {
             self.reject_command(cmd);
         }
     }
 
-    /// Ends one command that will not be written — it arrived while not in the operating phase, or the stamped generation is not the current one (`on_cmd`).
-    /// A request is woken with the generation it is bound to (the stamped value) and the last disconnect cause the supervisor knows — that cause may not be why the stamped generation ended
-    /// but a later disconnect's (if it re-attached several times in between). Those with no reply are counted.
+    /// Ends one command that will not be written (arrived outside the operating phase, or stale generation — `on_cmd`). A request wakes with its stamped generation and
+    /// the last known disconnect cause (possibly a later disconnect's); reply-less ones are counted.
     fn reject_command(&mut self, cmd: PeerCmd<W>) {
         match cmd.op {
             PeerOp::Request { reply, .. } => {
@@ -2322,30 +1902,24 @@ impl<W: Wire> Supervisor<W> {
                     sent: false,
                 }));
             }
-            // ★Do not fold with `_`★ — so that when a new branch is dropped, it is decided on the spot whether to count it · wake it · end it separately.
+            // ★Do not fold with `_`★ — decide each new branch: count · wake · end.
             PeerOp::Notify { .. } | PeerOp::Raw(_) | PeerOp::Resume { .. } => self.dropped_out += 1,
-            // The marker is not a message so it is not counted. Even if dropped, the close is not lost — the `goodbye` the handle wrote before the marker is
-            //   seen and folded by every waiting loop outside operation (the places that call this are outside operation or already closing).
+            // Not a message, so uncounted; dropping it loses no close — `goodbye` is seen by every waiting loop outside operation.
             PeerOp::Close { .. } => {}
-            // Not a message, and its connection is gone already — nothing to drop, nothing to count.
             PeerOp::DropLink { .. } => {}
         }
     }
 
-    /// ★Draining the ordering area comes last★ — only that waits on the receiving side, so what comes before it (waking the waiters · closing the outbound
-    /// queue · rejecting the remaining commands) is not tied to the receiving side's speed. If it came first, requests · notifications that entered the queue in the meantime would hang until the receiving
-    /// side drains (at most [`CLOSE_DRAIN_LIMIT`]).
+    /// ★Draining the ordering area comes last★ — only it waits on the receiver; first, entries queued meanwhile would hang until it drains (at most [`CLOSE_DRAIN_LIMIT`]).
     async fn teardown(&mut self) {
         let cause = self.end_cause;
         self.drop_link(CloseCode::GOING_AWAY).await;
         self.fail_pending(cause);
         self.data_rx.close();
-        // Wake the rest too — anything that comes in after the close is rejected by the channel as `Closed`.
         while let Ok(cmd) = self.data_rx.try_recv() {
             self.reject_command(cmd);
         }
-        // ★Fold the open resume window★ — the ledger disappears with this supervisor, so if not folded, held pieces vanish with neither delivery nor truncation
-        //   report. It goes out with the same report as when a window closes on its deadline.
+        // ★Fold the open resume window★ — else held pieces vanish without delivery or truncation report.
         let open = self.streams.close_resumes();
         self.hand_over_truncations(open);
         self.report_drops();
@@ -2423,8 +1997,7 @@ impl<W: Wire> Supervisor<W> {
             mut charge,
             generation,
         } = msg;
-        // ★Everything going up stands at the read gate★ — a piece that came out of the window is subtracted from the window share (`budget.rs` header). If left
-        //   in the window share, the window share fills just because the receiving side is slow and the next hole cannot be held.
+        // ★Everything going up stands at the read gate★ — a piece leaving the window is subtracted from the window share (`budget.rs` header).
         charge.unhold();
         let arrival = Arrival {
             peer: self.id.clone(),
@@ -2437,12 +2010,8 @@ impl<W: Wire> Supervisor<W> {
         });
     }
 
-    /// Puts at the end of the ordering area and loads as much as fits in the line. ★It does not wait★ — because the places that put in (events · packets · deadline
-    /// events · reports) are all synchronous. If it waited there, control and `fail_pending` would stall and teardown would hang.
-    ///
-    /// ★A full line does not cut or drop this connection★ — that line belongs to this handle (`PeerConfig::inbound`), so
-    /// being full means the consumer cannot keep up with this peer, not that the connection is at fault (ADR-0310 decision 17). Instead, while the ordering
-    /// area holds, the operating loop stops that peer's reading (「backpressure」 in this file's header).
+    /// Puts at the end of the ordering area and loads what fits in the line. ★Does not wait★ (synchronous put sites; waiting would stall control and hang teardown).
+    /// ★A full line does not cut or drop the connection★ — it is this handle's line, so full means the consumer is slow (ADR-0310 decision 17); the operating loop stops reading that peer instead.
     fn put(&mut self, item: Charged<Incoming<W>>) {
         if self.consumer_gone.load(Ordering::Acquire) {
             return;
@@ -2450,21 +2019,18 @@ impl<W: Wire> Supervisor<W> {
         let was_empty = self.order.is_empty();
         self.order.push_back(item);
         let open = flush(&self.inbound, &mut self.order);
-        // The ordering area just started holding — this is the time this peer's backpressure started (`track_pause`).
         if was_empty && !self.order.is_empty() {
             self.order_since = self.clock.now();
         }
         self.note_room(open);
     }
 
-    /// Reports the counted outbound losses. ★It reports regardless of policy★ — if it stopped counting, it would
-    /// be a worse choice than `Disconnect` (that sentence in policy.rs).
+    /// Reports counted outbound losses ★regardless of policy★ (policy.rs).
     fn report_drops(&mut self) {
         let count = std::mem::take(&mut self.dropped_out);
         if count == 0 {
             return;
         }
-        // If a report not yet loaded is at the end of the ordering area, add to it — so one does not pile up per turn while the line is backed up.
         if let Some(Charged {
             item: Incoming::Event(TransportEvent::Dropped { count: held, .. }),
             ..
@@ -2480,13 +2046,9 @@ impl<W: Wire> Supervisor<W> {
         });
     }
 
-    /// Collects and handles what the handle could not put in.
-    ///
-    /// ★Only outbound-queue saturation cuts the connection★ — 「my queue is full」 is this connection's problem, and 「the upward line is full」 is the consumer's speed (`put`). Merging the two into one count field would cut the connection just because the consumer is slow.
-    ///
-    /// ★Cut only when that overflow belongs to the current generation★ — the count outlives generations: an overflow counted in generation G is collected by G+1's first turn after that generation ended,
-    /// passing the connection-establishment phase (which does not call this). Enforcing the policy there would
-    /// cut the connection that just attached over the old connection's overflow. The count is reported regardless of generation.
+    /// Collects and handles what the handle could not put in. ★Only outbound-queue saturation cuts the connection★ ('my queue is full'), not 'the upward line is full' (`put`).
+    /// ★Cut only when the overflow belongs to the current generation★ — the count outlives generations and would cut a new connection over an old one's overflow;
+    /// the count is reported regardless.
     #[must_use = "during operation this decision cuts the connection"]
     fn drain_overflow(&mut self) -> Option<Input> {
         let refused = self.refused.swap(0, Ordering::AcqRel);
@@ -2499,7 +2061,6 @@ impl<W: Wire> Supervisor<W> {
         }
         self.dropped_out += full;
         self.report_drops();
-        // Read after collecting the count — a generation at least that of the collected overflow is visible (`Peer::count_overflow`).
         let latest = Generation(self.overflow_generation.load(Ordering::Acquire));
         if latest != self.machine.generation() {
             return None;
@@ -2511,15 +2072,9 @@ impl<W: Wire> Supervisor<W> {
     }
 }
 
-/// The input to feed the machine when leaving the operating phase — if the reader's end was already in the read-ahead queue salvaged while dropping the channel ([`Supervisor::salvage_read_ahead`])
-/// (the frontmost one — it may be the one frame in the middle of the line that cuts on decode failure), that end is written as the disconnect cause instead of the
-/// reason we left (write failure · silence · overflow …) — it is an end that was already read before dropping the channel. If the peer closes while the frame arm is pulled by backpressure, the supervisor may notice that closing
-/// first as a write that failed because of it (the line item in crate header 「known limits」).
-///
-/// ★What is not rewritten★ — if the app closed (`Input::Close`) or asked to reconnect (`Input::ReconnectNow`), it stays as is: in both
-/// the disconnect cause is [`DisconnectCause::Explicit`] and the caller knows that reason. Turning a reconnect into a disconnect would lose that entry point's promise to refill the budget
-/// and dial at once (ADR-0180 decision 7). If our cause is already the reader's end (cut on decode
-/// failure), that too stays as is — within the line that one frame comes before the end.
+/// The input to feed the machine on leaving the operating phase: if a reader's end was already in the read-ahead queue salvaged on channel drop ([`Supervisor::salvage_read_ahead`]),
+/// it becomes the disconnect cause instead of why we left (write failure · silence · overflow …). ★Not rewritten★ — an app close (`Input::Close`) or reconnect request
+/// (`Input::ReconnectNow`) stays `Explicit` (ADR-0180 decision 7: a reconnect must refill the budget and dial at once), and a cause already the reader's end stays.
 fn earlier_end(input: Input, read_end: Option<DisconnectCause>) -> Input {
     match (input, read_end) {
         (Input::LinkLost(ours), Some(theirs)) if !is_read_end(ours) => Input::LinkLost(theirs),
@@ -2527,7 +2082,6 @@ fn earlier_end(input: Input, read_end: Option<DisconnectCause>) -> Input {
     }
 }
 
-/// Is it the reader's end — the peer's close · a channel read error (including cut on decode failure).
 fn is_read_end(cause: DisconnectCause) -> bool {
     matches!(
         cause,
@@ -2535,8 +2089,6 @@ fn is_read_end(cause: DisconnectCause) -> bool {
     )
 }
 
-/// Loads the ordering area from the front as much as fits in the line — it does not wait. `false` = the receiving side closed (the ordering
-/// area is emptied — there is nowhere to load).
 fn flush<T>(lane: &mpsc::Sender<T>, order: &mut VecDeque<T>) -> bool {
     while let Some(item) = order.pop_front() {
         match lane.try_send(item) {
@@ -2554,11 +2106,10 @@ fn flush<T>(lane: &mpsc::Sender<T>, order: &mut VecDeque<T>) -> bool {
     true
 }
 
-/// Waits until a slot opens in the line and then loads as much of the ordering area as fits. `false` = the receiving side closed.
+/// Waits until a slot opens in the line, then loads as much of the ordering area as fits. `false` = the receiving side closed.
 ///
-/// ★Cancel-safe — put it on a `select!` arm★: if dropped while waiting for a slot, the ordering area is unchanged, and after taking the slot the
-/// take-out · loading finishes at once without `await`. Slots go around among the parties putting into the line in the order they waited
-/// (external fact — slot reservation on a tokio bounded channel is FIFO).
+/// ★Cancel-safe — put it on a `select!` arm★: dropped while waiting for a slot, the ordering area is unchanged, and after taking the slot the
+/// loading finishes at once without `await`. Slots go in waiting order (external fact — tokio bounded-channel slot reservation is FIFO).
 async fn drain_order<T>(lane: &mpsc::Sender<T>, order: &mut VecDeque<T>) -> bool {
     let Ok(permit) = lane.reserve().await else {
         order.clear();
@@ -2570,8 +2121,8 @@ async fn drain_order<T>(lane: &mpsc::Sender<T>, order: &mut VecDeque<T>) -> bool
     flush(lane, order)
 }
 
-/// Opens only the channel. ★The deadline is used by the dial and the handshake **together**★ — the current `HANDSHAKE_TIMEOUT` has the same shape,
-/// so if the dial drags on, the time left for the handshake shrinks by that much.
+/// Opens only the channel. ★The dial and the handshake **share** the deadline★ (the old `HANDSHAKE_TIMEOUT` had the same shape): a slow dial
+/// shrinks the handshake's remaining time.
 async fn dial_once(
     dialer: Arc<dyn Dialer>,
     addr: Address,
@@ -2582,7 +2133,7 @@ async fn dial_once(
     match with_deadline(&*clock, left, dialer.dial(&addr)).await {
         Ok(Ok(pair)) => Ok(pair),
         Ok(Err(DialFailure::Unreachable(err))) => Err(ConnectFailure::Unreachable(err)),
-        // The dialing side already knows — attached but the same path as a reject (give up without budget · TRD 3 §3-0 ⑤).
+        // The dialing side already knows — attached but treated as a reject (give up without budget · TRD 3 §3-0 ⑤).
         Ok(Err(DialFailure::Refused { code, reason })) => {
             debug_assert_eq!(
                 RejectKind::of(code),
@@ -2601,9 +2152,8 @@ async fn dial_once(
     }
 }
 
-/// The handshake did not finish — the dialing side feeds `failure` to the machine, and the accepted peer writes `end` as the end cause
-/// (`Supervisor::end_cause`). Both are decided together at each failure place — the dialing-side branch (`ConnectFailure`) carries only the text of failing to attach
-/// and does not tell read end from write end.
+/// The handshake did not finish — the dialing side feeds `failure` to the machine, the accepted peer writes `end` as the end cause
+/// (`Supervisor::end_cause`); both are decided at each failure place because `ConnectFailure` carries only the text and cannot tell read end from write end.
 struct HandshakeFailed {
     failure: ConnectFailure,
     end: DisconnectCause,
@@ -2620,9 +2170,8 @@ impl HandshakeFailed {
 
 /// Runs the handshake to the end on the opened channel.
 ///
-/// An accepted peer's end cause: our handshake's reject = `Explicit` · the peer closed (including a reject code) = `PeerClosed` · read error =
-/// `ReadFailed` · write error = `WriteFailed` · write exceeded the deadline = `WriteDeadline` · the peer's frame did not arrive by the deadline =
-/// `Idle`.
+/// An accepted peer's end cause: our reject = `Explicit` · peer closed (including a reject code) = `PeerClosed` · read error = `ReadFailed` ·
+/// write error = `WriteFailed` · write past deadline = `WriteDeadline` · peer frame not arrived by the deadline = `Idle`.
 async fn handshake_once(
     mut tx: Box<dyn LinkTx>,
     mut rx: Box<dyn LinkRx>,
@@ -2639,7 +2188,7 @@ async fn handshake_once(
                 let code = kind.close_code();
                 let mut link_usable = true;
                 if let Some(frame) = last {
-                    // Nothing more is written after a half-sent frame — the channel is simply dropped.
+                    // Nothing more is written after a half-sent frame; the channel is simply dropped.
                     link_usable = matches!(
                         with_deadline(&*clock, left(&*clock), tx.send(frame)).await,
                         Ok(Ok(()))
@@ -2675,10 +2224,9 @@ async fn handshake_once(
             HandshakeStep::Await => match with_deadline(&*clock, left(&*clock), rx.recv()).await {
                 Ok(Ok(LinkRead::Frame(Frame::Keepalive))) => step = HandshakeStep::Await,
                 Ok(Ok(LinkRead::Frame(frame))) => step = handshake.on_frame(&frame),
-                // ★The peer closed carrying a code = a reject, and the kind is decided by that code★ (TRD 3 §3-0 ⑤ — text does not
-                //   decide). Without this code, 「a terminal reject does not use budget」 (ADR-0180 decision 5) does not hold in code.
-                //   ★A bare close · a normal close code is not a 「reject」★ — a silent drop is 「failed to attach」, so it uses budget (if the daemon
-                //   is restarting, the next attempt attaches).
+                // ★A peer close carrying a code = a reject, and the code decides the kind★ (TRD 3 §3-0 ⑤ — text does not). Without it 「a terminal
+                //   reject does not use budget」 (ADR-0180 decision 5) does not hold in code. ★A bare close · normal close code is not a 「reject」★ —
+                //   a silent drop is 「failed to attach」 and uses budget (a restarting daemon attaches next attempt).
                 Ok(Ok(LinkRead::Closed(close))) => {
                     let failure = match close {
                         Some(close) => match RejectKind::of(close.code) {
@@ -2719,15 +2267,15 @@ fn peer_closed_during_handshake() -> ConnectFailure {
 
 /// Reads from the channel and hands it to the supervisor.
 ///
-/// ★Why a separate task★ — if `recv()` were put directly on a `select!` arm, each time another arm wins that future is
-/// canceled, and on a transport that is not cancel-safe a frame vanishes at that moment.
+/// ★Why a separate task★ — `recv()` directly on a `select!` arm is canceled whenever another arm wins, and on a transport that is not
+/// cancel-safe a frame vanishes then.
 ///
-/// ★If the read gate is closed, it does not do the next read★ (「fill level before adding」 — `budget.rs`) — with only the slot count of the read-ahead queue,
-/// that line would hold up to slot count × one-message limit. The share is added right where it is read.
+/// ★A closed read gate stops the next read★ (「fill level before adding」 — `budget.rs`) — with only the read-ahead slot count the line would
+/// hold up to slot count × one-message limit. The share is added right where it is read.
 ///
-/// ★Take the read-ahead queue slot before reading★ — it does not wait for a slot holding one frame it read. So when the supervisor
-/// folds this task, everything already read is in the read-ahead queue (`Supervisor::salvage_read_ahead`). If it folded while holding one in hand,
-/// that frame was already taken out of the channel but goes nowhere.
+/// ★Take the read-ahead slot before reading★ — never wait for a slot holding a frame already read, so that when the supervisor folds this task
+/// everything read is in the read-ahead queue (`Supervisor::salvage_read_ahead`); folded with one in hand, that frame would be out of the
+/// channel and go nowhere.
 async fn read_link(mut rx: Box<dyn LinkRx>, out: mpsc::Sender<LinkMsg>, ledger: Arc<Ledger>) {
     loop {
         let Ok(slot) = out.reserve().await else {
@@ -2766,10 +2314,9 @@ mod tests {
         net: MemoryNetwork,
         clock: ManualClock,
         inbound: mpsc::Receiver<Charged<Incoming<TestWire>>>,
-        /// Things taken out in advance to look at the fence. The assertion that follows reads these first.
         buffered: Vec<Incoming<TestWire>>,
-        /// The supervisor task. ★Channels and the clock cannot tell 「finished」 from 「panicked」★ — a panic also drops the supervisor,
-        /// closes all channels and releases all sleeping clocks.
+        /// The supervisor task. ★Channels and the clock cannot tell 「finished」 from 「panicked」★ — a panic also drops the supervisor, closes all
+        /// channels and releases all sleeping clocks.
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -2806,7 +2353,6 @@ mod tests {
             out
         }
 
-        /// Did a notification carrying this text come up. ★Do not discard what was taken out★ — the assertion that follows sees it.
         fn seen_notice(&mut self, body: &str) -> bool {
             let mut hit = false;
             let mut kept = Vec::new();
@@ -2830,23 +2376,22 @@ mod tests {
             })
         }
 
-        /// Did teardown close the outbound queue. ★If the line had room, at the moment this is seen the last loss report and `Closed` have
-        /// come up too★ — `teardown` puts in and loads straight away without `await` after closing the queue, so on a current_thread
-        /// runtime this line cannot cut in between. If the line was full, teardown is still waiting in the ordering area.
+        /// Did teardown close the outbound queue. ★If the line had room, the last loss report and `Closed` are already up when this is seen★ —
+        /// `teardown` puts and loads without `await` after closing the queue, so on current_thread nothing cuts in between. If the line was full,
+        /// teardown still waits in the ordering area.
         fn supervisor_done(&self) -> bool {
             self.peer.inner.data_tx.is_closed()
         }
 
-        /// Did the supervisor take everything out of the outbound queue. ★「nothing went out on the link」 alone does not make 「writing」
-        /// stand★ — it is true even with things left in the queue, and what is left in the queue is counted or woken separately by `fail_pending`. Then
-        /// an assertion that measures the count mid-write holds regardless of the write.
+        /// Did the supervisor take everything out of the outbound queue. ★「nothing went out on the link」 alone does not make 「writing」 stand★ —
+        /// it is true with items left in the queue (counted or woken separately by `fail_pending`); this way a mid-write count assertion holds
+        /// regardless of the write.
         fn queue_drained(&self) -> bool {
             let tx = &self.peer.inner.data_tx;
             tx.capacity() == tx.max_capacity()
         }
 
-        /// Has the supervisor task ended now without panicking. Polling an ended handle again makes tokio panic and
-        /// eats the harness — use it as the last assertion.
+        /// Has the supervisor task ended without panicking. Polling an ended handle again panics tokio and eats the harness — use it as the last assertion.
         async fn exited_cleanly(self) -> bool {
             matches!(poll_immediate(self.task).await, Some(Ok(())))
         }
@@ -2914,12 +2459,9 @@ mod tests {
         (h, endpoint)
     }
 
-    /// Creates a state where frames **never stop**.
-    ///
-    /// ★A finite bundle cannot create starvation★ — once the supervisor drains it all, the frame arm becomes `Pending`
-    /// and the later arms get polled then. So a test that does 「push in 1000 and settle」 **passes the same
-    /// whether `biased` or not** (measured — the first edition written in that form caught not a single mutant). Starvation arises
-    /// only when **fill rate ≥ drain rate**, so we keep the supply running.
+    /// Creates a state where frames **never stop**. ★A finite bundle cannot create starvation★ — once the supervisor drains it, the frame arm
+    /// is `Pending` and the later arms get polled, so 「push in 1000 and settle」 **passes the same with or without `biased`** (measured — the first
+    /// edition caught no mutant). Starvation needs **fill rate ≥ drain rate**, so the supply keeps running.
     fn flood(endpoint: &Arc<MemoryEndpoint>) -> tokio::task::JoinHandle<()> {
         let endpoint = endpoint.clone();
         tokio::spawn(async move {
@@ -2934,16 +2476,14 @@ mod tests {
         })
     }
 
-    /// Runs the supervisor a few turns under the flood. The 512 turns of [`settle`] are excessive here (the supply piles up that much).
     async fn pump(rounds: usize) {
         for _ in 0..rounds {
             tokio::task::yield_now().await;
         }
     }
 
-    /// ★If the defect revives, it **fails cleanly instead of hanging**★ — libtest has no per-test deadline, so
-    /// a regression that becomes a permanent wait would halt the whole CI without this net. The real-time 5 seconds flows
-    /// **only on the failure path** (the precedent for the same net is the shell package's `lib_unit`).
+    /// ★If the defect revives, it **fails cleanly instead of hanging**★ — libtest has no per-test deadline and a permanent wait would halt CI.
+    /// The real-time 5 seconds flows **only on the failure path** (precedent: the shell package's `lib_unit`).
     async fn joined(
         task: tokio::task::JoinHandle<Result<TestIn, RequestError>>,
     ) -> Result<TestIn, RequestError> {
@@ -2969,8 +2509,8 @@ mod tests {
 
     // ── C2/F1: anti-starvation rule ──
     //
-    // ★These eight are the regression net for C2·F1★ — not the flood tests below. The flood side checks 「does it stay alive under load」, and **starvation itself cannot be created with this harness** (the read task is a structural bottleneck so
-    //   the frame queue is always empty — the measurement in the `next_turn` comment).
+    // ★These eight are the regression net for C2·F1★, not the flood tests below: those check 「stays alive under load」, and **starvation itself
+    //   cannot be created with this harness** (the read task is a structural bottleneck, so the frame queue is always empty — see `next_turn`).
     const CAP: usize = 512;
 
     #[test]
@@ -3038,7 +2578,6 @@ mod tests {
         assert!(FRAME_BURST > 0);
         let t0 = Instant::now();
         let future = t0 + Duration::from_secs(1);
-        // ★Search with a limit★ — an unbounded search hangs when the rule is broken.
         let first_yield = (0..FRAME_BURST * 4)
             .find(|n| matches!(next_turn(t0, future, *n, 1, CAP), Turn::Outbound(_)))
             .expect("without a cap on the number of frames processed in a row, the outbound queue starves forever");
@@ -3105,8 +2644,7 @@ mod tests {
         .await;
     }
 
-    // A dial that lands but whose handshake never answers fails at the connect deadline (dial and handshake share it)
-    //   as a network-class failure, and the peer backs off.
+    // A dial that lands but whose handshake never answers fails at the connect deadline (they share it) as a network-class failure, and the peer backs off.
     #[tokio::test]
     async fn a_handshake_that_never_answers_fails_at_the_connect_deadline_and_backs_off() {
         let mut h = build(Policy::default(), Arc::new(HelloHandshake));
@@ -3114,7 +2652,6 @@ mod tests {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
-        // Held and never answered.
         let _endpoint = h.net.accept().expect("a link was opened");
         let deadline = Policy::default().connect_timeout;
 
@@ -3194,7 +2731,7 @@ mod tests {
                 generations: counter.clone(),
             })
         };
-        // A situation where a new supervisor attaches while the old supervisor is still alive (a succession race on the same name tag).
+        // A new supervisor attaches while the old one is still alive (a succession race on the same name tag).
         let first = spawn("d1");
         let second = spawn("d1");
         settle_until("both connected", || {
@@ -3302,7 +2839,6 @@ mod tests {
         assert_eq!(joined(old).await, Err(RequestError::Superseded));
         assert_eq!(joined(new).await, Err(RequestError::TagRetired));
 
-        // Even if the late reply to the request that went out first arrives, it is delivered to no one.
         endpoint.push(TestWire::reply(3));
         settle().await;
     }
@@ -3359,7 +2895,7 @@ mod tests {
     #[tokio::test]
     async fn a_request_that_lands_after_the_link_is_gone_is_refused_not_parked() {
         let (h, endpoint) = live().await;
-        // Imitates a race where it goes into the queue but the supervisor has already left the operating phase.
+        // Imitates a race: enqueued, but the supervisor has already left the operating phase.
         let late = {
             let peer = h.peer.clone();
             tokio::spawn(async move {
@@ -3395,7 +2931,6 @@ mod tests {
 
     // ── Generation stamp · the sent field (TRD 3 §3-0 ③ · D12 — the transport edition of the shell's two ADR-0195 tests) ──
 
-    /// The data frames the peer received, as text — the harness vocabulary is all `Frame::Text`.
     fn texts(frames: Vec<Frame>) -> Vec<String> {
         frames
             .into_iter()
@@ -3424,8 +2959,7 @@ mod tests {
         })
     }
 
-    // The `request_in` contract a consumer relies on: one poll queues the request, so what it queues next goes out
-    //   after it, while the reply is awaited later.
+    // The `request_in` contract a consumer relies on: one poll queues the request, so what is queued next goes out after it while the reply is awaited later.
     #[tokio::test]
     async fn the_first_poll_of_request_in_queues_the_request() {
         let (h, endpoint) = live().await;
@@ -3455,10 +2989,10 @@ mod tests {
         );
     }
 
-    // The transport edition of the shell's `buffered_command_on_disconnect_is_drained_not_executed_post_reconnect` — a request that was waiting for its answer
-    //   and a request that was in the queue both wake on the disconnect and are not executed on the next connection. ★Pin the branches deterministically★:
-    //   if we block the write of the preceding notification and stand the supervisor on it, the second request stays in the queue (a write does not
-    //   read the data queue). So the two each take one of the sent field's two branches (D12).
+    // Transport edition of the shell's `buffered_command_on_disconnect_is_drained_not_executed_post_reconnect` — a request awaiting its answer and a
+    //   queued request both wake on the disconnect and are not executed on the next connection. ★Pin the branches deterministically★: blocking the
+    //   preceding notification's write stands the supervisor on it, so the second request stays in the queue (a write does not read the data queue);
+    //   the two then take the two branches of the sent field (D12).
     #[tokio::test]
     async fn a_waiting_request_ends_as_sent_a_queued_one_as_not_sent_and_neither_runs_on_the_next_link(
     ) {
@@ -3484,7 +3018,6 @@ mod tests {
             "the supervisor is stuck on a blocked write, so the second request is in the queue"
         );
 
-        // The channel is cut — the blocked write ends in failure.
         first.fail_writes();
         first.stall_writes(false);
         settle().await;
@@ -3527,10 +3060,9 @@ mod tests {
         );
     }
 
-    // The transport edition of the shell's `held_clone_enqueued_after_disconnect_is_rejected_and_never_runs` — ★it measures the supervisor's just-before-write
-    //   comparison★. The machine empties the queue when it disconnects but cannot see what comes after, and the connection-establishment phase does not read the queue so that
-    //   stays until the next operating phase. To create that gap we put in the queue directly — the handle entry rejects because it is not operating now, so
-    //   we imitate a race that re-attached right after passing the entry (in the shell, the path of holding an endpoint clone and then putting in).
+    // Transport edition of the shell's `held_clone_enqueued_after_disconnect_is_rejected_and_never_runs` — ★measures the supervisor's just-before-write
+    //   comparison★. The machine empties the queue on disconnect but cannot see later entries, and the establishment phase does not read the queue.
+    //   To create the gap we enqueue directly (the handle entry rejects when not operating), imitating a re-attach right after the entry check.
     #[tokio::test]
     async fn a_command_stamped_before_a_reconnect_is_not_written_on_the_next_link() {
         let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
@@ -3538,7 +3070,7 @@ mod tests {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
-        // ★Keep hold of the other side★ — if dropped, it is a channel that vanished silently, so it is cut as a read error (`MemoryEndpoint::close`).
+        // ★Keep hold of the other side★ — dropped, the channel vanishes silently and is cut as a read error (`MemoryEndpoint::close`).
         let first = h.net.accept().expect("first link");
         first.push(Frame::Text("go".into()));
         settle_until("first connection", || {
@@ -3570,7 +3102,6 @@ mod tests {
                 out: TestOut::Notice("stale".into()),
             }))
             .is_ok());
-        // Fanout · resume also pass through the same comparison — put them in together so no branch slips out separately.
         assert!(data
             .try_send(stale(PeerOp::Raw(Frame::Text("raw|stale".into()))))
             .is_ok());
@@ -3626,7 +3157,6 @@ mod tests {
                 .any(|e| matches!(e, TransportEvent::Disconnected { .. })),
             "{events:?}"
         );
-        // How many reports it splits into depends on how many the supervisor takes out per turn, so we look only at the sum.
         assert_eq!(
             outbound_dropped(&events),
             3,
@@ -3634,7 +3164,7 @@ mod tests {
         );
     }
 
-    // `request` takes the generation at the place of the call — even if it re-attaches after the future is made and is first polled then, it does not go to the new connection.
+    // `request` takes the generation at the call — even if it re-attaches after the future is made and first polled then, it does not go to the new connection.
     #[tokio::test]
     async fn a_request_future_made_before_a_reconnect_stays_bound_to_the_old_generation() {
         let (h, first) = live().await;
@@ -3671,8 +3201,8 @@ mod tests {
         );
     }
 
-    // A queue filled in an ended generation only reports and does not cut the next connection (`Supervisor::drain_overflow`). 「reconnect now」
-    //   dials straight away without going through the backoff wait, so the first turn of the new connection is the first to collect that overflow count.
+    // A queue filled in an ended generation only reports and does not cut the next connection (`Supervisor::drain_overflow`); 「reconnect now」 dials without
+    //   backoff, so the new connection's first turn is the first to collect that count.
     #[tokio::test]
     async fn a_queue_that_overflowed_on_the_old_generation_does_not_cut_the_next_link() {
         let mut h = build(
@@ -3689,7 +3219,6 @@ mod tests {
         let first = h.net.accept().expect("first link");
         let g1 = h.peer.generation();
 
-        // Stand the supervisor on a blocked write and fill the queue.
         first.stall_writes(true);
         let notice = |body: &str| TestOut::Notice(body.into());
         assert_eq!(h.peer.notify(notice("n1")), Ok(()));
@@ -3700,7 +3229,6 @@ mod tests {
 
         h.peer.reconnect_now();
         settle().await;
-        // The close that drops the channel is standing on a blocked write — release it.
         first.stall_writes(false);
         settle_until("reconnect", || {
             h.peer.peer_state() == PeerState::Live && h.peer.generation() != g1
@@ -3731,7 +3259,7 @@ mod tests {
         );
     }
 
-    // The transport edition of the shell `CommandOutcome` socket comparison — if you take the received connection's generation and give the answer, it goes out only on that connection.
+    // Transport edition of the shell `CommandOutcome` socket comparison — an answer given with the received connection's generation goes out only on that connection.
     #[tokio::test]
     async fn notify_in_and_request_in_go_out_only_on_the_generation_they_name() {
         let (mut h, first) = live().await;
@@ -3921,8 +3449,8 @@ mod tests {
         settle().await;
         h.drain();
 
-        // A piece the peer had already sent before receiving the re-request. ★Then put up one fence after it★ — if we just assert 「there is none」 right after
-        //   `settle()`, it passes even when processing has not happened yet, and the test blesses the defect.
+        // A piece the peer sent before receiving the re-request. ★Then put up a fence after it★ — asserting 「none」 right after `settle()` would pass
+        //   even if processing had not happened, blessing the defect.
         endpoint.push(TestWire::chunk(1, 4, 6));
         endpoint.push(TestWire::encode_in(&TestIn::Notice("fence".into())));
         settle_until("until piece 6 and the fence are processed", || {
@@ -3934,7 +3462,6 @@ mod tests {
             "it is ★not here yet★, not ★the peer cannot give it★"
         );
 
-        // The peer's replay comes up in order.
         for seq in 2..=6 {
             endpoint.push(TestWire::chunk(1, 4, seq));
         }
@@ -3962,8 +3489,7 @@ mod tests {
         settle().await;
         h.drain();
 
-        // ★The window must close even if no more pieces come★ — the turn ending and the stream going quiet is the ordinary case,
-        //   and a decision that hangs only on arrival stays open forever then.
+        // ★The window must close even if no more pieces come★ — a stream going quiet after the turn is the ordinary case; a decision hanging only on arrival stays open forever.
         h.clock.advance(Duration::from_secs(2));
         settle().await;
         let items = h.drain();
@@ -4030,7 +3556,6 @@ mod tests {
         settle().await;
         h.drain();
 
-        // There is only one slot, so a new stream pushes out the old stream.
         endpoint.push(TestWire::chunk(2, 4, 1));
         settle().await;
         let items = h.drain();
@@ -4128,7 +3653,7 @@ mod tests {
     // ── Decode ──
     #[tokio::test]
     async fn a_decode_failure_reports_only_the_wire_class_never_the_value_it_quotes() {
-        // ★The decoder error quotes the received value★ — if that text rode on an event, the peer would plant text on the screen · the LLM surface (TRD 3 §5 19).
+        // ★The decoder error quotes the received value★ — if that text rode on an event, the peer could plant text on the screen · the LLM surface (TRD 3 §5 19).
         let (mut h, endpoint) = live().await;
         endpoint.push(Frame::Text("rep|PEER-SAYS-\u{1b}[31mHI|x".into()));
         settle().await;
@@ -4342,7 +3867,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_close_code_other_than_the_terminal_one_is_a_retryable_rejection() {
-        // ★A reject that came with only a code★ — only 4001 is terminal, and a reconnect code · an unknown code uses budget and dials again.
+        // ★A reject with only a code★ — only 4001 is terminal; a reconnect code · unknown code uses budget and dials again.
         for code in [
             CloseCode::HANDSHAKE_RETRYABLE,
             CloseCode(1008),
@@ -4394,7 +3919,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_handshake_that_waits_out_an_error_frame_lets_the_close_code_decide() {
-        /// If it receives the peer's error frame, it does not reject and waits for the close (TRD 3 §3-0 ⑤).
         struct WaitsOutErrors;
         impl Handshake for WaitsOutErrors {
             fn start(&self) -> HandshakeStep {
@@ -4615,7 +4139,6 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_drops_after_short_connects_keep_waiting_the_base_delay_without_jitter() {
-        // `build` turns jitter off (`no_jitter`) — with jitter the wait can fall below the base.
         let mut policy = Policy::default();
         policy.reconnect.max_attempts = u32::MAX;
         let h = build(policy, Arc::new(ImmediateHandshake));
@@ -4647,7 +4170,6 @@ mod tests {
                 break;
             }
             if let Some(endpoint) = h.net.accept() {
-                // Cuts as soon as it attaches — it never fills the dwell even once.
                 endpoint.close();
             }
             settle().await;
@@ -4771,7 +4293,6 @@ mod tests {
             "the supervisor stopped at the first write"
         );
 
-        // These are places where things are dropped while still in the queue — the handle already took an `Ok`.
         for n in 0..3 {
             h.peer.notify(TestOut::Notice(format!("n{n}"))).unwrap();
         }
@@ -4779,8 +4300,8 @@ mod tests {
 
         h.clock.advance(Duration::from_secs(5));
         settle().await;
-        // ★On a blocked channel, the close of `drop_link` is stuck too★ — if we do not release it, the backoff wait does not
-        //   start and the reconnect below does not come (that calculation in the `stall_writes` rustdoc).
+        // ★On a blocked channel `drop_link`'s close is stuck too★ — unreleased, the backoff wait does not start and the reconnect below does not come
+        //   (`stall_writes` rustdoc).
         endpoint.stall_writes(false);
         settle().await;
         h.clock.advance(Duration::from_millis(500));
@@ -4792,7 +4313,6 @@ mod tests {
             } => Some((*direction, *count)),
             _ => None,
         });
-        // 4 = the first one cut mid-write 1 + 3 left in the queue.
         assert!(
             matches!(dropped, Some((Direction::Outbound, 4))),
             "the handle already took Ok, so not counting here is a silent loss: {dropped:?}"
@@ -4807,7 +4327,6 @@ mod tests {
         let endpoint = h.net.accept().unwrap();
         let dials_before = h.net.dials();
 
-        // The consumer disappears.
         h.inbound.close();
         while h.inbound.try_recv().is_ok() {}
         drop(std::mem::replace(&mut h.inbound, mpsc::channel(1).1));
@@ -4858,7 +4377,7 @@ mod tests {
         settle().await;
         assert!(h.kinds().contains(&"DecodeFailed"));
 
-        // idle_timeout (50s) has passed since the time of connection. If garbage had rewound the clock, it would not be cut.
+        // idle_timeout (50s) has passed since connecting; garbage that rewound the clock would not be cut.
         h.clock.advance(Duration::from_secs(26));
         settle().await;
         assert_eq!(
@@ -4882,9 +4401,8 @@ mod tests {
 
         h.clock.advance(Duration::from_secs(5));
         settle().await;
-        // ★On a blocked channel, the close of `drop_link` is stuck too★ — the loss report comes out at the next stage (the backoff wait),
-        //   so if we do not release it, the assertion below meets it before the report has come out. The reason we do not cut with the clock is
-        //   that then even the backoff would pass and 「not yet attached」 would break.
+        // ★On a blocked channel `drop_link`'s close is stuck too★ — the loss report comes at the next stage (the backoff wait), so unreleased the assertion
+        //   below meets it before the report. Not cut with the clock: the backoff would also pass and 「not yet attached」 would break.
         endpoint.stall_writes(false);
         settle().await;
         assert_eq!(
@@ -4898,7 +4416,6 @@ mod tests {
             } => Some((*direction, *count)),
             _ => None,
         });
-        // 4 = the first one cut mid-write 1 + 3 left in the queue.
         assert!(
             matches!(dropped, Some((Direction::Outbound, 4))),
             "★waiting until reattached means nothing shows anywhere until the user presses 「reconnect」★: {dropped:?}"
@@ -4907,8 +4424,8 @@ mod tests {
 
     // ── 3-0 U1d: the queue-saturation count also wakes a sleeping supervisor ──
     //
-    // The end shape of a race where the handle put in after seeing a stale `Live` and the queue filled, and that count arrived after the supervisor had emptied the queue and fallen asleep in the give-up wait
-    //   — the queue is empty and only the count remains. If it does not wake, the report does not come out until the next control.
+    // End shape of a race: the handle enqueued after seeing a stale `Live`, the queue filled, and the count arrived after the supervisor emptied the
+    //   queue and slept in the give-up wait — only the count remains. Without a wake the report waits for the next control.
     #[tokio::test]
     async fn a_queue_full_count_wakes_a_parked_supervisor() {
         let mut h = build(Policy::default(), RejectingHandshake::new("nope"));
@@ -4929,11 +4446,10 @@ mod tests {
 
     // ── Reply-less frames cut mid-write are counted too ──
     //
-    // ★The handle already took an `Ok` when it queued★ — if notification · fanout frames whose write did not end in `Ok` are not counted,
-    //   it is a silent loss as is (that rule of `fail_pending`). We measure for each cutting reason (the two controls · channel error · write deadline),
-    //   and also measure together the two that must not be counted (request · keepalive).
+    // ★The handle already took an `Ok` when it queued★ — uncounted notification · fanout frames whose write did not end in `Ok` are a silent loss
+    //   (the `fail_pending` rule). Measured per cutting reason (the two controls · channel error · write deadline), together with the two that
+    //   must not be counted (request · keepalive).
 
-    /// The sum of outbound loss reports — summed even if the reports come up split across several times.
     fn outbound_dropped(events: &[TransportEvent<TestWire>]) -> u64 {
         events
             .iter()
@@ -4950,7 +4466,6 @@ mod tests {
 
     type Push = fn(&Peer<TestWire>) -> Result<(), SendError>;
 
-    /// The two entry points for reply-less frames — notification and fanout.
     fn reply_less_pushes() -> [(&'static str, Push); 2] {
         [
             ("notification", |p| {
@@ -4960,7 +4475,6 @@ mod tests {
         ]
     }
 
-    /// Blocks the write and pushes in one to stand the supervisor on that write. Empties the events that had come up.
     async fn park_in_flight(h: &mut Harness, endpoint: &MemoryEndpoint, push: Push) {
         endpoint.stall_writes(true);
         push(&h.peer).unwrap();
@@ -4983,7 +4497,6 @@ mod tests {
             park_in_flight(&mut h, &endpoint, push).await;
             h.peer.close();
             settle_until("shutdown", || h.peer.peer_state() == PeerState::Closed).await;
-            // Releases the stuck goodbye — if not released, it cannot get to `teardown`'s report.
             endpoint.stall_writes(false);
             settle_until("the supervisor ended", || h.supervisor_done()).await;
             let events = h.events();
@@ -5003,7 +4516,7 @@ mod tests {
             let (mut h, endpoint) = live().await;
             park_in_flight(&mut h, &endpoint, push).await;
             h.peer.reconnect_now();
-            // ★Release after control wins★ — if released first, the stuck write becomes ready together with control and may go out as is.
+            // ★Release after control wins★ — released first, the stuck write becomes ready together with control and may go out.
             settle_until("control won", || h.peer.peer_state() == PeerState::Dialing).await;
             endpoint.stall_writes(false);
             settle_until("reattached", || {
@@ -5020,10 +4533,9 @@ mod tests {
         for (what, push) in reply_less_pushes() {
             let (mut h, endpoint) = live().await;
             park_in_flight(&mut h, &endpoint, push).await;
-            // ★If we cut only the writing side and release the stall, the stuck write ends in a channel error★ — the receiving side is closed so it fails
-            //   (`testing::MemTx`). `fail` does not stand this branch: it reaches only the reading side, and during a write the supervisor does not look at the reading
-            //   side. Dropping the endpoint is not it either — the reading side is cut with it, and if that end gets into the read-ahead queue first,
-            //   the disconnect cause comes out as the read end (`salvage_read_ahead`).
+            // ★Cut only the writing side and release the stall — the stuck write ends in a channel error★ (receiving side closed; `testing::MemTx`).
+            //   `fail` does not reach this branch (reading side only; the supervisor does not look at it during a write), and dropping the endpoint cuts the
+            //   reading side too, whose end may reach the read-ahead queue first and make the cause the read end (`salvage_read_ahead`).
             endpoint.fail_writes();
             endpoint.stall_writes(false);
             settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
@@ -5050,7 +4562,6 @@ mod tests {
             park_in_flight(&mut h, &endpoint, push).await;
             h.clock.advance(Policy::default().write_deadline);
             settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
-            // Releases the stuck goodbye — the loss report comes out at the next stage (the backoff wait).
             endpoint.stall_writes(false);
             settle().await;
             let events = h.events();
@@ -5072,8 +4583,8 @@ mod tests {
     async fn a_request_cut_mid_write_is_woken_not_counted() {
         let (mut h, endpoint) = live().await;
         endpoint.stall_writes(true);
-        // ★Poll once on the spot instead of starting a separate task★ — if started, at a moment when that task has not yet run
-        //   the 「taken out of the queue」 below becomes true on an empty queue. The first poll does everything up to putting in the queue synchronously.
+        // ★Poll once on the spot, not in a separate task★ — a task not yet run would make 「taken out of the queue」 below true on an empty queue.
+        //   The first poll does everything up to enqueueing synchronously.
         let peer = h.peer.clone();
         let mut waiting = Box::pin(peer.request(TestOut::Request {
             tag: 1,
@@ -5086,8 +4597,7 @@ mod tests {
             h.queue_drained(),
             "the supervisor must have taken it out of the queue"
         );
-        // ★It must not have woken yet for 「writing」 to stand★ — a request rejected before writing also wakes below with the same error,
-        //   so without this the last assertion holds regardless of the write.
+        // ★Must not have woken yet for 「writing」 to stand★ — a request rejected before writing wakes with the same error, so the last assertion would hold regardless.
         assert!(
             poll_immediate(&mut waiting).await.is_none(),
             "ended before writing"
@@ -5158,9 +4668,8 @@ mod tests {
 
     // ── M4: it listens for control during a write too ──
     //
-    // ★The published state being `Closed` does not mean the supervisor has folded★ — `run` publishes the state **before applying**
-    //   the actions (between that loop's two `publish`es), so `settle_until` below passes even while teardown is
-    //   still stopped on a stuck close. So we release the stall and measure **past that**.
+    // ★A published `Closed` state does not mean the supervisor has folded★ — `run` publishes the state **before applying** the actions, so
+    //   `settle_until` passes while teardown is still stopped on a stuck close; release the stall and measure **past that**.
     #[tokio::test]
     async fn close_is_heard_while_a_write_is_parked() {
         let (h, endpoint) = live().await;
@@ -5178,9 +4687,8 @@ mod tests {
                 .any(|m| matches!(m, ClientMsg::Close(c) if c.code == CloseCode::GOING_AWAY))
         })
         .await;
-        // ★This assertion is a property of the harness, not the [`LinkTx::send`] contract★ — `testing::MemTx` stops a blocked write
-        //   before handing it over, so if cut nothing remains. On the WS adapter, the cut frame may go out ahead of the goodbye
-        //   (`ws.rs` 「Link properties」).
+        // ★A harness property, not the [`LinkTx::send`] contract★ — `testing::MemTx` stops a blocked write before handing it over, so a cut leaves nothing;
+        //   on the WS adapter the cut frame may go out ahead of the goodbye (`ws.rs` 「Link properties」).
         assert!(
             !seen.iter().any(|m| matches!(m, ClientMsg::Frame(_))),
             "a canceled write went out late: {seen:?}"
@@ -5189,12 +4697,10 @@ mod tests {
 
     // ── Shutdown: the goodbye code **really** goes out on the channel ──
     //
-    // ★That it drops even the last handle is intended★ — `Registry::remove` has that shape (it drops the handle
-    //   after telling it to close), and in that state the control channel immediately yields `Ready(None)`. In the edition where `drop_link` had a control arm,
-    //   `select!`'s random arm choice counted that `None` as the winner and the close future was dropped before it was even polled — about
-    //   half the time by measurement (2026-09-07).
-    // ★Do not measure in one turn★ — so this net catches only half at a time. The repetition below makes it
-    //   deterministic.
+    // ★Dropping even the last handle is intended★ — `Registry::remove` has that shape (drops the handle after telling it to close), and the control
+    //   channel then yields `Ready(None)` at once. With a control arm in `drop_link`, `select!`'s random choice counted that `None` as the winner and
+    //   dropped the close future unpolled — about half the time (measured 2026-09-07).
+    // ★Do not measure in one turn★ — it would catch only half; the repetition below makes it deterministic.
     #[tokio::test]
     async fn closing_speaks_the_goodbye_code_on_the_wire() {
         for round in 0..24 {
@@ -5214,10 +4720,9 @@ mod tests {
 
     // ── A stuck close is cut by the **deadline**, not by control ──
     //
-    // ★On a channel where the write is already blocked, the close is blocked too★ — the harness's `stall_writes` blocks all three of `send`·`ping`·`close`
-    //   (`testing::MemoryEndpoint::stall_writes`), so the real socket's shape is measured here.
-    // ★Do not remove the line that pushes the clock★ — `drop_link` no longer cuts that wait with control (「known limits」 in
-    //   the rustdoc there), so without it the supervisor stays standing on the stuck close and `settle_until` dies at the limit.
+    // ★On a channel whose write is blocked the close is blocked too★ — `stall_writes` blocks `send`·`ping`·`close` (`testing::MemoryEndpoint::stall_writes`),
+    //   so the real socket's shape is measured. ★Keep the line that advances the clock★ — `drop_link` no longer cuts that wait with control, so without it
+    //   the supervisor stays on the stuck close and `settle_until` dies at the limit.
     #[tokio::test]
     async fn a_parked_closing_frame_is_cut_by_the_write_deadline_not_by_control() {
         let (h, endpoint) = live().await;
@@ -5235,15 +4740,13 @@ mod tests {
             "★this test measures something only if the close is actually pending★ — if it went out, the assertions below are free"
         );
         h.peer.close();
-        // ★This assertion measures the 「not by control」 in the title★ — the assertions below are green even in the edition where the control arm
-        //   cut the stuck close. Before pushing the clock, it must not fold from the close request alone.
+        // ★Measures the 「not by control」 in the title★ — the assertions below stay green even where a control arm cut the stuck close; before advancing the clock it must not fold from the close request alone.
         settle().await;
         assert_ne!(
             h.peer.peer_state(),
             PeerState::Closed,
             "folded before the clock was advanced — control cut the pending close"
         );
-        // What cuts the stuck close is this line. Control stays in the queue and is read after that.
         h.clock.advance(Duration::from_secs(5));
         settle_until("control is alive even after the pending close", || {
             h.peer.peer_state() == PeerState::Closed
@@ -5260,12 +4763,9 @@ mod tests {
 
     // ── F1 regression: the goodbye is not lost even if a signal stays in the queue ──
     //
-    // ★Calling `reconnect_now()` **twice** is the point★ — the supervisor picks only one signal per turn so
-    //   the second stays in the queue, and then if `drop_link` sets a control arm, that arm is immediately `Ready` so the close future is
-    //   dropped without even being polled. There is no congestion at all — by measurement 2026-09-07, 41·54·49·49 of 100 runs
-    //   lost the goodbye that way, and after the fix it is 0.
-    // ★Do not measure in one turn★ — even if the regression revives, half pass, so the net for this defect, the third recurrence,
-    //   becomes a coin toss. The repetition below makes it deterministic.
+    // ★Calling `reconnect_now()` **twice** is the point★ — the supervisor takes one signal per turn, so the second stays queued and a control arm in
+    //   `drop_link` would be `Ready` at once, dropping the close future unpolled. No congestion; measured 2026-09-07: 41·54·49·49 of 100 runs lost
+    //   the goodbye, 0 after the fix. ★Do not measure in one turn★ — half pass even if the regression revives; the repetition makes it deterministic.
     #[tokio::test]
     async fn a_queued_control_signal_does_not_swallow_the_goodbye_code() {
         let (mut h, mut endpoint) = live().await;
@@ -5291,10 +4791,9 @@ mod tests {
 
     // ── 3-0 U1b: the ordering area ──
     //
-    // ★Set up with line length 1★ — the first `Connected` fills the line, so everything that comes up after goes through the supervisor's ordering
-    //   area. If the line has room, the ordering area empties right where it puts in, so nothing is measured.
+    // ★Set up with line length 1★ — the first `Connected` fills the line, so everything after goes through the supervisor's ordering area; with room,
+    //   the ordering area empties where it puts in and nothing is measured.
 
-    /// Runs the supervisor and drains the receiving side — until nothing comes up in a turn.
     async fn drain_until_quiet(h: &mut Harness) -> Vec<Incoming<TestWire>> {
         let mut out = Vec::new();
         loop {
@@ -5403,7 +4902,6 @@ mod tests {
         settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         first.push(TestWire::encode_in(&TestIn::Notice("n0".into())));
         settle().await;
-        // The peer's close lines up behind the held n0 and is not read (backpressure), so make it reconnect by control.
         h.peer.reconnect_now();
         settle_until("waiting for the second handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
@@ -5464,10 +4962,10 @@ mod tests {
         );
     }
 
-    // ★Measures the order inside teardown (waking the waiters · closing the queue → draining the ordering area)★. The fold is
-    //   visible to the handle before the channel is dropped (`run` emits it before `apply`) and the machine's `FailPending` empties the pending slots and the queue before that,
-    //   so a request that `fail_pending` in teardown catches arises only from a race that folded just after passing the handle's entry check (is the bound generation operating).
-    //   We make that request by putting it directly in the queue, and slip it in with the write blocked and the supervisor standing on the machine's `DropLink`.
+    // ★Measures the order inside teardown (waking waiters · closing the queue → draining the ordering area)★. The fold is visible to the handle before
+    //   the channel is dropped (`run` emits it before `apply`) and the machine's `FailPending` empties pending slots and the queue before that, so a
+    //   request that teardown's `fail_pending` catches arises only from a race that folded just after the handle's entry check. We create it by
+    //   enqueueing directly with the write blocked and the supervisor standing on the machine's `DropLink`.
     #[tokio::test]
     async fn requests_end_at_once_while_the_teardown_waits_on_the_held_items() {
         let (mut h, endpoint) = live_on_a_full_line().await;
@@ -5605,14 +5103,14 @@ mod tests {
         drop(std::mem::replace(&mut h.inbound, mpsc::channel(1).1));
     }
 
-    // ── 3-0 U1b: if the receiving side disappears, from any waiting loop it folds without waiting for the clock ──
+    // ── 3-0 U1b: if the receiving side disappears, any waiting loop folds without waiting for the clock ──
     //
-    // ★Do not push the clock★ — if pushed, the backoff ends or the deadline hits and the waiting loop gets out even without that decision.
+    // ★Do not advance the clock★ — the backoff would end or the deadline hit and the loop would get out without that decision.
 
     #[tokio::test]
     async fn a_backing_off_peer_holding_items_folds_when_the_consumer_goes() {
         let (mut h, endpoint) = live_on_a_full_line().await;
-        // What is held is the disconnect event — if a notification were put before it, the close would line up behind it and not be read (backpressure).
+        // What is held is the disconnect event — a notification before it would line the close up behind it, unread (backpressure).
         endpoint.close();
         settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
         assert_eq!(
@@ -5663,7 +5161,6 @@ mod tests {
         settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         first.push(TestWire::encode_in(&TestIn::Notice("n0".into())));
         settle().await;
-        // The same line as in `held_items_keep_flowing_while_the_supervisor_is_mid_handshake` — make it reconnect by control.
         h.peer.reconnect_now();
         settle_until("waiting for the second handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
@@ -5688,9 +5185,9 @@ mod tests {
 
     // ── 3-0 U1d: even with nothing held, if the receiving side disappears it folds on the spot ──
     //
-    // In the bundle above the ordering area holds, so the drain arm sees the disappearance. Here nothing is held, so only the receiver-end
-    // closing arm (`Sender::closed`) placed in each waiting loop sees it — without that arm, backoff · give-up · handshake · quiet operation would stay
-    // as they are until the clock or the next event. The clock is not pushed here either.
+    // Above, the ordering area holds so the drain arm sees the disappearance; here nothing is held, so only the receiver-end closing arm
+    // (`Sender::closed`) in each waiting loop sees it — without it backoff · give-up · handshake · quiet operation would stay until the clock or
+    // the next event. The clock is not advanced here either.
 
     #[tokio::test]
     async fn a_waiting_peer_with_nothing_held_folds_when_the_consumer_goes() {
@@ -5761,7 +5258,7 @@ mod tests {
         assert!(h.exited_cleanly().await);
     }
 
-    // Even if the receiving side's disappearance and a 「reconnect now」 are ready together — whichever arm wakes first — it does not dial again.
+    // Receiver disappearance and a 「reconnect now」 ready together — whichever arm wakes first, it does not dial again.
     #[tokio::test]
     async fn a_reconnect_racing_the_consumers_exit_does_not_dial() {
         let (mut h, _endpoint) = live().await;
@@ -5780,8 +5277,8 @@ mod tests {
 
     // ── 3-0 U1d: end cause — tell the read end from the write end ──
     //
-    // The daemon adapter uses this value to tell the read end (finish running the remaining commands) from the write end (cut at once) (TRD 3 §3-0 ①).
-    // We do not drop the endpoint — both sides would be cut together and which one is learned first would depend on scheduling.
+    // The daemon adapter uses this to tell the read end (finish remaining commands) from the write end (cut at once) (TRD 3 §3-0 ①). The endpoint is
+    // not dropped — both sides would be cut together and which is learned first would depend on scheduling.
 
     type Cut = fn(&Harness, &MemoryEndpoint);
     type ReadEnd = fn(&MemoryEndpoint);
@@ -5822,10 +5319,9 @@ mod tests {
 
     // ── 3-0 U1d: when dropping the channel, a read end already in the read-ahead queue becomes the disconnect cause ──
     //
-    // Line length 1 — the first notification is held in the ordering area and the operating loop pulls the frame arm (backpressure). The peer's close · read
-    // error that comes after stays in the read-ahead queue unread, and the supervisor leaves first with its own cause (write failure · write deadline · overflow …).
+    // Line length 1 — the first notification is held in the ordering area and the loop pulls the frame arm (backpressure). The peer's close · read
+    // error after it stays unread in the read-ahead queue, and the supervisor leaves first with its own cause (write failure · write deadline · overflow …).
 
-    /// Stand the supervisor in the operating phase with one read end placed in the read-ahead queue.
     async fn a_read_end_behind_a_held_line(
         policy: Policy,
         end: ReadEnd,
@@ -5860,7 +5356,6 @@ mod tests {
             .collect()
     }
 
-    /// One of our-side causes for the supervisor leaving the operating phase — the policy, and the steps taken while running the supervisor in between.
     type Leave = (&'static str, fn() -> Policy, &'static [Cut]);
 
     const LEAVES: [Leave; 4] = [
@@ -5880,7 +5375,6 @@ mod tests {
                 h.clock.advance(Policy::default().ping_interval);
             }],
         ),
-        // Release the stall after the deadline cuts the stuck write — the close that drops the channel must go out before entering backoff.
         (
             "write deadline",
             Policy::default,
@@ -5893,7 +5387,7 @@ mod tests {
                 |_, e| e.stall_writes(false),
             ],
         ),
-        // One slot in the outbound queue — the second notification cannot get in and is counted, and the supervisor cuts at the start of the turn after writing the first (default policy).
+        // One slot in the outbound queue — the second notification cannot get in and is counted; the supervisor cuts at the next turn start after writing the first (default policy).
         (
             "outbound queue overflow",
             || Policy {
@@ -5939,7 +5433,7 @@ mod tests {
         }
     }
 
-    // If the app closed or asked to reconnect, that cause (`Explicit`) stays — the caller knows.
+    // An app close or reconnect request keeps its cause (`Explicit`) — the caller knows.
     #[tokio::test]
     async fn an_app_close_or_reconnect_stays_explicit_with_a_read_end_read_ahead() {
         let acts: [(&str, AppAct); 2] = [
@@ -5963,7 +5457,7 @@ mod tests {
         }
     }
 
-    // If our cause is already the reader's end (cut on decode failure), it stays as is — within the line that one frame comes before the close that followed.
+    // If our cause is already the reader's end (cut on decode failure) it stays — within the line that frame precedes the close that followed.
     #[tokio::test]
     async fn a_decode_failure_cut_keeps_its_cause_over_a_close_read_behind_it() {
         let mut h = build(
@@ -5987,8 +5481,8 @@ mod tests {
         assert_eq!(h.disconnect_cause(), Some(DisconnectCause::ReadFailed));
     }
 
-    // The same holds inside the line salvaged while dropping the channel — the one frame that cuts on decode failure comes before the close that followed, so that cause stays.
-    //   What was already read after it is still handed over (`salvaging_carries_on_past_a_frame_it_cannot_decode`).
+    // Same inside the salvaged line — the decode-failure frame precedes the close that followed, so that cause stays; what was read after it is still
+    //   handed over (`salvaging_carries_on_past_a_frame_it_cannot_decode`).
     #[tokio::test]
     async fn a_decode_cut_salvaged_from_the_read_ahead_outranks_a_close_behind_it() {
         let (mut h, endpoint) = a_read_end_behind_a_held_line(
@@ -6017,8 +5511,8 @@ mod tests {
 
     // ── 3-0 U1d: even if the receiving side disappears mid-write, it does not wait for that write ──
     //
-    // One stuck write and one stuck keepalive at the place that drains the queue back to back (`Turn::Outbound`) — both must fold without pushing the clock.
-    // Without the write arm, it stands for each stuck write up to `write_deadline`.
+    // One stuck write and one stuck keepalive at the back-to-back queue drain (`Turn::Outbound`) — both must fold without advancing the clock;
+    // without the write arm it stands up to `write_deadline` per stuck write.
 
     #[tokio::test]
     async fn a_consumer_leaving_mid_batch_folds_without_waiting_out_the_stalled_write() {
@@ -6031,8 +5525,7 @@ mod tests {
         );
         settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         let endpoint = h.net.accept().unwrap();
-        // Stand it on a keepalive and fill the queue past half, then block the write and release the keepalive — the next turn drains the queue back to back
-        //   and stands on the first write.
+        // Stand on a keepalive and fill the queue past half, then block the write and release the keepalive — the next turn drains in a batch and stands on the first write.
         endpoint.stall_pings(true);
         h.clock.advance(Policy::default().ping_interval);
         settle().await;
@@ -6056,7 +5549,7 @@ mod tests {
             h.peer.peer_state() == PeerState::Closed
         })
         .await;
-        // The close that drops the channel is caught by the write block — that one is a place we deliberately do not listen at, so release it (`drop_link`).
+        // The close that drops the channel is caught by the write block — a place we deliberately do not listen at; release it (`drop_link`).
         endpoint.stall_writes(false);
         settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert_eq!(
@@ -6096,7 +5589,6 @@ mod tests {
 
     // ── 3-0 U1c: backpressure · byte count · stopping the silence decision ──
 
-    /// One frame whose payload is exactly `len` bytes.
     fn blob(tag: u8, len: usize) -> Frame {
         Frame::Binary(vec![tag; len])
     }
@@ -6142,7 +5634,6 @@ mod tests {
         }
         settle().await;
 
-        // n00 = the ordering area · n01~n04 = the read-ahead queue. The read task reads only after taking a slot, so there is no frame in hand.
         let read = 1 + frame_buffer;
         assert_eq!(
             endpoint.unread(),
@@ -6212,9 +5703,9 @@ mod tests {
         assert_eq!(h.peer.held_bytes(), 0);
     }
 
-    // ★Line length 1 uses all three layers★ — the first frame stands in the ordering area and the second in the read-ahead queue. The worst case is reading one more frame right under the read share (since streams
-    //   are not used, the whole budget), so we make one frame 1 smaller than the read share. The ceiling that uses streams and fills up to the window
-    //   share is `holding_a_window_full_and_a_read_share_full_still_fits_the_budget_plus_one_message` below.
+    // ★Line length 1 uses all three layers★ — the first frame in the ordering area, the second in the read-ahead queue. Worst case is reading one more
+    //   frame right under the read share (no streams, so the whole budget), hence a frame 1 smaller than the read share. The ceiling with streams and a
+    //   full window share is `holding_a_window_full_and_a_read_share_full_still_fits_the_budget_plus_one_message`.
     #[tokio::test]
     async fn what_a_peer_holds_never_exceeds_the_budget_plus_one_message() {
         let budget = 1000;
@@ -6292,7 +5783,6 @@ mod tests {
         );
     }
 
-    /// Even if released after holding for over 50 s, it is not `Idle`, and the silence decision counts again from the moment of release.
     async fn idle_restarts_from_the_release(mut h: Harness, what: &str) {
         h.clock.advance(Duration::from_secs(60));
         settle().await;
@@ -6342,8 +5832,7 @@ mod tests {
         .await;
         let endpoint = h.net.accept().unwrap();
         h.drain();
-        // ★Do not put a liveness check after it★ — if that were read right at release and rewound `last_rx`, the release's rewind
-        //   could not be measured.
+        // ★No liveness check after it★ — read right at release it would rewind `last_rx` and the release's rewind could not be measured.
         endpoint.push(blob(0, 2 * budget));
         settle().await;
         assert!(
@@ -6353,11 +5842,10 @@ mod tests {
         idle_restarts_from_the_release(h, "byte budget").await;
     }
 
-    // ★Make the release slip into a timer turn (`Turn::Timer`) that is followed by a progress check★ — `on_timer` skipped the silence decision
-    //   by the 「held」 at its start, but if the wake-up time were re-measured by the backpressure at that place, it would be set by the stale `last_rx`'s silence deadline (already
-    //   passed) and the progress check (`debug_assert`) would panic the supervisor.
-    //   To get to that turn, the ping time must pass while the supervisor is outside `select` — we stand it on a blocked notification write. When that write
-    //   is released the supervisor goes through to that turn's ping without yielding, so we block only the ping and let the receiving side drain inside it.
+    // ★Make the release slip into a timer turn (`Turn::Timer`) followed by a progress check★ — `on_timer` skipped the silence decision by the start's
+    //   「held」, but a wake time re-measured by backpressure there would use the stale `last_rx`'s (already passed) silence deadline and the progress
+    //   check (`debug_assert`) would panic the supervisor. To reach that turn the ping time must pass while the supervisor is outside `select`: stand it on
+    //   a blocked notification write; on release it goes to that turn's ping without yielding, so block only the ping and let the receiving side drain inside it.
     #[tokio::test]
     async fn a_release_inside_a_timer_round_does_not_trip_the_progress_check() {
         let budget = 100;
@@ -6375,7 +5863,6 @@ mod tests {
         endpoint.push(blob(0, 2 * budget));
         settle().await;
         assert!(h.peer.held_bytes() >= budget, "holds by the budget alone");
-        // Passes the silence deadline (50 s) — it does not cut because it is held, and the ping goes out every 20 s.
         for _ in 0..2 {
             h.clock.advance(Duration::from_secs(20));
             settle().await;
@@ -6387,7 +5874,6 @@ mod tests {
         endpoint.stall_writes(true);
         h.peer.notify(TestOut::Notice("slow".into())).unwrap();
         settle().await;
-        // Passes the next ping time (60 s) while standing on a write — within the write deadline (5 s).
         h.clock.advance(Duration::from_millis(4500));
         settle().await;
         endpoint.stall_pings(true);
@@ -6410,7 +5896,6 @@ mod tests {
 
     // ── 3-0 U1c: resume window · backpressure ──
 
-    /// A stream piece whose payload is exactly `len` bytes (key 1 · incarnation 1).
     fn sized_chunk(seq: u64, len: usize) -> Frame {
         let head = format!("chk|1|1|{seq}|");
         assert!(
@@ -6440,7 +5925,6 @@ mod tests {
             .collect()
     }
 
-    /// A supervisor that received piece 1 and took it out — from the next piece on, the hole decision stands.
     async fn streaming(budget: usize, inbound_cap: usize) -> (Harness, Arc<MemoryEndpoint>) {
         let mut h = build_budgeted(
             Policy::default(),
@@ -6458,8 +5942,8 @@ mod tests {
         (h, endpoint)
     }
 
-    // ★Grow the held pieces by the window cap★ — the window cap is at least the read share, so if that share went into the read gate the gate would close,
-    //   the replay would stay in the channel and could not fill the hole, and replay arriving late after the window closes on the deadline is dropped as a number already passed.
+    // ★Grow the held pieces by the window cap★ — the window cap is at least the read share; if that share went into the read gate it would close, the
+    //   replay would stay in the channel and could not fill the hole, and a replay arriving after the deadline close is dropped as a past number.
     #[tokio::test]
     async fn a_held_chunk_never_stops_the_reads_that_fill_its_gap() {
         let budget = 100;
@@ -6501,8 +5985,8 @@ mod tests {
         );
     }
 
-    // ★The receiving side stops after the window opens★ — fill line length 1 with one notification so the hole event stands in the ordering area, and meanwhile the frame
-    //   arm is pulled and the replay stays in the read-ahead queue. If the window deadline were counted as is, the window would close in between and the replay would be dropped.
+    // ★The receiving side stops after the window opens★ — fill line length 1 with a notification so the hole event stands in the ordering area while the
+    //   frame arm is pulled and the replay stays in the read-ahead queue; counting the window deadline as is would close the window and drop the replay.
     #[tokio::test]
     async fn a_stalled_consumer_does_not_run_the_resume_window_out() {
         let (mut h, endpoint) = streaming(BYTE_BUDGET, 1).await;
@@ -6518,7 +6002,6 @@ mod tests {
             "the replay is in the read-ahead queue"
         );
 
-        // Passes the window deadline (2 s) and the ping time (20 s) too, letting the timer run once while held.
         h.clock.advance(Duration::from_secs(3));
         settle().await;
         h.clock.advance(Duration::from_secs(20));
@@ -6542,7 +6025,6 @@ mod tests {
         );
     }
 
-    // Budget 100 = window cap 50 — two 30s exceed it at the second.
     #[tokio::test]
     async fn holding_past_the_window_cap_takes_the_truncation_path() {
         let budget = 100;
@@ -6600,7 +6082,7 @@ mod tests {
 
     // ── 3-0 U1c: salvage the read-ahead queue when dropping the channel ──
     //
-    // ★Set up with line length 1★ — n0 stands in the ordering area and n1 · n2 stay in the read-ahead queue with the frame arm pulled.
+    // ★Line length 1★ — n0 in the ordering area, n1 · n2 in the read-ahead queue with the frame arm pulled.
 
     async fn three_notices_held(h: &Harness, endpoint: &MemoryEndpoint) {
         for n in 0..3 {
@@ -6615,8 +6097,8 @@ mod tests {
         assert_eq!(endpoint.unread(), 0);
     }
 
-    // ★Fill the read-ahead queue completely (2 slots)★ — while the read task waits for the next slot there must be no frame in hand, so that salvaged plus
-    //   what stayed in the channel adds up to everything sent.
+    // ★Fill the read-ahead queue completely (2 slots)★ — while the read task waits for the next slot no frame may be in hand, so salvaged plus
+    //   what stayed in the channel equals everything sent.
     #[tokio::test]
     async fn reconnecting_hands_over_what_was_already_read_before_the_new_link() {
         let mut h = build_with(
@@ -6674,7 +6156,6 @@ mod tests {
         settle().await;
         h.clock.advance(Policy::default().write_deadline);
         settle().await;
-        // The close of the channel being dropped is caught by the same stall — release it to finish teardown (`stall_writes` rustdoc).
         endpoint.stall_writes(false);
 
         let items = drain_until_quiet(&mut h).await;
@@ -6692,7 +6173,7 @@ mod tests {
         );
     }
 
-    // ★A re-attached channel uses the same count★ — it does not read the new channel until the share the old channel left drops below the read share.
+    // ★A re-attached channel uses the same count★ — the new channel is not read until the share the old one left drops below the read share.
     #[tokio::test]
     async fn a_new_link_waits_for_what_the_old_link_left_to_drop_below_the_budget() {
         let budget = 100;
@@ -6733,7 +6214,7 @@ mod tests {
         assert_eq!(h.peer.held_bytes(), 0);
     }
 
-    // ★Even if it redials with a reply in the read-ahead queue, the waiting caller receives it★ — salvaging comes before the machine's waiter wake-up.
+    // ★Redialing with a reply in the read-ahead queue, the waiting caller still receives it★ — salvaging precedes the machine's waiter wake-up.
     #[tokio::test]
     async fn a_reply_already_read_reaches_its_caller_when_reconnecting() {
         let (mut h, endpoint) = live_on_a_full_line().await;
@@ -6759,8 +6240,8 @@ mod tests {
 
     // ── 3-0 U1c: one budget covers both the read share and the window cap (B + M) ──
 
-    // ★Fill the read share too while the window is full★ — if the window cap were the budget (two counts), it would hold four (96) in the window and hold two more (98)
-    //   by reading, exceeding B + M (149). If the window cap is half, the window closes as a truncation at the third piece and that share closes the read gate.
+    // ★Fill the read share too while the window is full★ — with the window cap = the budget (two counts), the window would hold four (96) and reading two
+    //   more (98) would exceed B + M (149); with half, the window closes as a truncation at the third piece and that share closes the read gate.
     #[tokio::test]
     async fn holding_a_window_full_and_a_read_share_full_still_fits_the_budget_plus_one_message() {
         let budget = 100;
@@ -6788,8 +6269,8 @@ mod tests {
         assert_eq!(h.peer.held_bytes(), 0);
     }
 
-    // ★Only a supervisor that has seen a stream piece halves the read gate★ — send the same three frames (30 · 30 · 30) at budget 100. A supervisor that did not use
-    //   streams reads the third too (60 < 100), and a supervisor that saw one piece reaches the read share (50) at the second and leaves the third in the channel.
+    // ★Only a supervisor that has seen a stream piece halves the read gate★ — three frames (30 · 30 · 30) at budget 100: a non-stream supervisor reads the
+    //   third too (60 < 100); one that saw a piece hits the read share (50) at the second and leaves the third in the channel.
     #[tokio::test]
     async fn only_a_peer_that_has_seen_a_stream_chunk_splits_its_read_gate() {
         let budget = 100;
@@ -6828,8 +6309,7 @@ mod tests {
 
     // ── 3-0 U1c: progress · clock · generation · teardown of held pieces ──
 
-    // ★The piece that hit the byte limit is not the largest number among those held★ — if progress is set to that piece's number, replay 4 · 5 goes up
-    //   again after 5 (order reversed · overlap).
+    // ★The piece that hit the byte limit is not the largest number held★ — progress set to its number would let replay 4 · 5 go up again after 5 (order reversed · overlap).
     #[tokio::test]
     async fn a_descending_arrival_past_the_window_cap_never_rewinds_the_stream() {
         let budget = 100;
@@ -6849,8 +6329,8 @@ mod tests {
         );
     }
 
-    // ★The hold starts while waiting on a write★ — the supervisor can come to the start of the turn and notice the hold only after that write ends. If we count from when
-    //   it was noticed, the 3 s standing on the write counts as the window deadline (2 s), the window closes as soon as it releases, and the replay is dropped as a number already passed.
+    // ★The hold starts while waiting on a write★ — the supervisor notices it only after the write ends. Counting from the notice would charge the 3 s on
+    //   the write to the window deadline (2 s), close the window on release and drop the replay as a past number.
     #[tokio::test]
     async fn backpressure_that_begins_during_a_stalled_write_still_stops_the_resume_clock() {
         let budget = 100;
@@ -6893,8 +6373,8 @@ mod tests {
         assert_eq!(h.peer.peer_state(), PeerState::Live);
     }
 
-    // The ordering-area edition of the test above — at the place where the hole event stands in the ordering area because of a full line, the re-request write is blocked. We must count from when the ordering area
-    //   started holding so that the time standing on the write is not counted as the window deadline.
+    // Ordering-area edition of the test above — the hole event stands in the ordering area because of a full line and the re-request write is blocked;
+    //   counting from when the ordering area started holding keeps the write time out of the window deadline.
     #[tokio::test]
     async fn a_held_line_that_begins_before_a_stalled_resume_write_still_stops_the_resume_clock() {
         let (mut h, endpoint) = streaming(BYTE_BUDGET, 1).await;
@@ -6917,9 +6397,9 @@ mod tests {
         assert_eq!(chunk_seqs(&items), vec![2, 3]);
     }
 
-    // The loss-report edition of the test above — while standing on the write, the receiving side empties the line and the outbound queue overflows. The report at the start of the turn after the write
-    //   loads even the hole event into the line and empties the ordering area — if the hold is not seen before that report, the hold that started mid-write is lost,
-    //   and the deadline comes before the read-ahead queue's replay and closes the window.
+    // Loss-report edition of the test above — during the write the receiving side empties the line and the outbound queue overflows. The report at
+    //   the next turn start loads even the hole event and empties the ordering area; if the hold is not seen before it, the mid-write hold is lost and
+    //   the deadline closes the window before the read-ahead queue's replay.
     #[tokio::test]
     async fn a_drop_report_that_empties_the_held_line_does_not_hide_the_pause() {
         let mut h = build_budgeted(
@@ -6970,9 +6450,9 @@ mod tests {
         assert!(labels(&items).contains(&"Dropped".to_string()));
     }
 
-    // ★The read gate closes while waiting on a write and reopens before that write ends★ — the supervisor sees only the open gate at the start of the turn
-    //   and never sees the hold. If that time is not pushed, the 3 s standing on the write exceeds the window deadline (2 s), the deadline comes before the read-ahead queue's
-    //   replay and closes the window, and replay 2 is dropped as a number already passed.
+    // ★The read gate closes during a write and reopens before it ends★ — the supervisor sees only the open gate at the turn start and never the hold.
+    //   Unpushed, the 3 s on the write exceeds the window deadline (2 s), the deadline beats the read-ahead queue's replay and closes the window, and
+    //   replay 2 is dropped as a past number.
     #[tokio::test]
     async fn a_gate_that_shuts_and_reopens_inside_a_stalled_write_still_stops_the_resume_clock() {
         let budget = 100;
@@ -7041,7 +6521,6 @@ mod tests {
         (supervisor, clock)
     }
 
-    /// A window that received 1 and opened a hole at 3 — written as requested now. What it returns = that window's deadline.
     fn open_window(sup: &mut Supervisor<TestWire>) -> Instant {
         let now = sup.clock.now();
         for seq in [1, 3] {
@@ -7059,7 +6538,6 @@ mod tests {
             .expect("the window opened")
     }
 
-    /// Closes the read gate for `secs` seconds and then opens it — budget 100 · streams unused, so it closes at 100 bytes.
     fn shut_for(sup: &Supervisor<TestWire>, clock: &ManualClock, secs: u64) {
         let gate = sup.ledger.charge(100);
         clock.advance(Duration::from_secs(secs));
@@ -7088,8 +6566,8 @@ mod tests {
         );
     }
 
-    // ★If an unseen span straddles the ordering area's hold, treat it as held from that first span★ — if we looked only at when the ordering area started holding,
-    //   we would lose the 1 s it was closed before that, and if we pushed the two separately we would push the overlapping 1 s twice.
+    // ★An unseen span straddling the ordering area's hold counts as held from that first span★ — looking only at when the ordering area started
+    //   would lose the 1 s closed before, and pushing the two separately would push the overlapping 1 s twice.
     #[test]
     fn an_unseen_interval_reaching_into_a_held_line_starts_the_pause_at_its_own_start() {
         let (mut sup, clock) = idle_supervisor();
@@ -7119,8 +6597,7 @@ mod tests {
         );
     }
 
-    // ★If an unseen span ended before the current hold, push it separately★ — if we pulled the current hold's start back to that span's start,
-    //   we would push even the time it was open in between.
+    // ★An unseen span that ended before the current hold is pushed separately★ — pulling the hold's start back to that span would push the open time in between.
     #[test]
     fn an_unseen_interval_that_ended_before_the_current_pause_is_shifted_on_its_own() {
         let (mut sup, clock) = idle_supervisor();
@@ -7143,8 +6620,8 @@ mod tests {
         );
     }
 
-    // ★A span closed and opened while we knew it was held is not pushed again even if the count hands it over separately★ — that span is all after
-    //   the hold started, so it is already inside the time pushed at release.
+    // ★A span closed and opened while we knew it was held is not pushed again even if the count hands it over separately★ — it is all after the hold
+    //   started, so already inside the time pushed at release.
     #[test]
     fn intervals_inside_a_known_pause_are_not_shifted_twice() {
         let (mut sup, clock) = idle_supervisor();
@@ -7167,8 +6644,8 @@ mod tests {
         );
     }
 
-    // ★Even under a policy that cuts on decode failure, salvaging hands over what is after it too★ — during operation what comes after that one frame is handed over by
-    //   salvaging, so if it stopped mid-salvage, the same read-ahead queue would be handed over or dropped depending on where it was cut.
+    // ★Even under a cut-on-decode-failure policy, salvaging hands over what follows★ — during operation what follows that frame is handed over by
+    //   salvaging; stopping mid-salvage would hand over or drop the same read-ahead queue depending on where it was cut.
     #[tokio::test]
     async fn salvaging_carries_on_past_a_frame_it_cannot_decode() {
         let mut h = build_with(
@@ -7248,7 +6725,7 @@ mod tests {
         );
     }
 
-    // ★Teardown folds the open window before dropping the ledger★ — if not, held pieces vanish with neither delivery nor truncation report.
+    // ★Teardown folds the open window before dropping the ledger★ — else held pieces vanish without delivery or truncation report.
     #[tokio::test]
     async fn closing_hands_over_a_held_chunk_as_a_truncation_before_closed() {
         let (mut h, endpoint) = streaming(BYTE_BUDGET, 4096).await;
@@ -7285,12 +6762,10 @@ mod tests {
 
     // ── 3-0 U3: pre-close flush ──
     //
-    // ★Put the close code outside the crate's reserved range★ — if it equals the default close (`GOING_AWAY` · "closing"), then 「loaded the close we were given」
-    //   cannot be measured.
+    // ★Put the close code outside the crate's reserved range★ — equal to the default close (`GOING_AWAY` · "closing"), 「loaded the close we were given」 cannot be measured.
 
     const BYE: CloseCode = CloseCode(CloseCode::CONSUMER_BASE);
 
-    /// What went out on the link in a readable form — a frame as its body, a close as `close:code:reason`.
     fn wire_labels(msgs: &[ClientMsg]) -> Vec<String> {
         msgs.iter()
             .map(|msg| match msg {
@@ -7355,7 +6830,7 @@ mod tests {
         assert!(h.exited_cleanly().await);
     }
 
-    // ★Push the clock to 1 ms before the deadline and look★ — this separates a regression that folds at the write deadline (5 s) or the teardown limit without a deadline.
+    // ★Advance the clock to 1 ms before the deadline and look★ — separates a regression folding at the write deadline (5 s) or the teardown limit.
     // ★Make the first write already blocked before the drain★ — the deadline must be set mid-write (the wake of `Supervisor::guard`).
     #[tokio::test]
     async fn a_peer_that_does_not_read_is_closed_at_the_flush_deadline() {
@@ -7403,8 +6878,7 @@ mod tests {
         assert!(h.exited_cleanly().await);
     }
 
-    // ★Even if the receiving line is backed up (even if the ordering area is holding), the drain's deadline runs★ — and the end does not
-    //   come until the receiving side drains (teardown loads what it holds).
+    // ★Even with the receiving line backed up (ordering area holding), the drain's deadline runs★ — and the end waits until the receiver drains (teardown loads what it holds).
     #[tokio::test]
     async fn a_held_inbound_line_neither_holds_back_the_flush_deadline_nor_loses_what_was_held() {
         let (mut h, endpoint) = live_on_a_full_line().await;
@@ -7447,9 +6921,8 @@ mod tests {
         assert_eq!(poll_immediate(done.as_mut()).await, Some(()));
     }
 
-    // ★The deadline and the write end become ready in the same turn★ — it must close whichever `select!` picks. If the write wins it returns to the start of the turn
-    //   and sees the past deadline as a timer (if put into `wake_at` and `on_timer` does not look, the progress check blows up).
-    //   The pick is random so it runs many turns.
+    // ★Deadline and write end ready in the same turn★ — it must close whichever `select!` picks. If the write wins, the turn start sees the past deadline as a
+    //   timer (if it is in `wake_at` but `on_timer` does not look, the progress check blows up). The pick is random, so many turns.
     #[tokio::test]
     async fn a_write_that_ends_on_the_flush_deadline_still_closes_cleanly() {
         for round in 0..24 {
@@ -7477,10 +6950,9 @@ mod tests {
         }
     }
 
-    // ★If the deadline passes while draining the queue back to back (`Turn::Outbound`), it does not start the next write★ (start of `Supervisor::guard`)
-    //   — that batch does not return to the start of the turn so the timer cannot cut in. Stand it on a keepalive, fill the queue, then release, so the next
-    //   turn drains in a batch and stands on the first write (that arrangement of `a_consumer_leaving_mid_batch_…`). The first write and the deadline are ready in the same
-    //   turn and the pick is random so it runs many turns.
+    // ★If the deadline passes while draining the queue back to back (`Turn::Outbound`), the next write does not start★ (start of `Supervisor::guard`)
+    //   — that batch does not return to the turn start so the timer cannot cut in. Stand on a keepalive, fill the queue, release, so the next turn drains
+    //   in a batch and stands on the first write (as `a_consumer_leaving_mid_batch_…`). First write and deadline ready in the same turn, random pick: many turns.
     #[tokio::test]
     async fn no_write_starts_after_the_flush_deadline_in_the_middle_of_a_batch() {
         for round in 0..24 {
@@ -7525,7 +6997,7 @@ mod tests {
         }
     }
 
-    // ★Measure while still operating★ — keep the supervisor standing on a write before the marker. If measured after folding, it cannot be told apart from rejected because it is outside operation.
+    // ★Measure while still operating★ — keep the supervisor on a write before the marker; after folding it cannot be told from rejected-because-outside-operation.
     #[tokio::test]
     async fn every_send_after_the_marker_is_refused_on_the_spot_and_not_counted() {
         let (mut h, endpoint) = live().await;
@@ -7595,9 +7067,8 @@ mod tests {
         assert_eq!(poll_immediate(done).await, Some(()));
     }
 
-    // ★Even if it closes at once, that close frame is within the same deadline★ — left blocked, it ends at `flush_timeout` (not the write deadline of 5 s),
-    //   and released, the close we were given goes out. Control and the drain-start wake are ready in the same turn and which one is caught first is random,
-    //   so the branch left blocked runs many turns.
+    // ★Even if it closes at once, that close frame is within the same deadline★ — left blocked it ends at `flush_timeout` (not the 5 s write deadline); released,
+    //   the close we were given goes out. Control and the drain-start wake are ready in the same turn and which is caught first is random, so the blocked branch runs many turns.
     #[tokio::test]
     async fn a_full_outbound_queue_closes_at_once_without_writing_what_it_held() {
         for (round, unstall) in (0..12).map(|round| (round, round == 0)) {
@@ -7624,7 +7095,7 @@ mod tests {
             })
             .await;
             if unstall {
-                // The close that drops the channel is caught by the write block — that one is a place we deliberately do not listen at, so release it (`drop_link`).
+                // The close that drops the channel is caught by the write block — a place we deliberately do not listen at; release it (`drop_link`).
                 endpoint.stall_writes(false);
             } else {
                 h.clock.advance(Policy::default().flush_timeout);
@@ -7772,8 +7243,8 @@ mod tests {
         assert_eq!(poll_immediate(done).await, Some(()));
     }
 
-    // ★The marker is not bound to a generation★ — a marker stamped with an old generation, crossing a re-attach, also closes. We create that crossing directly (in the order the handle
-    //   stamps, it occurs only in a narrow race). We do not push the clock — if pushed, the drain's deadline closes even without that decision.
+    // ★The marker is not bound to a generation★ — a marker stamped with an old generation, crossing a re-attach, also closes. Created directly (in the
+    //   handle's stamping order it needs a narrow race). The clock is not advanced — the drain's deadline would close even without that decision.
     #[tokio::test]
     async fn a_marker_stamped_with_an_older_generation_still_closes() {
         let (mut h, endpoint) = live().await;
@@ -7804,8 +7275,7 @@ mod tests {
         );
     }
 
-    // ★Call before the supervisor runs★ — the `select!` in the dial phase picks at random, so without a check that looks ahead, the dial could be
-    //   polled once. It runs many turns.
+    // ★Call before the supervisor runs★ — the dial phase's `select!` picks at random, so without a look-ahead check the dial could be polled once. Many turns.
     #[tokio::test]
     async fn a_flush_asked_before_the_supervisor_runs_never_dials() {
         for round in 0..16 {
@@ -7821,8 +7291,7 @@ mod tests {
         }
     }
 
-    // ★The drain continues even if all handles are released★ — if all are released, the control channel closes and the supervisor reads it as 「close」. While the marker
-    //   holds that channel, it does not close.
+    // ★The drain continues even if all handles are released★ — releasing all closes the control channel, which the supervisor reads as 「close」; the marker holds it open.
     #[tokio::test]
     async fn dropping_every_handle_mid_flush_still_writes_what_was_accepted() {
         let (h, endpoint) = live().await;
@@ -7848,7 +7317,7 @@ mod tests {
         assert_eq!(poll_immediate(done).await, Some(()));
     }
 
-    // ★A bare close does not wait for the marker (the control channel overtakes)★ — the close that is loaded is the one written earlier.
+    // ★A bare close does not wait for the marker (the control channel overtakes)★ — the close loaded is the one written earlier.
     #[tokio::test]
     async fn a_plain_close_during_a_flush_jumps_the_queue_and_speaks_the_flush_goodbye() {
         let (h, endpoint) = live().await;
@@ -7879,9 +7348,8 @@ mod tests {
         );
     }
 
-    // ★Call the drain while the close that drops the channel to redial is blocked★ — that close was caught by the write deadline (5 s) before the drain,
-    //   but the drain's deadline (2 s) covers it too (`drop_link` listens for the drain start). Pushing the clock to 1 ms before the deadline and looking
-    //   separates it from a regression that ends at the write deadline.
+    // ★Call the drain while the close that drops the channel to redial is blocked★ — it was caught by the write deadline (5 s) before the drain, but the
+    //   drain's deadline (2 s) covers it too (`drop_link` listens for the drain start). Advancing to 1 ms before the deadline separates it from a regression ending at the write deadline.
     #[tokio::test]
     async fn a_flush_asked_while_a_dropped_link_is_still_closing_ends_at_the_flush_deadline() {
         let (mut h, endpoint) = live().await;
@@ -7925,11 +7393,11 @@ mod tests {
         assert!(h.exited_cleanly().await);
     }
 
-    // ★Call the reconnect right before the drain★ — the handle refuses only calls after the drain, so that one stays in the control queue.
-    //   Wherever the supervisor reads it, it must drop it for the drain to end with the close we were given. Three arrangements split the places it reads — a call
-    //   on a blocked write (mid-write · deterministic) · a call without a block (the operating wait mostly · mid-write sometimes) · a call on a blocked write and
-    //   release at once (the write end and control are ready in the same turn so the control collection at the start of the turn is about half). The pick is random so each arrangement
-    //   runs 16 turns (the probability of never stepping on the rarest branch — the third arrangement's start of the turn — even once is under 1e-4).
+    // ★Call the reconnect right before the drain★ — the handle refuses only calls after the drain, so that one stays in the control queue; wherever the
+    //   supervisor reads it, it must drop it so the drain ends with the close we were given. Three arrangements split the read places: a call on a blocked write
+    //   (mid-write · deterministic) · a call without a block (mostly the operating wait · sometimes mid-write) · a call on a blocked write released at once (write end and
+    //   control ready in the same turn, so the turn-start control collection is about half). The pick is random so each runs 16 turns (the chance of never hitting the
+    //   rarest branch is under 1e-4).
     #[tokio::test]
     async fn a_reconnect_asked_just_before_a_flush_does_not_cancel_it() {
         for round in 0..48 {
@@ -7972,13 +7440,12 @@ mod tests {
         }
     }
 
-    // ★If the connection is lost mid-drain, it does not show the reconnect machine's give-up · reconnect★ — the shell shows a reconnect popup on
-    //   `GaveUp` (ADR-0180). With one budget that disconnect is the give-up (`GaveUp`) and with three it is `Backoff` — we measure both.
-    // ★Make the disconnect from the peer's close★ — while the write is blocked the peer closes (it goes into the read-ahead queue) and the write deadline cuts that write.
-    //   The disconnect cause is the peer's close read first (`earlier_end`), and the close that drops the channel is still blocked, so we look at the state
-    //   published in between. Set the drain's deadline longer than the write deadline — if that deadline closes first, no disconnect occurs.
-    // ★The close frame carries the code of the disconnect cause, not the close we were given★ (`drop_link`) — it is a channel where the write works once the block is released, so that code
-    //   really goes out.
+    // ★If the connection is lost mid-drain, the reconnect machine's give-up · reconnect is not shown★ — the shell shows a reconnect popup on `GaveUp`
+    //   (ADR-0180). With one budget that disconnect is `GaveUp`, with three `Backoff` — both are measured.
+    // ★Make the disconnect from the peer's close★ — while the write is blocked the peer closes (into the read-ahead queue) and the write deadline cuts that write;
+    //   the cause is the peer's close read first (`earlier_end`), and the close that drops the channel is still blocked, so we look at the state published in
+    //   between. Set the drain's deadline longer than the write deadline — if it closed first, no disconnect would occur.
+    // ★The close frame carries the code of the disconnect cause, not the close we were given★ (`drop_link`) — the write works once released, so that code really goes out.
     #[tokio::test]
     async fn a_link_lost_mid_flush_neither_gives_up_nor_backs_off_and_closes_with_the_cause_code() {
         let write_deadline = Policy::default().write_deadline;
@@ -8041,9 +7508,9 @@ mod tests {
         }
     }
 
-    // ★If, after deciding to give up, a drain is called while the close that drops that channel is blocked, `GaveUp` does not go up★ — when the machine
-    //   emits `[.., DropLink, Emit(GaveUp)]` it is before the drain so `fold_into_close` cannot collect it (`apply` collects it when emitting).
-    //   Cut by the write deadline with one budget so it decides to give up, and call the drain while the close is blocked.
+    // ★If a drain is called after deciding to give up while the close that drops that channel is blocked, `GaveUp` does not go up★ — the machine's
+    //   `[.., DropLink, Emit(GaveUp)]` precedes the drain so `fold_into_close` cannot collect it (`apply` collects it when emitting). Cut by the write
+    //   deadline with one budget so it gives up, then call the drain while the close is blocked.
     #[tokio::test]
     async fn a_flush_asked_while_dropping_a_link_after_giving_up_never_reports_the_give_up() {
         let policy = Policy {
@@ -8096,7 +7563,7 @@ mod tests {
         assert!(h.exited_cleanly().await);
     }
 
-    // ★The close frame of a non-drain close waits up to the write deadline★ — this separates it from a regression that shortens it to the drain's deadline.
+    // ★The close frame of a non-drain close waits up to the write deadline★ — separates it from a regression shortening it to the drain's deadline.
     #[tokio::test]
     async fn a_plain_close_waits_for_its_closing_frame_up_to_the_write_deadline() {
         let (h, endpoint) = live().await;
@@ -8121,8 +7588,8 @@ mod tests {
         assert!(h.exited_cleanly().await);
     }
 
-    // ★A request before the marker is written and its reply is not waited for★ — it closes at the marker and wakes as a sent disconnect (`Explicit`). We do not
-    //   push the clock — this separates it from a regression that wakes on the request deadline.
+    // ★A request before the marker is written and its reply is not waited for★ — it closes at the marker and wakes as a sent disconnect (`Explicit`);
+    //   the clock is not advanced — separates it from a regression waking on the request deadline.
     #[tokio::test]
     async fn requests_ahead_of_the_marker_are_written_then_woken_as_sent_without_their_reply() {
         let (mut h, endpoint) = live().await;
