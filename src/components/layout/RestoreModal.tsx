@@ -1,11 +1,7 @@
-// 「이전 화면을 복원할까요?」 (restore the previous screen?) after an abnormal exit — a modal for the main window only (TRD S21-storage §6-7 · user decision D4).
-//
-// ★While up, main cannot be used★ — the layout beneath is locked by `AppLayout` with `inert`, and this component moves focus
-//   inside, traps Tab inside, and stops the shortcut dispatcher (N4). The dispatcher lets edit targets (xterm · chat input)
-//   pass through, so merely stopping it does not block typing beneath — the three locks are one set.
-// ★Closing is decided by state★ — it does not close because a button was pressed. When the state pulled again after the answer or `restore:changed` (including an answer sent over the bus)
-//   is no longer `awaiting`, `AppLayout` withdraws this. On failure it stays `awaiting` so it can be answered again.
-// ★Only the human UI is blocked★ — other windows (tree · popout) and LLM bus commands are not blocked.
+// "Restore the previous screen?" after an abnormal exit — a modal for the main window only (TRD S21-storage §6-7).
+// ★While up, main cannot be used★ — the layout beneath is locked by `AppLayout` with `inert`, and this component moves focus inside, traps Tab inside, and stops the shortcut dispatcher (N4). The dispatcher lets edit targets (xterm · chat input) pass, so stopping it alone does not block typing beneath — the three locks are one set.
+// ★Closing is decided by state★, not by a button press: when the state pulled again after the answer or `restore:changed` (including an answer sent over the bus) is no longer `awaiting`, `AppLayout` withdraws this. On failure it stays `awaiting` so it can be answered again.
+// ★Only the human UI is blocked★ — other windows (tree · popout) and LLM bus commands are not.
 // ★What it shows is only what the bus `restore.status` carries★ — save time · number of windows · number of tabs.
 
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
@@ -30,12 +26,11 @@ const savedAtFormat = perLanguage(
 )
 
 /**
- * Unix milliseconds → date · time in this PC's time zone. `null` for a value that cannot be represented as a `Date` (outside ±8.64e15 · not finite).
+ * Unix milliseconds → date · time in this PC's time zone; `null` for a value not representable as a `Date` (outside ±8.64e15 · not finite).
  */
 export function formatSavedAt(ms: number): string | null {
   const at = new Date(ms)
-  // ★If the value is passed on unfiltered `format` throws a RangeError and not the modal but the whole screen goes to the error boundary★ — the shell carries the copy's
-  //   `saved_at_ms` as a u64 as is and the copy is the disk bytes as is, so a corrupted or hand-edited file exceeds this range.
+  // ★Unfiltered, `format` throws a RangeError and the whole screen — not the modal — goes to the error boundary★: the shell carries the copy's `saved_at_ms` as a u64 as is and the copy is the disk bytes as is, so a corrupted or hand-edited file exceeds this range.
   return Number.isNaN(at.getTime()) ? null : savedAtFormat().format(at)
 }
 
@@ -63,8 +58,7 @@ export default function RestoreModal({ status, onAnswer }: Props) {
     return () => setKeybindingsPaused(false)
   }, [])
 
-  // When it first appears, and when the answer ends and the buttons come alive again, bring focus in if it is outside (body · the spot a disabled button dropped).
-  // Put it on the less destructive 「이전 화면 복원」 (restore previous screen) — so a single Enter does not become an irreversible refusal.
+  // On first appearance, and when the answer ends and the buttons come alive, bring focus in if it is outside (body · where a disabled button dropped it). Prefer the less destructive "restore previous screen" so a single Enter is not an irreversible refusal.
   useEffect(() => {
     if (busy) return
     if (!dialogRef.current?.contains(document.activeElement)) acceptRef.current?.focus()
@@ -75,7 +69,7 @@ export default function RestoreModal({ status, onAnswer }: Props) {
     setFailed(false)
     onAnswer(accept)
       .catch(e => {
-        console.warn('[restore] restore_answer 실패:', e)
+        console.warn('[restore] restore_answer failed:', e)
         setFailed(true)
       })
       .finally(() => setBusy(false))
@@ -106,8 +100,7 @@ export default function RestoreModal({ status, onAnswer }: Props) {
 
   const { windows, tabs } = status
   const savedAt = status.saved_at_ms === null ? null : formatSavedAt(status.saved_at_ms)
-  // `null` is a value that does not come while asking — if it comes, put it on the 「지운다 · 되돌릴 수 없다」 (deletes · cannot be undone) side. Saying it stays and then deleting
-  //   is worse than the opposite.
+  // `null` does not come while asking — if it does, put it on the "deletes · cannot be undone" side; saying it stays and then deleting is worse than the opposite.
   const warning = status.durable === false ? t('restore.rejectWarningNotSaving') : t('restore.rejectWarning')
 
   return (

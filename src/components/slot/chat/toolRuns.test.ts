@@ -87,14 +87,14 @@ function groupsOf(rows: DisplayRow[]): Extract<DisplayRow, { kind: 'toolGroup' }
 
 // ── groupToolRuns ──
 
-describe('groupToolRuns — 묶음 짓기', () => {
-  it('도구 하나는 묶지 않는다 — 그 행 그대로', () => {
+describe('groupToolRuns — building groups', () => {
+  it('one tool is not grouped — that row as is', () => {
     const a = tool('a')
     const after = thought('then')
     expect(shape(groupToolRuns([a, after], true, rowKind))).toEqual([a.itemId, after.itemId])
   })
 
-  it('도구 둘이 이어지면 묶음 하나 — 키 = 첫 호출의 백엔드 id', () => {
+  it('two consecutive tools make one group — key = backend id of the first call', () => {
     const a = tool('a')
     const b = tool('b')
     expect(shape(groupToolRuns([a, b], false, rowKind))).toEqual([
@@ -102,7 +102,7 @@ describe('groupToolRuns — 묶음 짓기', () => {
     ])
   })
 
-  it('그리지 않는 행(벤더 결과 운반 · usage · 빈 생각)이 끼어도 이어지고 멤버 · 줄 어디에도 안 나온다', () => {
+  it('even with non-drawn rows in between (vendor result carrier · usage · empty thought) it continues, and they appear in neither members nor lines', () => {
     const a = tool('a')
     const b = tool('b')
     const c = tool('c')
@@ -112,7 +112,7 @@ describe('groupToolRuns — 묶음 짓기', () => {
     ])
   })
 
-  it('도구 사이의 비지 않은 생각은 멤버로 흡수한다(U5)', () => {
+  it('a non-empty thought between tools is absorbed as a member (U5)', () => {
     const a = tool('a')
     const mid = thought('look at b next')
     const b = tool('b')
@@ -122,21 +122,21 @@ describe('groupToolRuns — 묶음 짓기', () => {
   })
 
   it.each([
-    ['글', text],
-    ['사용자 말풍선', bubble],
-    ['턴 구분선', separator],
-    ['결말', outcome],
-    ['오류', errorRow],
-    ['모르는 사건', unsupported],
-    ['그 밖의 탈출구 항목', escape],
-  ] as const)('%s 이 끼면 끊는다 — 양쪽이 도구 하나씩이라 묶음이 없다', (_label, make) => {
+    ['text', text],
+    ['user bubble', bubble],
+    ['turn divider', separator],
+    ['outcome', outcome],
+    ['error', errorRow],
+    ['unknown event', unsupported],
+    ['other escape-hatch item', escape],
+  ] as const)('a %s in between breaks it — one tool on each side so there is no group', (_label, make) => {
     const a = tool('a')
     const mid = (make as (s: string) => StructuredItem)('x')
     const b = tool('b')
     expect(shape(groupToolRuns([a, mid, b], true, rowKind))).toEqual([a.itemId, mid.itemId, b.itemId])
   })
 
-  it('끊는 행 양쪽이 각각 둘 이상이면 묶음 둘 — 키가 다르다', () => {
+  it('if the rows on both sides of a breaker each have two or more it makes two groups — different keys', () => {
     const [a, b] = [tool('a'), tool('b')]
     const mid = text('mid')
     const [c, d] = [tool('c'), tool('d')]
@@ -144,7 +144,7 @@ describe('groupToolRuns — 묶음 짓기', () => {
     expect(rows.map(r => (r.kind === 'item' ? r.item.itemId : r.key))).toEqual(['tool:a', mid.itemId, 'tool:c'])
   })
 
-  it('첫 도구 앞 · 마지막 도구 뒤의 생각은 멤버가 아니고 제자리에 줄로 남는다', () => {
+  it('thoughts before the first tool and after the last tool are not members and stay as lines in place', () => {
     const before = thought('plan')
     const [a, b] = [tool('a'), tool('b')]
     const after = thought('summarize')
@@ -158,7 +158,7 @@ describe('groupToolRuns — 묶음 짓기', () => {
     ])
   })
 
-  it('묶음 안의 그리지 않는 행을 빼면 모든 항목이 원래 순서로 한 번씩 나온다', () => {
+  it('removing the non-drawn rows inside a group, every item comes out once in the original order', () => {
     const items = [text('hi'), tool('a'), carrier('a'), tool('b'), thought('t'), text('done'), separator(), tool('c')]
     const seen = groupToolRuns(items, false, rowKind).flatMap(r =>
       r.kind === 'item' ? [r.item.itemId] : r.members.map(m => m.itemId),
@@ -168,33 +168,33 @@ describe('groupToolRuns — 묶음 짓기', () => {
   })
 })
 
-describe('groupToolRuns — live(도는 중 — 머리 시제)', () => {
-  it('턴 중 · 묶음이 꼬리면 live', () => {
+describe('groupToolRuns — live (running — head tense)', () => {
+  it('mid-turn · if the group is the tail it is live', () => {
     const rows = groupToolRuns([text('go'), tool('a'), tool('b')], true, rowKind)
     expect(groupsOf(rows)[0].live).toBe(true)
   })
 
-  it('턴 중 · 뒤가 생각 · 그리지 않는 행뿐이면 live 그대로 — 생각이 왔다고 끝난 것으로 보지 않는다', () => {
+  it('mid-turn · if only thoughts and non-drawn rows follow it stays live — a thought arriving is not read as finished', () => {
     const rows = groupToolRuns([tool('a'), tool('b'), thought('hmm'), usage(), thought('  ')], true, rowKind)
     expect(groupsOf(rows)[0].live).toBe(true)
   })
 
-  it('끊는 행이 뒤에 오면 live 가 아니다', () => {
+  it('if a breaker row comes after it is not live', () => {
     const rows = groupToolRuns([tool('a'), tool('b'), thought('hmm'), text('answer')], true, rowKind)
     expect(groupsOf(rows)[0].live).toBe(false)
   })
 
-  it('턴이 닫혔으면 꼬리여도 live 가 아니다', () => {
+  it('if the turn is closed even the tail is not live', () => {
     const rows = groupToolRuns([tool('a'), tool('b')], false, rowKind)
     expect(groupsOf(rows)[0].live).toBe(false)
   })
 
-  it('꼬리 묶음만 live — 앞 묶음은 끝난 것이다', () => {
+  it('only the tail group is live — earlier groups are finished', () => {
     const rows = groupToolRuns([tool('a'), tool('b'), text('x'), tool('c'), tool('d')], true, rowKind)
     expect(groupsOf(rows).map(g => g.live)).toEqual([false, true])
   })
 
-  it('도는 꼬리 묶음이 자라도 키는 그대로다 — 생각 뒤에 도구가 이어지면 그 생각이 멤버가 된다', () => {
+  it('even as the running tail group grows its key stays — if a tool follows a thought that thought becomes a member', () => {
     const [a, b] = [tool('a'), tool('b')]
     const mid = thought('next')
     const c = tool('c')
@@ -207,25 +207,25 @@ describe('groupToolRuns — live(도는 중 — 머리 시제)', () => {
   })
 })
 
-describe('groupToolRuns — 키', () => {
-  it('첫 호출에 id 가 없으면 item:<itemId>', () => {
+describe('groupToolRuns — key', () => {
+  it('if the first call has no id it is item:<itemId>', () => {
     const a = tool(null)
     expect(groupsOf(groupToolRuns([a, tool('b')], false, rowKind))[0].key).toBe(`item:${a.itemId}`)
   })
 
-  it('빈 문자열 id 도 없는 것으로 본다', () => {
+  it('an empty-string id is also seen as absent', () => {
     const a = tool('')
     expect(groupsOf(groupToolRuns([a, tool('b')], false, rowKind))[0].key).toBe(`item:${a.itemId}`)
   })
 
-  it('두 묶음의 첫 호출이 같은 id 면 뒤 묶음은 item:<itemId> — 키가 겹치지 않는다', () => {
+  it('if the first calls of two groups share the same id the later group is item:<itemId> — keys do not collide', () => {
     const first = tool('dup')
     const second = tool('dup')
     const keys = groupsOf(groupToolRuns([first, tool('x'), text('-'), second, tool('y')], false, rowKind)).map(g => g.key)
     expect(keys).toEqual(['tool:dup', `item:${second.itemId}`])
   })
 
-  it('isToolGroupKey — 지은 키 모양만 받는다', () => {
+  it('isToolGroupKey — accepts only the built key shape', () => {
     expect(isToolGroupKey('tool:call_1')).toBe(true)
     expect(isToolGroupKey('item:12')).toBe(true)
     expect(isToolGroupKey('call_1')).toBe(false)
@@ -235,7 +235,7 @@ describe('groupToolRuns — 키', () => {
   })
 })
 
-describe('groupToolRuns — replay(같은 사건열 = 같은 결과)', () => {
+describe('groupToolRuns — replay (same event sequence = same result)', () => {
   const frames = [
     { type: 'TextDelta', text: 'start', turn_id: null, message_id: null },
     { type: 'ToolCall', name: 'Grep', args_json: '{}', id: 'g1', turn_id: null, message_id: null, category: 'Search' },
@@ -253,7 +253,7 @@ describe('groupToolRuns — replay(같은 사건열 = 같은 결과)', () => {
     return groupToolRuns(acc.snapshot(), !acc.isTurnDone(), rowKind)
   }
 
-  it('reset 뒤 다시 먹여도 줄 · 키 · 멤버가 같다 — 고른 펼침이 replay 를 넘는다', () => {
+  it('refeeding after reset gives the same lines · keys · members — the chosen expansion survives replay', () => {
     const acc = new StructuredEventAccumulator()
     const first = feedAll(acc)
     acc.reset()
@@ -265,8 +265,8 @@ describe('groupToolRuns — replay(같은 사건열 = 같은 결과)', () => {
 
 // ── summarizeGroup · decision ──
 
-describe('summarizeGroup — 종류별 수', () => {
-  it('고정 순서(검색 · 읽기 · 목록 · 편집 · 명령 · 웹 · 에이전트 · MCP · 기타) · 0 인 종류는 빠진다', () => {
+describe('summarizeGroup — count per kind', () => {
+  it('fixed order (search · read · list · edit · command · web · agent · MCP · other) · kinds with 0 drop out', () => {
     const calls = (['Other', 'Command', 'Search', 'Read', 'Search', 'Mcp'] as const).map(category =>
       tool(null, { category }),
     )
@@ -279,7 +279,7 @@ describe('summarizeGroup — 종류별 수', () => {
     ])
   })
 
-  it('종류 칸이 없거나 모르는 낱말(프로토타입 이름 포함)이면 기타', () => {
+  it('if the kind field is missing or an unknown word (including prototype names) it is other', () => {
     const calls = [
       tool(null, { category: undefined }),
       tool(null, { category: 'Teleport' as never }),
@@ -289,13 +289,13 @@ describe('summarizeGroup — 종류별 수', () => {
   })
 })
 
-describe('summarizeGroup — 오류 · 거부 셈', () => {
-  it('codex 실패 = 표식 failed', () => {
+describe('summarizeGroup — error · rejection count', () => {
+  it('codex failure = marker failed', () => {
     const s = summarizeGroup([tool('a', { resultMark: 'failed' }), tool('b')], new Set())
     expect([s.errors, s.declined]).toEqual([1, 0])
   })
 
-  it('claude 파싱 오류 = buildToolResultMap 의 isError 인 호출(vendorErrorIdsOf)', () => {
+  it('claude parse error = a call whose buildToolResultMap isError (vendorErrorIdsOf)', () => {
     const results = new Map([
       ['a', { content: 'no such file', isError: true }],
       ['b', { content: 'ok', isError: false }],
@@ -306,22 +306,22 @@ describe('summarizeGroup — 오류 · 거부 셈', () => {
     expect([s.errors, s.declined]).toEqual([1, 0])
   })
 
-  it('거부 셈 = refused + declined — 오류 수에 안 든다', () => {
+  it('rejection count = refused + declined — not counted toward the error count', () => {
     const s = summarizeGroup([tool('a', { resultMark: 'refused' }), tool('b', { resultMark: 'declined' }), tool('c')], new Set())
     expect([s.errors, s.declined]).toEqual([0, 2])
   })
 
-  it('표식 없음 · 칸 없음은 셈에 안 든다 — 성공이 아니라 모름이다', () => {
+  it('no marker · no field is not counted — it is unknown, not success', () => {
     const s = summarizeGroup([tool('a', { resultMark: undefined }), tool('b', { resultMark: null })], new Set())
     expect([s.errors, s.declined]).toEqual([0, 0])
   })
 
-  it('한 호출은 한 칸에만 — 거부 표식이 벤더 오류보다 먼저다', () => {
+  it('one call goes in one cell only — the rejection marker comes before the vendor error', () => {
     const s = summarizeGroup([tool('a', { resultMark: 'refused' })], new Set(['a']))
     expect([s.errors, s.declined]).toEqual([0, 1])
   })
 
-  it('뒤에 온 결과가 앞 표식을 덮은 값으로 센다(누산기 경유)', () => {
+  it('a later result is counted as the value overwriting the earlier marker (via the accumulator)', () => {
     const acc = new StructuredEventAccumulator()
     const call = (id: string) =>
       acc.feed(JSON.stringify({ type: 'ToolCall', name: 'Bash', args_json: '{}', id, turn_id: null, message_id: null }))
@@ -341,14 +341,14 @@ describe('summarizeGroup — 오류 · 거부 셈', () => {
   })
 })
 
-describe('DECLINED_MARK — 두 값', () => {
+describe('DECLINED_MARK — two values', () => {
   const calls = [tool('a', { resultMark: 'refused' }), tool('b', { resultMark: 'declined' }), tool('c', { resultMark: 'failed' })]
 
-  it("확정값은 'own'(사용자 결정 U2-a)", () => {
+  it("the confirmed value is 'own' (user decision U2-a)", () => {
     expect(DECLINED_MARK).toBe('own')
   })
 
-  it("'own' — 거부는 따로: 오류 1 · 거부 2 · 사유 키가 출처별", () => {
+  it("'own' — rejection separately: error 1 · rejected 2 · reason key per source", () => {
     const s = summarizeGroup(calls, new Set(), 'own')
     expect([s.errors, s.declined]).toEqual([1, 2])
     expect(toolCallVerdict('refused', false, 'own')).toBe('declined')
@@ -356,7 +356,7 @@ describe('DECLINED_MARK — 두 값', () => {
     expect(declinedReasonKey('declined', 'own')).toBe('chat.toolDeclinedReason')
   })
 
-  it("'error' — 거부 둘 다 오류로: 오류 3 · 거부 0 · 사유 줄 없음", () => {
+  it("'error' — both rejections as errors: error 3 · rejected 0 · no reason line", () => {
     const s = summarizeGroup(calls, new Set(), 'error')
     expect([s.errors, s.declined]).toEqual([3, 0])
     expect(toolCallVerdict('refused', false, 'error')).toBe('error')
@@ -365,13 +365,13 @@ describe('DECLINED_MARK — 두 값', () => {
     expect(declinedReasonKey('declined', 'error')).toBeNull()
   })
 
-  it('기본 인자는 DECLINED_MARK 를 따른다', () => {
+  it('the default argument follows DECLINED_MARK', () => {
     expect(summarizeGroup(calls, new Set())).toEqual(summarizeGroup(calls, new Set(), DECLINED_MARK))
   })
 })
 
 describe('toolCallVerdict · declinedReasonKey', () => {
-  it('실패 · 벤더 오류 = error · 표식 없음 = null', () => {
+  it('failure · vendor error = error · no marker = null', () => {
     expect(toolCallVerdict('failed', false)).toBe('error')
     expect(toolCallVerdict(null, true)).toBe('error')
     expect(toolCallVerdict(undefined, true)).toBe('error')
@@ -379,17 +379,17 @@ describe('toolCallVerdict · declinedReasonKey', () => {
     expect(toolCallVerdict(undefined, false)).toBeNull()
   })
 
-  it('거부가 아니면 사유 키 없음', () => {
+  it('if not a rejection there is no reason key', () => {
     expect(declinedReasonKey('failed')).toBeNull()
     expect(declinedReasonKey(null)).toBeNull()
     expect(declinedReasonKey(undefined)).toBeNull()
   })
 })
 
-describe('summaryParts — 요약 줄', () => {
+describe('summaryParts — summary line', () => {
   const line = (s: ToolGroupSummary): string => summaryParts(s).map(p => t(p.key, { count: String(p.count) })).join(' · ')
 
-  it('종류 → 오류 → 거부 순서 — 「… · 오류 1 · 거부 1」', () => {
+  it('order kind → error → rejection — 「… · error 1 · rejected 1」', () => {
     const calls = [
       tool('a', { category: 'Search', resultMark: 'declined' }),
       tool('b', { category: 'Read', resultMark: 'failed' }),
@@ -400,17 +400,17 @@ describe('summaryParts — 요약 줄', () => {
     expect(summaryParts(s).map(p => p.tone)).toEqual(['default', 'default', 'error', 'declined'])
   })
 
-  it('거부만 있으면 「오류」 칸이 없다', () => {
+  it('with only rejections there is no 「error」 cell', () => {
     const s = summarizeGroup([tool('a', { resultMark: 'refused' }), tool('b', { resultMark: 'declined' })], new Set())
     expect(line(s)).toBe('읽기 2 · 거부 2')
   })
 
-  it("DECLINED_MARK='error' 면 거부가 오류 칸으로 — 「오류 2」 · 거부 칸 없음", () => {
+  it("if DECLINED_MARK='error' rejections go to the error cell — 「error 2」 · no rejection cell", () => {
     const s = summarizeGroup([tool('a', { resultMark: 'refused' }), tool('b', { resultMark: 'declined' })], new Set(), 'error')
     expect(line(s)).toBe('읽기 2 · 오류 2')
   })
 
-  it('종류 아홉 전부 문구 키가 있다', () => {
+  it('all nine kinds have a text key', () => {
     const all = (['Search', 'Read', 'List', 'Edit', 'Command', 'Web', 'Agent', 'Mcp', 'Other'] as const).map(category =>
       tool(null, { category }),
     )

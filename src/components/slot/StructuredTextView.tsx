@@ -1,6 +1,5 @@
 // ADR-0050: structured chat render dispatch. Benchmark look = the Claude Code VSCode extension (first approximation, the user
-//   adjusts afterward from screenshots). All external (Apache-2.0) ports introduced in an earlier round were removed and replaced with
-//   our own implementation.
+//   adjusts afterward from screenshots). Own implementation — no external ports.
 //
 // ★This file's responsibility★: **pure render** — subscription/accumulation is RichSlot's concern.
 
@@ -278,7 +277,7 @@ function ToolItemRow({
 }) {
   const [open, setOpen] = useState(false)
   const hint = shortArgs(argsJson)
-  // ADR-0241: the badge is the same decision as the bundle summary — if two places split separately, the head's 「오류 N」 (N errors) and the expanded badge diverge.
+  // ADR-0241: the badge is the same decision as the bundle summary — if two places split separately, the head's 「N errors」 and the expanded badge diverge.
   const verdict = toolCallVerdict(mark, result?.isError === true, DECLINED_MARK)
   const isErr = verdict === 'error'
   const isDeclined = verdict === 'declined'
@@ -364,8 +363,8 @@ function ToolItemRow({
  * Turn outcome marker — failure/interrupt/unknown, the three ★must be told apart on screen★ (that distinction is the outcome field's reason to exist).
  * Three axes tell them apart: icon · text · tone. ★Do not lean on color alone★ — the e-ink theme neutralizes color, so
  * if only color differed the three would become one shape.
- * ★Interrupt and unknown are not painted red★ — an interrupt is a normal path the user cut, and unknown means 「모른다」 (we do not know), not
- * 「실패했다」 (it failed). Only failure uses the error tone (the same vocabulary as the Error row).
+ * ★Interrupt and unknown are not painted red★ — an interrupt is a normal path the user cut, and unknown means 「we do not know」, not
+ * 「it failed」. Only failure uses the error tone (the same vocabulary as the Error row).
  */
 /**
  * The interrupt emphasis line (U8 — bold · accent color · `CircleStop`). Used by both the interrupt branch of the outcome row and the interruption display row — the two rows must have the same
@@ -430,7 +429,7 @@ function InterruptNoteRow({ text }: { text: string }) {
  *
  * ★Do not draw the event name or payload★ — protocol words are not put on the user's screen (trd-phase2a §6-2).
  *   The accumulator sends the name needed for diagnosis to the console only.
- * ★It must not look like assistant body text★ — keep it to one muted-tone line so it reads as a 「우리 쪽 한계 고지」 (a notice of our own limit).
+ * ★It must not look like assistant body text★ — keep it to one muted-tone line so it reads as a 「a notice of our own limit」.
  */
 function UnsupportedRow({ count }: { count: number }) {
   return (

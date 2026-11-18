@@ -1,20 +1,15 @@
-// ADR-0064: assemble the slot right-click menu items only as "command id references" (no direct store calls from the menu —
-//   ADR-0064 invariant). Common slot ops are contributed with target='*', and content-specific items with target=<SlotContentType>,
-//   through the same API (registerSlotMenu) (in the vein of VS Code contributes.menus).
+// ADR-0064: slot right-click menu items are assembled only as command-id references (no direct store calls from the menu). Common ops contribute with target='*', content-specific items with target=<SlotContentType>, via registerSlotMenu.
 //
-// ★Stay DOM-free★: like registry.ts, it is a pure Map/functions, so it is unit-tested headless (vitest). DOM/Tauri
-//   dependence is pushed out to the command handlers (*Commands.ts / slotCommands.ts).
+// ★DOM-free★: pure Map/functions so it is unit-tested headless; DOM/Tauri dependence lives in the command handlers.
 
 import type { SlotContent } from '../api/layoutTypes'
 import { getCommand } from './registry'
 
-/** '*' = all slots (common). */
 export type SlotMenuTarget = SlotContent['type'] | '*'
 
 /**
- * The execution context of the slot that opened the menu — the assembly site (`LayoutLeaf`) carries it. `agentId` only for an assigned slot.
- * ★The only source of menu state (☑ · enabled)★ — [`SlotMenuItem.checked`] · [`SlotMenuItem.enabled`] read only this. If store
- * state is needed, the assembly site subscribes and carries it here (since it subscribes, an open menu is redrawn to follow).
+ * Execution context of the slot that opened the menu; `agentId` only for an assigned slot.
+ * ★Only source of menu state (☑ · enabled)★ — the assembly site (`LayoutLeaf`) subscribes to the store and carries state here, so an open menu redraws.
  */
 export interface SlotMenuCtx {
   viewId: string | null
@@ -24,69 +19,48 @@ export interface SlotMenuCtx {
 }
 
 /**
- * A contribution item (ADR-0064 fixed schema + ADR-0065 additive extension). It is one of two shapes:
- *   - **Execution item**: has `commandId` (+ no `children`). title/run are resolved from the registry at build time.
- *   - **Container** (1-level submenu): has `children` + its own `id` and `title` required (+ no `commandId`).
- * Neither or both is a dev error (fail-loud, ADR-0065 §영향/불변식). hideOn · children · id · title are all
- * optional, so an existing `{commandId, group, order}` contribution stays valid unchanged (backward compatible).
+ * ADR-0064 fixed schema + ADR-0065 additive extension. One of two shapes:
+ *   - Execution item: `commandId`, no `children`.
+ *   - Container (1-level submenu): `children` + own `id` and `title`, no `commandId`.
+ * Neither or both is a dev error (fail-loud, ADR-0065 §Impact/invariants).
  */
 export interface SlotMenuItem {
-  /** The registry command id of an execution item (e.g. 'slot.close'). Omitted for a container. fail-loud: if unregistered, buildSlotMenu skips + logs an error. */
+  /** Registry command id of an execution item (e.g. 'slot.close'); omitted for a container. Unregistered → buildSlotMenu skips + logs. */
   commandId?: string
-  /**
-   * The identity of a container (has children) — its registration key, its resolved id (`container:<id>`) and the last sort
-   * tie-break. Omitted for an execution item. ADR-0373: an id, not the title, so the identity is the same in every language.
-   */
+  /** Container identity: registration key, resolved id (`container:<id>`) and last sort tie-break. ADR-0373: an id, not the title, so it is language-independent. */
   id?: string
-  /** Display name of a container, called when the menu is built (ADR-0373). Omitted for an execution item (the registry title is used). */
+  /** Container display name, called at build time (ADR-0373). Omitted for an execution item. */
   title?: () => string
-  /** Sort axis 1 (group) — 'content' (content-specific) first, 'slot-ops' (common) later. Order fixed by GROUP_ORDER. */
+  /** Sort axis 1 — 'content' before 'slot-ops' (GROUP_ORDER). */
   group: string
-  /** Sort axis 2 (order within the group). Ascending within the same group. */
   order: number
-  /**
-   * ADR-0065 exclusion condition — hides this item in slots of the listed content types (subtraction only, not an allowlist).
-   * E.g. `['empty']` on slot.empty → the '*' universal registration is kept but removed only from empty slots (common ops single source kept).
-   */
+  /** ADR-0065 exclusion — hides the item in slots of the listed content types (subtraction only, not an allowlist). E.g. `['empty']` keeps the '*' registration but drops it from empty slots. */
   hideOn?: SlotContent['type'][]
-  /** ADR-0065 1-level submenu children. If present this item is a container (id and title required, no commandId). Children are flat execution items only (no nesting). */
+  /** ADR-0065 1-level submenu children (flat execution items only). Present → container. */
   children?: SlotMenuItem[]
   /**
-   * If present, this execution item is a toggle and the value is the ☑ (renderer = `menuitemcheckbox`). Cannot be attached to a container.
-   * ★Reads only ctx — do not read the store★ (ADR-0064 「메뉴에서 직접 store 호출 금지」 — no direct store calls from the menu): the title is fixed at build time, so
-   * this is the only place to carry state, and the assembly site puts state in ctx for it.
+   * Toggle ☑ (renderer = `menuitemcheckbox`); not for containers. ★Reads only ctx, never the store★ (ADR-0064) — the title is fixed at build time, so ctx is the only state carrier.
    */
   checked?: (ctx: SlotMenuCtx) => boolean
-  /**
-   * If false the renderer draws it disabled (clicking does not run it). Always enabled if absent. Cannot be attached to a container. Same rule as `checked`
-   * — ★reads only ctx★. A different axis from the command's `when`: `when` is a UI context gate that keybindings 「못 본 것처럼 넘기는」
-   * (pass over as if unseen), and the menu does not read it.
-   */
+  /** False → drawn disabled. Same rule as `checked` (★reads only ctx★). Not the command's `when`, which the menu does not read. Not for containers. */
   enabled?: (ctx: SlotMenuCtx) => boolean
 }
 
-/**
- * The buildSlotMenu output = resolved items the renderer uses as is (+ group boundary marks).
- * If children exist it is a container (1-level submenu) — the renderer does not call run in this case and unfolds children as a hover flyout.
- */
+/** buildSlotMenu output: items the renderer uses as is. A container (children present) is not run; its children unfold as a hover flyout. */
 export interface ResolvedSlotMenuItem {
   id: string
   title: string
   run: (args?: Record<string, unknown>) => unknown
   group: string
-  /** True if this item is the first of its group and another group came before it (the renderer draws a divider). */
+  /** First of its group with another group before it → renderer draws a divider. */
   separatorBefore: boolean
-  /** ADR-0065 1-level submenu — the resolved children if a container. undefined if an execution item. */
+  /** ADR-0065 resolved children of a container; undefined for an execution item. */
   children?: ResolvedSlotMenuItem[]
-  /** The contribution's [`SlotMenuItem.checked`] as is. If absent it is not a toggle. */
   checked?: (ctx: SlotMenuCtx) => boolean
-  /** The contribution's [`SlotMenuItem.enabled`] as is. If absent always enabled. */
   enabled?: (ctx: SlotMenuCtx) => boolean
 }
 
-// ★Group render order fixed★ (ADR-0064 §5): content-specific ('content') on top, common slot ops ('slot-ops') below,
-//   with a divider between. A group not listed here is pushed back (Infinity) with a stable name-order sort — when adding a new group
-//   specify it here to fix the order (no implicit order).
+// ★Group render order★ (ADR-0064 §5): 'content' above 'slot-ops'. Unlisted groups sort last by name — add a new group here to fix its order.
 const GROUP_ORDER: Record<string, number> = {
   content: 0,
   'slot-ops': 1,
@@ -103,9 +77,8 @@ function itemKey(item: SlotMenuItem): string {
 }
 
 /**
- * Register a slot menu contribution. Re-contributing the same (target, key) is not silently overwritten but warned about and then replaced
- * (isomorphic to registry.register — reveals HMR re-evaluation, duplicate loads, and typos). idempotent: the last registration wins.
- * key = commandId (execution item) or 'container:'+id (container) — a container has no commandId, so it is identified by its id.
+ * Register a slot menu contribution. Re-contributing the same (target, key) warns and replaces (last wins; reveals HMR re-evaluation, duplicate loads, typos).
+ * key = commandId, or 'container:'+id for a container.
  */
 export function registerSlotMenu(target: SlotMenuTarget, items: SlotMenuItem[]): void {
   const list = contributions.get(target) ?? []
@@ -113,7 +86,7 @@ export function registerSlotMenu(target: SlotMenuTarget, items: SlotMenuItem[]):
     const key = itemKey(item)
     const idx = list.findIndex(existing => itemKey(existing) === key)
     if (idx >= 0) {
-      console.warn(`[slotMenu] 중복 기여 재등록 — 교체: target='${target}' key='${key}'`)
+      console.warn(`[slotMenu] duplicate contribution re-registered — replaced: target='${target}' key='${key}'`)
       list[idx] = item
     } else {
       list.push(item)
@@ -122,11 +95,9 @@ export function registerSlotMenu(target: SlotMenuTarget, items: SlotMenuItem[]):
   contributions.set(target, list)
 }
 
-/** Independent of registration order — deterministic by (group, order) alone. */
 function compareItems(a: SlotMenuItem, b: SlotMenuItem): number {
   const gr = groupRank(a.group) - groupRank(b.group)
   if (gr !== 0) return gr
-  // Different group names of the same rank (both unregistered, etc.) — stabilized by name order.
   if (a.group !== b.group) return a.group < b.group ? -1 : 1
   if (a.order !== b.order) return a.order - b.order
   const ka = itemKey(a)
@@ -135,9 +106,7 @@ function compareItems(a: SlotMenuItem, b: SlotMenuItem): number {
 }
 
 /**
- * null (skip) on failure (unregistered, etc.).
- * ★fail-loud but crash-free (FIX-1)★: it is called at render time (right click), so a throw would blank the app without an error boundary.
- *   Loudly console.error and skip only that item as null (full boot-time validation is validateSlotMenuContributions).
+ * Null (skip) when unresolvable. ★fail-loud but crash-free (FIX-1)★: runs at right-click render time, so a throw would blank the app — console.error and skip the item.
  */
 function resolveRunnable(commandId: string, target: SlotContent['type']): ResolvedSlotMenuItem | null {
   const cmd = getCommand(commandId)
@@ -157,27 +126,24 @@ function withCtxPredicates(entry: ResolvedSlotMenuItem, item: SlotMenuItem): Res
 }
 
 /**
- * Item shape validation (ADR-0065 §영향/불변식) — execution item XOR container. On violation, log loudly and return false (skip).
- *   - Execution item: commandId present + children absent.
- *   - Container: children present (non-empty) + id and title present + commandId absent.
- * ★Limited to 1 level★: if nested=true (= this item is already a child of a container), having children again is 2-level nesting and forbidden.
- * ★fail-loud but crash-free★: isomorphic to the FIX-1 style of buildSlotMenu — dev error (console.error) + skip.
+ * ADR-0065 §Impact/invariants shape check: execution item (commandId, no children) XOR container (non-empty children + id + title, no commandId). Violation → console.error, return false (skip).
+ * ★1 level only★: nested=true (already a container child) with children is forbidden.
  */
 function validateItemShape(item: SlotMenuItem, target: SlotMenuTarget, nested: boolean): boolean {
   const hasCmd = typeof item.commandId === 'string' && item.commandId.length > 0
   const hasChildren = Array.isArray(item.children) && item.children.length > 0
   const label = item.commandId ?? item.id ?? '(untitled)'
   if (hasCmd && hasChildren) {
-    console.error(`[slotMenu] item "${label}" (target=${target}) — commandId 와 children 을 동시에 가질 수 없음 (실행 항목 XOR 컨테이너) — skipped`)
+    console.error(`[slotMenu] item "${label}" (target=${target}) — cannot have both commandId and children (execution item XOR container) — skipped`)
     return false
   }
   if (!hasCmd && !hasChildren) {
-    console.error(`[slotMenu] item "${label}" (target=${target}) — commandId 도 children 도 없음 (실행 항목 XOR 컨테이너 필요) — skipped`)
+    console.error(`[slotMenu] item "${label}" (target=${target}) — has neither commandId nor children (execution item XOR container required) — skipped`)
     return false
   }
   if (hasChildren) {
     if (nested) {
-      console.error(`[slotMenu] item "${label}" (target=${target}) — 2단+ 중첩 금지(children 안의 children) — skipped`)
+      console.error(`[slotMenu] item "${label}" (target=${target}) — nesting of 2+ levels not allowed (children inside children) — skipped`)
       return false
     }
     if (typeof item.id !== 'string' || item.id.length === 0) {
@@ -190,7 +156,7 @@ function validateItemShape(item: SlotMenuItem, target: SlotMenuTarget, nested: b
     }
     for (const field of ['checked', 'enabled'] as const) {
       if (item[field]) {
-        console.error(`[slotMenu] container "${label}" (target=${target}) — 컨테이너는 ${field} 를 가질 수 없음 — skipped`)
+        console.error(`[slotMenu] container "${label}" (target=${target}) — a container cannot have ${field} — skipped`)
         return false
       }
     }
@@ -199,26 +165,16 @@ function validateItemShape(item: SlotMenuItem, target: SlotMenuTarget, nested: b
 }
 
 /**
- * Gather the contentType contributions ∪ '*' (common) contributions, sort deterministically → registry resolve → an array of renderable items.
- *
- * ★Sorting is independent of registration order — only by (groupRank, order)★ (ADR-0064): so the render does not wobble with
- *   import order or HMR order. For stable sorting, group uses the GROUP_ORDER rank, within it order, and ties break by key (commandId/container id).
- * ★hideOn filter (ADR-0065)★: an item whose hideOn includes the contentType is removed first (subtraction — the '*' universality is kept,
- *   only the specific type is excluded). Trims slot.empty on empty slots while keeping the common ops single-source ('*') invariant.
- * ★1-level submenu (ADR-0065)★: a container with children resolves its title + each child's commandId.
- *   ★Children keep declaration order★ (no reordering, unlike the top level) — the contribution already lists them in the intended relative order (ADR-0065
- *   "keeping their relative order"). If a child has children again that is 2-level nesting, so dev error + skip (nested=true).
- *   ★hideOn also applies to children (FIX-2)★: run the same subtraction as the top level on each child (visibility contract = children included).
- *   ★Omit an empty container (FIX-1)★: if all children are skipped (unregistered · 2-level nesting · hideOn) and it empties, the container would be mistaken for a leaf and
- *   become a dead item, so the whole container gets console.error + skip (do not emit it with children:[]).
- * ★dedupe (FIX-2)★: if '*' (common) and contentType (specific) contribute the same key, duplicate items · duplicate React keys result.
- *   After sorting, dedupe by key and leave only the *first appearance* in the final order (the content group sorts before slot-ops,
- *   so if content redeclares a common op the content side wins — though redeclaring a common op should not exist in the first place, and this is a defensive dedupe).
- * ★fail-loud but crash-free (FIX-1)★: an unregistered commandId or a shape violation does not throw but does console.error + skip.
- * separatorBefore: true on the first item where the group changes (excluding the very first) → the renderer draws a divider above it.
+ * Contributions for contentType ∪ '*', sorted, resolved against the registry.
+ * ★Order is independent of registration order★ (ADR-0064): (GROUP_ORDER rank, order), ties by key — no wobble from import/HMR order.
+ * ★hideOn (ADR-0065)★: removed first (subtraction; '*' universality kept). Applies to children too (FIX-2).
+ * ★1-level submenu (ADR-0065)★: children keep declaration order; a child with children is 2-level nesting → dev error + skip.
+ * ★Empty container omitted (FIX-1)★: if all children are skipped it would be a dead leaf, so console.error + skip the whole container.
+ * ★dedupe (FIX-2)★: same key from '*' and contentType → keep the first in final order (defensive; content sorts before slot-ops).
+ * ★fail-loud but crash-free (FIX-1)★: unregistered commandId or shape violation → console.error + skip, never throw.
+ * separatorBefore: true on the first item of each new group (not the very first).
  */
 export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMenuItem[] {
-  // contentType==='*' is impossible by type (SlotContent['type']).
   const merged: SlotMenuItem[] = [...(contributions.get('*') ?? []), ...(contributions.get(contentType) ?? [])]
 
   const visible = merged.filter(item => !(item.hideOn?.includes(contentType) ?? false))
@@ -246,13 +202,12 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
       }
       if (children.length === 0) {
         console.error(
-          `[slotMenu] container "${item.id}" (target=${contentType}) — 자식이 모두 skip 되어 빈 컨테이너 — omitted`,
+          `[slotMenu] container "${item.id}" (target=${contentType}) — all children were skipped, leaving an empty container — omitted`,
         )
         continue
       }
       entry = {
-        // ADR-0373: the resolved id comes from the container's own id (no commandId) — the React key · data-attr stay the same
-        //   across a language switch, so an open flyout survives it. run is a no-op (the renderer does not call it).
+        // ADR-0373: id comes from the container's own id so the React key · data-attr survive a language switch. run is a no-op.
         id: `container:${item.id}`,
         title: (item.title as () => string)(),
         run: () => undefined,
@@ -280,13 +235,8 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
 }
 
 /**
- * Full boot-time validation (FIX-1 + FIX-3) — inspects every registered contribution right at boot without a right click. Two kinds:
- *   1. **Shape validation (FIX-3)** — run validateItemShape recursively down to the children (both-cmd-and-children / 2-level nesting /
- *      container id or title missing). The old version looked only at commandId existence, so shape violations were caught only on right click (buildSlotMenu) —
- *      now they are discovered at boot (dev-time).
- *   2. **commandId existence (FIX-1)** — check that the commandId of execution items · container children is in the registry.
- * Both console.error without crashing (minimal boot side effects — paired with the skip+log of buildSlotMenu, do not promote to a throw).
- * ★Unlike buildSlotMenu, it does no sorting/resolve/hideOn★ — pure validation only (visibility is a render concern).
+ * Boot-time validation of every registered contribution (no right click needed): (1) shape, recursively into children (FIX-3); (2) commandId exists in the registry for execution items and container children (FIX-1).
+ * console.error only, never throw. ★No sorting/resolve/hideOn★ — pure validation.
  */
 export function validateSlotMenuContributions(): void {
   for (const [target, items] of contributions) {
@@ -313,7 +263,7 @@ export function validateSlotMenuContributions(): void {
   }
 }
 
-/** Test only — contribution reset (isolation between tests). Do not call from production code (mirrors registry.__reset…). */
+/** Test only — resets contributions between tests; never call from production code. */
 export function __resetSlotMenuForTest(): void {
   contributions.clear()
 }

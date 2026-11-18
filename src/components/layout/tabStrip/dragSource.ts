@@ -1,10 +1,6 @@
-// TRD S21-slot-docking §2-4 · §4-2 · §4-6: the one place that drives a tab drag emitted by the source webview to the end — swap redraw release · original selection
-//   revert · sending at dragend · the own tab bar order-move look are decided only here. The basis for deciding is only the drag id and the model state —
-//   it does not rely on the order in which deadlines · events arrive (release · revert rules = the pure reducer `dock/dragOverride.ts` · this feeds it and issues its
-//   answer). It does not know the DOM — converting tab head events into values is `useTabDragSource`.
-// There is one per webview — the tab bar (order move · active paint) and the window layout (the visible tab of keep-alive) read the same snapshot.
-// ★This module does not call the shell during a drag (dragstart ~ dragend)★ (ADR-0296 · ADR-0297) — the shell calls are the `tab_drop` of dragend
-//   and one revert after `done` (`switch_tab_if`), and both are after the drag has ended.
+// TRD S21-slot-docking §2-4 · §4-2 · §4-6: the one place that drives a tab drag from the source webview to its end — swap redraw release · original selection revert · sending at dragend · the own tab bar order-move look. Decisions rest only on the drag id and model state, not on deadline/event arrival order (release · revert rules = the pure reducer `dock/dragOverride.ts`; this feeds it and issues its answer). Knows no DOM — `useTabDragSource` converts head events into values.
+// One per webview — the tab bar (order move · active paint) and the window layout (keep-alive visible tab) read the same snapshot.
+// ★No shell call during a drag (dragstart ~ dragend)★ (ADR-0296 · ADR-0297) — the shell calls are the `tab_drop` at dragend and one revert after `done` (`switch_tab_if`), both after the drag ended.
 
 import type { EndEffect } from '../../../../src-tauri/bindings/EndEffect'
 import type { PointCss } from '../../../../src-tauri/bindings/PointCss'
@@ -23,7 +19,7 @@ import {
 import type { LocalDrag, SourceStripMove } from '../dock/localDrag'
 import { moveDue, reorderThreshold } from './reorderGeometry'
 
-/** The outside — in production `useTabDragSource` fills it with Tauri · the store, and tests plug in a fake (ADR-0012). */
+/** The outside: `useTabDragSource` fills it with Tauri · the store in production; tests plug in a fake (ADR-0012). */
 export interface DragSourcePorts {
   send(drop: TabDrop): Promise<TabDropReply>
   /** The shell changes to `to` only when that window's active is still `expect` (TRD §4-6). */
@@ -65,9 +61,7 @@ export interface DragSourceSnapshot {
   window: string | null
   override: OverrideState
   /**
-   * The order move to draw — exists only after the first decision of that drag (`setSourceStrip`) has come inside its own tab bar zone. At the dragstart spot it is
-   * `null`, so the tab bar draws the same DOM as at rest (if the dragged head leaves from under the pressed point inside dragstart, the engine collapses the drag).
-   * Whether to draw is decided once more by the caller with `stripHeld` (withdrawn if the model order differs from dragstart).
+   * The order move to draw — exists only after the first decision of that drag (`setSourceStrip`) came inside its own tab bar zone. At the dragstart spot it is `null`, so the tab bar draws the same DOM as at rest (if the dragged head left from under the pressed point inside dragstart, the engine would collapse the drag). The caller still withdraws it with `stripHeld` if the model order differs from dragstart.
    */
   motion: StripMotion | null
 }
@@ -75,10 +69,7 @@ export interface DragSourceSnapshot {
 export interface DragSource {
   getSnapshot(): DragSourceSnapshot
   subscribe(cb: () => void): () => void
-  /**
-   * The tab state after `window:tabs-updated` (· the `list_tabs` pull) was applied to that window's store — once per apply (even if nothing changed, the fact that the notice
-   * arrived is the release trigger — TRD §2-4 ②). That window's first value is not counted as a notice.
-   */
+  /** Tab state after `window:tabs-updated` (· `list_tabs` pull) was applied to that window's store — once per apply; even an unchanged notice is the release trigger (TRD §2-4 ②). That window's first value is not counted as a notice. */
   model(window: string, m: WindowModel): void
   /** That window's pointerdown (including outside heads). */
   pointerDown(): void
@@ -90,9 +81,7 @@ export interface DragSource {
   /** The `tab_drop:done` that came to this window. */
   done(d: TabDropDone): void
   /**
-   * Whether a head press in that window must send `switch_tab` even when it presses the model active tab (`view`) — `true` if a revert with `expect = view` was issued to that window and
-   * that window's model active is still `view`. If not sent, the revert arriving later overwrites this press (the shell applies in the order received —
-   * a `switch_tab` sent later passes the revert). Once `true` is returned, that revert is forgotten.
+   * Whether a head press in that window must send `switch_tab` even when it presses the model active tab (`view`): `true` if a revert with `expect = view` was issued to that window and its model active is still `view`. Otherwise the later-arriving revert would overwrite this press (the shell applies in received order). Returning `true` forgets that revert.
    */
   forceSwitch(window: string, view: string): boolean
 }
@@ -130,8 +119,7 @@ export function createDragSource(ports: DragSourcePorts): DragSource {
   let lastStrip: SourceStripMove | null = null
   let snap: DragSourceSnapshot = { window: null, override: IDLE, motion: null }
   const listeners = new Set<() => void>()
-  // The last revert issued per window (`forceSwitch`) — withdrawn when that window's model active leaves `expect` (it arrived · someone else changed it) or its invoke errors.
-  //   Held separately from the swap redraw (`reverting`) — that is released by any pointerdown of that window, but the revert is still in flight.
+  // The last revert issued per window (`forceSwitch`) — withdrawn when that window's model active leaves `expect` (arrived · changed by someone else) or its invoke errors. Held apart from the swap redraw (`reverting`), which any pointerdown of that window releases while the revert is still in flight.
   const reverts = new Map<string, Revert>()
 
   const modelOf = (w: string | null): WindowModel => (w === null ? EMPTY : (models.get(w) ?? EMPTY))
@@ -173,11 +161,11 @@ export function createDragSource(ports: DragSourcePorts): DragSource {
     ports.switchTabIf(r.window, r.to, r.expect).then(
       changed => {
         // Not changed = the active changed in the meantime — that notice (`tabs`) releases it.
-        if (!changed) console.debug('[dragSource] switch_tab_if: 활성이 바뀌어 되돌리지 않았다', r)
+        if (!changed) console.debug('[dragSource] switch_tab_if: the active tab changed, not restoring', r)
       },
       err => {
         // A normal race (the tab to revert was closed in the meantime, etc.) — only a log is left and it falls back to the model active.
-        console.warn('[dragSource] switch_tab_if 실패 — 모델 활성으로 물러난다:', err)
+        console.warn('[dragSource] switch_tab_if failed — falling back to the active tab of the model:', err)
         if (reverts.get(r.window) === r) reverts.delete(r.window)
         if (drag === null) return
         dispatch({ type: 'revertFailed', drag })
@@ -196,17 +184,16 @@ export function createDragSource(ports: DragSourcePorts): DragSource {
       to: { type: 'new_window', by: { type: 'drag_end', effect }, size: s.size, grab: s.grab },
     }
     ports.send(drop).then(
-      reply => console.debug('[dragSource] tab_drop(drag_end) 답:', reply),
+      reply => console.debug('[dragSource] tab_drop(drag_end) reply:', reply),
       err => {
-        console.warn('[dragSource] tab_drop(drag_end) 실패 — 바꿔 그리기를 곧바로 푼다:', err)
+        console.warn('[dragSource] tab_drop(drag_end) failed — releasing the swapped drawing at once:', err)
         dispatch({ type: 'sendFailed', drag: s.drag })
         publish()
       },
     )
   }
 
-  // Chrome order threshold — the confirmed position changes to the decision's position only when `moveDue` is true (`judge` does not look at the threshold · TRD §7 U3).
-  //   The tab bar geometry is the order drawn now (the order carrying the confirmed position), so it is the same basis as the decision's position.
+  // Chrome order threshold — the confirmed position moves to the decision's position only when `moveDue` is true (`judge` ignores the threshold · TRD §7 U3). The tab bar geometry is the order drawn now (carrying the confirmed position), the same basis as the decision's position.
   function follow(t: Track, view: string, m: SourceStripMove): void {
     const g = ports.local.readStripGeometry()
     const d = g === null ? -1 : g.tabs.indexOf(view)
@@ -255,8 +242,7 @@ export function createDragSource(ports: DragSourcePorts): DragSource {
       })
       dispatch({ type: 'start', window: s.window, drag: s.drag, view: s.view, initial: s.initial })
       track = { index: null, left: s.left, lastMove: s.x, justAttached: true, inZone: true, tracking: false }
-      // ★Put the first decision before the outgoing drag mark★ — that mark's notice calls `stripChanged`, and if the previous drag's last decision
-      //   (`null`, etc.) remains then, the new drag is read as 「구역 밖」.
+      // ★Put the first decision before the outgoing drag mark★ — that mark's notice calls `stripChanged`, and a remaining last decision of the previous drag (`null` etc.) would make the new drag read as "outside the zone".
       const first: SourceStripMove = { index: modelOf(s.window).tabs.indexOf(s.view), left: s.left, x: s.x }
       lastStrip = first
       ports.local.setSourceStrip(first)
@@ -290,9 +276,7 @@ export function createDragSource(ports: DragSourcePorts): DragSource {
       const f = flight
       if (f === null || f.ended || f.s.view !== view) return
       f.ended = true
-      // Neither sends the end to the shell (TRD §2-4 ④ · U2 ⑨): this webview's drop was at the same place in the same window so it was not sent · a drag the engine
-      //   collapsed (measured on the old HTML5 drag — dragend(none) in the same task as dragstart · if sent, the shell reads it as a drop at the last point and a new window
-      //   comes up). The mark is always taken — if left, the next drag reads it as its own.
+      // Neither sends the end to the shell (TRD §2-4 ④ · U2 ⑨): a same-place same-window drop was not sent, and a drag the engine collapsed (old HTML5 drag: dragend(none) in the same task as dragstart) would be read by the shell as a drop at the last point and open a new window. The mark is always taken — left over, the next drag reads it as its own.
       const marked = ports.local.takeLocalDrop(f.s.drag)
       const local = marked || f.sameTask
       // ★Feed the reducer first, then send★ (U2 ⑦) — a `done` that arrived before dragend is split off as the receiving window's `Drop` share.

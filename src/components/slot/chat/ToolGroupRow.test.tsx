@@ -41,8 +41,8 @@ const root = (c: HTMLElement) => c.querySelector('[data-tool-group]') as HTMLEle
 const header = () => screen.getByRole('button')
 const memberCount = (c: HTMLElement) => c.querySelectorAll('[data-member]').length
 
-describe('ToolGroupRow — 요약 머리', () => {
-  it('종류별 수 · 오류 · 거부를 고정 순서로 잇는다 — 오류는 붉은 톤 · 거부는 주황 토큰', () => {
+describe('ToolGroupRow — summary head', () => {
+  it('joins count per kind · error · rejection in a fixed order — errors a red tone · rejection an orange token', () => {
     const calls = [
       tool('a', { category: 'Read' }),
       tool('b', { category: 'Search' }),
@@ -66,7 +66,7 @@ describe('ToolGroupRow — 요약 머리', () => {
     expect(root(container).getAttribute('data-tool-group-count')).toBe('4')
   })
 
-  it('벤더 오류 id 로 센 오류도 머리에 선다(claude) · 거부 표식이 벤더 오류를 이긴다', () => {
+  it('errors counted by vendor error id also stand in the head (claude) · the rejection marker wins over the vendor error', () => {
     const calls = [tool('a'), tool('b'), tool('c', { resultMark: 'declined' })]
     renderRow(group(calls), { vendorErrorIds: new Set(['b', 'c']) })
     expect(header().textContent).toBe(
@@ -79,7 +79,7 @@ describe('ToolGroupRow — 요약 머리', () => {
   })
 
   // ADR-0263 (amendment of ADR-0239 decision 4): progressive while running · when done that indicator drops and only the per-kind count remains (past tense).
-  it('live 면 요약 뒤에 진행형 표시가 붙고, 끝나면 빠진다 — 그 사이 수는 제자리에서 자란다', () => {
+  it('if live a progressive indicator is attached after the summary and drops when finished — the count grows in place meanwhile', () => {
     const [a, b, c] = [tool('a'), tool('b'), tool('c')]
     const { container, rerender } = renderRow(group([a, b], true))
     expect(root(container).getAttribute('data-tool-group-live')).toBe('1')
@@ -97,12 +97,12 @@ describe('ToolGroupRow — 요약 머리', () => {
   })
 })
 
-describe('ToolGroupRow — 펼침', () => {
+describe('ToolGroupRow — expansion', () => {
   const shownIds = (c: HTMLElement) =>
     Array.from(c.querySelectorAll('[data-member]')).map((el) => el.getAttribute('data-member'))
 
   // ADR-0263 decision 1 (user decision 2026-10-01): while running head + the last call as one line · when done head only.
-  it('고른 값이 없으면 도는 동안 마지막 호출 한 줄만 · 호출이 늘면 그 줄이 새 마지막으로 바뀐다 · 끝나면 머리만', () => {
+  it('with no chosen value only the last call line while running · when calls grow that line becomes the new last · head only when finished', () => {
     const [a, b, c] = [tool('a'), tool('b'), tool('c')]
     const { container, rerender } = renderRow(group([a, b], true))
     const node = root(container)
@@ -122,7 +122,7 @@ describe('ToolGroupRow — 펼침', () => {
     expect(shownIds(container)).toEqual([])
   })
 
-  it('슬롯이 없으면 머리를 눌러도 안 바뀐다 — 도는 동안의 한 줄도 그대로', () => {
+  it('without a slot pressing the head changes nothing — the one line while running as is', () => {
     const calls = [tool('a'), tool('b')]
     renderRow(group(calls, true))
     expect((header() as HTMLButtonElement).disabled).toBe(true)
@@ -131,7 +131,7 @@ describe('ToolGroupRow — 펼침', () => {
     expect(memberCount(document.body)).toBe(1)
   })
 
-  it('펼치면 멤버를 원래 순서로 그린다', () => {
+  it('expanding draws the members in the original order', () => {
     useToolGroupStore.getState().bind('s1', 'agent-1')
     const calls = [tool('a'), tool('b'), tool('c')]
     const { container } = renderRow(group(calls), { slotId: 's1' })
@@ -141,7 +141,7 @@ describe('ToolGroupRow — 펼침', () => {
     )
   })
 
-  it('사람 토글이 스토어에 적히고 두 방향 다 이긴다 — 도는 중 펼치면 전부 · 도는 중 접으면 머리만', () => {
+  it('the human toggle is written to the store and wins both ways — expanding while running shows all · collapsing while running leaves only the head', () => {
     useToolGroupStore.getState().bind('s1', 'agent-1')
     const calls = [tool('a'), tool('b')]
     const row = group(calls, true)
@@ -168,7 +168,7 @@ describe('ToolGroupRow — 펼침', () => {
     expect(root(container).getAttribute('data-tool-group-open')).toBe('0')
   })
 
-  it('command 경로(스토어 setOpen)로 바뀐 값을 그대로 그린다 — 펼침 알림은 부르지 않는다', () => {
+  it('draws the value changed via the command path (store setOpen) as is — it does not call the expansion notice', () => {
     useToolGroupStore.getState().bind('s1', 'agent-1')
     const onGroupToggle = vi.fn()
     const row = group([tool('a'), tool('b')])
@@ -181,7 +181,7 @@ describe('ToolGroupRow — 펼침', () => {
     expect(onGroupToggle).not.toHaveBeenCalled()
   })
 
-  it('펼침 알림은 사람이 펼칠 때만 · isLast 를 싣는다 — 접을 때는 없다', () => {
+  it('the expansion notice only when a human expands · carries isLast — none when collapsing', () => {
     useToolGroupStore.getState().bind('s1', 'agent-1')
     const onGroupToggle = vi.fn()
     renderRow(group([tool('a'), tool('b')]), { slotId: 's1', isLast: false, onGroupToggle })
@@ -192,7 +192,7 @@ describe('ToolGroupRow — 펼침', () => {
     expect(onGroupToggle).toHaveBeenCalledTimes(1)
   })
 
-  it('슬롯이 묶여 있지 않으면 아무것도 안 바꾸고 알림도 없이 경고만 남긴다', () => {
+  it('if the slot is not bound it changes nothing and leaves only a warning without a notice', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const onGroupToggle = vi.fn()

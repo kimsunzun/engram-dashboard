@@ -1,8 +1,5 @@
-// ADR-0239: tool bundle one line — summary head and expand · collapse. This component alone reads and changes the expansion state in the conversation view —
-//   `StructuredTextView` stays a pure render with no state · effect · store subscription (ADR-0050).
-//   ★No `ChatRow` rail inside★ (ADR-0051): the bundle is one rail row and rail positions are computed from the row list — if each member
-//   drew a rail, the calculation and the DOM would diverge. Member rows are received via `renderMember` — the row component lives inside `StructuredTextView`,
-//   and importing that file here would be circular.
+// ADR-0239: tool bundle one line — summary head and expand · collapse. This component alone reads and changes the expansion state in the conversation view; `StructuredTextView` stays a pure render with no state · effect · store subscription (ADR-0050).
+// ★No `ChatRow` rail inside★ (ADR-0051): the bundle is one rail row and rail positions are computed from the row list — a rail drawn per member would diverge the calculation and the DOM. Members come via `renderMember` — the row component lives inside `StructuredTextView`, and importing that file here would be circular.
 
 import { Fragment, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight, Layers } from 'lucide-react'
@@ -53,17 +50,16 @@ export function ToolGroupRow({
 }: ToolGroupRowProps) {
   const chosen = useToolGroupStore((s) => chosenOpen(s, slotId, row.key))
   const open = chosen ?? false
-  // ADR-0263 decision 1: with no chosen value, while running the call running now (the last call) is put as one line under the head, and when done only the head remains.
-  //   The chosen value wins both ways — if collapsed while running, that one line is gone too.
+  // ADR-0263 decision 1: with no chosen value, while running the last call is put as one line under the head, and when done only the head remains; the chosen value wins both ways (collapsed while running → that line is gone too).
   const shown = open ? row.members : chosen === undefined && row.live ? row.calls.slice(-1) : []
   // ADR-0241: the summary count is the same decision as the expanded row badge (`toolCallVerdict`) — a decline does not count toward the error number.
   const parts = summaryParts(summarizeGroup(row.calls, vendorErrorIds, DECLINED_MARK))
   const toggle = () => {
     if (slotId === undefined) return
     const next = !open
-    // ★The only way to change expansion is the store `setOpen`★ — the human toggle and the LLM command take the same path (CLAUDE.md 「LLM-우선 제어」).
+    // ★The only way to change expansion is the store `setOpen`★ — the human toggle and the LLM command take the same path (CLAUDE.md 「LLM-우선 제어」). // hangul-ok
     if (!useToolGroupStore.getState().setOpen(slotId, row.key, next)) {
-      console.warn(`[ToolGroupRow] 슬롯 '${slotId}' 이 묶여 있지 않아 묶음 펼침을 적지 못했다 — 대화 뷰의 bind 가 빠졌다`)
+      console.warn(`[ToolGroupRow] slot '${slotId}' is not bound, so the group expansion could not be recorded — the conversation view's bind is missing`)
       return
     }
     if (next) onGroupToggle?.(isLast)

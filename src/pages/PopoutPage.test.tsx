@@ -27,7 +27,7 @@ vi.mock('@tauri-apps/api/window', () => ({
 }))
 
 // ── WindowLayout stub — internal logic is covered by WindowLayout.test · the notice layer is received as `notices` and drawn inside it (the spot below the title bar
-//   is WindowLayout.test's 「알림 층의 자리」 (the notice layer's spot) share) ──
+//   is WindowLayout.test's 「the notice layer's spot」 share) ──
 vi.mock('../components/layout/WindowLayout', () => ({
   default: ({ label, notices }: { label: string; notices?: ReactNode }) => (
     <div data-testid="window-layout" data-label={label}>
@@ -81,22 +81,22 @@ afterEach(() => {
   connection.connectionBand = null
 })
 
-describe('PopoutPage (탭 소유 모델, ADR-0057)', () => {
-  it('?window=<label> → WindowLayout 이 그 label 로 마운트된다', () => {
+describe('PopoutPage (tab ownership model, ADR-0057)', () => {
+  it('?window=<label> → WindowLayout mounts with that label', () => {
     render(<PopoutPage />)
     const wl = screen.getByTestId('window-layout')
     expect(wl.getAttribute('data-label')).toBe(POPUP_LABEL)
   })
 
-  it('★view:closed 은퇴(G2)★: PopoutPage 는 view:closed 를 구독하지 않는다(자가종료 리스너 제거)', () => {
+  it('★view:closed retired (G2)★: PopoutPage does not subscribe to view:closed (the self-exit listener removed)', () => {
     render(<PopoutPage />)
     // Old bug: window self-exit via a view:closed listener → double fire/re-entry.
     expect(listeners.has('view:closed')).toBe(false)
   })
 })
 
-// jsdom cannot measure sizes — assert 「밀지 않는다」 (does not push) with computed position and structure.
-describe('PopoutPage — 연결 띠는 레이아웃을 덮는다(ADR-0277)', () => {
+// jsdom cannot measure sizes — assert 「does not push」 with computed position and structure.
+describe('PopoutPage — the connection band covers the layout (ADR-0277)', () => {
   function mount(connectionError: string | null) {
     connection.connectionError = connectionError
     // The shell raises the band — a cause alone shows nothing.
@@ -113,8 +113,8 @@ describe('PopoutPage — 연결 띠는 레이아웃을 덮는다(ADR-0277)', () 
   }
 
   // The covering spot is decided by WindowLayout — the canvas area below the title bar (user decision 2026-10-26 · T-66).
-  it('연결 띠는 덮는 층 안이고, 층은 WindowLayout 의 notices 로 넘어가 계산된 위치가 absolute 로 기준 칸의 맨 위에 붙는다', () => {
-    const { box, overlay, windowLayout } = mount('폴더 문제')
+  it('the connection band is inside the covering layer, and the layer goes to WindowLayout\'s notices so the computed position is absolute attached at the very top of the reference area', () => {
+    const { box, overlay, windowLayout } = mount('folder problem')
     const alert = screen.getByRole('alert')
     expect(overlay.contains(alert)).toBe(true)
     const style = getComputedStyle(overlay)
@@ -125,8 +125,8 @@ describe('PopoutPage — 연결 띠는 레이아웃을 덮는다(ADR-0277)', () 
     expect(getComputedStyle(box).position).toBe('relative')
   })
 
-  it('연결 띠가 떠도 내용 칸은 그대로다 — 세로 스택의 나머지를 다 쓰고, 흐름 안의 자식은 WindowLayout 뿐이다', () => {
-    const { root, box, windowLayout } = mount('폴더 문제')
+  it('even with the connection band up the content area is as is — it uses the rest of the vertical stack, and the only child in flow is WindowLayout', () => {
+    const { root, box, windowLayout } = mount('folder problem')
     expect(screen.getByRole('alert')).toBeTruthy()
     expect([root.style.width, root.style.height]).toEqual(['100vw', '100vh'])
     expect(root.style.display).toBe('flex')
@@ -137,14 +137,14 @@ describe('PopoutPage — 연결 띠는 레이아웃을 덮는다(ADR-0277)', () 
     expect([...box.children]).toEqual([windowLayout])
   })
 
-  it('이유가 없으면 층은 비어 있다', () => {
+  it('with no reason the layer is empty', () => {
     mount(null)
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.getByTestId('notice-stack').childElementCount).toBe(0)
   })
 
-  it('층 안에서도 ✕ 로 닫힌다', () => {
-    mount('폴더 문제')
+  it('even in the layer it closes with ✕', () => {
+    mount('folder problem')
     fireEvent.click(screen.getByLabelText('알림 닫기'))
     expect(screen.queryByRole('alert')).toBeNull()
   })

@@ -1,13 +1,13 @@
-/* 채팅 마크다운 스타일 — 우리 자체 스타일시트. 벤치마크 = Claude Code VSCode 확장 룩(1차 근사치,
-   사용자가 스크린샷으로 후속 조정). Tailwind preflight 가 문단/제목/리스트 마커를 벗겨내므로 여기서
-   `.chat-markdown` 스코프로 다시 선언한다. 값은 확장 룩의 첫 근사치다.
-   코드 하이라이트 팔레트 = 아래 import 한 highlight.js 테마. */
+/* Chat markdown style — our own stylesheet. Benchmark = the Claude Code VSCode extension look (first approximation,
+   the user adjusts afterwards via screenshots). Tailwind preflight strips paragraph/heading/list markers so they are
+   re-declared here under the `.chat-markdown` scope. The values are a first approximation of the extension look.
+   Code highlight palette = the highlight.js theme imported below. */
 
 @import 'highlight.js/styles/github-dark.css';
 
-/* ADR-0051: base font-size/line-height 는 채팅 스타일 토큰을 참조한다(LLM 제어 시 마크다운 본문도
-   함께 반응). 값 부재 시 이전 하드코딩(13px/1.45)으로 fallback. heading/code/table margin 등 나머지는
-   이번 라운드 범위 밖이라 하드코딩 유지(ADR-0051 거부한 대안: chat.css 전체 토큰화 = YAGNI). */
+/* ADR-0051: base font-size/line-height reference the chat style tokens (so the markdown body also reacts
+   under LLM control). With no value it falls back to the earlier hard-coded (13px/1.45). The rest such as heading/code/table margin
+   is out of scope for this round so stays hard-coded (ADR-0051 rejected alternative: tokenizing all of chat.css = YAGNI). */
 .chat-markdown {
   font-size: var(--chat-font-size, 13px);
   line-height: var(--chat-line-height, 1.45);
@@ -15,7 +15,7 @@
   font-family: inherit;
 }
 
-/* 문단 — 밀집 리듬. 마지막 문단은 아래 여백 제거(박스 하단 정렬). */
+/* Paragraph — dense rhythm. The last paragraph drops its bottom margin (bottom-aligns the box). */
 .chat-markdown p {
   margin: 0 0 0.5em 0;
 }
@@ -23,7 +23,7 @@
   margin-bottom: 0;
 }
 
-/* 제목 — 확장은 본문 대비 적당한 크기 차이만 둔다(과하지 않게). */
+/* Heading — like the extension, only a moderate size difference from the body (not excessive). */
 .chat-markdown h1,
 .chat-markdown h2,
 .chat-markdown h3,
@@ -53,7 +53,7 @@
   font-weight: 700;
 }
 
-/* 리스트 — 마커 표시(preflight 가 지우므로 복원). */
+/* List — show markers (preflight removes them, so restore). */
 .chat-markdown ul,
 .chat-markdown ol {
   padding-left: 1.5em;
@@ -64,16 +64,16 @@
 }
 .chat-markdown ol {
   list-style: decimal;
-  /* outside 마커는 ol 의 padding-left 안쪽에 그려진다. 2자리 숫자("24.")가
-     1.5em(≈19.5 px)에서 좌측으로 넘쳐 ScrollArea overflow:hidden 에 잘렸던
-     것을 방지 — 3자리까지 수용 가능한 2.2em 으로 확장. (마커 클립 수정) */
+  /* Outside markers are drawn inside the ol's padding-left. This prevents a 2-digit number ("24.") from
+     overflowing left at 1.5em (≈19.5 px) and being clipped by ScrollArea overflow:hidden —
+     widened to 2.2em, which fits up to 3 digits. (marker clip fix) */
   padding-left: 2.2em;
 }
 .chat-markdown li {
   margin: 0.15em 0;
 }
 
-/* 코드 블록 */
+/* Code block */
 .chat-markdown pre {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -84,7 +84,7 @@
   line-height: 1.5;
 }
 
-/* 인라인 코드 — 확장은 accent 색이 아니라 중립색(본문색)으로 둔다. */
+/* Inline code — unlike the extension, neutral (body) color rather than accent. */
 .chat-markdown code:not(pre > code) {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
   color: var(--text);
@@ -96,8 +96,8 @@
   word-break: break-word;
 }
 
-/* 표 — 확장처럼 내용 크기로(content-sized). full-width 로 늘리면 셀 적은 표가 거대해져 어색하다.
-   넓은 표는 컨테이너 폭에서 멈춘다(max-width). */
+/* Table — content-sized like the extension. Stretching to full-width makes a table with few cells huge and awkward.
+   A wide table stops at the container width (max-width). */
 .chat-markdown table {
   border-collapse: collapse;
   width: auto;
@@ -114,21 +114,21 @@
   font-weight: 600;
 }
 
-/* 링크 */
+/* Link */
 .chat-markdown a {
   color: var(--accent);
   text-decoration-line: underline;
   text-underline-offset: 2px;
 }
 
-/* 구분선 */
+/* Divider */
 .chat-markdown hr {
   margin: 0.8em 0;
   border: none;
   border-top: 1px solid var(--border);
 }
 
-/* 취소선(GFM) */
+/* Strikethrough (GFM) */
 .chat-markdown del {
   text-decoration: line-through;
   opacity: 0.7;

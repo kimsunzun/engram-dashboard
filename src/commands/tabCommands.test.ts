@@ -28,15 +28,15 @@ function payload(label: string, window_id: string, number: number, ids: string[]
 }
 
 /**
- * 셸 `list_tabs` 흉내 — 창 인자를 셸 해석기처럼 푼다(숫자만 = 번호 거절 · 영속 id · label). 거절은 셸처럼 문자열로 한다.
+ * Imitates the shell `list_tabs` — resolves the window argument like the shell resolver (digits only = number refused · persistent id · label). Refuses with a string, like the shell.
  */
 function shellWith(...windows: WindowTabsPayload[]): void {
   vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
     if (cmd !== 'list_tabs') return undefined
     const arg = String((args as { window: string }).window).trim()
-    if (/^\d+$/.test(arg)) throw '창 번호는 창 인자로 받지 않는다 — 번호는 다시 쓰인다'
+    if (/^\d+$/.test(arg)) throw 'window numbers are not accepted as a window argument — numbers get reused'
     const hit = windows.find(w => w.label === arg || w.window_id === arg)
-    if (!hit) throw `window 없음: ${arg}`
+    if (!hit) throw `no window: ${arg}`
     return hit
   })
 }
@@ -46,7 +46,7 @@ const switchTabSpy = vi.fn(async () => undefined)
 const closeTabSpy = vi.fn(async () => undefined)
 const NEW_WINDOW = { window: 'slot-popup-0a1b2c3d-1', window_id: '7d2f0b8e-1c3a-4f5e-9b6d-2a4c6e8f0a1b', number: 2 }
 const createWindowSpy = vi.fn(async () => NEW_WINDOW)
-/** 셸 `window_control` 답 흉내 — 모든 칸이 참이라 명령마다 버스 답 모양으로 깎였는지가 보인다. `close` 는 main = 숨김. */
+/** Imitates the shell `window_control` answer — every field is true, so it shows whether each command trimmed it to the bus answer shape. `close` is main = hide. */
 const controlWindowSpy = vi.fn(
   async (window: string, action: WindowControlAction, ifEmpty?: boolean): Promise<WindowControlOutcome> => ({
     deferred: true,
@@ -69,7 +69,7 @@ beforeEach(() => {
   createWindowSpy.mockClear()
   controlWindowSpy.mockClear()
   renameTabSpy.mockClear()
-  window.location.hash = '#/' // main 창 컨텍스트
+  window.location.hash = '#/' // main window context
   useViewStore.setState({
     windows: {},
     createTab: createTabSpy,
@@ -84,143 +84,143 @@ afterEach(() => {
   window.location.hash = origHash
 })
 
-describe('tabCommands 라우팅 (window 해소)', () => {
-  it('tab.create(window 생략) → createTab(이 창=main, undefined)', () => {
+describe('tabCommands routing (window resolution)', () => {
+  it('tab.create (window omitted) → createTab(this window=main, undefined)', () => {
     run('tab.create')
     expect(createTabSpy).toHaveBeenCalledWith('main', undefined)
   })
 
-  it('tab.create(window/name 지정) → createTab(그 창, name)', () => {
+  it('tab.create (window/name given) → createTab(that window, name)', () => {
     run('tab.create', { window: 'slot-popup-2', name: 'My Tab' })
     expect(createTabSpy).toHaveBeenCalledWith('slot-popup-2', 'My Tab')
   })
 
-  it('tab.create(name 앞뒤 공백) → createTab(그 창, trim된 name)', () => {
+  it('tab.create (name with leading/trailing spaces) → createTab(that window, trimmed name)', () => {
     run('tab.create', { window: 'slot-popup-2', name: '  My Tab  ' })
     expect(createTabSpy).toHaveBeenCalledWith('slot-popup-2', 'My Tab')
   })
 
-  it('tab.create(공백 name) → throw(createTab 안 부름)', () => {
+  it('tab.create (blank name) → throw (createTab not called)', () => {
     expect(() => run('tab.create', { name: '   ' })).toThrow()
     expect(createTabSpy).not.toHaveBeenCalled()
   })
 
-  it('tab.create(name 생략 · window 지정) → createTab(그 창, undefined) — 자동 이름', () => {
+  it('tab.create (name omitted · window given) → createTab(that window, undefined) — automatic name', () => {
     run('tab.create', { window: 'slot-popup-2' })
     expect(createTabSpy).toHaveBeenCalledWith('slot-popup-2', undefined)
   })
 
-  it('tab.switch(view 지정) → switchTab(이 창, view)', () => {
+  it('tab.switch (view given) → switchTab(this window, view)', () => {
     run('tab.switch', { view: 'v7' })
     expect(switchTabSpy).toHaveBeenCalledWith('main', 'v7')
   })
 
-  it('tab.switch(view 누락) → throw', () => {
+  it('tab.switch (view missing) → throw', () => {
     expect(() => run('tab.switch')).toThrow()
   })
 
-  it('tab.close(view 지정) → closeTab(이 창, view)', () => {
+  it('tab.close (view given) → closeTab(this window, view)', () => {
     run('tab.close', { view: 'v3' })
     expect(closeTabSpy).toHaveBeenCalledWith('main', 'v3')
   })
 
-  // ── ★S4-F1★ — view 생략 = 셸이 푼 그 창의 활성 ──
-  it('tab.close(window label·view 생략) → 그 창의 active 를 닫는다(현재 웹뷰 active 아님)', async () => {
+  // ── ★S4-F1★ — view omitted = the active tab of the window the shell resolved ──
+  it('tab.close (window label · view omitted) → closes the active tab of that window (not the current webview active)', async () => {
     shellWith(payload('main', 'main', 1, ['mv'], 'mv'), payload(POPUP, POPUP_ID, 2, ['pv'], 'pv'))
     await run('tab.close', { window: POPUP })
-    // ★버그였다면 main 의 active(mv)로 닫아 (popup, mv) 어긋남 → 백엔드 ViewNotFound★.
+    // ★Had it been the bug, it would close with main's active (mv), giving a (popup, mv) mismatch → backend ViewNotFound★.
     expect(closeTabSpy).toHaveBeenCalledWith(POPUP, 'pv')
   })
 
-  it('tab.close(window_id·view 생략) → 셸이 푼 label 과 그 창의 active 로 닫는다', async () => {
+  it('tab.close (window_id · view omitted) → closes with the label the shell resolved and the active tab of that window', async () => {
     shellWith(payload('main', 'main', 1, ['mv'], 'mv'), payload(POPUP, POPUP_ID, 2, ['pv'], 'pv'))
     await run('tab.close', { window: POPUP_ID })
     expect(invoke).toHaveBeenCalledWith('list_tabs', { window: POPUP_ID })
     expect(closeTabSpy).toHaveBeenCalledWith(POPUP, 'pv')
   })
 
-  it('tab.close(window·view 모두 생략) → 이 웹뷰 창(main)의 active 를 닫는다', async () => {
+  it('tab.close (window and view both omitted) → closes the active tab of this webview window (main)', async () => {
     shellWith(payload('main', 'main', 1, ['mv'], 'mv'))
     await run('tab.close')
     expect(closeTabSpy).toHaveBeenCalledWith('main', 'mv')
   })
 
-  it('tab.close(창 번호·view 생략) → 셸 거절을 던진다(닫지 않는다)', async () => {
+  it('tab.close (window number · view omitted) → throws the shell refusal (does not close)', async () => {
     shellWith(payload('main', 'main', 1, ['mv'], 'mv'), payload(POPUP, POPUP_ID, 2, ['pv'], 'pv'))
-    await expect(run('tab.close', { window: '2' })).rejects.toThrow(/^\[tab\.close\] 창 번호/)
+    await expect(run('tab.close', { window: '2' })).rejects.toThrow(/^\[tab\.close\] window numbers/)
     expect(closeTabSpy).not.toHaveBeenCalled()
   })
 
-  it('tab.close(모르는 창·view 생략) → 셸 거절을 던진다', async () => {
+  it('tab.close (unknown window · view omitted) → throws the shell refusal', async () => {
     shellWith(payload('main', 'main', 1, ['mv'], 'mv'))
-    await expect(run('tab.close', { window: 'slot-popup-9' })).rejects.toThrow(/window 없음: slot-popup-9/)
+    await expect(run('tab.close', { window: 'slot-popup-9' })).rejects.toThrow(/no window: slot-popup-9/)
     expect(closeTabSpy).not.toHaveBeenCalled()
   })
 
   // ── ★tab.rename(ADR-0057)★ ──
-  it('tab.rename(view/name 지정) → renameTab(view, trim된 name)', () => {
+  it('tab.rename (view/name given) → renameTab(view, trimmed name)', () => {
     run('tab.rename', { view: 'v7', name: '  My Tab  ' })
     expect(renameTabSpy).toHaveBeenCalledWith('v7', 'My Tab')
   })
 
-  it('tab.rename(view 누락) → throw(renameTab 안 부름)', () => {
+  it('tab.rename (view missing) → throw (renameTab not called)', () => {
     expect(() => run('tab.rename', { name: 'x' })).toThrow()
     expect(renameTabSpy).not.toHaveBeenCalled()
   })
 
-  it('tab.rename(name 누락) → throw', () => {
+  it('tab.rename (name missing) → throw', () => {
     expect(() => run('tab.rename', { view: 'v1' })).toThrow()
     expect(renameTabSpy).not.toHaveBeenCalled()
   })
 
-  it('tab.rename(공백 name) → throw(invoke 전 loud fail)', () => {
+  it('tab.rename (blank name) → throw (loud fail before invoke)', () => {
     expect(() => run('tab.rename', { view: 'v1', name: '   ' })).toThrow()
     expect(renameTabSpy).not.toHaveBeenCalled()
   })
 
-  it('window.create → createWindow() · 답 = {window, window_id, number}', async () => {
+  it('window.create → createWindow() · answer = {window, window_id, number}', async () => {
     await expect(run('window.create')).resolves.toEqual(NEW_WINDOW)
     expect(createWindowSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('window.close(window 생략) → window_control close(이 창=main) · 답 = 버스 철자 outcome', async () => {
+  it('window.close (window omitted) → window_control close(this window=main) · answer = bus-spelled outcome', async () => {
     await expect(run('window.close')).resolves.toEqual({ outcome: 'HiddenAll' })
     expect(controlWindowSpy).toHaveBeenCalledWith('main', 'close', false)
   })
 
-  it('window.close(팝아웃 window_id) → 답 outcome = Closed', async () => {
+  it('window.close (popout window_id) → answer outcome = Closed', async () => {
     await expect(run('window.close', { window: POPUP_ID })).resolves.toEqual({ outcome: 'Closed' })
     expect(controlWindowSpy).toHaveBeenCalledWith(POPUP_ID, 'close', false)
   })
 
-  it('window.close(if_empty = true · window_id) → ifEmpty 를 실어 보낸다 · 답 outcome = Kept', async () => {
+  it('window.close (if_empty = true · window_id) → sends ifEmpty along · answer outcome = Kept', async () => {
     await expect(run('window.close', { window: POPUP_ID, if_empty: true })).resolves.toEqual({ outcome: 'Kept' })
     expect(controlWindowSpy).toHaveBeenCalledWith(POPUP_ID, 'close', true)
   })
 
-  it('window.close(if_empty = true · window 생략) → throw — 이 창 label 로 떨어지면 셸이 아무것도 못 찾는다', () => {
+  it('window.close (if_empty = true · window omitted) → throw — falling back to this window label, the shell finds nothing', () => {
     for (const w of [undefined, null]) {
-      expect(() => run('window.close', { window: w, if_empty: true })).toThrow(/^\[window\.close\] if_empty 에는 window/)
+      expect(() => run('window.close', { window: w, if_empty: true })).toThrow(/^\[window\.close\] if_empty requires window/)
     }
     expect(controlWindowSpy).not.toHaveBeenCalled()
   })
 
-  it('window.close(if_empty 가 boolean 아님) → throw', () => {
+  it('window.close (if_empty not a boolean) → throw', () => {
     for (const ifEmpty of ['true', 1]) {
       expect(() => run('window.close', { window: POPUP_ID, if_empty: ifEmpty })).toThrow(
-        /^\[window\.close\] if_empty 는 boolean/,
+        /^\[window\.close\] if_empty must be a boolean/,
       )
     }
     expect(controlWindowSpy).not.toHaveBeenCalled()
   })
 
-  // ── 창 상태 명령 — 셸 버스와 같은 id · 같은 답 모양(TRD S26-window-chrome §6-1 · §6-4) ──
+  // ── Window state commands — the same ids and the same answer shapes as the shell bus (TRD S26-window-chrome §6-1 · §6-4) ──
   it.each([
     ['window.minimize', 'minimize', {}],
     ['window.maximize', 'maximize', { deferred: true }],
     ['window.unmaximize', 'unmaximize', { deferred: true }],
     ['window.raise', 'raise', { shown_all: true, focused: true, pending: true }],
-  ] as const)('%s → window_control %s(그 창) · 답 = 버스 답 칸만', async (id, action, answer) => {
+  ] as const)('%s → window_control %s (that window) · answer = only the bus answer fields', async (id, action, answer) => {
     await expect(run(id, { window: POPUP_ID })).resolves.toEqual(answer)
     expect(controlWindowSpy).toHaveBeenCalledWith(POPUP_ID, action)
     await run(id)
@@ -230,7 +230,7 @@ describe('tabCommands 라우팅 (window 해소)', () => {
   it.each([
     ['window.hideAll', 'hide_all', {}],
     ['window.showAll', 'show_all', { focused: true }],
-  ] as const)('%s → window_control %s · window 인자로 창을 고르지 않고 이 창 label 을 채운다', async (id, action, answer) => {
+  ] as const)('%s → window_control %s · does not pick a window by the window argument and fills this window label', async (id, action, answer) => {
     window.location.hash = `#/popup?window=${POPUP}`
     for (const w of [undefined, null, 'main', POPUP_ID]) {
       controlWindowSpy.mockClear()
@@ -239,47 +239,47 @@ describe('tabCommands 라우팅 (window 해소)', () => {
     }
   })
 
-  it.each(['window.hideAll', 'window.showAll'])('%s 도 준 window 가 빈 값 · 문자열 아님이면 던진다', id => {
+  it.each(['window.hideAll', 'window.showAll'])('%s also throws when the given window is empty or not a string', id => {
     for (const w of ['', '   ', 2]) {
-      expect(() => run(id, { window: w })).toThrow(new RegExp(`^\\[${id.replace('.', '\\.')}\\] window 는 비어 있지 않은`))
+      expect(() => run(id, { window: w })).toThrow(new RegExp(`^\\[${id.replace('.', '\\.')}\\] window must be a non-empty`))
     }
     expect(controlWindowSpy).not.toHaveBeenCalled()
   })
 
-  it('창 상태 명령도 빈 window 는 이 창으로 접지 않는다', () => {
-    expect(() => run('window.maximize', { window: '  ' })).toThrow(/^\[window\.maximize\] window 는 비어 있지 않은/)
+  it('window state commands do not fold an empty window into this window either', () => {
+    expect(() => run('window.maximize', { window: '  ' })).toThrow(/^\[window\.maximize\] window must be a non-empty/)
     expect(controlWindowSpy).not.toHaveBeenCalled()
   })
 
   it.each(['window.minimize', 'window.maximize', 'window.unmaximize', 'window.raise', 'window.hideAll', 'window.showAll'])(
-    '%s 의 셸 거절(문자열)은 명령 이름을 붙인 Error 로 던진다',
+    '%s: a shell refusal (string) is thrown as an Error carrying the command name',
     async id => {
-      controlWindowSpy.mockRejectedValueOnce('창 번호는 창 인자로 받지 않는다')
+      controlWindowSpy.mockRejectedValueOnce('window numbers are not accepted as a window argument')
       const err = await Promise.resolve(run(id, { window: POPUP_ID })).catch((e: unknown) => e)
       expect(err).toBeInstanceOf(Error)
-      expect((err as Error).message).toBe(`[${id}] 창 번호는 창 인자로 받지 않는다`)
+      expect((err as Error).message).toBe(`[${id}] window numbers are not accepted as a window argument`)
     },
   )
 
-  it('window.close 의 셸 거절(문자열)도 명령 이름을 붙인 Error 로 던진다', async () => {
-    controlWindowSpy.mockRejectedValueOnce('window 없음: w-9')
+  it('a shell refusal (string) of window.close is also thrown as an Error carrying the command name', async () => {
+    controlWindowSpy.mockRejectedValueOnce('no window: w-9')
     const err = await Promise.resolve(run('window.close', { window: 'w-9', if_empty: true })).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(Error)
-    expect((err as Error).message).toBe('[window.close] window 없음: w-9')
+    expect((err as Error).message).toBe('[window.close] no window: w-9')
   })
 
-  // ── 빈 window 인자는 이 창으로 접지 않는다 ──
-  it('window: undefined → 이 창(main)으로 떨어진다', () => {
+  // ── An empty window argument is not folded into this window ──
+  it('window: undefined → falls back to this window (main)', () => {
     run('window.close', { window: undefined })
     expect(controlWindowSpy).toHaveBeenCalledWith('main', 'close', false)
   })
 
-  it('window: null → undefined 처럼 이 창(main)으로 떨어진다', () => {
+  it('window: null → falls back to this window (main) like undefined', () => {
     run('window.close', { window: null })
     expect(controlWindowSpy).toHaveBeenCalledWith('main', 'close', false)
   })
 
-  it('window 가 BigInt · 순환 객체여도 명령 접두를 단 오류로 던진다', () => {
+  it('throws an error with the command prefix even when window is a BigInt or a cyclic object', () => {
     const circular: Record<string, unknown> = {}
     circular.self = circular
     for (const w of [1n, circular]) {
@@ -288,16 +288,16 @@ describe('tabCommands 라우팅 (window 해소)', () => {
     expect(createTabSpy).not.toHaveBeenCalled()
   })
 
-  it('window 빈 문자열 · 공백뿐 → throw(이 창으로 접지 않는다)', () => {
+  it('window empty string · blank only → throw (not folded into this window)', () => {
     for (const w of ['', '   ']) {
-      expect(() => run('window.close', { window: w })).toThrow(/^\[window\.close\] window 는 비어 있지 않은 문자열/)
+      expect(() => run('window.close', { window: w })).toThrow(/^\[window\.close\] window must be a non-empty string/)
       expect(() => run('tab.create', { window: w })).toThrow(/^\[tab\.create\] window/)
     }
     expect(controlWindowSpy).not.toHaveBeenCalled()
     expect(createTabSpy).not.toHaveBeenCalled()
   })
 
-  it('window 가 문자열이 아니면(숫자) throw', async () => {
+  it('throws when window is not a string (a number)', async () => {
     expect(() => run('tab.switch', { window: 2, view: 'v1' })).toThrow(/^\[tab\.switch\] window/)
     await expect(run('tab.close', { window: 2 })).rejects.toThrow(/^\[tab\.close\] window/)
     await expect(run('tab.next', { window: 2 })).rejects.toThrow(/^\[tab\.next\] window/)
@@ -307,50 +307,50 @@ describe('tabCommands 라우팅 (window 해소)', () => {
   })
 })
 
-// ── ★layout.setSlotContent variant 형태 검증(FIX LOW)★ ─────────────────────────────────────────
-// 이 스위트가 막는 것: {type:'agent'}(agent_id 누락) 같은 malformed 값이 레지스트리를 통과해 Rust
-// 역직렬화에서야 늦게 터지는 것 — invoke 전에 loud fail.
-describe('layout.setSlotContent variant 형태 검증', () => {
+// ── ★layout.setSlotContent variant shape validation (FIX LOW)★ ─────────────────────────────────────────
+// What this suite blocks: a malformed value like {type:'agent'} (agent_id missing) passing the registry and blowing up late in Rust
+// deserialization — loud fail before invoke.
+describe('layout.setSlotContent variant shape validation', () => {
   const setSlotContentSpy = vi.fn(async () => undefined)
   beforeEach(() => {
     setSlotContentSpy.mockClear()
     useViewStore.setState({ setSlotContent: setSlotContentSpy })
   })
 
-  it('agent variant 에 agent_id 없으면 throw(레지스트리 경계에서 loud fail, invoke 전)', () => {
+  it('agent variant without agent_id → throw (loud fail at the registry boundary, before invoke)', () => {
     expect(() =>
       run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agent' } }),
     ).toThrow(/agent_id/)
     expect(setSlotContentSpy).not.toHaveBeenCalled()
   })
 
-  it('agent variant 의 agent_id 가 비문자열(숫자)이면 throw', () => {
+  it('agent variant whose agent_id is a non-string (number) → throw', () => {
     expect(() =>
       run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agent', agent_id: 42 } }),
     ).toThrow(/agent_id/)
     expect(setSlotContentSpy).not.toHaveBeenCalled()
   })
 
-  it('agent variant 의 agent_id 가 빈 문자열이면 throw', () => {
+  it('agent variant whose agent_id is an empty string → throw', () => {
     expect(() =>
       run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agent', agent_id: '' } }),
     ).toThrow(/agent_id/)
     expect(setSlotContentSpy).not.toHaveBeenCalled()
   })
 
-  it('알 수 없는 type 은 여전히 throw(화이트리스트)', () => {
+  it('an unknown type still throws (whitelist)', () => {
     expect(() =>
       run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'bogus' } }),
     ).toThrow(/SlotContent variant/)
     expect(setSlotContentSpy).not.toHaveBeenCalled()
   })
 
-  it('정상 agent variant(agent_id 문자열) → setSlotContent 로 라우팅', () => {
+  it('a valid agent variant (agent_id string) → routed to setSlotContent', () => {
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agent', agent_id: 'a-1' } })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'agent', agent_id: 'a-1' })
   })
 
-  it('unit variant(empty/agent_list/preset_palette)는 추가 필드 없이 통과', () => {
+  it('unit variants (empty/agent_list/preset_palette) pass without extra fields', () => {
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'empty' } })
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's2', content: { type: 'agent_list' } })
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's3', content: { type: 'preset_palette' } })
@@ -359,9 +359,8 @@ describe('layout.setSlotContent variant 형태 검증', () => {
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'preset_palette' })
   })
 
-  // ★대소문자 무관 수용 + 선언 철자 정규화(사용자 결정 2026-09-23)★: store·백엔드로 흘러가는 태그는
-  //   호출자가 쓴 철자가 아니라 SlotContent 유니온의 선언 철자여야 한다(wire 바이트 동일).
-  it('type 대소문자 무관 수용 → 선언 철자로 정규화해 라우팅', () => {
+  // ★Case-insensitive acceptance + normalization to the declared spelling★: the tag flowing to the store and backend must be the declared spelling of the SlotContent union, not the caller's (wire bytes identical).
+  it('type accepted case-insensitively → normalized to the declared spelling and routed', () => {
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'EMPTY' } })
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's2', content: { type: 'Agent_List' } })
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's3', content: { type: 'PRESET_PALETTE' } })
@@ -370,13 +369,13 @@ describe('layout.setSlotContent variant 형태 검증', () => {
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'preset_palette' })
   })
 
-  it('agent variant 는 태그만 접고 agent_id 는 그대로 나른다', () => {
+  it('agent variant folds only the tag and carries agent_id as is', () => {
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'Agent', agent_id: 'A-1' } })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'agent', agent_id: 'A-1' })
   })
 
-  // ── 사용량 슬롯(TRD S21 usage-limit-slot §1-8) — show_* 는 있으면 boolean · 빠진 칸은 그 슬롯의 지금 값(없으면 셸 serde 기본값) ──
-  it('usage variant — show_* boolean 은 그대로 · 모르는 슬롯의 빠진 칸은 채우지 않고 넘긴다 · 태그는 접는다', () => {
+  // ── Usage slot (TRD S21 usage-limit-slot §1-8) — show_* is a boolean when present · a missing field is that slot's current value (the shell serde default when none) ──
+  it('usage variant — show_* booleans as is · missing fields of an unknown slot are passed on unfilled · the tag is folded', () => {
     run('layout.setSlotContent', {
       viewId: 'v1',
       slotId: 's1',
@@ -389,8 +388,8 @@ describe('layout.setSlotContent variant 형태 검증', () => {
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'usage' })
   })
 
-  // 버스의 `layout.setSlotContent`(셸 락 안 병합)와 같은 결과여야 한다 — 두 LLM 길이 갈리지 않게(TRD §3 #20).
-  it('usage variant — 이미 사용량인 슬롯의 빠진 show 칸은 지금 값으로 채운다 · 준 칸은 그대로', () => {
+  // Must give the same result as the bus `layout.setSlotContent` (merge inside the shell lock) — so the two LLM paths do not diverge (TRD §3 #20).
+  it('usage variant — missing show fields of a slot that is already usage are filled with the current value · given fields as is', () => {
     const layout: LayoutNode = {
       type: 'split',
       id: 'sp',
@@ -403,7 +402,7 @@ describe('layout.setSlotContent variant 형태 검증', () => {
     try {
       run('layout.setSlotContent', { viewId: 'v1', slotId: 'u1', content: { type: 'usage', show_codex: true } })
       run('layout.setSlotContent', { viewId: 'v1', slotId: 'u1', content: { type: 'usage' } })
-      // 지금 사용량이 아닌 슬롯은 병합하지 않는다 — 셸이 빠진 칸을 true 로 읽는다.
+      // A slot that is not usage now is not merged — the shell reads missing fields as true.
       run('layout.setSlotContent', { viewId: 'v1', slotId: 'e1', content: { type: 'usage', show_claude: false } })
       expect(setSlotContentSpy.mock.calls).toEqual([
         ['v1', 'u1', { type: 'usage', show_claude: false, show_codex: true }],
@@ -415,19 +414,19 @@ describe('layout.setSlotContent variant 형태 검증', () => {
     }
   })
 
-  it('usage variant — show_* 가 boolean 이 아니면 invoke 전에 throw', () => {
+  it('usage variant — throw before invoke when show_* is not a boolean', () => {
     for (const bad of ['false', 0, null, {}]) {
       expect(() =>
         run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'usage', show_claude: bad } }),
-      ).toThrow(/show_claude 는 boolean/)
+      ).toThrow(/show_claude of the usage variant must be a boolean/)
       expect(() =>
         run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'usage', show_codex: bad } }),
-      ).toThrow(/show_codex 는 boolean/)
+      ).toThrow(/show_codex of the usage variant must be a boolean/)
     }
     expect(setSlotContentSpy).not.toHaveBeenCalled()
   })
 
-  it('대소문자만 접는다 — 철자가 다르면 여전히 throw', () => {
+  it('only the letter case is folded — a different spelling still throws', () => {
     expect(() =>
       run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agentlist' } }),
     ).toThrow(/SlotContent variant/)
@@ -438,56 +437,56 @@ describe('layout.setSlotContent variant 형태 검증', () => {
   })
 })
 
-// 탭 차례 · 활성은 셸 답(list_tabs) 기준 — 웹 스토어는 보지 않는다.
-describe('tab.next (Ctrl+Tab 순환)', () => {
-  it('탭 여러 개 → 오른쪽 순환(active 다음 탭으로 switch)', async () => {
+// Tab order and active tab are based on the shell answer (list_tabs) — the web store is not consulted.
+describe('tab.next (Ctrl+Tab cycling)', () => {
+  it('several tabs → cycles to the right (switch to the tab after active)', async () => {
     shellWith(payload('main', 'main', 1, ['a', 'b', 'c'], 'a'))
     await run('tab.next')
     expect(invoke).toHaveBeenCalledWith('list_tabs', { window: 'main' })
     expect(switchTabSpy).toHaveBeenCalledWith('main', 'b')
   })
 
-  it('마지막 탭이 active → 첫 탭으로 wrap', async () => {
+  it('last tab active → wraps to the first tab', async () => {
     shellWith(payload('main', 'main', 1, ['a', 'b'], 'b'))
     await run('tab.next')
     expect(switchTabSpy).toHaveBeenCalledWith('main', 'a')
   })
 
-  it('탭 1개 → no-op(switch 안 부름)', async () => {
+  it('1 tab → no-op (switch not called)', async () => {
     shellWith(payload('main', 'main', 1, ['a'], 'a'))
     await run('tab.next')
     expect(switchTabSpy).not.toHaveBeenCalled()
   })
 
-  it('웹 스토어에 그 창이 없어도 셸 답으로 옮긴다', async () => {
+  it('moves by the shell answer even when the web store does not have that window', async () => {
     useViewStore.setState({ windows: {} })
     shellWith(payload('main', 'main', 1, ['a', 'b'], 'a'))
     await run('tab.next')
     expect(switchTabSpy).toHaveBeenCalledWith('main', 'b')
   })
 
-  it('window label → 그 창에서 옮긴다', async () => {
+  it('window label → moves in that window', async () => {
     shellWith(payload('main', 'main', 1, ['a', 'b'], 'a'), payload(POPUP, POPUP_ID, 2, ['p', 'q'], 'q'))
     await run('tab.next', { window: POPUP })
     expect(switchTabSpy).toHaveBeenCalledWith(POPUP, 'p')
   })
 
-  it('window_id → 셸이 푼 label 로 옮긴다', async () => {
+  it('window_id → moves by the label the shell resolved', async () => {
     shellWith(payload('main', 'main', 1, ['a', 'b'], 'a'), payload(POPUP, POPUP_ID, 2, ['p', 'q'], 'p'))
     await run('tab.next', { window: POPUP_ID })
     expect(invoke).toHaveBeenCalledWith('list_tabs', { window: POPUP_ID })
     expect(switchTabSpy).toHaveBeenCalledWith(POPUP, 'q')
   })
 
-  it('창 번호 → 셸 거절을 던진다(옮기지 않는다)', async () => {
+  it('window number → throws the shell refusal (does not move)', async () => {
     shellWith(payload('main', 'main', 1, ['a', 'b'], 'a'), payload(POPUP, POPUP_ID, 2, ['p', 'q'], 'p'))
-    await expect(run('tab.next', { window: '2' })).rejects.toThrow(/^\[tab\.next\] 창 번호/)
+    await expect(run('tab.next', { window: '2' })).rejects.toThrow(/^\[tab\.next\] window numbers/)
     expect(switchTabSpy).not.toHaveBeenCalled()
   })
 
-  it('모르는 창 → 셸 거절을 던진다', async () => {
+  it('unknown window → throws the shell refusal', async () => {
     shellWith(payload('main', 'main', 1, ['a', 'b'], 'a'))
-    await expect(run('tab.next', { window: 'slot-popup-9' })).rejects.toThrow(/window 없음: slot-popup-9/)
+    await expect(run('tab.next', { window: 'slot-popup-9' })).rejects.toThrow(/no window: slot-popup-9/)
     expect(switchTabSpy).not.toHaveBeenCalled()
   })
 })

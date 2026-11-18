@@ -1,7 +1,4 @@
-// ConnectionNotice — the connection band (TRD S36 §3-4 · ADR-0134 decision 4).
-//
-// What this suite guards: the band the shell sends is drawn with the right words, 「다시 연결」 does what it says (and
-// only in the main window), and the user is never stuck under a band they cannot close.
+// ConnectionNotice — the connection band (TRD S36 §3-4 · ADR-0134 decision 4). Guards: the shell's band is drawn with the right words, "reconnect" does what it says (main window only), and the user is never stuck under a band they cannot close.
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -9,8 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Band } from '../../../src-tauri/bindings/Band'
 import type { ConnectionState } from '../../api/agentClient'
 
-// Stand in for the agentClient singleton with a minimal surface — reproduce only the subscription notification, with no real transport/IPC.
-// ★vi.hoisted required★: the vi.mock factory is hoisted to the top of the file and cannot see ordinary top-level variables.
+// Stand in for the agentClient singleton with a minimal surface — only the subscription notification, no real transport/IPC. ★vi.hoisted required★: the vi.mock factory is hoisted above ordinary top-level variables.
 const { listeners, fake, control } = vi.hoisted(() => {
   const listeners = new Set<(state: string) => void>()
   const fake = {
@@ -43,8 +39,7 @@ const REFUSED: Band = { kind: 'not_connected', refused: true }
 const VERSION: Band = { kind: 'version', can_stop: true }
 const VERSION_FIXED: Band = { kind: 'version', can_stop: false }
 
-// Subscription notifications come from outside React, so they are wrapped in act for the state update to flush (the
-//   Tauri event callback has the same shape in production).
+// Subscription notifications come from outside React, so they are wrapped in act (the Tauri event callback has the same shape in production).
 function emit(state: ConnectionState, band: Band | null, error: string | null = null) {
   act(() => {
     fake.connectionState = state
@@ -82,17 +77,17 @@ afterEach(() => {
 describe('ConnectionNotice — what the band says', () => {
   it('draws nothing without a band, even with a start cause (the shell decides)', () => {
     render(<ConnectionNotice />)
-    emit('down', null, '폴더 문제')
+    emit('down', null, 'folder problem')
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('band ① shows the head and the start cause', () => {
     render(<ConnectionNotice />)
-    emit('down', PLAIN, '데이터 폴더에 쓸 수 없음(C:\\x) — 쓰기 가능한 위치에 압축을 풀어 주세요')
+    emit('down', PLAIN, 'cannot write to the data folder (C:\\x) — unzip it to a writable location')
     const alert = screen.getByRole('alert')
     expect(alert.getAttribute('data-band')).toBe('not_connected')
     expect(alert.textContent).toContain('데몬에 연결하지 못했습니다.')
-    expect(alert.textContent).toContain('쓰기 가능한 위치')
+    expect(alert.textContent).toContain('writable location')
   })
 
   it('band ① without a cause shows the head only', () => {
@@ -103,15 +98,15 @@ describe('ConnectionNotice — what the band says', () => {
 
   it('band ① refused shows the refusal and hides the start cause', () => {
     render(<ConnectionNotice />)
-    emit('down', REFUSED, '폴더 문제')
+    emit('down', REFUSED, 'folder problem')
     const text = screen.getByRole('alert').textContent
     expect(text).toContain('데몬이 이 앱의 인증을 거절했습니다')
-    expect(text).not.toContain('폴더 문제')
+    expect(text).not.toContain('folder problem')
   })
 
   it('band ② shows the version text and never the start cause', () => {
     render(<ConnectionNotice />)
-    emit('down', VERSION, '폴더 문제')
+    emit('down', VERSION, 'folder problem')
     const alert = screen.getByRole('alert')
     expect(alert.getAttribute('data-band')).toBe('version')
     expect(alert.firstElementChild?.textContent).toBe(
@@ -130,19 +125,19 @@ describe('ConnectionNotice — what the band says', () => {
   })
 })
 
-describe('ConnectionNotice — 「다시 연결」 (main window)', () => {
+describe('ConnectionNotice — 「reconnect」 (main window)', () => {
   it.each([
     ['band ①', PLAIN],
     ['band ① refused', REFUSED],
     ['band ② (can_stop)', VERSION],
     ['band ② (no can_stop)', VERSION_FIXED],
-  ])('%s carries 「다시 연결」 and ✕, no stop button', (_name, band) => {
+  ])('%s carries 「reconnect」 and ✕, no stop button', (_name, band) => {
     render(<ConnectionNotice actions />)
     emit('down', band)
     expect(buttonNames()).toEqual(['다시 연결', '알림 닫기'])
   })
 
-  it('runs DaemonControl.start and shows 「연결 중…」 disabled while it runs', async () => {
+  it('runs DaemonControl.start and shows 「connecting…」 disabled while it runs', async () => {
     const run = deferred<unknown>()
     control.start.mockImplementation(() => run.promise)
     render(<ConnectionNotice actions />)
@@ -174,7 +169,7 @@ describe('ConnectionNotice — 「다시 연결」 (main window)', () => {
       await run.promise.catch(() => undefined)
     })
     expect((screen.getByRole('button', { name: '다시 연결' }) as HTMLButtonElement).disabled).toBe(false)
-    expect(warn).toHaveBeenCalledWith('[ConnectionNotice] 다시 연결 실패:', boom)
+    expect(warn).toHaveBeenCalledWith('[ConnectionNotice] reconnect failed:', boom)
     warn.mockRestore()
   })
 })
@@ -182,36 +177,36 @@ describe('ConnectionNotice — 「다시 연결」 (main window)', () => {
 // ✕ memory = band kind + cause text, cleared on `connected`; and the covering layer's row contract.
 describe('ConnectionNotice', () => {
   // The row contract of the covering layer (the `NoticeOverlay` doc) — if `wrap-anywhere` is lost, a long cause pushes the ✕ off screen.
-  it('줄은 불투명 바탕이고 글 칸은 아무 데서나 줄을 바꾼다', () => {
+  it('the row has an opaque background and the text field wraps anywhere', () => {
     render(<ConnectionNotice />)
-    emit('down', PLAIN, '폴더 문제')
+    emit('down', PLAIN, 'folder problem')
     const alert = screen.getByRole('alert')
     expect(alert.className).toMatch(/\bbg-elevated\b/)
     expect(alert.firstElementChild?.className).toMatch(/\bwrap-anywhere\b/)
   })
 
-  it('닫으면 사라진다', () => {
+  it('it disappears on close', () => {
     render(<ConnectionNotice />)
-    emit('down', PLAIN, '폴더 문제')
+    emit('down', PLAIN, 'folder problem')
     fireEvent.click(screen.getByLabelText('알림 닫기'))
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
   // The band sits on the covering layer — if the next notification of the same band revives it, the ✕ is powerless.
-  it('닫은 뒤 같은 이유로 다시 통지돼도 뜨지 않는다', () => {
+  it('after closing, it does not reappear even if notified again for the same reason', () => {
     render(<ConnectionNotice />)
-    emit('down', PLAIN, '폴더 문제')
+    emit('down', PLAIN, 'folder problem')
     fireEvent.click(screen.getByLabelText('알림 닫기'))
-    emit('reconnecting', PLAIN, '폴더 문제')
+    emit('reconnecting', PLAIN, 'folder problem')
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('닫은 뒤 다른 이유가 오면 다시 뜬다', () => {
+  it('after closing, a different reason makes it reappear', () => {
     render(<ConnectionNotice />)
-    emit('down', PLAIN, '첫 번째 이유')
+    emit('down', PLAIN, 'first reason')
     fireEvent.click(screen.getByLabelText('알림 닫기'))
-    emit('down', PLAIN, '두 번째 이유')
-    expect(screen.getByRole('alert').textContent).toContain('두 번째 이유')
+    emit('down', PLAIN, 'second reason')
+    expect(screen.getByRole('alert').textContent).toContain('second reason')
   })
 
   it('shows again for a different band kind', () => {
@@ -225,17 +220,17 @@ describe('ConnectionNotice', () => {
 
   it('stays closed while the band goes away and comes back without a connection', () => {
     render(<ConnectionNotice />)
-    emit('down', PLAIN, '폴더 문제')
+    emit('down', PLAIN, 'folder problem')
     fireEvent.click(screen.getByLabelText('알림 닫기'))
     emit('reconnecting', null)
-    emit('down', PLAIN, '폴더 문제')
+    emit('down', PLAIN, 'folder problem')
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
   // ★F3 regression guard★: a recurrence of the same cause after a fix and a connection is the common case.
   it('shows the same band again after a connection', () => {
     render(<ConnectionNotice />)
-    const same = '데이터 폴더에 쓸 수 없음(C:\\x) — 쓰기 가능한 위치에 압축을 풀어 주세요'
+    const same = 'cannot write to the data folder (C:\\x) — unzip it to a writable location'
     emit('down', PLAIN, same)
     fireEvent.click(screen.getByLabelText('알림 닫기'))
     expect(screen.queryByRole('alert')).toBeNull()
@@ -244,7 +239,7 @@ describe('ConnectionNotice', () => {
     expect(screen.queryByRole('alert')).toBeNull()
 
     emit('down', PLAIN, same)
-    expect(screen.getByRole('alert').textContent).toContain('쓰기 가능한 위치')
+    expect(screen.getByRole('alert').textContent).toContain('writable location')
   })
 })
 
@@ -265,7 +260,7 @@ describe('ConnectionNotice — language switch', () => {
   it.each([
     ['refused', REFUSED, null],
     ['version', VERSION, null],
-    ['a raw start cause', PLAIN, '폴더 문제'],
+    ['a raw start cause', PLAIN, 'folder problem'],
   ] as const)('a dismissed band (%s) stays dismissed across a switch', (_name, band, error) => {
     render(<Root />)
     emit('down', band, error)

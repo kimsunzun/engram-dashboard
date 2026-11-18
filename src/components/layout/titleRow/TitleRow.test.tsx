@@ -84,8 +84,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('TitleRow — 배치 · 끌 자리', () => {
-  it('줄 순서 = 탭바 → 끌 빈 자리 → 번호 표식 → 창 단추(최소화 → 최대화 → 셋째)', () => {
+describe('TitleRow — layout · drag spot', () => {
+  it('row order = tab bar → empty drag spot → number marker → window buttons (minimize → maximize → third)', () => {
     renderRow({ number: 4 })
     expect([...row().children].map(el => (el as HTMLElement).dataset.testid)).toEqual([
       'tab-bar',
@@ -100,7 +100,7 @@ describe('TitleRow — 배치 · 끌 자리', () => {
     ])
   })
 
-  it('끌 자리 = 줄 자신 · 끌 빈 자리(값 없는 속성 — 자기 자신만) · 표식 · 단추 · 탭바 자리에는 없다', () => {
+  it('drag spot = the row itself · empty drag spot (a valueless attribute — itself only) · absent on marker · button · tab bar spot', () => {
     renderRow()
     expect(row().getAttribute(DRAG)).toBe('')
     expect(screen.getByTestId('title-grab-gap').getAttribute(DRAG)).toBe('')
@@ -109,7 +109,7 @@ describe('TitleRow — 배치 · 끌 자리', () => {
     }
   })
 
-  it('탭바만 줄어든다 — 끌 빈 자리(42) · 표식 · 단추는 줄지 않는다', () => {
+  it('only the tab bar shrinks — empty drag spot (42) · marker · buttons do not shrink', () => {
     renderRow()
     const gap = screen.getByTestId('title-grab-gap').style
     expect([gap.flexGrow, gap.flexShrink, gap.flexBasis]).toEqual(['0', '0', '42px'])
@@ -119,7 +119,7 @@ describe('TitleRow — 배치 · 끌 자리', () => {
     }
   })
 
-  it('높이 = 보통 위 여백 6 + 탭바 28 · 최대화면 여백 0 · data-maximized · 크롬 모양의 왼 여백', () => {
+  it('height = normal top margin 6 + tab bar 28 · maximized margin 0 · data-maximized · left margin of the chrome shape', () => {
     const f = fakeFrame()
     renderRow({ frame: f.source })
     expect([row().style.height, row().dataset.maximized, row().style.paddingLeft]).toEqual(['34px', 'false', '0px'])
@@ -127,15 +127,15 @@ describe('TitleRow — 배치 · 끌 자리', () => {
     expect([row().style.height, row().dataset.maximized, row().style.paddingLeft]).toEqual(['28px', 'true', '70px'])
   })
 
-  it('창 사실을 받기 전 = 보통 높이 · 앞 창 · 단추를 그린다', () => {
+  it('before receiving the window fact = normal height · front window · draws buttons', () => {
     renderRow({ frame: fakeFrame(null).source })
     expect([row().style.height, row().dataset.windowActive]).toEqual(['34px', 'true'])
     expect(screen.getByTestId('caption-buttons')).toBeTruthy()
   })
 })
 
-describe('TitleRow — 번호 표식', () => {
-  it('글자 = 번호만 · Tab 순서 밖 · 화면 낭독기에서 감춘다 · 누름을 받지 않는다(부모 끌 자리로 간다)', () => {
+describe('TitleRow — number marker', () => {
+  it('text = number only · outside Tab order · hidden from the screen reader · does not take a press (goes to the parent drag spot)', () => {
     renderRow({ number: 7 })
     const marker = screen.getByTestId('window-number')
     expect(marker.textContent).toBe('7')
@@ -145,7 +145,7 @@ describe('TitleRow — 번호 표식', () => {
     expect(marker.style.fontVariantNumeric).toBe('tabular-nums')
   })
 
-  it('폭 = 최소 28 · 글자 양옆 8 — 자리 수만큼 넓어지고 자르지 않는다', () => {
+  it('width = minimum 28 · 8 on each side of the text — widens by the number of digits and does not clip', () => {
     for (const n of [7, 42, 123]) {
       const view = renderRow({ number: n })
       const s = screen.getByTestId('window-number').style
@@ -163,8 +163,8 @@ describe('TitleRow — 번호 표식', () => {
   })
 })
 
-describe('TitleRow — 창 단추', () => {
-  it('셋 다 type=button · 접근성 이름 = 툴팁 — main = 최소화 · 최대화 · 모든 창 숨기기', () => {
+describe('TitleRow — window buttons', () => {
+  it('all three type=button · accessible name = tooltip — main = minimize · maximize · hide all windows', () => {
     renderRow()
     expect(
       (['caption-minimize', 'caption-maximize', 'caption-close'] as const).map(id => [
@@ -179,7 +179,7 @@ describe('TitleRow — 창 단추', () => {
     ])
   })
 
-  it('누르면 레지스트리 window.* 명령 → 셸 invoke window_control(이 창 label) — main 셋째 = window.close(셸이 모두 숨긴다)', () => {
+  it('pressing → registry window.* command → shell invoke window_control (this window label) — main third = window.close (the shell hides all)', () => {
     renderRow()
     fireEvent.click(button('caption-minimize'))
     fireEvent.click(button('caption-maximize'))
@@ -191,7 +191,7 @@ describe('TitleRow — 창 단추', () => {
     ])
   })
 
-  it('최대화 상태 = 둘째 단추 「이전 크기로 복원」(겹친 상자) → window.unmaximize · 사실이 바뀌면 다시 그린다', () => {
+  it('maximized state = second button 「restore previous size」 (overlapping boxes) → window.unmaximize · redraws when the fact changes', () => {
     const f = fakeFrame()
     renderRow({ frame: f.source })
     expect(button('caption-maximize').querySelector('svg.lucide-square')).toBeTruthy()
@@ -205,7 +205,7 @@ describe('TitleRow — 창 단추', () => {
     expect(button('caption-maximize').getAttribute('aria-label')).toBe('최대화')
   })
 
-  it('main 셋째 = 눈 가림 · 옅은 맴돎(빨강 아님) / 팝아웃 셋째 = 「창 닫기」 × · 빨간 맴돎 → window.close', () => {
+  it('main third = eye cover · faint hover (not red) / popout third = 「close window」 × · red hover → window.close', () => {
     const main = renderRow({ label: 'main' })
     const hideAll = button('caption-close')
     expect(hideAll.querySelector('svg.lucide-eye-off')).toBeTruthy()
@@ -225,7 +225,7 @@ describe('TitleRow — 창 단추', () => {
     expect(controlCalls()).toEqual([['window_control', { window: 'slot-popup-3', action: 'close', ifEmpty: false }]])
   })
 
-  it('맴돎 · 글자색은 클래스로만 — 인라인 색 · 바탕이 없다(인라인이 맴돎을 이긴다) · 포커스 테두리', () => {
+  it('hover · text color only by class — no inline color · background (inline would beat hover) · focus border', () => {
     renderRow()
     for (const id of ['caption-minimize', 'caption-maximize', 'caption-close'] as const) {
       const b = button(id)
@@ -237,7 +237,7 @@ describe('TitleRow — 창 단추', () => {
   })
 
   // TRD §8-4 — the details of reporting · hover are covered by `snapOverlay.test.ts`. Here, whether the window fact field opens and closes that path.
-  it('스냅 오버레이 — caption.snap_overlay 거짓(기본 빌드)이면 최대화 단추 사각형을 보고하지 않는다 · 참이면 보고하고 떼면 걷는다', () => {
+  it('snap overlay — if caption.snap_overlay is false (default build) it does not report the maximize button rectangle · if true it reports and withdraws on release', () => {
     const snapCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'report_max_button_rect')
     const off = renderRow()
     expect(snapCalls()).toEqual([])
@@ -253,15 +253,15 @@ describe('TitleRow — 창 단추', () => {
     expect(snapCalls().slice(-1)[0]).toEqual(['report_max_button_rect', { rect: null }])
   })
 
-  it('크롬 모양이 단추를 OS 몫으로 두면(caption.buttons 거짓) 그리지 않는다 — 표식은 그대로', () => {
+  it('if the chrome shape leaves buttons to the OS (caption.buttons false) it does not draw them — the marker as is', () => {
     renderRow({ frame: fakeFrame({ ...FRAME, caption: { ...FRAME.caption, buttons: false } }).source })
     expect(screen.queryByTestId('caption-buttons')).toBeNull()
     expect(screen.getByTestId('window-number')).toBeTruthy()
   })
 })
 
-describe('TitleRow — 흐림 · 대기 모드', () => {
-  it('창 사실 focused → data-window-active · 바뀌면 따라간다', () => {
+describe('TitleRow — dimming · waiting mode', () => {
+  it('window fact focused → data-window-active · follows when it changes', () => {
     const f = fakeFrame()
     renderRow({ frame: f.source })
     expect(row().dataset.windowActive).toBe('true')
@@ -271,11 +271,11 @@ describe('TitleRow — 흐림 · 대기 모드', () => {
     expect(row().dataset.windowActive).toBe('true')
   })
 
-  it('제목 줄 토큰은 세 테마 모두 있다 · 흐림은 탭 글자 · 번호 · 단추 글리프 토큰을 흐림 색으로 갈아 끼운다', () => {
+  it('title row tokens exist in all three themes · dimming swaps the tab text · number · button glyph tokens to the dim color', () => {
     const css = require('node:fs').readFileSync(`${process.cwd()}/src/styles/theme.css`, 'utf8')
     for (const theme of ['dark', 'light', 'e-ink']) {
       const m = css.match(new RegExp(`:root\\[data-theme='${theme}'\\]\\s*\\{\\s*--tab-text:[^}]*\\}`))
-      expect(m, `${theme} 의 제목 줄 블록이 없다`).not.toBeNull()
+      expect(m, `${theme} has no title row block`).not.toBeNull()
       for (const token of [
         '--tab-text',
         '--chrome-number-fg',
@@ -285,24 +285,24 @@ describe('TitleRow — 흐림 · 대기 모드', () => {
         '--caption-close-hover-bg',
         '--caption-close-hover-fg',
       ]) {
-        expect(m![0], `${theme} 에 ${token} 가 없다`).toMatch(new RegExp(`${token}:\\s*[^;]+;`))
+        expect(m![0], `${theme} has no ${token}`).toMatch(new RegExp(`${token}:\\s*[^;]+;`))
       }
     }
     const dim = css.match(/\[data-window-active='false'\]\s*\{[^}]*\}/)
-    expect(dim, '흐림 규칙이 없다').not.toBeNull()
+    expect(dim, 'no dim rule').not.toBeNull()
     for (const token of ['--tab-text', '--tab-text-inactive', '--chrome-number-fg', '--caption-fg']) {
       expect(dim![0]).toContain(`${token}: var(--chrome-inactive-fg);`)
     }
   })
 
-  it('대기 모드(standby · number null) = 표식 · 단추 없이 줄 · 끌 빈 자리만 — 탭바는 그대로 자식', () => {
+  it('waiting mode (standby · number null) = only row · empty drag spot without marker · buttons — the tab bar stays as a child', () => {
     renderRow({ number: null, standby: true })
     expect([...row().children].map(el => (el as HTMLElement).dataset.testid)).toEqual(['tab-bar', 'title-grab-gap'])
     expect(row().getAttribute(DRAG)).toBe('')
   })
 
   // Loading · boot failure screens — with no OS frame, this row is the only place to move and close the window (`WindowLayout`).
-  it('번호가 아직 없는 보통 화면 = 표식만 빼고 창 단추는 그린다', () => {
+  it('a normal screen with no number yet = draws the window buttons, only the marker omitted', () => {
     renderRow({ number: null })
     expect([...row().children].map(el => (el as HTMLElement).dataset.testid)).toEqual([
       'tab-bar',
@@ -313,7 +313,7 @@ describe('TitleRow — 흐림 · 대기 모드', () => {
 })
 
 // TRD S26-window-chrome §7-7 — the numbers of the computation are covered by `metrics.test.ts`. Here, what is measured and when it is sent.
-describe('TitleRow — 최소 창 크기 보고', () => {
+describe('TitleRow — minimum window size report', () => {
   // Sequence number · epoch are covered by `minSizeReport.test.ts` — here only the size.
   const minReports = () =>
     invokeMock.mock.calls
@@ -343,7 +343,7 @@ describe('TitleRow — 최소 창 크기 보고', () => {
     )
   }
 
-  it('마운트 때 보낸다 — 표식 폭은 재고 단추 셋을 싣는다 · 다시 그려도 같은 값은 다시 보내지 않는다', async () => {
+  it('sends at mount — measures the marker width and carries three buttons · redrawing with the same value does not resend', async () => {
     const f = fakeFrame()
     renderRow({ frame: f.source })
     await settle()
@@ -352,7 +352,7 @@ describe('TitleRow — 최소 창 크기 보고', () => {
     expect(minReports()).toEqual([{ width: 286, height: 64 }])
   })
 
-  it('번호 자리 수가 바뀌면 표식 폭을 다시 재서 보낸다(한 · 두 · 세 자리)', async () => {
+  it('if the number of digits changes it re-measures the marker width and sends (one · two · three digits)', async () => {
     measureMarkerByDigits()
     const view = render(rowWith(9))
     await settle()
@@ -369,7 +369,7 @@ describe('TitleRow — 최소 창 크기 보고', () => {
 
   // The shell withdraws the open mark set when it opened the window at that window's next report — if a report during waiting withdraws the adoption-time mark first, the adopted window is not
   //   pulled wider (`TitleRow` head · head of `src-tauri/src/chrome/book.rs`).
-  it('번호가 없으면(대기 · 로딩 · 부팅 실패) 보내지 않는다 · 번호를 받으면 표식 · 단추를 실어 처음 보낸다', async () => {
+  it('with no number (waiting · loading · boot failure) it does not send · once a number is received it sends the first time carrying marker · buttons', async () => {
     const f = fakeFrame()
     const view = render(rowWith(null, f.source, true))
     await settle()
@@ -381,7 +381,7 @@ describe('TitleRow — 최소 창 크기 보고', () => {
     expect(minReports()).toEqual([{ width: 286, height: 64 }])
   })
 
-  it('크롬 모양이 바뀌면 다시 보낸다 — 단추를 OS 가 그리면 단추 몫을 빼고 · 왼 여백은 더한다', async () => {
+  it('if the chrome shape changes it sends again — if the OS draws the buttons the button share is subtracted · the left margin is added', async () => {
     const f = fakeFrame()
     render(rowWith(1, f.source))
     await settle()
@@ -396,7 +396,7 @@ describe('TitleRow — 최소 창 크기 보고', () => {
     ])
   })
 
-  it('최대화해도 보내는 값은 그대로다(보통 상태 기준 — 셸은 보통 크기 창에만 입힌다)', async () => {
+  it('even when maximized the sent value is the same (based on the normal state — the shell applies it only to a normal-size window)', async () => {
     const f = fakeFrame()
     render(rowWith(1, f.source))
     await settle()

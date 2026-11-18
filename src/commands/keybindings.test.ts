@@ -6,12 +6,7 @@ import { comboOf, installKeybindings, isEditableTarget, setKeybindingsPaused } f
 import { useThemeStore } from '../store/themeStore'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ★jsdom does not implement HTMLElement.isContentEditable (always undefined)★ — real WebView2/browsers
-//   return the *effective* editability per the HTML spec, but jsdom has not even a stub. The production guard (isEditableTarget)
-//   treats isContentEditable as the authority (FIX-A), so if a test leaned on jsdom's broken value it would verify
-//   the contenteditable contract not at all. So only in tests we plant a spec-compliant isContentEditable getter on the element (computing effective
-//   editability by walking up the contentEditable attribute chain) to check the contract with real browser semantics. plaintext-only/inheritance/"false"
-//   island boundaries are reflected per spec too. (Production code is not touched.)
+// ★jsdom does not implement HTMLElement.isContentEditable (always undefined)★ — browsers return the *effective* editability per the HTML spec; the production guard (isEditableTarget) treats isContentEditable as the authority (FIX-A), so leaning on jsdom's value would verify nothing of the contenteditable contract. Tests plant a spec-compliant getter (effective editability by walking up the contentEditable chain; plaintext-only/inheritance/"false" island boundaries per spec). Production code is untouched.
 function withSpecContentEditable(el: HTMLElement): HTMLElement {
   Object.defineProperty(el, 'isContentEditable', {
     configurable: true,
@@ -42,26 +37,26 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
-describe('isEditableTarget (ADR-0055 포커스 가드)', () => {
-  it('<input> 은 편집 대상 → true', () => {
+describe('isEditableTarget (ADR-0055 focus guard)', () => {
+  it('<input> is an edit target → true', () => {
     const el = document.createElement('input')
     document.body.appendChild(el)
     expect(isEditableTarget(el)).toBe(true)
   })
 
-  it('<textarea> 는 편집 대상 → true', () => {
+  it('<textarea> is an edit target → true', () => {
     const el = document.createElement('textarea')
     document.body.appendChild(el)
     expect(isEditableTarget(el)).toBe(true)
   })
 
-  it('<select> 는 편집 대상 → true', () => {
+  it('<select> is an edit target → true', () => {
     const el = document.createElement('select')
     document.body.appendChild(el)
     expect(isEditableTarget(el)).toBe(true)
   })
 
-  it('contenteditable="true" 조상 안의 요소 → true', () => {
+  it('an element inside a contenteditable="true" ancestor → true', () => {
     const editable = mkCE('true')
     const inner = document.createElement('span')
     editable.appendChild(inner)
@@ -69,12 +64,12 @@ describe('isEditableTarget (ADR-0055 포커스 가드)', () => {
     expect(isEditableTarget(inner)).toBe(true)
   })
 
-  it('contenteditable="plaintext-only" → true (FIX-1: 가드 구멍 방지)', () => {
+  it('contenteditable="plaintext-only" → true (FIX-1: prevents a guard hole)', () => {
     const editable = mkCE('plaintext-only')
     expect(isEditableTarget(editable)).toBe(true)
   })
 
-  it('contenteditable="plaintext-only" 조상 안의 요소 → true', () => {
+  it('an element inside a contenteditable="plaintext-only" ancestor → true', () => {
     const editable = mkCE('plaintext-only')
     const inner = document.createElement('span')
     editable.appendChild(inner)
@@ -82,12 +77,12 @@ describe('isEditableTarget (ADR-0055 포커스 가드)', () => {
     expect(isEditableTarget(inner)).toBe(true)
   })
 
-  it('contenteditable="false" → false (명시적 비편집은 단축키 허용)', () => {
+  it('contenteditable="false" → false (explicit non-edit allows shortcuts)', () => {
     const el = mkCE('false')
     expect(isEditableTarget(el)).toBe(false)
   })
 
-  it('편집 조상 안의 contenteditable="false" 섬 자손 → false (FIX-A: closest 가 경계를 넘던 버그)', () => {
+  it('a contenteditable="false" island descendant inside an edit ancestor → false (FIX-A: the bug where closest crossed the boundary)', () => {
     const editable = mkCE('true')
     const island = document.createElement('button')
     island.setAttribute('contenteditable', 'false')
@@ -99,7 +94,7 @@ describe('isEditableTarget (ADR-0055 포커스 가드)', () => {
     expect(isEditableTarget(inner)).toBe(false)
   })
 
-  it('.xterm(터미널) 안의 요소 → true (터미널 키를 삼키면 안 됨)', () => {
+  it('an element inside .xterm (terminal) → true (must not swallow terminal keys)', () => {
     const term = document.createElement('div')
     term.className = 'xterm'
     const row = document.createElement('div')
@@ -108,29 +103,29 @@ describe('isEditableTarget (ADR-0055 포커스 가드)', () => {
     expect(isEditableTarget(row)).toBe(true)
   })
 
-  it('평범한 <div>(비편집) → false (단축키 허용)', () => {
+  it('a plain <div> (non-edit) → false (shortcuts allowed)', () => {
     const el = document.createElement('div')
     document.body.appendChild(el)
     expect(isEditableTarget(el)).toBe(false)
   })
 
-  it('null 타겟 → false (방어)', () => {
+  it('null target → false (defence)', () => {
     expect(isEditableTarget(null)).toBe(false)
   })
 })
 
-describe('comboOf (키 조합 정규화)', () => {
-  it('Ctrl+Shift+T → ctrl+shift+t (수식키 순서·소문자 정규화)', () => {
+describe('comboOf (key combination normalization)', () => {
+  it('Ctrl+Shift+T → ctrl+shift+t (modifier order · lowercase normalization)', () => {
     const e = new KeyboardEvent('keydown', { key: 'T', ctrlKey: true, shiftKey: true })
     expect(comboOf(e)).toBe('ctrl+shift+t')
   })
 
-  it('수식키 자체는 combo 에서 제외', () => {
+  it('modifier keys themselves are excluded from the combo', () => {
     const e = new KeyboardEvent('keydown', { key: 'Control', ctrlKey: true })
     expect(comboOf(e)).toBe('ctrl')
   })
 
-  it('수식키 없는 단일 키 → 키 이름만', () => {
+  it('a single key without modifiers → the key name only', () => {
     const e = new KeyboardEvent('keydown', { key: 'a' })
     expect(comboOf(e)).toBe('a')
   })
@@ -139,7 +134,7 @@ describe('comboOf (키 조합 정규화)', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // FIX-6: verify through the *actually installed listener*, not a pure predicate.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
+describe('installKeybindings (installed listener wiring/lifecycle)', () => {
   let dispose: (() => void) | null = null
 
   beforeEach(() => {
@@ -166,7 +161,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     return e
   }
 
-  it('비편집 타겟(document.body)에서 ctrl+tab → 바인딩 command 실행 + preventDefault', () => {
+  it('ctrl+tab on a non-edit target (document.body) → runs the bound command + preventDefault', () => {
     const spy = vi.fn()
     // Swap the default binding (ctrl+tab → tab.next) for this test's spy command.
     register({ id: 'tab.next', title: () => 'next', run: spy })
@@ -177,12 +172,9 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     expect(e.defaultPrevented).toBe(true)
   })
 
-  it('배선이 store 액션까지 닿는다(document.body keydown)', () => {
-    // ★Do not run the real adapter★ — adapters register as a module side effect, and if another test already
-    // cache-imported it, it is not re-registered after `__resetRegistryForTest()` (test-order dependence). So we register directly in this
-    // place and only check that the whole "key → run → store action" span connects.
-    // ★themeStore is chosen as the store because it is a **store observable without Tauri**★ — the store (viewStore) of the `tab.next`
-    // that this key actually calls goes through invoke, so measuring it here would measure a mock, not the wiring.
+  it('the wiring reaches the store action (document.body keydown)', () => {
+    // ★Do not run the real adapter★ — adapters register as a module side effect and are not re-registered after `__resetRegistryForTest()` if another test already cache-imported them (test-order dependence); register directly here and check only that "key → run → store action" connects.
+    // ★themeStore is chosen because it is a **store observable without Tauri**★ — `tab.next`'s store (viewStore) goes through invoke, so measuring it would measure a mock, not the wiring.
     useThemeStore.getState().setTheme('dark')
     const THEMES = ['dark', 'light', 'e-ink'] as const
     register({
@@ -199,7 +191,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     expect(useThemeStore.getState().theme).toBe('light')
   })
 
-  it('타겟이 <input> 이면 command 실행 안 함(가드가 리스너에 배선됨)', () => {
+  it('does not run the command when the target is an <input> (the guard is wired into the listener)', () => {
     const spy = vi.fn()
     register({ id: 'tab.next', title: () => 'next', run: spy })
     dispose = installKeybindings()
@@ -211,7 +203,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     expect(e.defaultPrevented).toBe(false)
   })
 
-  it('타겟이 .xterm 자손이면 command 실행 안 함', () => {
+  it('does not run the command when the target is a .xterm descendant', () => {
     const spy = vi.fn()
     register({ id: 'tab.next', title: () => 'next', run: spy })
     dispose = installKeybindings()
@@ -225,7 +217,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     expect(spy).not.toHaveBeenCalled()
   })
 
-  it('타겟이 contenteditable="plaintext-only" 면 command 실행 안 함', () => {
+  it('does not run the command when the target is contenteditable="plaintext-only"', () => {
     const spy = vi.fn()
     register({ id: 'tab.next', title: () => 'next', run: spy })
     dispose = installKeybindings()
@@ -239,7 +231,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
   })
 
   // ── Stops while the restore modal is up (TRD S21-storage §6-7 N4) ──
-  it('멈춘 동안에는 발화하지 않고 preventDefault 도 안 한다', () => {
+  it('does not fire while paused and does not preventDefault either', () => {
     const spy = vi.fn()
     register({ id: 'tab.next', title: () => 'next', run: spy })
     dispose = installKeybindings()
@@ -250,7 +242,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     expect(e.defaultPrevented).toBe(false)
   })
 
-  it('다시 켜면 발화한다', () => {
+  it('fires again when turned back on', () => {
     const spy = vi.fn()
     register({ id: 'tab.next', title: () => 'next', run: spy })
     dispose = installKeybindings()
@@ -262,7 +254,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
-  it('disposer 호출 후엔 더 이상 발화하지 않는다', () => {
+  it('no longer fires after the disposer is called', () => {
     const spy = vi.fn()
     register({ id: 'tab.next', title: () => 'next', run: spy })
     const d = installKeybindings()
@@ -271,7 +263,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     expect(spy).not.toHaveBeenCalled()
   })
 
-  it('StrictMode 식 install→dispose→install → 정확히 1회만 발화(중복 등록 누수 없음)', () => {
+  it('StrictMode-style install→dispose→install → fires exactly once (no duplicate registration leak)', () => {
     const spy = vi.fn()
     register({ id: 'tab.next', title: () => 'next', run: spy })
     const d1 = installKeybindings()
@@ -281,7 +273,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
-  it('when:()=>false 로 바인딩된 command 는 키로 발화 안 함(FIX-5)', () => {
+  it('a command bound with when:()=>false does not fire by key (FIX-5)', () => {
     const spy = vi.fn()
     register({ id: 'tab.next', title: () => 'next', when: () => false, run: spy })
     dispose = installKeybindings()
@@ -291,7 +283,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     expect(e.defaultPrevented).toBe(false)
   })
 
-  it('when:()=>true 로 바인딩된 command 는 정상 발화(FIX-5)', () => {
+  it('a command bound with when:()=>true fires normally (FIX-5)', () => {
     const spy = vi.fn()
     register({ id: 'tab.next', title: () => 'next', when: () => true, run: spy })
     dispose = installKeybindings()
@@ -301,7 +293,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     expect(e.defaultPrevented).toBe(true)
   })
 
-  it('when 이 throw 하면 command 미실행 + 리스너 밖으로 안 새고 + preventDefault 안 함(FIX-B)', () => {
+  it('when `when` throws, the command does not run + it does not leak out of the listener + no preventDefault (FIX-B)', () => {
     const spy = vi.fn()
     register({
       id: 'tab.next',

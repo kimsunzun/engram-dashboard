@@ -1,72 +1,72 @@
-:root[data-theme='dark']  { --bg: #0a0a0a; --bg-secondary: #141414; --surface-elevated: #262626; --text: #e0e0e0; --text-muted: #888; --border: #242424; --accent: #4a9eff; --status-running: #3fb950; /* 활성(Running) 글리프 색 — 다크 bg 위 가독 green(github-dark 계열, ADR-0062 색 개정) */ --status-blocked: #d29922; /* 마지막 실패로 못 여는 항목의 경고색 — 다크 bg 위 가독 amber(ADR-0173) */ --scrollbar-thumb: rgba(255, 255, 255, 0.24); /* 다크 bg 위 밝은 반투명 thumb */ --status-danger: #f85149; /* 위험(남은 양 20% 미만 등) — 다크 bg 위 가독 red(github-dark 계열) */ --vendor-claude: #d97757; --vendor-codex: #c9c9c9; /* 회사 표지색 — 아이콘 모양은 확정 전 자리표시(사용자 결정 2026-09-29) */ }
-:root[data-theme='light'] { --bg: #f5f5f5; --bg-secondary: #fff; --surface-elevated: #ffffff; --text: #1a1a1a; --text-muted: #666; --border: #ccc; --accent: #0066cc; --status-running: #1a7f37; /* 활성(Running) 글리프 색 — 밝은 bg 위 가독 green(github-light 계열, ADR-0062 색 개정) */ --status-blocked: #9a6700; /* 마지막 실패로 못 여는 항목의 경고색 — 밝은 bg 위 가독 amber(ADR-0173) */ --scrollbar-thumb: rgba(0, 0, 0, 0.28); /* 밝은 bg 위 어두운 반투명 thumb */ --status-danger: #cf222e; /* 위험 — 밝은 bg 위 가독 red(github-light 계열) */ --vendor-claude: #d97757; --vendor-codex: var(--text-muted); /* 다크의 밝은 회색은 흰 bg 에서 안 보인다 */ }
-:root[data-theme='e-ink']  { --bg: #ffffff; --bg-secondary: #f0f0f0; --surface-elevated: #f0f0f0; --text: #000000; --text-muted: #444; --border: #000; --accent: #000; --status-running: var(--text-muted); /* e-ink 은 색 무력화 — Running 도 muted(중립)로 모양만 남긴다(ADR-0062 e-ink 의도 보존, 색 개정 예외) */ --status-blocked: var(--text); /* e-ink 은 색 무력화 — 금지 표식은 본문색으로 두어 모양만 남긴다 */ --scrollbar-thumb: rgba(0, 0, 0, 0.32); /* 흰 고대비 bg 위 진한 반투명 thumb(e-ink 강조) */ --status-danger: var(--text); --vendor-claude: var(--text); --vendor-codex: var(--text); /* e-ink 은 색 무력화 — 위험은 막대 모양이, 회사는 아이콘 모양이 가른다 */ }
+:root[data-theme='dark']  { --bg: #0a0a0a; --bg-secondary: #141414; --surface-elevated: #262626; --text: #e0e0e0; --text-muted: #888; --border: #242424; --accent: #4a9eff; --status-running: #3fb950; /* active (Running) glyph color — green readable on the dark bg (github-dark family, ADR-0062 color revision) */ --status-blocked: #d29922; /* warning color for an item that cannot be opened due to its last failure — amber readable on the dark bg (ADR-0173) */ --scrollbar-thumb: rgba(255, 255, 255, 0.24); /* light translucent thumb on the dark bg */ --status-danger: #f85149; /* danger (under 20% remaining, etc.) — red readable on the dark bg (github-dark family) */ --vendor-claude: #d97757; --vendor-codex: #c9c9c9; /* company marker color — the icon shape is a placeholder until finalized (user decision 2026-09-29) */ }
+:root[data-theme='light'] { --bg: #f5f5f5; --bg-secondary: #fff; --surface-elevated: #ffffff; --text: #1a1a1a; --text-muted: #666; --border: #ccc; --accent: #0066cc; --status-running: #1a7f37; /* active (Running) glyph color — green readable on the light bg (github-light family, ADR-0062 color revision) */ --status-blocked: #9a6700; /* warning color for an item that cannot be opened due to its last failure — amber readable on the light bg (ADR-0173) */ --scrollbar-thumb: rgba(0, 0, 0, 0.28); /* dark translucent thumb on the light bg */ --status-danger: #cf222e; /* danger — red readable on the light bg (github-light family) */ --vendor-claude: #d97757; --vendor-codex: var(--text-muted); /* the dark theme's light gray is invisible on a white bg */ }
+:root[data-theme='e-ink']  { --bg: #ffffff; --bg-secondary: #f0f0f0; --surface-elevated: #f0f0f0; --text: #000000; --text-muted: #444; --border: #000; --accent: #000; --status-running: var(--text-muted); /* e-ink neutralizes color — Running is also muted (neutral), leaving only the shape (keeps the ADR-0062 e-ink intent, exception to the color revision) */ --status-blocked: var(--text); /* e-ink neutralizes color — the forbidden marker uses the body color so only the shape remains */ --scrollbar-thumb: rgba(0, 0, 0, 0.32); /* dark translucent thumb on the white high-contrast bg (e-ink emphasis) */ --status-danger: var(--text); --vendor-claude: var(--text); --vendor-codex: var(--text); /* e-ink neutralizes color — danger is told apart by bar shape, company by icon shape */ }
 
-/* 탭바(ADR-0295 결정 1 · ADR-0298 — Chrome 꼴, 사용자 결정 2026-10-19) — 바는 내용 면(--bg)보다 한 칸 눌린 면, 활성 탭은 내용과
-   같은 면이라 아래 캔버스로 이어진다. 비활성 탭은 채우지 않고 구분선만, 맴돎은 둥근 옅은 면. edge = 바 아래 1px 선(활성 탭이
-   덮은 자리만 끊긴다).
-   ★다크는 내용이 거의 검정(#0a0a0a)이라 바를 더 누를 여지가 없어 거꾸로 바를 한 단계 밝힌다(#242424)★ — 활성 탭이 가장 어둡고
-   내용과 한 면이 된다(Zed Ayu Dark 꼴 · ADR-0298 결정 1 — 바 #000 일 때 활성이 안 보였다). 맴돎은 바보다 조금 밝다. 다크 ·
-   라이트는 면 밝기 차가 바와 내용을 가르므로 edge 선을 투명으로 둔다.
-   --tab-text-inactive = 비활성 탭 글자 · 쉴 때의 × · + — 12 px 글자의 WCAG AA 4.5:1 을 바 위에서 넘기는 회색(ADR-0298
-   결정 6 · 7). 맴돎 머리는 이름 · × 가 --tab-text(= --text)로 바뀌어(결정 8) 이 회색이 맴돎 면에 놓이지 않는다. 같은 회색이 + 아이콘을
-   그 맴돎 원 위에도 그린다 — 다크 #999 대 #424242 3.53:1 · 라이트 #636363 대 #c3c3c3 3.41:1 · 아이콘은 WCAG 비텍스트 대비
-   3:1 이 기준이라 둘 다 넘는다.
-   ★e-ink 은 색이 아니라 모양으로 가른다★ — 검정 edge 선이 활성 탭 자리에서만 끊긴다. */
-:root[data-theme='dark']  { --tab-bar-bg: #242424; --tab-bar-edge: transparent; --tab-active-bg: var(--bg); --tab-hover-bg: color-mix(in srgb, var(--text) 7%, var(--tab-bar-bg)); --tab-separator: color-mix(in srgb, var(--text-muted) 45%, var(--tab-bar-bg)); --tab-button-hover-bg: color-mix(in srgb, var(--text) 16%, transparent); --tab-text-inactive: #999; /* 바 #242424 위 5.45:1(#888 은 4.38 로 미달) */ }
-:root[data-theme='light'] { --tab-bar-bg: #e3e3e3; --tab-bar-edge: transparent; --tab-active-bg: var(--bg); --tab-hover-bg: color-mix(in srgb, var(--tab-active-bg) 60%, var(--tab-bar-bg)); --tab-separator: color-mix(in srgb, var(--text-muted) 45%, var(--tab-bar-bg)); --tab-button-hover-bg: color-mix(in srgb, var(--text) 16%, transparent); --tab-text-inactive: #636363; /* 바 #e3e3e3 위 4.68:1(--text-muted #666 은 4.47 로 미달) */ }
+/* Tab bar (ADR-0295 decision 1 · ADR-0298 — Chrome style, user decision 2026-10-19) — the bar is one step darker than the content surface (--bg), and the active tab is
+   the same surface as the content so it flows into the canvas below. Inactive tabs are not filled, only separators; hover is a rounded faint surface. edge = a 1px line under the bar (broken only
+   where the active tab covers it).
+   ★Dark content is nearly black (#0a0a0a) so there is no room to darken the bar further; instead the bar is lightened a step (#242424)★ — the active tab is the darkest and
+   becomes one surface with the content (Zed Ayu Dark style · ADR-0298 decision 1 — with a #000 bar the active tab was invisible). Hover is slightly lighter than the bar. In dark and
+   light the surface brightness difference separates bar and content, so the edge line is transparent.
+   --tab-text-inactive = inactive tab text · idle × · + — a gray that clears WCAG AA 4.5:1 for 12 px text on the bar (ADR-0298
+   decisions 6 · 7). The hovered tab's head switches the name · × to --tab-text (= --text) (decision 8), so this gray is never placed on the hover surface. The same gray draws the + icon
+   on that hover circle too — dark #999 vs #424242 3.53:1 · light #636363 vs #c3c3c3 3.41:1 · the icon's WCAG non-text contrast bar is
+   3:1, so both clear it.
+   ★e-ink separates by shape, not color★ — the black edge line is broken only at the active tab's position. */
+:root[data-theme='dark']  { --tab-bar-bg: #242424; --tab-bar-edge: transparent; --tab-active-bg: var(--bg); --tab-hover-bg: color-mix(in srgb, var(--text) 7%, var(--tab-bar-bg)); --tab-separator: color-mix(in srgb, var(--text-muted) 45%, var(--tab-bar-bg)); --tab-button-hover-bg: color-mix(in srgb, var(--text) 16%, transparent); --tab-text-inactive: #999; /* 5.45:1 on bar #242424 (#888 falls short at 4.38) */ }
+:root[data-theme='light'] { --tab-bar-bg: #e3e3e3; --tab-bar-edge: transparent; --tab-active-bg: var(--bg); --tab-hover-bg: color-mix(in srgb, var(--tab-active-bg) 60%, var(--tab-bar-bg)); --tab-separator: color-mix(in srgb, var(--text-muted) 45%, var(--tab-bar-bg)); --tab-button-hover-bg: color-mix(in srgb, var(--text) 16%, transparent); --tab-text-inactive: #636363; /* 4.68:1 on bar #e3e3e3 (--text-muted #666 falls short at 4.47) */ }
 :root[data-theme='e-ink']  { --tab-bar-bg: #e6e6e6; --tab-bar-edge: var(--border); --tab-active-bg: var(--bg); --tab-hover-bg: color-mix(in srgb, var(--text) 12%, var(--tab-bar-bg)); --tab-separator: var(--text-muted); --tab-button-hover-bg: color-mix(in srgb, var(--text) 16%, transparent); --tab-text-inactive: var(--text-muted); }
 
-/* 제목 줄(TRD S26-window-chrome §7-3 · §7-4 · §7-5) — 탭바와 같은 바 위의 번호 표식 · 창 단추.
-   --tab-text = 활성 · 맴돎 탭의 이름 · ×(ADR-0298 결정 8 의 --text) — 아래 흐림이 덮을 수 있게 토큰으로 둔다.
-   --caption-hover-bg = 최소화 · 최대화 · main 의 「모든 창 숨기기」 단추 맴돎(빨강 아님 — 결정 T3) = 탭 단추 맴돎과 같은 옅은 바탕.
-   --caption-close-hover-* = 팝아웃 「창 닫기」 맴돎 = Windows 11 의 닫기 빨강(값 미검 · S11).
-   --chrome-inactive-fg = 창이 앞 창이 아닐 때 탭 글자 · 번호 · 단추 글리프 — 바 위 비텍스트 대비 3:1 은 넘고 12 px 글자의
-   4.5:1 에는 못 미친다(흐림이 목적이다 · 값은 화면 실측 AC15 로 다듬는다).
-   ★e-ink 은 색이 아니라 모양으로 가른다★ — 닫기 맴돎 = 본문색 반전 · 흐림 = 회색 글자. */
-:root[data-theme='dark']  { --tab-text: var(--text); --chrome-number-fg: var(--text); --caption-fg: var(--text); --caption-hover-bg: var(--tab-button-hover-bg); --caption-close-hover-bg: #c42b1c; --caption-close-hover-fg: #fff; --chrome-inactive-fg: #7a7a7a; /* 바 #242424 위 3.62:1 */ }
-:root[data-theme='light'] { --tab-text: var(--text); --chrome-number-fg: var(--text); --caption-fg: var(--text); --caption-hover-bg: var(--tab-button-hover-bg); --caption-close-hover-bg: #c42b1c; --caption-close-hover-fg: #fff; --chrome-inactive-fg: #808080; /* 바 #e3e3e3 위 3.08:1 */ }
+/* Title row (TRD S26-window-chrome §7-3 · §7-4 · §7-5) — the number marker and window buttons on the same bar as the tab bar.
+   --tab-text = name · × of the active · hovered tab (ADR-0298 decision 8's --text) — kept as a token so the dimming below can override it.
+   --caption-hover-bg = hover of minimize · maximize · main's 「hide all windows」 button (not red — decision T3) = the same faint background as the tab button hover.
+   --caption-close-hover-* = popout 「close window」 hover = Windows 11's close red (value unverified · S11).
+   --chrome-inactive-fg = tab text · number · button glyph when the window is not the front window — clears 3:1 non-text contrast on the bar but not
+   the 4.5:1 for 12 px text (dimming is the purpose · the value is tuned by on-screen measurement AC15).
+   ★e-ink separates by shape, not color★ — close hover = body color inverted · dimming = gray text. */
+:root[data-theme='dark']  { --tab-text: var(--text); --chrome-number-fg: var(--text); --caption-fg: var(--text); --caption-hover-bg: var(--tab-button-hover-bg); --caption-close-hover-bg: #c42b1c; --caption-close-hover-fg: #fff; --chrome-inactive-fg: #7a7a7a; /* 3.62:1 on bar #242424 */ }
+:root[data-theme='light'] { --tab-text: var(--text); --chrome-number-fg: var(--text); --caption-fg: var(--text); --caption-hover-bg: var(--tab-button-hover-bg); --caption-close-hover-bg: #c42b1c; --caption-close-hover-fg: #fff; --chrome-inactive-fg: #808080; /* 3.08:1 on bar #e3e3e3 */ }
 :root[data-theme='e-ink']  { --tab-text: var(--text); --chrome-number-fg: var(--text); --caption-fg: var(--text); --caption-hover-bg: var(--tab-button-hover-bg); --caption-close-hover-bg: var(--text); --caption-close-hover-fg: var(--bg); --chrome-inactive-fg: var(--text-muted); }
-/* 흐림 = 제목 줄(`data-window-active` — 창 사실 `focused`) 아래에서만 글자 토큰을 갈아 끼운다. */
+/* Dimming = swaps the text tokens only under the title row (`data-window-active` — window fact `focused`). */
 [data-window-active='false'] { --tab-text: var(--chrome-inactive-fg); --tab-text-inactive: var(--chrome-inactive-fg); --chrome-number-fg: var(--chrome-inactive-fg); --caption-fg: var(--chrome-inactive-fg); }
 
-/* 사용량 슬롯(TRD S21 usage-limit-slot §1-8 · PRD R10·R11) — 남은 양 세 구간의 글자색·막대 채움·막대 테두리, 값 없음(회색)·
-   상태 배지·회사 아이콘·팝업 머리의 오래된 나이(호박색 — ADR-0259). 컴포넌트는 이 토큰만 쓴다. ★색 값은 위 테마 줄의 바탕
-   토큰만 가리킨다 — 리터럴을 두지 않는다★(색 프리셋이 바탕 토큰만 갈아 끼우게). ★e-ink 은 색이 아니라 모양으로 가른다★ —
-   노랑 = 빗금 · 빨강 = 검정 채움 + 굵은 테두리 · 회사 = 아이콘 모양. 오래된 나이만은 모양 단서가 없다 — 본문색이라 흐린
-   글자보다 진해질 뿐이다(처리 미정 — TRD §6 #30). */
+/* Usage slot (TRD S21 usage-limit-slot §1-8 · PRD R10·R11) — text color, bar fill and bar border for the three remaining-amount bands, the no-value (gray)
+   state badge, company icon and the stale age in the popup head (amber — ADR-0259). Components use only these tokens. ★Color values point only at the base
+   tokens of the theme lines above — no literals★ (so a color preset swaps only the base tokens). ★e-ink separates by shape, not color★ —
+   yellow = hatching · red = black fill + thick border · company = icon shape. Only the stale age has no shape cue — it is the body color so it just
+   gets darker than the dim text (handling undecided — TRD §6 #30). */
 :root[data-theme='dark']  { --usage-ok: var(--status-running); --usage-warn: var(--status-blocked); --usage-danger: var(--status-danger); --usage-none: var(--text-muted); --usage-badge: var(--status-blocked); --usage-ok-fill: var(--usage-ok); --usage-warn-fill: var(--usage-warn); --usage-danger-fill: var(--usage-danger); --usage-track: color-mix(in srgb, var(--text-muted) 25%, transparent); --usage-bar-border: 0 solid transparent; --usage-danger-border: 0 solid transparent; --usage-vendor-claude: var(--vendor-claude); --usage-vendor-codex: var(--vendor-codex); --usage-stale: var(--status-blocked); }
 :root[data-theme='light'] { --usage-ok: var(--status-running); --usage-warn: var(--status-blocked); --usage-danger: var(--status-danger); --usage-none: var(--text-muted); --usage-badge: var(--status-blocked); --usage-ok-fill: var(--usage-ok); --usage-warn-fill: var(--usage-warn); --usage-danger-fill: var(--usage-danger); --usage-track: color-mix(in srgb, var(--text-muted) 25%, transparent); --usage-bar-border: 0 solid transparent; --usage-danger-border: 0 solid transparent; --usage-vendor-claude: var(--vendor-claude); --usage-vendor-codex: var(--vendor-codex); --usage-stale: var(--status-blocked); }
 :root[data-theme='e-ink']  { --usage-ok: var(--status-running); --usage-warn: var(--status-blocked); --usage-danger: var(--status-danger); --usage-none: var(--text-muted); --usage-badge: var(--text); --usage-ok-fill: var(--text-muted); --usage-warn-fill: repeating-linear-gradient(45deg, var(--text) 0 1px, transparent 1px 4px); --usage-danger-fill: var(--text); --usage-track: transparent; --usage-bar-border: 1px solid var(--text); --usage-danger-border: 2px solid var(--text); --usage-vendor-claude: var(--vendor-claude); --usage-vendor-codex: var(--vendor-codex); --usage-stale: var(--status-blocked); }
 
-/* ADR-0051: 채팅 렌더 간격·폰트 토큰 — 값의 권위는 셸 설정 `chat.style.*` 이고(ADR-0265), 값이 오면
-   chatStyleStore 가 이 :root 변수들을 setProperty 로 덮어쓴다. 여기 값이 서는 구간은 그 값이 오기 전의 첫 페인트다
-   (= 셸 스키마 표 `src-tauri/src/settings/registry.rs` 의 기본값과 동기 — 대조 시험은 없다, ADR-0265 「U2 의 대가」).
-   색 토큰과 달리 theme(dark/light/e-ink) 무관이라 :root 한 곳에만 둔다.
-   ★기본값은 이전 하드코딩(pt-3=12px 등)보다 넉넉하게 잡는다★ — 사용자 지적(우리 렌더가 확장 대비
-   좁고 산만)에 대한 1차 근사치. 정확한 px 는 후속 스크린샷 반복으로 조정(핵심은 값이 변수화된 것).
-   ★rail 연결선 오프셋 ↔ 행 top-padding 커플링 명시화★: --chat-rail-line-offset 은 outer row 의
-   top-padding(--chat-rail-row-pt)만큼 위로 끌어올려(음수) 위 행 dot 까지 선을 잇는다. 둘은 한 그룹이라
-   함께 조정한다(기존 top-[-12px]↔pt-3 암묵 커플링을 변수로 대체). */
+/* ADR-0051: chat render spacing and font tokens — the authority for the values is the shell setting `chat.style.*` (ADR-0265), and when a value arrives
+   chatStyleStore overwrites these :root variables with setProperty. The values here stand only for the first paint before that
+   (= kept in sync with the defaults in the shell schema table `src-tauri/src/settings/registry.rs` — there is no cross-check test, ADR-0265 「the cost of U2」).
+   Unlike the color tokens they are theme (dark/light/e-ink)-independent, so they live in :root only.
+   ★Defaults are set more generous than the earlier hard-coded values (pt-3=12px etc.)★ — a first approximation answering the user's complaint (our render is
+   narrow and busy compared with the extension). Exact px is tuned by later screenshot iterations (the point is that the values are now variables).
+   ★rail connector offset ↔ row top-padding coupling made explicit★: --chat-rail-line-offset pulls up (negative) by the outer row's
+   top-padding (--chat-rail-row-pt) to connect the line to the dot of the row above. The two are one group, so
+   adjust them together (replaces the implicit top-[-12px]↔pt-3 coupling with variables). */
 :root {
-  --chat-rail-row-pt: 0.8rem;     /* rail 행 top-padding(행간 리듬) — 사용자 라이브 튜닝 확정값 */
-  --chat-wait-strip-h: 1.75rem;   /* 입력창 위 대기 표시 줄 높이(사용자 결정 2026-10-01 — 두세 줄로 키울 때 이 값만 바꾼다) */
-  --chat-plain-row-pt: 0.7rem;    /* 비-rail 행 top-padding — 사용자 라이브 튜닝 확정값 */
-  --chat-user-py: 7px;            /* 유저 버블 세로 padding — 사용자 라이브 튜닝 확정값 */
-  --chat-user-px: 0.9rem;         /* 유저 버블 가로 padding(userPy 와 대칭) */
-  --chat-user-my: 0.375rem;       /* 유저 버블 세로 margin(이전 my-1=0.25rem 보다 넉넉 — 턴 덩어리 분리) */
-  --chat-rail-gutter: 1.5rem;     /* rail gutter 폭(이전 w-6=1.5rem 유지) */
-  --chat-rail-line-offset: -1rem; /* 연결선 top(위 행으로 이어짐) = -1 × --chat-rail-row-pt(커플링) */
-  --chat-rail-dot-top: 0.5625rem; /* 점 마커 top = 콘텐츠 첫 줄 정중앙(사용자 라이브 튜닝 — 이전 0.75rem 은 3px 아래로 치우침) */
-  --chat-font-size: 13px;         /* 채팅 루트 base font-size(chat.css .chat-markdown 과 동기) */
-  --chat-line-height: 1.45;       /* 채팅 base line-height — 사용자 라이브 튜닝 확정값 */
+  --chat-rail-row-pt: 0.8rem;     /* rail row top-padding (row rhythm) — value fixed by the user's live tuning */
+  --chat-wait-strip-h: 1.75rem;   /* height of the waiting-indicator line above the input box (user decision 2026-10-01 — change only this value to grow it to two or three lines) */
+  --chat-plain-row-pt: 0.7rem;    /* non-rail row top-padding — value fixed by the user's live tuning */
+  --chat-user-py: 7px;            /* user bubble vertical padding — value fixed by the user's live tuning */
+  --chat-user-px: 0.9rem;         /* user bubble horizontal padding (symmetric with userPy) */
+  --chat-user-my: 0.375rem;       /* user bubble vertical margin (more generous than the earlier my-1=0.25rem — separates turn chunks) */
+  --chat-rail-gutter: 1.5rem;     /* rail gutter width (keeps the earlier w-6=1.5rem) */
+  --chat-rail-line-offset: -1rem; /* connector top (continues into the row above) = -1 × --chat-rail-row-pt (coupling) */
+  --chat-rail-dot-top: 0.5625rem; /* dot marker top = exact middle of the content's first line (user live tuning — the earlier 0.75rem sat 3px low) */
+  --chat-font-size: 13px;         /* chat root base font-size (kept in sync with chat.css .chat-markdown) */
+  --chat-line-height: 1.45;       /* chat base line-height — value fixed by the user's live tuning */
 
-  /* ADR-0053: 앱 전역 오버레이 스크롤바(ScrollArea seam/Radix + xterm) 구조 토큰(크기·모양) — --chat-* 과
-     마찬가지로 theme 무관이라 여기에만 둔다(현재 LLM 제어 미노출 — §5 후속으로 셸 설정(`settings.*`)에 얹을 여지).
-     이 토큰은 공용 ScrollArea(components/ui/scroll-area.css)와 xterm(index.css .xterm-viewport)이 함께 참조한다.
-     ★--scrollbar-thumb(색)은 테마마다 달라야 하므로 각 :root[data-theme=...] 블록에 둔다★.
-     ★--scrollbar-show-delay 제거★: type="scroll" 전환으로 hover show-delay 기법 폐기 — scrollHideDelay(500ms)
-     가 Radix 수준에서 숨김 타이밍을 제어하므로 CSS 레벨 지연 토큰 불필요. */
-  --scrollbar-size: 10px;        /* 스크롤바 트랙 폭(overlay — 콘텐츠 폭 불변, gutter 0) */
-  --scrollbar-radius: 9999px;    /* thumb 라운드(pill) */
+  /* ADR-0053: structure tokens (size, shape) of the app-wide overlay scrollbar (ScrollArea seam/Radix + xterm) — like --chat-*,
+     theme-independent so they live only here (not exposed to LLM control now — room to put them on the shell settings (`settings.*`) as a §5 follow-up).
+     These tokens are referenced together by the shared ScrollArea (components/ui/scroll-area.css) and xterm (index.css .xterm-viewport).
+     ★--scrollbar-thumb (color) must differ per theme, so it lives in each :root[data-theme=...] block★.
+     ★--scrollbar-show-delay removed★: the switch to type="scroll" retired the hover show-delay technique — scrollHideDelay (500ms)
+     controls the hide timing at the Radix level, so no CSS-level delay token is needed. */
+  --scrollbar-size: 10px;        /* scrollbar track width (overlay — content width unchanged, gutter 0) */
+  --scrollbar-radius: 9999px;    /* thumb rounding (pill) */
 }

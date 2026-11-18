@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const listeners = new Map<string, (e: { payload: unknown }) => void>()
 /** Event name → registration options (observes `target`). */
 const listenOptions = new Map<string, unknown>()
-/** IPC order observation — `listen:<이벤트>` · `invoke:window_role`. */
+/** IPC order observation — `listen:<event>` · `invoke:window_role`. */
 const ipcOrder: string[] = []
 const unlistenMock = vi.fn()
 let listenShouldReject = false
@@ -51,10 +51,8 @@ const closeCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'window_cont
 const KEPT = { deferred: false, pending: false, shown_all: false, focused: false, close: 'kept' }
 const CLOSED = { ...KEPT, close: 'closed' }
 
-// ── ViewLayoutRenderer stub — the canvas inside is out of scope (observes only which view it draws) + ★mount counter★.
-// ★S4-F5 keep-alive no-remount★: to proxy whether the slot component is not remounted on tab switch (terminal instance survives),
-//   on mount useEffect([]) raises a counter per viewId by 1. If the count does not grow after a switch and only display
-//   is toggled, the keep-alive ("lossless switch", ADR-0056) structure holds.
+// ── ViewLayoutRenderer stub — the canvas inside is out of scope; observes which view it draws + ★mount counter★.
+// ★S4-F5 keep-alive no-remount★: mount `useEffect([])` bumps a per-viewId counter; if it does not grow after a tab switch and only display toggles, the keep-alive ("lossless switch", ADR-0056) structure holds.
 const mountCounts = vi.hoisted(() => new Map<string, number>())
 /** viewIdOverride → the props that renderer last received. */
 const rendererProps = vi.hoisted(() => new Map<string, Record<string, unknown>>())
@@ -140,8 +138,8 @@ beforeEach(() => {
 
 afterEach(cleanup)
 
-describe('WindowLayout — 초기 pull + keep-alive 캔버스', () => {
-  it('mount 시 list_tabs(label) pull → 탭바 + 모든 탭 캔버스 마운트(keep-alive)', async () => {
+describe('WindowLayout — initial pull + keep-alive canvas', () => {
+  it('on mount list_tabs(label) pull → tab bar + all tab canvases mount (keep-alive)', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     expect(invokeMock).toHaveBeenCalledWith('list_tabs', { window: 'main' })
@@ -153,7 +151,7 @@ describe('WindowLayout — 초기 pull + keep-alive 캔버스', () => {
     expect(v2.style.display).toBe('none')
   })
 
-  it('각 탭 캔버스에 그 view 를 get_view 로 채워 ViewLayoutRenderer 에 viewIdOverride 로 내려꽂는다', async () => {
+  it('each tab canvas fills its view with get_view and passes it down to ViewLayoutRenderer as viewIdOverride', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getAllByTestId('view-renderer').length).toBe(2))
     expect(invokeMock).toHaveBeenCalledWith('get_view', { viewId: 'v1' })
@@ -164,7 +162,7 @@ describe('WindowLayout — 초기 pull + keep-alive 캔버스', () => {
   })
 
   // The rectangle array must be the cache reference as is — the divider preview recognizes a new snapshot by array reference (ADR-0227).
-  it('캐시 항목의 사각형(같은 참조)·비율 한계·version·모르는 내용 슬롯을 렌더러에 넘긴다', async () => {
+  it('passes the cache entry\'s rectangles (same reference) · ratio bounds · version · unknown content slots to the renderer', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => {
       const cached = useViewStore.getState().layouts['v1']
@@ -180,13 +178,10 @@ describe('WindowLayout — 초기 pull + keep-alive 캔버스', () => {
   })
 })
 
-// ── ★S4-F4: mount-race — a newer window:tabs-updated arrives during the initial list_tabs pull await★ ──────────────
-// Restores at component level the class that the old viewStore.test.ts deferred init-race harness verified.
-// Scenario: WindowLayout mount → listen registered first (§7-1 "subscribe first, pull later") → while the list_tabs pull is
-//   pending a newer-version window:tabs-updated arrives → the pull later
-//   resolves with a stale payload → assert that the version guard of applyWindowTabsUpdated blocks the stale pull's overwrite.
-describe('WindowLayout — mount-race(초기 pull vs 최신 emit, S4-F4)', () => {
-  it('list_tabs pull 이 pending 인 동안 더 최신 emit 도착 → 늦게 온 stale pull 이 최신 상태를 덮지 않는다', async () => {
+// ── S4-F4: mount-race — a newer window:tabs-updated arrives during the initial list_tabs pull ──
+// Scenario: listen registered first (§7-1 "subscribe first, pull later") → a newer-version window:tabs-updated arrives while list_tabs is pending → the pull resolves stale → the version guard of applyWindowTabsUpdated must block its overwrite.
+describe('WindowLayout — mount-race (initial pull vs latest emit, S4-F4)', () => {
+  it('while the list_tabs pull is pending a newer emit arrives → the late stale pull does not overwrite the latest state', async () => {
     let resolveListTabs: (payload: unknown) => void = () => {}
     const listTabsPending = new Promise<unknown>(res => {
       resolveListTabs = res
@@ -224,11 +219,10 @@ describe('WindowLayout — mount-race(초기 pull vs 최신 emit, S4-F4)', () =>
   })
 })
 
-// ── ★ADR-0102: boot pull bounded retry + surfacing the final failure★ ──────────────────────────────────────
-// main has no event recovery path (window:tabs-updated fires only on tab mutation), so if the boot list_tabs pull is
-//   one-shot, an early failure = loading stuck forever.
-describe('WindowLayout — 부팅 pull 재시도/표면화(ADR-0102)', () => {
-  it('list_tabs 가 2번 reject 후 resolve → 재시도로 회수해 탭바가 뜬다', async () => {
+// ── ADR-0102: boot pull bounded retry + surfacing the final failure ──
+// main has no event recovery path (window:tabs-updated fires only on tab mutation), so a one-shot boot list_tabs pull failing early = loading stuck forever.
+describe('WindowLayout — boot pull retry/surfacing (ADR-0102)', () => {
+  it('list_tabs rejects twice then resolves → recovered by retry and the tab bar appears', async () => {
     let listTabsCalls = 0
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') {
@@ -252,7 +246,7 @@ describe('WindowLayout — 부팅 pull 재시도/표면화(ADR-0102)', () => {
     expect(screen.queryByTestId('window-boot-error')).toBeNull()
   })
 
-  it('list_tabs 가 계속 reject → 재시도 소진 후 가시적 에러 상태 렌더(로딩 고착 아님)', async () => {
+  it('list_tabs keeps rejecting → after retries are exhausted a visible error state renders (not stuck loading)', async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'list_tabs') throw new Error('backend down')
       return undefined
@@ -265,10 +259,8 @@ describe('WindowLayout — 부팅 pull 재시도/표면화(ADR-0102)', () => {
     expect(screen.queryByTestId('tab-bar')).toBeNull()
   })
 
-  // In the old structure the listen() await was outside the try, so if listener registration rejected, the async IIFE died as unhandled and
-  //   the list_tabs pull never even started, so bootFailed was never set (loading placeholder stuck forever — no signal).
-  //   Now a listen failure is surfaced as bootFailed just like a pull failure.
-  it('listen 등록이 reject → 조용한 로딩 고착이 아니라 boot-error 표면화(FIX-2)', async () => {
+  // listen() used to await outside the try, so a rejected registration killed the async IIFE unhandled — the pull never started and bootFailed was never set. Now a listen failure surfaces as bootFailed like a pull failure.
+  it('listen registration rejects → boot-error is surfaced rather than quietly stuck loading (FIX-2)', async () => {
     listenShouldReject = true
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('window-boot-error')).toBeTruthy(), {
@@ -279,8 +271,8 @@ describe('WindowLayout — 부팅 pull 재시도/표면화(ADR-0102)', () => {
 })
 
 // ── First screen and first screen notice — a window the shell built hidden is shown on the notice (`theme/firstPaint.ts`) ──
-describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
-  it('탭을 받기 전은 바탕만(문구 없음) · 알림은 탭바와 활성 탭의 레이아웃이 그려진 뒤 한 번', async () => {
+describe('WindowLayout — first screen · first-paint notice', () => {
+  it('before tabs are received only the background (no text) · the notice goes once after the tab bar and the active tab\'s layout are drawn', async () => {
     let answerTabs: (payload: unknown) => void = () => {}
     let answerActiveView: (snap: ViewSnapshot) => void = () => {}
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
@@ -322,7 +314,7 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
     expect(seenAtReport).toEqual([['v1', 'v2']])
   })
 
-  it('부팅 실패면 실패 문구가 첫 화면이다 — 알림을 보낸다', async () => {
+  it('on boot failure the failure text is the first screen — the notice is sent', async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'list_tabs') throw new Error('backend down')
       return undefined
@@ -333,7 +325,7 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
   })
 
   // TRD S26-window-chrome §7-7 — so the window is widened before the shell shows it.
-  it('알림은 제목 줄의 최소 창 크기 보고가 답한 뒤 — 보고가 먼저 나가고 그 답을 기다린다', async () => {
+  it('the notice is after the title row\'s minimum window size report answers — the report goes out first and waits for its answer', async () => {
     let answerReport: () => void = () => {}
     const order: string[] = []
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
@@ -359,7 +351,7 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
     await waitFor(() => expect(order).toEqual(['report:286x64', 'first-paint']))
   })
 
-  it('보고가 답하지 않거나 거절돼도 알림은 상한 뒤에 나간다', async () => {
+  it('even if the report does not answer or is refused the notice goes out after the cap', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     for (const answer of ['hang', 'reject'] as const) {
       reportFirstPaintMock.mockReset()
@@ -371,7 +363,7 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
         if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
         if (cmd === 'report_window_min_width') {
           if (answer === 'hang') return new Promise<void>(() => {})
-          throw new Error('거절(시험)')
+          throw new Error('refused (test)')
         }
         return undefined
       })
@@ -383,7 +375,7 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
   })
 
   // A waiting window stays hidden until it is handed over — the empty frame is not a first screen (TRD S21-slot-docking §3-9 I7).
-  it('대기 창은 첫 화면을 알리지 않는다', async () => {
+  it('a waiting window does not announce the first screen', async () => {
     currentWindow.label = 'slot-popup-7'
     windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
     render(<WindowLayout label="slot-popup-7" />)
@@ -393,11 +385,10 @@ describe('WindowLayout — 첫 화면 · 첫 페인트 알림', () => {
   })
 })
 
-// ── ★FIX-3: the per-tab get_view keep-alive pull also self-heals with bounded retry★ ──────────────────────────
-// The old one-shot get_view only did console.warn on a transient failure and tabIdsKey was unchanged, so there was no re-emit trigger,
-//   and that tab's canvas stayed stuck on "View 로딩 중" until an unrelated layout:updated arrived.
-describe('WindowLayout — get_view keep-alive 재시도 self-heal(FIX-3)', () => {
-  it('get_view 가 처음엔 reject, 재시도로 성공 → 그 탭 캔버스가 회복(재발행 관측)', async () => {
+// ── FIX-3: per-tab get_view keep-alive pull self-heals with bounded retry ──
+// A one-shot get_view only console.warned on a transient failure and tabIdsKey stayed unchanged (no re-emit trigger), so that tab's canvas stayed on "View loading" until an unrelated layout:updated.
+describe('WindowLayout — get_view keep-alive retry self-heal (FIX-3)', () => {
+  it('get_view first rejects, succeeds on retry → that tab canvas recovers (republish observed)', async () => {
     let v1Calls = 0
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') {
@@ -427,13 +418,12 @@ describe('WindowLayout — get_view keep-alive 재시도 self-heal(FIX-3)', () =
       },
       { timeout: 3000 },
     )
-    // If it were one-shot, it would be stuck at 1 call.
     expect(v1Calls).toBeGreaterThanOrEqual(3)
   })
 })
 
-describe('WindowLayout — window:tabs-updated 자기 label 필터', () => {
-  it('자기 label emit → 활성 탭 스왑(v1→v2)', async () => {
+describe('WindowLayout — window:tabs-updated own-label filter', () => {
+  it('own label emit → active tab swap (v1→v2)', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     emit('window:tabs-updated', {
@@ -450,7 +440,7 @@ describe('WindowLayout — window:tabs-updated 자기 label 필터', () => {
     expect(v1.style.display).toBe('none')
   })
 
-  it('다른 label emit → 무시(자기 창 불변)', async () => {
+  it('other label emit → ignored (own window unchanged)', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     emit('window:tabs-updated', {
@@ -464,11 +454,10 @@ describe('WindowLayout — window:tabs-updated 자기 label 필터', () => {
   })
 })
 
-// ── ★S4-F5: keep-alive no-remount — slot components are not remounted on tab switch (terminal instance survives)★ ──
-// Unit proxy for ADR-0056 keep-alive "lossless switch": asserts with the mount counter that active/hidden slot renderers are not remounted after a switch
-//   and only display is toggled (actual xterm survival belongs to qa cdp stage 6 — here only the structure).
+// ── S4-F5: keep-alive no-remount — slot components are not remounted on tab switch ──
+// Unit proxy for ADR-0056 "lossless switch": the mount counter shows renderers are not remounted and only display toggles (real xterm survival = qa cdp stage 6).
 describe('WindowLayout — keep-alive no-remount(ADR-0056, S4-F5)', () => {
-  it('탭 전환(v1→v2) 후 두 슬롯 렌더러 mount 횟수가 안 늘고 display 만 토글된다', async () => {
+  it('after a tab switch (v1→v2) the two slot renderers\' mount counts do not grow and only display toggles', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => {
       expect(mountCounts.get('v1')).toBe(1)
@@ -503,10 +492,10 @@ describe('WindowLayout — keep-alive no-remount(ADR-0056, S4-F5)', () => {
   })
 })
 
-describe('WindowLayout — 0탭 자가닫힘(§5-2/G2 · TRD S26-window-chrome §5-5)', () => {
+describe('WindowLayout — 0-tab self-close (§5-2/G2 · TRD S26-window-chrome §5-5)', () => {
   const CLOSE_IF_EMPTY = ['window_control', { window: 'wid-slot-popup-1', action: 'close', ifEmpty: true }]
 
-  it('0탭 신호(window:tabs-updated{tabs:[]}) → 레지스트리 window.close{if_empty} 를 탭이 있던 때 받은 window_id 로', async () => {
+  it('0-tab signal (window:tabs-updated{tabs:[]}) → registry window.close{if_empty} with the window_id received when it had tabs', async () => {
     render(<WindowLayout label="slot-popup-1" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     // The window_id of a 0-tab payload is not used — only the value received while tabs existed is used.
@@ -514,7 +503,7 @@ describe('WindowLayout — 0탭 자가닫힘(§5-2/G2 · TRD S26-window-chrome �
     await waitFor(() => expect(closeCalls()).toEqual([CLOSE_IF_EMPTY]))
   })
 
-  it('0탭 신호가 두 번 와도 청하기는 한 번만(idempotent 재진입 가드)', async () => {
+  it('even if the 0-tab signal arrives twice the request goes once (idempotent re-entry guard)', async () => {
     render(<WindowLayout label="slot-popup-1" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 5 })
@@ -524,7 +513,7 @@ describe('WindowLayout — 0탭 자가닫힘(§5-2/G2 · TRD S26-window-chrome �
     expect(closeCalls()).toHaveLength(1)
   })
 
-  it('청한 뒤 탭이 다시 오면(셸이 닫지 않았다 — Kept) 다음 0탭에 다시 청한다', async () => {
+  it('after the request, if tabs come again (the shell did not close — Kept) it requests again on the next 0 tabs', async () => {
     render(<WindowLayout label="slot-popup-1" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     emit('window:tabs-updated', { label: 'slot-popup-1', tabs: [], active: 'v1', version: 5 })
@@ -543,9 +532,9 @@ describe('WindowLayout — 0탭 자가닫힘(§5-2/G2 · TRD S26-window-chrome �
   })
 
   it.each([
-    ['window_id 없음', undefined],
-    ['0탭 페이로드의 window_id 뿐', 'wid-0tab'],
-  ])('탭이 있던 때의 window_id 가 없으면 청하지 않는다(%s)', async (_case, windowId) => {
+    ['no window_id', undefined],
+    ['only the window_id of a 0-tab payload', 'wid-0tab'],
+  ])('does not request without the window_id from when it had tabs (%s)', async (_case, windowId) => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
@@ -555,7 +544,7 @@ describe('WindowLayout — 0탭 자가닫힘(§5-2/G2 · TRD S26-window-chrome �
         return undefined
       })
       render(<WindowLayout label="slot-popup-1" />)
-      await waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringMatching(/window_id 가 없어 청하지 않는다/)))
+      await waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringMatching(/no window_id from when .* held a tab, so not requesting/)))
       expect(closeCalls()).toEqual([])
     } finally {
       warn.mockRestore()
@@ -563,9 +552,8 @@ describe('WindowLayout — 0탭 자가닫힘(§5-2/G2 · TRD S26-window-chrome �
   })
 })
 
-// ── ★ADR-0227: window canvas report (TRD §2d)★ ─────────────────────────────────────────────────────────
-// jsdom has no ResizeObserver and vitest has no setupFiles, so only this block installs a stub. The test fires the callback
-//   directly (there is no layout, so no real size change occurs).
+// ── ADR-0227: window canvas report (TRD §2d) ──
+// jsdom has no ResizeObserver and vitest has no setupFiles, so only this block installs a stub and fires its callback directly.
 class FakeResizeObserver {
   static instances: FakeResizeObserver[] = []
   observed: Element[] = []
@@ -648,7 +636,7 @@ function gateCanvasReport() {
   }
 }
 
-describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
+describe('WindowLayout — window canvas report (ADR-0227, TRD §2d)', () => {
   beforeEach(() => {
     FakeResizeObserver.instances = []
     vi.stubGlobal('ResizeObserver', FakeResizeObserver)
@@ -661,7 +649,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     vi.restoreAllMocks()
   })
 
-  it('win 이 늦게 와도 callback ref 로 탭 내용 영역에 관측이 붙고 첫 측정이 보고된다', async () => {
+  it('even if win arrives late the observation attaches to the tab content area via the callback ref and the first measurement is reported', async () => {
     let resolveListTabs: (payload: unknown) => void = () => {}
     const listTabsPending = new Promise<unknown>(res => {
       resolveListTabs = res
@@ -694,7 +682,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     await waitFor(() => expect(canvasReports()).toEqual([{ w: 1024, h: 768 }]))
   })
 
-  it('디바운스 → 정수 반올림 → 바뀔 때만 보낸다 · 같은 크기 재전송 없음 · 0 크기는 안 보낸다', async () => {
+  it('debounce → integer rounding → sent only when changed · no resend of the same size · a 0 size is not sent', async () => {
     const { ro } = await mountReady()
     vi.useFakeTimers()
 
@@ -723,7 +711,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     ])
   })
 
-  it('실패하면 RO 변화 없이도 유계 재시도로 재전송하고, 성공한 값만 직전 값이 된다', async () => {
+  it('on failure it resends by bounded retry even with no RO change, and only a successful value becomes the previous value', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     let calls = 0
     mockCanvasReport(async () => {
@@ -751,7 +739,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     expect(canvasReports()).toHaveLength(3)
   })
 
-  it('재시도가 소진되면 console.error 로 남기고 직전 값을 갱신하지 않는다', async () => {
+  it('when retries are exhausted it leaves console.error and does not update the previous value', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     let refuse = true
@@ -773,7 +761,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     expect(canvasReports()).toHaveLength(5)
   })
 
-  it('재시도 대기 중 다른 크기가 관측되면 디바운스를 기다리지 않고 옛 재시도를 멈춘다', async () => {
+  it('if a different size is observed while waiting to retry it stops the old retry without waiting for the debounce', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     mockCanvasReport(async ({ w }) => {
@@ -805,7 +793,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     expect(canvasReports()).toHaveLength(2)
   })
 
-  it('0 크기 관측은 보내는 중인 값의 재시도를 멈추지 않는다', async () => {
+  it('a 0-size observation does not stop the retry of the value being sent', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     let calls = 0
     mockCanvasReport(async () => {
@@ -826,7 +814,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     ])
   })
 
-  it('날아가는 invoke 가 있으면 새 크기는 그 응답 뒤에 보낸다(창당 한 번에 하나)', async () => {
+  it('while an invoke is in flight a new size is sent after its response (one per window)', async () => {
     const gate = gateCanvasReport()
     const { ro } = await mountReady()
     vi.useFakeTimers()
@@ -852,7 +840,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     expect(canvasReports()).toHaveLength(2)
   })
 
-  it('날아가는 동안 온 크기는 마지막 하나만 응답 뒤에 보내고, 그 응답 값과 같으면 건너뛴다', async () => {
+  it('of the sizes arriving while in flight only the last one is sent after the response, and it is skipped if equal to that response value', async () => {
     const gate = gateCanvasReport()
     const { ro } = await mountReady()
     vi.useFakeTimers()
@@ -886,7 +874,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     expect(gate.maxInAir()).toBe(1)
   })
 
-  it('응답을 기다리며 대기하던 값은 더 새 관측이 오면 버려져 응답 뒤에도 나가지 않는다', async () => {
+  it('a value waiting for the response is discarded when a newer observation comes so it is not sent even after the response', async () => {
     const gate = gateCanvasReport()
     const { ro } = await mountReady()
     vi.useFakeTimers()
@@ -908,7 +896,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     ])
   })
 
-  it('훅 인스턴스가 바뀌어도(재마운트) 옛 인스턴스의 invoke 응답 전에는 보내지 않는다', async () => {
+  it('even if the hook instance changes (remount) nothing is sent before the old instance\'s invoke response', async () => {
     const gate = gateCanvasReport()
     const first = await mountReady()
     vi.useFakeTimers()
@@ -934,7 +922,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     expect(gate.maxInAir()).toBe(1)
   })
 
-  it('다른 값이 날아가는 중 직전 성공값으로 돌아오면 그 응답 결과로 판정한다', async () => {
+  it('if it returns to the last successful value while a different value is in flight it is judged by that response result', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const gate = gateCanvasReport()
     const { ro } = await mountReady()
@@ -969,7 +957,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     expect(gate.maxInAir()).toBe(1)
   })
 
-  it('탭 전환 재렌더가 관측·디바운스를 끊지 않는다(ref 참조 고정)', async () => {
+  it('a tab-switch re-render does not cut observation or debounce (ref reference fixed)', async () => {
     const { ro } = await mountReady()
     vi.useFakeTimers()
 
@@ -991,7 +979,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     expect(liveObserver()).toBe(ro)
   })
 
-  it('디바운스 중 언마운트하면 보내지 않고 관측을 뗀다', async () => {
+  it('unmounting during debounce sends nothing and detaches observation', async () => {
     const { ro, unmount } = await mountReady()
     vi.useFakeTimers()
 
@@ -1003,7 +991,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     expect(canvasReports()).toEqual([])
   })
 
-  it('재시도 중 언마운트하면 재시도가 멈추고 최종 실패 로그도 없다', async () => {
+  it('unmounting during retry stops the retry and leaves no final failure log either', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     mockCanvasReport(async () => {
@@ -1021,7 +1009,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     expect(reportErrors(errSpy)).toHaveLength(0)
   })
 
-  it('응답을 기다리는 중 언마운트하면 응답이 와도 대기 중이던 크기를 보내지 않는다', async () => {
+  it('unmounting while waiting for the response does not send the waiting size even if the response comes', async () => {
     const gate = gateCanvasReport()
     const { ro, unmount } = await mountReady()
     vi.useFakeTimers()
@@ -1036,7 +1024,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
     expect(canvasReports()).toEqual([{ w: 800, h: 600 }])
   })
 
-  it('ResizeObserver 가 없는 환경에서도 던지지 않고 보고 없이 렌더한다', async () => {
+  it('even in an environment without ResizeObserver it does not throw and renders without a report', async () => {
     vi.stubGlobal('ResizeObserver', undefined)
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
@@ -1047,7 +1035,7 @@ describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
 })
 
 // TRD S26-window-chrome §7-1 · §7-5 — a title row where the tab bar used to be placed (layout · buttons · dimming details = `titleRow/TitleRow.test.tsx`).
-describe('WindowLayout — 제목 줄', () => {
+describe('WindowLayout — title row', () => {
   const FRAME = {
     restored: { w: 800, h: 600 },
     maximized: false,
@@ -1068,7 +1056,7 @@ describe('WindowLayout — 제목 줄', () => {
     })
   }
 
-  it('main — 제목 줄이 탭바를 품고 · 번호 표식 = 탭 알림의 번호 · 셋째 단추 = 모든 창 숨기기', async () => {
+  it('main — the title row holds the tab bar · number marker = the number of the tab notice · third button = hide all windows', async () => {
     tabsWithNumber('main', 3)
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('window-number').textContent).toBe('3'))
@@ -1077,7 +1065,7 @@ describe('WindowLayout — 제목 줄', () => {
     expect(screen.getByTestId('caption-close').getAttribute('aria-label')).toBe('모든 창 숨기기')
   })
 
-  it('팝아웃 — 셋째 단추 = 창 닫기 · 누르면 이 창 label 로 window_control close', async () => {
+  it('popout — third button = close window · pressing sends window_control close with this window label', async () => {
     currentWindow.label = 'slot-popup-4'
     tabsWithNumber('slot-popup-4', 2)
     render(<WindowLayout label="slot-popup-4" />)
@@ -1088,7 +1076,7 @@ describe('WindowLayout — 제목 줄', () => {
     expect(closeCalls()).toEqual([['window_control', { window: 'slot-popup-4', action: 'close', ifEmpty: false }]])
   })
 
-  it('창 사실(window:frame)의 focused · maximized 를 제목 줄이 따라간다', async () => {
+  it('the title row follows the focused · maximized of the window fact (window:frame)', async () => {
     tabsWithNumber('main', 1)
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(listeners.has('window:frame')).toBe(true))
@@ -1101,12 +1089,11 @@ describe('WindowLayout — 제목 줄', () => {
   })
 })
 
-// User decision 2026-10-26 (T-66): the notice band does not cover the title row (window buttons · draggable area) — it attaches to the top of the canvas area under the title row.
-//   jsdom cannot measure sizes — the position is asserted structurally (the position · z of the covering layer itself belongs to NoticeOverlay.test).
-describe('WindowLayout — 알림 층의 자리', () => {
+// T-66: the notice band does not cover the title row (window buttons · draggable area) — it attaches to the top of the canvas area below it. jsdom cannot measure sizes, so the position is asserted structurally (the covering layer's position · z belongs to NoticeOverlay.test).
+describe('WindowLayout — place of the notice layer', () => {
   const notices = <div data-testid="notices-probe" />
 
-  it('알림 층은 제목 줄 밖 · 캔버스 칸(positioned) 맨 앞에 붙고, 제목 줄이 그보다 앞이다', async () => {
+  it('the notice layer is outside the title row · attached at the very front of the canvas area (positioned), and the title row is ahead of it', async () => {
     render(<WindowLayout label="main" notices={notices} />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     const probe = screen.getByTestId('notices-probe')
@@ -1130,7 +1117,7 @@ describe('WindowLayout — 알림 층의 자리', () => {
     expect(row.contains(probe)).toBe(false)
   }
 
-  it('로딩 화면에도 제목 줄(끌 자리 · 창 단추 — 표식은 아직 없다) 아래에 알림 층을 그린다', async () => {
+  it('the loading screen also draws the notice layer under the title row (drag spot · window buttons — the marker is not there yet)', async () => {
     invokeMock.mockImplementation(() => new Promise(() => {}))
     render(<WindowLayout label="main" notices={notices} />)
     expect(screen.getByTestId('window-loading').textContent).toBe('')
@@ -1141,9 +1128,8 @@ describe('WindowLayout — 알림 층의 자리', () => {
     expect(screen.queryByTestId('tab-bar')).toBeNull()
   })
 
-  // That window may not be in the model (a stale popout) — the window buttons are sent by that label without window_id, and the shell attaches
-  //   directly to the open popout window of that label (a window outside the model — TRD S26-window-chrome §6-2 · shell test `window_buttons_of_an_unmodeled_window_reach_its_os_window`).
-  it('부팅 실패 화면에도 제목 줄 아래에 알림 층을 그린다 — 창 단추가 그 label 로 가고 연결 실패 이유도 읽힌다', async () => {
+  // The window may not be in the model (a stale popout): window buttons go by label without window_id and the shell attaches to the open popout of that label (TRD S26-window-chrome §6-2 · shell test `window_buttons_of_an_unmodeled_window_reach_its_os_window`).
+  it('the boot failure screen also draws the notice layer under the title row — window buttons go to that label and the connection failure reason is readable', async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') throw new Error('backend down')
       if (cmd === 'window_control') return (args as { action: string }).action === 'close' ? CLOSED : { ...KEPT, close: null }
@@ -1164,7 +1150,7 @@ describe('WindowLayout — 알림 층의 자리', () => {
     )
   })
 
-  it('번호를 받기 전(로딩 · 부팅 실패)에는 최소 창 크기를 보내지 않는다', async () => {
+  it('before receiving the number (loading · boot failure) the minimum window size is not sent', async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'list_tabs') throw new Error('backend down')
       return undefined
@@ -1175,9 +1161,8 @@ describe('WindowLayout — 알림 층의 자리', () => {
   })
 })
 
-// ADR-0277: the memory of closing with ✕ (the state of `ConnectionNotice` · `StateFileNotice`) is not withdrawn — the notice layer must not be
-//   remounted even when the screen changes, so that the memory remains.
-describe('WindowLayout — 화면이 바뀌어도 알림의 닫힘 기억이 남는다', () => {
+// ADR-0277: the dismissal memory (✕) of `ConnectionNotice` · `StateFileNotice` is not withdrawn — the notice layer must not remount when the screen changes.
+describe('WindowLayout — the notice\'s dismissal memory survives screen changes', () => {
   let mounts = 0
   function DismissableProbe() {
     const [open, setOpen] = useState(true)
@@ -1194,7 +1179,7 @@ describe('WindowLayout — 화면이 바뀌어도 알림의 닫힘 기억이 남
     mounts = 0
   })
 
-  it('로딩 중에 닫고 탭이 오면 닫힌 채다', async () => {
+  it('close during loading and when tabs come it stays closed', async () => {
     let answerTabs: (payload: unknown) => void = () => {}
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') return new Promise(res => (answerTabs = res))
@@ -1214,7 +1199,7 @@ describe('WindowLayout — 화면이 바뀌어도 알림의 닫힘 기억이 남
     expect(mounts).toBe(1)
   })
 
-  it('부팅 실패 화면에서 닫고 탭 알림으로 되살아나도 닫힌 채다', async () => {
+  it('close on the boot failure screen and even if revived by a tab notice it stays closed', async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') throw new Error('backend down')
       if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
@@ -1241,15 +1226,15 @@ describe('WindowLayout — 화면이 바뀌어도 알림의 닫힘 기억이 남
   })
 })
 
-describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
-  it('[+] 클릭 → createTab(label) invoke', async () => {
+describe('WindowLayout — TabBar action → store action (this label)', () => {
+  it('[+] click → createTab(label) invoke', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('tab-add')).toBeTruthy())
     fireEvent.click(screen.getByTestId('tab-add'))
     expect(invokeMock).toHaveBeenCalledWith('create_tab', { window: 'main', name: null })
   })
 
-  it('숨은 탭 누름 → switchTab(label, view) invoke', async () => {
+  it('hidden tab press → switchTab(label, view) invoke', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     const tab2 = screen.getAllByTestId('tab').find(t => t.getAttribute('data-view-id') === 'v2')!
@@ -1257,7 +1242,7 @@ describe('WindowLayout — TabBar 액션 → store 액션(이 label)', () => {
     expect(invokeMock).toHaveBeenCalledWith('switch_tab', { window: 'main', view: 'v2' })
   })
 
-  it('탭 × 클릭 → closeTab(label, view) invoke', async () => {
+  it('tab × click → closeTab(label, view) invoke', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
     const closeBtns = screen.getAllByTestId('tab-close')
@@ -1314,7 +1299,7 @@ function dragOver(types: string[]): Event {
   return e
 }
 
-describe('WindowLayout — 탭 끌기 배선', () => {
+describe('WindowLayout — tab drag wiring', () => {
   beforeEach(() => {
     stripWidth = 800
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false }) as MediaQueryList))
@@ -1324,7 +1309,7 @@ describe('WindowLayout — 탭 끌기 배선', () => {
     vi.restoreAllMocks()
   })
 
-  it('셸 끌기 세션 사건(dock:drag · dock:feed)은 듣지 않는다 — spare:adopted 만 자기 창 대상으로 건 뒤 window_role 을 묻는다', async () => {
+  it('shell drag session events (dock:drag · dock:feed) are not listened to — only spare:adopted is hooked on its own window, then window_role is asked', async () => {
     currentWindow.label = 'slot-popup-3'
     await mountDockWindow('slot-popup-3')
     expect(listenOptions.get('spare:adopted')).toEqual({ target: 'slot-popup-3' })
@@ -1333,7 +1318,7 @@ describe('WindowLayout — 탭 끌기 배선', () => {
     expect(ipcOrder).not.toContain('listen:dock:feed')
   })
 
-  it('이 창에서 끄는 동안 탭바 구역 밖이면 남은 탭 캔버스를 보이고(R15 · 모델 그대로) 돌아오면 끄는 탭 · 크롬 = 뷰포트 − 탭 캔버스', async () => {
+  it('while dragging in this window, outside the tab bar zone it shows the remaining tab canvases (R15 · model unchanged) and on return the dragged tab · chrome = viewport − tab canvas', async () => {
     stubStrip()
     __resetDragSourceForTest()
     Object.defineProperty(window.screen, 'availWidth', { value: 1920, configurable: true })
@@ -1425,7 +1410,7 @@ describe('WindowLayout — 탭 끌기 배선', () => {
     })
   }
 
-  it('끌기 안내 층은 탭 캔버스 상자 바로 안에 그 상자를 덮고 · 늘 마운트돼 있다(안내는 없음)', async () => {
+  it('the drag guide layer is directly inside the tab canvas box covering that box · always mounted (no guide)', async () => {
     await mountDropWindow()
     const layer = screen.getByTestId('dock-overlay-layer')
     expect(layer.parentElement).toBe(canvasOf('v1').parentElement)
@@ -1434,7 +1419,7 @@ describe('WindowLayout — 탭 끌기 배선', () => {
     expect(screen.queryByTestId('dock-overlay')).toBeNull()
   })
 
-  it('우리 끌기를 뿌리에서 받아 캔버스 좌표로 미리보기를 그리고 · 끄는 동안 셸을 부르지 않고 · drop 에 Seam 하나를 보낸다', async () => {
+  it('it receives our drag at the root and draws a preview in canvas coordinates · does not call the shell while dragging · sends one Seam on drop', async () => {
     await mountDropWindow()
     const seen: string[] = []
     const rdnd = (e: Event) => void seen.push(e.type)
@@ -1478,7 +1463,7 @@ describe('WindowLayout — 탭 끌기 배선', () => {
     }
   })
 
-  it('우리 것이 아닌 끌기(트리 행 · 파일)는 받지도 끊지도 않는다 — window 의 react-dnd 꼴 리스너까지 간다', async () => {
+  it('a drag that is not ours (tree row · file) is neither received nor cut — it goes through to window\'s react-dnd-style listeners', async () => {
     await mountDropWindow()
     const seen: string[] = []
     const rdnd = (e: Event) => void seen.push(e.type)
@@ -1494,7 +1479,7 @@ describe('WindowLayout — 탭 끌기 배선', () => {
     }
   })
 
-  it('파일 · URL 끌어 놓기를 막는다(앱 안 링크 포함) · 글자 끌기는 그대로 · 내리면 뗀다', async () => {
+  it('it blocks file · URL drag-and-drop (including in-app links) · text drag as is · detaches when taken down', async () => {
     const { unmount } = await mountDockWindow('main')
     const link = dragOver(['text/uri-list'])
     expect(link.defaultPrevented).toBe(true)
@@ -1510,9 +1495,8 @@ describe('WindowLayout — 탭 끌기 배선', () => {
   })
 })
 
-// ── ★Waiting mode (TRD S21-slot-docking §3-9)★ — a window of the spare window pool (hidden spare window) is an empty frame · 0-tab self-close off · no tab pull-in
-//   · measuring reports as usual. Mode = `window_role` at mount time, then `spare:adopted` (to normal).
-describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
+// ── Waiting mode (TRD S21-slot-docking §3-9) — a spare-pool window (hidden spare) is an empty frame · 0-tab self-close off · no tab pull-in · measuring reports as usual. Mode = `window_role` at mount, then `spare:adopted` (to normal). ──
+describe('WindowLayout — waiting mode (window_role · spare:adopted)', () => {
   const SPARE = 'slot-popup-7'
 
   beforeEach(() => {
@@ -1530,7 +1514,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     return view
   }
 
-  it('spare:adopted 듣기를 자기 창 대상으로 먼저 건 뒤 window_role 을 묻는다', async () => {
+  it('hooks spare:adopted listening on its own window first, then asks window_role', async () => {
     render(<WindowLayout label={SPARE} />)
     await waitFor(() => expect(ipcOrder).toContain('invoke:window_role'))
     expect(ipcOrder.indexOf('listen:spare:adopted')).toBeGreaterThanOrEqual(0)
@@ -1538,7 +1522,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     expect(listenOptions.get('spare:adopted')).toEqual({ target: SPARE })
   })
 
-  it('window_role = spare → 빈 틀(탭바 + 빈 캔버스) · list_tabs 를 당기지 않는다 · 부팅 오류 · 로딩 문구 없음', async () => {
+  it('window_role = spare → empty frame (tab bar + empty canvas) · does not pull list_tabs · no boot error · loading text', async () => {
     await mountSpare()
     expect(screen.getByTestId('tab-bar')).toBeTruthy()
     // The title row is drawn (so the tab bar is not remounted when taken in) but there are no number badge · window buttons — it is outside the shell window model.
@@ -1553,7 +1537,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     expect(screen.queryByTestId('window-boot-error')).toBeNull()
   })
 
-  it('대기 모드에선 이 창의 0탭 알림이 와도 닫지 않는다', async () => {
+  it('in waiting mode it does not close even if this window\'s 0-tab notice arrives', async () => {
     await mountSpare()
     act(() =>
       useViewStore.getState().applyWindowTabsUpdated({ label: SPARE, window_id: 'w-spare', number: 2, title: 'Engram:2', tabs: [], active: '', version: 9 }),
@@ -1563,7 +1547,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     expect(screen.getByTestId('spare-canvas')).toBeTruthy()
   })
 
-  it('대기 모드에서도 재기 둘(캔버스 · 칸 틀 지표)을 보낸다', async () => {
+  it('in waiting mode it also sends the two measurements (canvas · area frame metrics)', async () => {
     FakeResizeObserver.instances = []
     vi.stubGlobal('ResizeObserver', FakeResizeObserver)
     __resetCanvasReportForTest()
@@ -1581,7 +1565,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     }
   })
 
-  it('spare:adopted → 보통 모드: list_tabs 로 들인 탭을 당겨 그리고, 0탭 자가닫힘이 다시 산다', async () => {
+  it('spare:adopted → normal mode: pulls and draws the adopted tabs with list_tabs, and 0-tab self-close revives', async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs')
         return { label: SPARE, window_id: 'w-spare', tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
@@ -1604,7 +1588,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     )
   })
 
-  it('대기 창은 창 사실(window_frame)을 당기지 않는다 — 셸 창 모델 밖이다 · 들이면 당긴다', async () => {
+  it('a waiting window does not pull the window fact (window_frame) — outside the shell window model · it pulls when adopted', async () => {
     const frameCalls = () => invokeMock.mock.calls.filter(c => c[0] === 'window_frame')
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') return { label: SPARE, tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
@@ -1628,7 +1612,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     await waitFor(() => expect(frameCalls()).toEqual([['window_frame', undefined]]))
   })
 
-  it('들인 뒤 제 탭을 당겨 오기 전에는 빈 틀 그대로 — 로딩 문구 없음 · 탭바 줄은 같은 노드', async () => {
+  it('until it pulls its own tabs after adoption it is the empty frame as is — no loading text · the tab bar row is the same node', async () => {
     let answer: (payload: unknown) => void = () => {}
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') return new Promise(res => (answer = res))
@@ -1652,7 +1636,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
 
   const headIds = () => screen.queryAllByTestId('tab').map(h => h.getAttribute('data-view-id'))
 
-  it('대기 중에 들일 탭이 먼저 오면(전역 미러) 대기가 풀릴 때까지 빈 틀 · 풀리는 순간 그 탭', async () => {
+  it('if a tab to adopt arrives first during waiting (global mirror) it is an empty frame until waiting is released · that tab the moment it is released', async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'list_tabs') return new Promise(() => {})
       if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
@@ -1671,7 +1655,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     expect(screen.queryByTestId('spare-canvas')).toBeNull()
   })
 
-  it('window_role = unknown 이거나 실패하면 보통으로 그린다', async () => {
+  it('if window_role = unknown or fails it is drawn as normal', async () => {
     windowRoleMock.mockImplementation(async () => ({ role: 'unknown', generation: null }))
     const first = render(<WindowLayout label={SPARE} />)
     await waitFor(() => expect(screen.getAllByTestId('tab-canvas')).toHaveLength(2))
@@ -1690,7 +1674,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
     }
   })
 
-  it('모드를 모르는 동안(window_role 답 전)에는 0탭 알림이 와도 닫지 않는다 — 대기로 답하면 끝까지 안 닫는다', async () => {
+  it('while the mode is unknown (before the window_role answer) it does not close even if a 0-tab notice arrives — if it answers waiting it never closes', async () => {
     let answer: (reply: unknown) => void = () => {}
     windowRoleMock.mockImplementation(() => new Promise(res => (answer = res)))
     render(<WindowLayout label={SPARE} />)
@@ -1708,7 +1692,7 @@ describe('WindowLayout — 대기 모드(window_role · spare:adopted)', () => {
 })
 
 // ── Prewarmed window adoption · first screen notice (TRD S21-slot-docking §3-9 I26 · I28) — the shell door of the adopted window receives only the notice carrying that adoption number ──
-describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
+describe('WindowLayout — adoption number · first-screen re-notice', () => {
   const SPARE = 'slot-popup-7'
   const TABS = { label: SPARE, window_id: 'w-spare', number: 2, title: 'Pop - Engram:2', tabs: [{ id: 'p1', name: 'Pop', named: true }], active: 'p1', version: 3 }
 
@@ -1731,7 +1715,7 @@ describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
     })
   }
 
-  it('대기 → 채택: 제 탭을 그린 뒤 그 채택 번호로 한 번 알린다', async () => {
+  it('waiting → adoption: after drawing its own tabs it notifies once with that adoption number', async () => {
     listTabsAnswers(() => true)
     windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
     render(<WindowLayout label={SPARE} />)
@@ -1743,7 +1727,7 @@ describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
     await waitFor(() => expect(reports()).toEqual([[4]]))
   })
 
-  it('번호 0 도 채택 번호로 싣는다', async () => {
+  it('number 0 is also carried as an adoption number', async () => {
     listTabsAnswers(() => true)
     windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
     render(<WindowLayout label={SPARE} />)
@@ -1753,7 +1737,7 @@ describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
   })
 
   // A prewarmed page whose `window_role` failed already reported `bootFailed` in normal mode by pulling its own label, which the model does not know.
-  it('window_role 실패 페이지 — 채택에 부팅 실패를 내리고 다시 당겨 탭을 그린 뒤 그 번호로 다시 알린다', async () => {
+  it('window_role failure page — takes boot failure down on adoption, pulls again and draws tabs, then notifies again with that number', async () => {
     let adopted = false
     listTabsAnswers(() => adopted)
     windowRoleMock.mockImplementation(async () => {
@@ -1779,7 +1763,7 @@ describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
     }
   }, 6000)
 
-  it('채택 전후로 첫 화면이 이어져도(부팅 실패를 내림과 탭 반영이 한 렌더) 그 번호로 다시 알린다', async () => {
+  it('even if the first screen continues around adoption (taking boot failure down and reflecting tabs in one render) it notifies again with that number', async () => {
     listTabsAnswers(() => false)
     windowRoleMock.mockImplementation(async () => {
       throw new Error('no dock state')
@@ -1802,7 +1786,7 @@ describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
   }, 6000)
 
   // The shell does not check whether the page has been fully loaded before handing over — a page that missed the adoption event receives the number as the reply while waiting to become visible.
-  it('spare:adopted 뒤에 마운트한 페이지 — window_role 답 model + 번호로 보통 모드 · 그 번호로 한 번 알린다', async () => {
+  it('a page mounted after spare:adopted — window_role answer model + number gives normal mode · notifies once with that number', async () => {
     listTabsAnswers(() => true)
     windowRoleMock.mockImplementation(async () => ({ role: 'model', generation: 7 }))
     render(<WindowLayout label={SPARE} />)
@@ -1811,7 +1795,7 @@ describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
     await waitFor(() => expect(reports()).toEqual([[7]]))
   })
 
-  it('채택을 본 뒤 늦게 온 window_role 답 spare 는 대기로 되돌리지 않는다', async () => {
+  it('a late window_role answer spare after seeing adoption does not return it to waiting', async () => {
     listTabsAnswers(() => true)
     let answer: (reply: unknown) => void = () => {}
     windowRoleMock.mockImplementation(() => new Promise(res => (answer = res)))
@@ -1826,7 +1810,7 @@ describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
     await waitFor(() => expect(reports()).toEqual([[5]]))
   })
 
-  it('spare:adopted 듣기를 못 걸면 adoptable: false 로 묻고 · 답 spare 가 와도 대기로 그리지 않는다', async () => {
+  it('if spare:adopted listening cannot be hooked it asks with adoptable: false · even if the answer is spare it is not drawn as waiting', async () => {
     listTabsAnswers(() => true)
     rejectListen.add('spare:adopted')
     windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
@@ -1842,7 +1826,7 @@ describe('WindowLayout — 채택 번호 · 첫 화면 다시 알림', () => {
     }
   })
 
-  it('StrictMode 두 번 마운트 — 늘 adoptable: true 로 묻고 채택 뒤 알림은 한 번', async () => {
+  it('StrictMode double mount — always asks with adoptable: true and the notice after adoption is once', async () => {
     listTabsAnswers(() => true)
     windowRoleMock.mockImplementation(async () => ({ role: 'spare', generation: null }))
     render(

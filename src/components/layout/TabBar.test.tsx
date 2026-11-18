@@ -1,7 +1,5 @@
-// TabBar unit test — tab render · press to switch · close · add · inline name edit (ADR-0057, §7-2) + the tab drag source (TRD
-//   S21-slot-docking §4-2 · §4-4 · §4-6 — the hook `useTabDragSource` · `dragSource` real · invoke · events are fakes).
-// Tab bar (hand calculation of the drag-side expectations): row x 100..800 · y 40..68 · `+` 40 → usable width 660 · with four tabs all 160 → head x 0 · 160 ·
-//   320 · 480. Press tab a (head x 100..260) at x 180 (grab offset 80).
+// TabBar unit test — tab render · press to switch · close · add · inline name edit (ADR-0057, §7-2) + the tab drag source (TRD S21-slot-docking §4-2 · §4-4 · §4-6; `useTabDragSource` · `dragSource` real, invoke · events fake).
+// Drag expectations by hand: row x 100..800 · y 40..68 · `+` 40 → usable width 660; four tabs at 160 → head x 0 · 160 · 320 · 480. Press tab a (head x 100..260) at x 180 (grab offset 80).
 
 import { act, cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -77,7 +75,7 @@ function openEdit(id: string) {
 const openEditForV1 = () => openEdit('v1')
 
 describe('TabBar', () => {
-  it('tabs 를 렌더하고 active 탭을 data-active=true 로 강조한다', () => {
+  it('renders tabs and highlights the active tab with data-active=true', () => {
     renderBar('v2')
     const tabs = screen.getAllByTestId('tab')
     expect(tabs).toHaveLength(2)
@@ -85,7 +83,7 @@ describe('TabBar', () => {
     expect(head('v1').getAttribute('data-active')).toBe('false')
   })
 
-  it('비활성 탭 머리를 왼쪽 단추로 누르는 순간 onSwitch(그 view) — 클릭을 기다리지 않는다', () => {
+  it('the moment an inactive tab head is pressed with the left button, onSwitch(that view) — it does not wait for the click', () => {
     const { onSwitch } = renderBar('v1')
     fireEvent.pointerDown(nameOf('v2'), { button: 0, pointerId: 1 })
     expect(onSwitch).toHaveBeenCalledWith('v2')
@@ -93,7 +91,7 @@ describe('TabBar', () => {
     expect(onSwitch).toHaveBeenCalledTimes(1)
   })
 
-  it('활성 탭 누름 · 오른쪽 단추 누름은 전환하지 않는다', () => {
+  it('pressing the active tab · pressing with the right button does not switch', () => {
     const { onSwitch } = renderBar('v1')
     fireEvent.pointerDown(head('v1'), { button: 0, pointerId: 1 })
     fireEvent.pointerDown(head('v2'), { button: 2, pointerId: 1 })
@@ -101,7 +99,7 @@ describe('TabBar', () => {
   })
 
   // TRD S26-window-chrome §7-1 · §7-2 — the tab bar inside the title bar.
-  it('탭 줄 행 = 창 끌 자리(값 없는 속성 — 자기 자신만) · 탭바 뿌리 · 머리 · × · + 에는 없다', () => {
+  it('tab row = window-drag spot (a valueless attribute — itself only) · absent on the tab bar root · head · × · +', () => {
     renderBar('v1')
     expect(screen.getByTestId('tab-strip-row').getAttribute('data-tauri-drag-region')).toBe('')
     const others = [
@@ -113,19 +111,19 @@ describe('TabBar', () => {
     for (const el of others) expect(el.hasAttribute('data-tauri-drag-region'), el.dataset.testid).toBe(false)
   })
 
-  it('탭바 뿌리는 제목 줄에서 줄어드는 쪽 — flex 1 1 0 · min-width 0 · 높이 28', () => {
+  it('the tab bar root is the side that shrinks in the title row — flex 1 1 0 · min-width 0 · height 28', () => {
     renderBar('v1')
     const s = screen.getByTestId('tab-bar').style
     expect([s.flexGrow, s.flexShrink, s.flexBasis, s.minWidth, s.height]).toEqual(['1', '1', '0px', '0px', '28px'])
   })
 
-  it('[+] 클릭 → onCreate', () => {
+  it('[+] click → onCreate', () => {
     const { onCreate } = renderBar()
     fireEvent.click(screen.getByTestId('tab-add'))
     expect(onCreate).toHaveBeenCalledTimes(1)
   })
 
-  it('탭 × 클릭 → onClose(그 view id) · × 누름은 머리 누름이 아니다(전환 없음)', () => {
+  it('tab × click → onClose(that view id) · pressing × is not a head press (no switch)', () => {
     const { onClose, onSwitch } = renderBar('v1')
     const close = head('v2').querySelector<HTMLElement>('[data-testid="tab-close"]')!
     fireEvent.pointerDown(close, { button: 0, pointerId: 1 })
@@ -134,7 +132,7 @@ describe('TabBar', () => {
     expect(onSwitch).not.toHaveBeenCalled()
   })
 
-  it('닫기 · + 단추 = 22 px 원 안의 아이콘 · + 원 앞 틈은 margin 이 아니라 왼 패딩', () => {
+  it('close · + button = an icon inside a 22 px circle · the gap before the + circle is left padding, not margin', () => {
     renderBar('v1')
     const close = head('v1').querySelector<HTMLElement>('[data-testid="tab-close"]')!
     expect(close.style.width).toBe('22px')
@@ -153,7 +151,7 @@ describe('TabBar', () => {
   })
 
   // jsdom does not paint :hover — we check only that the class is attached and that there is no inline background that beats it.
-  it('× · + 원의 맴돎 색은 테마 토큰 클래스 · 인라인 배경 없음 · 두 원은 머리 내용과 같은 세로 띠', () => {
+  it('the hover color of the × · + circles is a theme token class · no inline background · the two circles are the same vertical band as the head content', () => {
     renderBar('v1')
     const close = head('v1').querySelector<HTMLElement>('[data-testid="tab-close"]')!
     expect(close.className.split(' ')).toContain('hover:bg-[var(--tab-button-hover-bg)]')
@@ -165,14 +163,13 @@ describe('TabBar', () => {
     expect(circle.className.split(' ')).toContain('group-hover/add:bg-[var(--tab-button-hover-bg)]')
     expect([circle.style.background, circle.style.backgroundColor]).toEqual(['', ''])
 
-    // The × circle is the middle of the head's content area, the + circle the middle of the + box — if the top · bottom of the two areas are equal, the circle center heights are equal.
     const content = close.parentElement!
     expect([content.style.top, content.style.bottom, content.style.alignItems]).toEqual(['4px', '0px', 'center'])
     expect([add.style.top, add.style.bottom, add.style.alignItems]).toEqual([content.style.top, content.style.bottom, 'center'])
   })
 
   // The name inherits the head's text color — if the inline colors of the head and × are equal, the name · × are one color.
-  it('이름 · × 는 한 전경색 — 활성 · 맴돎 = --tab-text · 쉴 때 = --tab-text-inactive · + 도 쉴 때 그 회색', () => {
+  it('name · × share one foreground color — active · hover = --tab-text · at rest = --tab-text-inactive · + is also that gray at rest', () => {
     renderBar('v1')
     const close = (id: string) => head(id).querySelector<HTMLElement>('[data-testid="tab-close"]')!
     const colours = (id: string) => [nameOf(id).style.color, head(id).style.color, close(id).style.color]
@@ -187,7 +184,7 @@ describe('TabBar', () => {
     expect(screen.getByTestId('tab-add').style.color).toBe('var(--tab-text-inactive)')
   })
 
-  it('+ 원(아이콘) 클릭 → onCreate · 닫기 아이콘 클릭 → onClose', () => {
+  it('+ circle (icon) click → onCreate · close icon click → onClose', () => {
     const { onCreate, onClose } = renderBar('v1')
     fireEvent.click(screen.getByTestId('tab-add-circle').querySelector('svg')!)
     expect(onCreate).toHaveBeenCalledTimes(1)
@@ -195,26 +192,25 @@ describe('TabBar', () => {
     expect(onClose).toHaveBeenCalledWith('v2')
   })
 
-  it('이름 더블클릭 → 인라인 편집 진입(input 등장, 현재 이름 시드)', () => {
+  it('name double-click → enters inline edit (input appears, seeded with the current name)', () => {
     renderBar('v1')
     const input = openEditForV1()
     expect(input.value).toBe('View 1')
     expect(input.getAttribute('data-view-id')).toBe('v1')
   })
 
-  it('Enter(새 이름) → onRename(id, trim된 새이름) — 정확히 1회(Enter+blur 이중호출 방지, FIX 3)', () => {
+  it('Enter (new name) → onRename(id, trimmed new name) — exactly once (prevents the Enter+blur double call, FIX 3)', () => {
     const { onRename } = renderBar('v1')
     const input = openEditForV1()
     fireEvent.change(input, { target: { value: '  Renamed  ' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     expect(onRename).toHaveBeenCalledWith('v1', 'Renamed')
-    // A blur after unmount has its delivery turned off by React 19 during commit, and after that it is a detached node so it does not reach the root listener.
-    //   So fireEvent.blur on this detached input does not reach even the `editingId` check of commitEdit — this is not a test that measures that check.
+    // A blur after unmount is not delivered by React 19 during commit and the input is detached, so this blur never reaches the root listener or commitEdit's `editingId` check — it does not measure that check.
     fireEvent.blur(input)
     expect(onRename).toHaveBeenCalledTimes(1)
   })
 
-  it('편집 진입 시 select() 가 정확히 1회만 실행(매 키입력 재선택 방지, FIX 1)', () => {
+  it('select() runs exactly once on entering edit (prevents re-selecting on every keystroke, FIX 1)', () => {
     renderBar('v1')
     const selectSpy = vi.spyOn(HTMLInputElement.prototype, 'select')
     const input = openEditForV1()
@@ -228,7 +224,7 @@ describe('TabBar', () => {
     selectSpy.mockRestore()
   })
 
-  it('Esc → 편집 취소(onRename 안 부름, revert)', () => {
+  it('Esc → cancels edit (onRename not called, revert)', () => {
     const { onRename } = renderBar('v1')
     const input = openEditForV1()
     fireEvent.change(input, { target: { value: 'Whatever' } })
@@ -237,7 +233,7 @@ describe('TabBar', () => {
     expect(screen.queryByTestId('tab-rename-input')).toBeNull()
   })
 
-  it('빈/공백 이름 확정(Enter) → onRename 안 부름(revert)', () => {
+  it('committing an empty/blank name (Enter) → onRename not called (revert)', () => {
     const { onRename } = renderBar('v1')
     const input = openEditForV1()
     fireEvent.change(input, { target: { value: '   ' } })
@@ -245,7 +241,7 @@ describe('TabBar', () => {
     expect(onRename).not.toHaveBeenCalled()
   })
 
-  it('이름 미변경 확정(Enter) → onRename 안 부름(no-op)', () => {
+  it('committing an unchanged name (Enter) → onRename not called (no-op)', () => {
     const { onRename } = renderBar('v1')
     const input = openEditForV1()
     fireEvent.keyDown(input, { key: 'Enter' })
@@ -253,7 +249,7 @@ describe('TabBar', () => {
   })
 
   // TRD S26-window-chrome §3-1 — confirming an auto name with exactly those characters still counts as having set the name.
-  it('자동 이름 탭의 같은 글자 확정(Enter) → onRename(id, 그 글자) 1회', () => {
+  it('committing the same text of an auto-named tab (Enter) → onRename(id, that text) once', () => {
     const { onRename } = renderBar('v1', [
       { id: 'v1', name: '에이전트 트리', named: false },
       { id: 'v2', name: 'View 2', named: true },
@@ -266,7 +262,7 @@ describe('TabBar', () => {
     expect(onRename).toHaveBeenCalledWith('v1', '에이전트 트리')
   })
 
-  it('자동 이름 탭도 빈/공백 확정(Enter) → onRename 안 부름', () => {
+  it('an auto-named tab also committing empty/blank (Enter) → onRename not called', () => {
     const { onRename } = renderBar('v1', [{ id: 'v1', name: '빈 칸', named: false }])
     const input = openEditForV1()
     fireEvent.change(input, { target: { value: '   ' } })
@@ -274,8 +270,8 @@ describe('TabBar', () => {
     expect(onRename).not.toHaveBeenCalled()
   })
 
-  // The same characters are sent only with Enter — main decision (U3a review · 2026-10-25).
-  it('자동 이름 탭 — 글자를 안 바꾸고 포커스를 잃으면 onRename 안 부르고 편집만 끝낸다', () => {
+  // Unchanged text is sent only with Enter.
+  it('auto-named tab — losing focus without changing the text does not call onRename and just ends the edit', () => {
     const { onRename } = renderBar('v1', [
       { id: 'v1', name: '에이전트 트리', named: false },
       { id: 'v2', name: 'View 2', named: true },
@@ -287,7 +283,7 @@ describe('TabBar', () => {
     expect(screen.queryByTestId('tab-rename-input')).toBeNull()
   })
 
-  it('자동 이름 탭 — 바꾼 글자는 포커스 잃음으로도 보낸다 · 1회', () => {
+  it('auto-named tab — changed text is also sent on focus loss · once', () => {
     const { onRename } = renderBar('v1', [
       { id: 'v1', name: '에이전트 트리', named: false },
       { id: 'v2', name: 'View 2', named: true },
@@ -299,7 +295,7 @@ describe('TabBar', () => {
     expect(onRename).toHaveBeenCalledWith('v1', '내 탭')
   })
 
-  it('편집 중 이름이 바뀌어도(자동 이름이 따라감 · LLM 이름 바꾸기) 손대지 않은 칸의 포커스 잃음 · Enter 는 옛 이름을 써 넣지 않는다', () => {
+  it('even if the name changes during edit (auto name follows · LLM rename), focus loss · Enter on the untouched field do not write in the old name', () => {
     const bar = renderBar('v1', [
       { id: 'v1', name: '에이전트 트리', named: false },
       { id: 'v2', name: 'View 2', named: true },
@@ -315,9 +311,8 @@ describe('TabBar', () => {
     expect(bar.onRename).not.toHaveBeenCalled()
   })
 
-  // Tauri `drag.js` blocks the default action of a press on the draggable area (moving focus), so the input area does not blur. The imitation = a listener attached first on the document
-  //   bubble phase — it also cuts off later listeners (jsdom does not move focus on press, so the default-action side is already the same).
-  it('편집 중 창 끌 자리(탭 줄 빈 곳) 누름 → 편집을 끝낸다 — 포커스 잃음과 같은 규칙(바꾼 글자만 보낸다)', () => {
+  // Tauri `drag.js` blocks the default action of a press on the draggable area (focus move), so the input does not blur; imitated by a document bubble-phase listener attached first that also cuts off later listeners (jsdom moves no focus on press).
+  it('pressing the window-drag spot during edit (empty part of the tab row) → ends the edit — the same rule as focus loss (only changed text is sent)', () => {
     const dragJs = (e: MouseEvent) => {
       if (!(e.target instanceof Element) || !e.target.hasAttribute('data-tauri-drag-region')) return
       e.preventDefault()
@@ -343,7 +338,7 @@ describe('TabBar', () => {
     }
   })
 
-  it('끌 자리가 아닌 누름에는 포커스를 빼지 않는다 — 편집 중인 탭의 × 누름이 입력 칸 포커스를 지키는 규칙 그대로', () => {
+  it('a press that is not a drag spot does not take focus away — the same rule where pressing × of the tab being edited keeps the input field focus', () => {
     renderBar('v1')
     const input = openEditForV1()
     fireEvent.mouseDown(head('v1').querySelector('[data-testid="tab-close"]')!)
@@ -351,7 +346,7 @@ describe('TabBar', () => {
     expect(screen.getByTestId('tab-rename-input')).toBe(input)
   })
 
-  it('앞뒤 공백이 붙은 자동 이름 — 손대지 않고 포커스를 잃으면 onRename 안 부른다', () => {
+  it('auto name with surrounding whitespace — losing focus untouched does not call onRename', () => {
     const { onRename } = renderBar('v1', [{ id: 'v1', name: ' proj ', named: false }])
     const input = openEditForV1()
     expect(input.value).toBe(' proj ')
@@ -359,7 +354,7 @@ describe('TabBar', () => {
     expect(onRename).not.toHaveBeenCalled()
   })
 
-  it('앞뒤 공백이 붙은 정한 이름 — 편집 중 LLM 이 바꿔도 손대지 않은 칸의 포커스 잃음 · Enter 는 옛 이름을 써 넣지 않는다', () => {
+  it('set name with surrounding whitespace — even if the LLM changes it during edit, focus loss · Enter on the untouched field do not write in the old name', () => {
     const bar = renderBar('v1', [{ id: 'v1', name: ' old ', named: true }])
     let input = openEditForV1()
     bar.rerender({ tabs: [{ id: 'v1', name: 'new', named: true }] })
@@ -372,7 +367,7 @@ describe('TabBar', () => {
     expect(bar.onRename).not.toHaveBeenCalled()
   })
 
-  it('편집 중 input 키 입력이 바깥(전역 키바인딩)으로 새지 않는다(stopPropagation)', () => {
+  it('input keystrokes during edit do not leak outside (to global keybindings) (stopPropagation)', () => {
     renderBar('v1')
     const input = openEditForV1()
     const outside = vi.fn()
@@ -382,7 +377,7 @@ describe('TabBar', () => {
     expect(outside).not.toHaveBeenCalled()
   })
 
-  it('비활성 탭 이름 더블클릭 제스처 → 누름에서 그 탭으로 전환 · 편집 진입', () => {
+  it('inactive tab name double-click gesture → switches to that tab on press · enters edit', () => {
     const { onSwitch } = renderBar('v1')
     const name = nameOf('v2')
     for (const detail of [1, 2]) {
@@ -396,7 +391,7 @@ describe('TabBar', () => {
     expect(vi.mocked(onSwitch).mock.calls.every(c => c[0] === 'v2')).toBe(true)
   })
 
-  it('× 를 연속 클릭으로 닫다가 밀려 온 다음 탭의 × (detail 2)는 닫는다 — 전에 머리 누름으로 활성이 된 탭이라도 · 이름 편집은 열지 않는다', () => {
+  it('while closing with consecutive × clicks, the × of the next tab pushed in (detail 2) closes — even for a tab made active earlier by a head press · it does not open name edit', () => {
     const { onClose } = renderBar('v1')
     fireEvent.pointerDown(nameOf('v2'), { button: 0, pointerId: 1 })
     const close = (id: string) => head(id).querySelector<HTMLElement>('[data-testid="tab-close"]')!
@@ -407,7 +402,7 @@ describe('TabBar', () => {
     expect(screen.queryByTestId('tab-rename-input')).toBeNull()
   })
 
-  it('이름 칸 밖 머리 더블클릭도 편집을 열고 · 편집 중 입력 칸 안의 더블클릭은 친 글자를 지우지 않는다', () => {
+  it('a head double-click outside the name field also opens edit · a double-click inside the input field during edit does not erase typed text', () => {
     renderBar('v1')
     fireEvent.doubleClick(head('v1'))
     const input = screen.getByTestId('tab-rename-input') as HTMLInputElement
@@ -416,7 +411,7 @@ describe('TabBar', () => {
     expect((screen.getByTestId('tab-rename-input') as HTMLInputElement).value).toBe('Typed')
   })
 
-  it('머리 = div · OS 끌기 출처(draggable)', () => {
+  it('head = div · OS drag source (draggable)', () => {
     renderBar('v1')
     for (const el of screen.getAllByTestId('tab')) {
       expect(el.tagName).toBe('DIV')
@@ -424,7 +419,7 @@ describe('TabBar', () => {
     }
   })
 
-  it('탭바 줄 = 위치 기준 · 스크롤 없음 · 왼쪽 패딩 없음 · 머리와 + 만 담는다', () => {
+  it('tab bar row = position reference · no scroll · no left padding · holds only heads and +', () => {
     renderBar('v1')
     const row = screen.getByTestId('tab-strip-row')
     expect(row.style.position).toBe('relative')
@@ -437,7 +432,7 @@ describe('TabBar', () => {
     expect(screen.getByTestId('tab-add').style.marginLeft).toBe('')
   })
 
-  it('구분선은 그린 이웃 사이마다 있고 · 활성 탭과 맴도는 탭의 양옆에서는 떼지 않고 사라진다 · 활성 면은 활성 탭에만', () => {
+  it('a divider exists between each pair of drawn neighbours · beside the active and hovered tab it disappears without detaching · the active surface is only on the active tab', () => {
     const tabs = ['a', 'b', 'c', 'd', 'e', 'f'].map(id => ({ id, name: id, named: true }))
     renderBar('b', tabs)
     // The divider sits on the head's left edge — the divider at head x = between (the neighbor before x | x).
@@ -462,7 +457,7 @@ describe('TabBar', () => {
   })
 
   // PRD R27 · ADR-0295 decision 1 — top corner 10 · bottom wing 12 · left-right margin 2 · ADR-0298 decision 3 — divider 1×13.
-  it('활성 탭 모양 = 위 모서리 반지름 10 · 아래 바깥 날개 반지름 12 · 구분선 두께 1 · 높이 13 · 좌우 여백 2', () => {
+  it('active tab shape = top corner radius 10 · bottom outer wing radius 12 · divider thickness 1 · height 13 · side margin 2', () => {
     const tabs = ['a', 'b', 'c'].map(id => ({ id, name: id, named: true }))
     renderBar('b', tabs)
     const part = (id: string, testid: string) => head(id).querySelector<HTMLElement>(`[data-testid="${testid}"]`)!
@@ -492,7 +487,7 @@ describe('TabBar', () => {
   })
 
   // Chrome `horizontal_tab_style_views.cc` `GetSeparatorOpacity` · `GetHoverInterpolatedSeparatorOpacity`.
-  it('구분선은 곧바로 사라지고 · 맴돎이 끝난 머리 양옆만 200 ms EASE_IN 으로 나타나며 · 그 뒤와 활성이 옮은 되살아남은 곧바로다', () => {
+  it('the divider disappears at once · only the two sides of a head whose hover ended appear with 200 ms EASE_IN · after that and where the active moved, revival is at once', () => {
     vi.useFakeTimers()
     try {
       const tabs = ['a', 'b', 'c', 'd'].map(id => ({ id, name: id, named: true }))
@@ -523,8 +518,8 @@ describe('TabBar', () => {
     }
   })
 
-  // User report 2026-10-21 — the × and + of the last inactive head looked stuck together.
-  it('마지막 머리 오른쪽 가에 끝 구분선 — 마지막 머리에만 · 경계 가운데 · 비활성 · 맴돎 아님일 때만 보인다', () => {
+  // The × and + of the last inactive head must not look stuck together.
+  it('end divider on the right edge of the last head — only on the last head · centered on the boundary · shown only when inactive · not hovered', () => {
     const tabs = ['a', 'b', 'c'].map(id => ({ id, name: id, named: true }))
     const bar = renderBar('a', tabs)
     const trail = () => screen.getByTestId('tab-separator-trailing')
@@ -543,9 +538,8 @@ describe('TabBar', () => {
   })
 })
 
-// ── Tab drag (OS drag source — TRD S21-slot-docking §4-2 · §4-4 · §4-6 · §8-2 「훅 · 컴포넌트」) ──
-// jsdom has no DragEvent · DataTransfer, so we raise events with a drag data field attached. The source window tab bar decision (`localDrag.setSourceStrip`) is
-//   the job of root receiving, so the test writes it directly. The decision where the engine folds a drag · the real event spacing is not covered by this test.
+// ── Tab drag (OS drag source — TRD S21-slot-docking §4-2 · §4-4 · §4-6 · §8-2) ──
+// jsdom has no DragEvent · DataTransfer, so events carry a drag data field. The source tab bar decision (`localDrag.setSourceStrip`) belongs to root receiving, so the test writes it directly; the engine's drag folding · real event spacing are not covered.
 
 let rowWidth: number
 
@@ -688,7 +682,7 @@ async function startA(bar: ReturnType<typeof renderBar>): Promise<FakeDt> {
   return dt
 }
 
-describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
+describe('TabBar — tab drag (OS drag source)', () => {
   beforeEach(async () => {
     rowWidth = 700
     handlers.clear()
@@ -729,7 +723,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
 
   // ── Drawing (outside a drag) ──
 
-  it('머리 폭 · 자리 = 탭바 레이아웃(쓸 수 있는 폭 = 줄 − +) · + 는 마지막 머리 뒤', async () => {
+  it('head width · position = tab bar layout (usable width = row − +) · + is after the last head', async () => {
     await mount('a')
     expect(['a', 'b', 'c', 'd'].map(id => [xOf(head(id)), head(id).style.width])).toEqual([
       [0, '160px'],
@@ -741,7 +735,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(head('a').style.transition).toBe(SNAP)
   })
 
-  it('좁은 탭바 — 보이는 머리만 그리고 활성 최소 폭보다 좁은 비활성 머리는 닫기 버튼을 감춘다', async () => {
+  it('narrow tab bar — draws only visible heads and an inactive head narrower than the active minimum width hides its close button', async () => {
     rowWidth = 140 // Usable width 100 → widths 52 · 32 · 32 · 32 · visible = the first two
     await mount('a')
     expect(headIds()).toEqual(['a', 'b'])
@@ -751,8 +745,8 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(head('b').querySelector('[data-testid="tab-close"]')).toBeNull()
   })
 
-  // When the window is narrower than the title bar's minimum width — if row width 0 is counted as 「재지 못함」 (could not measure), all heads stand at 160 and cover the right of the title bar.
-  it('줄 폭 0(높이는 있음) = 잰 값 — 머리를 하나도 그리지 않고 · 탭바 뿌리는 가로로 자른다', async () => {
+  // When the window is narrower than the title bar's minimum width — if row width 0 is counted as 「could not measure」, all heads stand at 160 and cover the right of the title bar.
+  it('row width 0 (height present) = the measured value — draws no head at all · the tab bar root clips horizontally', async () => {
     rowWidth = 0
     await mount('a')
     expect(screen.queryAllByTestId('tab')).toEqual([])
@@ -760,9 +754,8 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(screen.getByTestId('tab-bar').style.overflowX).toBe('clip')
   })
 
-  // User decision 2026-10-26 (T-66 · TRD S26-window-chrome §7-9) — only where tabs are (first tab ~ `+`) is the tab bar zone. A drop on the blank to its right · draggable blank
-  //   area · number marker · window buttons creates a new window.
-  it('탭바 구역의 바탕 = 첫 탭 왼쪽 ~ + 오른 끝 × 탭바 줄(제목 줄 안이면 제목 줄 — 위 여백 포함) · 그 위아래 15', async () => {
+  // TRD S26-window-chrome §7-9 (T-66): only where tabs are (first tab ~ `+`) is the tab bar zone; a drop on the blank to its right · draggable blank · number marker · window buttons creates a new window.
+  it('tab bar zone background = first tab left ~ + right end × tab bar row (the title row if inside the title row — including the top margin) · 15 above and below it', async () => {
     const bar = await mount('a')
     // Four heads 640 · + 640..680 → viewport 100..780 (the tab bar row goes to 800).
     expect(xOf(screen.getByTestId('tab-add'))).toBe(640)
@@ -776,7 +769,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(localDrag.readStripGeometry()!.zoneViewport).toEqual({ x0: 100, y0: 19, x1: 780, y1: 83 })
   })
 
-  it('탭바 구역 — 숨긴 머리가 있으면 + 가 선 보이는 끝까지 · 탭이 없으면 + 만', async () => {
+  it('tab bar zone — if there are hidden heads up to the visible end where + stands · with no tabs only +', async () => {
     rowWidth = 140 // Usable width 100 → visible heads a(52) · b(32) · + 84..124
     const bar = await mount('a')
     expect(localDrag.readStripGeometry()!.zoneViewport).toEqual({ x0: 100, y0: 25, x1: 224, y1: 83 })
@@ -787,7 +780,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
 
   // ── draggable condition ──
 
-  it('머리 = 끌기 출처(draggable) — 이름 편집 중인 머리 · main 의 마지막 탭(Q35)은 아니다 · 탭 하나뿐인 팝아웃은 끈다(Q34)', async () => {
+  it('head = drag source (draggable) — not a head under name edit · not main\'s last tab (Q35) · a popout with only one tab turns it off (Q34)', async () => {
     const bar = await mount('a')
     expect(['a', 'b', 'c', 'd'].map(id => head(id).getAttribute('draggable'))).toEqual(['true', 'true', 'true', 'true'])
     fireEvent.doubleClick(nameOf('b'))
@@ -804,7 +797,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
 
   // ── dragstart ──
 
-  it('dragstart = 우리 형식 하나(타입 문자열 · 값) · effectAllowed move · 라벨 그림 · window 에 안 닿음 · 머리 자리 · DOM 그대로', async () => {
+  it('dragstart = one of our formats (type string · value) · effectAllowed move · label image · does not reach window · head position · DOM as is', async () => {
     const bar = await mount('b')
     fireEvent.pointerDown(head('a'), { button: 0, pointerId: 1, clientX: 180, clientY: 50 })
     bar.rerender({ active: 'a' })
@@ -856,7 +849,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
   })
 
   // TRD S26-window-chrome §7-6 — a maximized title bar has no top margin, and a new window is in the normal state so that margin (6) stands.
-  it('최대화된 창에서 뗀 탭 — 새 창의 크롬 · 잡은 y 를 보통 상태 제목 줄 높이로 센다', async () => {
+  it('a tab released from a maximized window — the new window\'s chrome · the grabbed y counts as the normal-state title row height', async () => {
     invokeMock.mockImplementation(async (cmd: string) => (cmd === 'window_frame' ? { ...FRAME, maximized: true } : undefined))
     const bar = await mount('b')
     const title = document.createElement('div')
@@ -874,7 +867,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(value).toMatchObject({ size: { w: 1000, h: 700 }, grab: { x: 180, y: 56 } })
   })
 
-  it('닫기 버튼에서 누른 끌기(엔진은 머리에 낸다) · 이름 입력에서 시작한 글자 끌기 → 취소 · 자료 없음 · window 까지 닿음', async () => {
+  it('a drag pressed on the close button (the engine fires it on the head) · a text drag started from the name input → cancelled · no data · reaches window', async () => {
     await mount('a')
     const seen = vi.fn()
     window.addEventListener('dragstart', seen)
@@ -902,7 +895,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(ok.setData).toHaveBeenCalledTimes(1)
   })
 
-  it('머리 밖의 끌기(트리 행 · 파일 따위)는 건드리지 않는다 — 막지도 끊지도 싣지도 않는다', async () => {
+  it('a drag outside heads (tree row · file etc.) is not touched — neither blocked, cut nor carried', async () => {
     await mount('a')
     const seen = vi.fn()
     window.addEventListener('dragstart', seen)
@@ -917,7 +910,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
 
   // ── Source tab bar while dragging ──
 
-  it('구역 안 — 끄는 머리는 커서를 바로 따르고(전환 없음 · 맨 위) 이웃은 확정한 순서로 200 ms EASE_OUT 비켜난다 · DOM · key 그대로', async () => {
+  it('inside the zone — the dragged head follows the cursor directly (no switch · on top) and neighbours step aside in the confirmed order with 200 ms EASE_OUT · DOM · key as is', async () => {
     const bar = await mount('b')
     const row = screen.getByTestId('tab-strip-row')
     const nodes = screen.getAllByTestId('tab')
@@ -945,7 +938,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(invokes('tab_drop')).toEqual([])
   })
 
-  it('구역 밖 = 남은 탭(누르기 전 활성)을 칠하고 머리는 모델 자리로 200 ms 돌아감 · 돌아오면 끄는 탭', async () => {
+  it('outside the zone = paints the remaining tab (the active before pressing) and the head returns to the model position in 200 ms · when it comes back the dragged tab', async () => {
     const bar = await mount('b')
     await startA(bar)
     strip(1, 120, 300)
@@ -961,7 +954,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(invokes('tab_drop')).toEqual([])
   })
 
-  it('끄는 머리는 레이아웃이 숨겨도 그린다 — 출처 노드를 떼면 dragend 가 오지 않는다', async () => {
+  it('the dragged head is drawn even if the layout hides it — detaching the source node means dragend never comes', async () => {
     rowWidth = 140 // Usable width 100 — with active b only a · b are visible
     const bar = await mount('b', ABCD)
     fireEvent.pointerDown(head('b'), { button: 0, clientX: 140, clientY: 50 })
@@ -981,7 +974,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     ['none', 'none'],
     ['move', 'move'],
     ['copy', 'none'],
-  ])('dragend(dropEffect=%s) → tab_drop{NewWindow{by: DragEnd{effect: %s}}} 하나', async (dropEffect, effect) => {
+  ])('dragend(dropEffect=%s) → tab_drop{NewWindow{by: DragEnd{effect: %s}}} once', async (dropEffect, effect) => {
     const bar = await mount('b')
     const dt = await startA(bar)
     drag('dragEnd', head('a'), fakeDt(dropEffect))
@@ -999,7 +992,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(drops()).toHaveLength(1)
   })
 
-  it('놓은 뒤 — 끄는 머리는 확정한 자리로 미끄러지고, 모델 순서가 오는 그 그림에 모델 자리 = 같은 자리 · 같은 노드', async () => {
+  it('after the drop — the dragged head slides to the confirmed position, and in the very frame the model order arrives model position = the same position · same node', async () => {
     const bar = await mount('b')
     const nodes = screen.getAllByTestId('tab')
     const dt = await startA(bar)
@@ -1016,7 +1009,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(head('a').style.zIndex).toBe('1')
   })
 
-  it('같은 웹뷰 제자리 놓기(뿌리 drop 이 적음) → 아무것도 안 보냄 · 곧바로 풀려 모델 자리 · 되돌리지 않음', async () => {
+  it('same-webview in-place drop (the root drop records it) → sends nothing · released at once to the model position · no revert', async () => {
     const bar = await mount('b')
     const dt = await startA(bar)
     strip(1, 120, 300)
@@ -1033,7 +1026,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(invokes('switch_tab_if')).toEqual([])
   })
 
-  it('dragstart 와 같은 task 의 dragend(엔진이 접은 끌기) → 아무것도 안 보냄 · 풀림 · 되돌리지 않음', async () => {
+  it('dragend in the same task as dragstart (a drag the engine collapsed) → sends nothing · released · no revert', async () => {
     const bar = await mount('b')
     fireEvent.pointerDown(head('a'), { button: 0, clientX: 180, clientY: 50 })
     bar.rerender({ active: 'a' })
@@ -1047,7 +1040,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(invokes('switch_tab_if')).toEqual([])
   })
 
-  it('tab_drop invoke 오류 → 바꿔 그리기를 곧바로 푼다', async () => {
+  it('tab_drop invoke error → releases the swapped drawing at once', async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'window_frame') return FRAME
       if (cmd === 'tab_drop') throw new Error('ipc down')
@@ -1069,7 +1062,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
   // ── Result notice · restoring the original selection (§4-6) ──
 
   it.each(['canceled', 'ignored'] as const)(
-    'done{%s}(자기 dragend none) → switch_tab_if(initial, expect = 끄는 탭) 한 번 · 되돌리는 동안 initial 을 칠한다',
+    'done{%s} (own dragend none) → switch_tab_if(initial, expect = dragged tab) once · initial is painted while reverting',
     async outcome => {
       const bar = await mount('b')
       const dt = await startA(bar)
@@ -1085,10 +1078,10 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     },
   )
 
-  it('되돌리지 않는 갈래 — 그사이 활성이 바뀜 · initial = 끄는 탭 · Rejected · 자기 dragend 가 move · 남의 끌기', async () => {
+  it('branches that do not revert — the active changed in between · initial = dragged tab · Rejected · own dragend is move · someone else\'s drag', async () => {
     const cases: Array<{ name: string; run: (bar: ReturnType<typeof renderBar>) => Promise<void> }> = [
       {
-        name: '활성 바뀜',
+        name: 'active changed',
         run: async bar => {
           const dt = await startA(bar)
           drag('dragEnd', head('a'), fakeDt('none'))
@@ -1126,7 +1119,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
         },
       },
       {
-        name: '남의 끌기',
+        name: 'a drag of someone else',
         run: async bar => {
           await startA(bar)
           drag('dragEnd', head('a'), fakeDt('none'))
@@ -1147,7 +1140,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     }
   })
 
-  it('되돌리기 오류는 잡아 로그만 남기고 모델 활성으로 물러난다', async () => {
+  it('a revert error is caught, only a log is left and it falls back to the model active', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === 'window_frame') return FRAME
@@ -1167,7 +1160,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(head('a').getAttribute('data-active')).toBe('true')
   })
 
-  it('되돌리기가 닿기 전에 끄는 탭을 누르면 모델 활성이 그 탭이어도 switch_tab 을 보낸다 — 셸이 차례대로 적용하면 끝 활성 = 누른 탭', async () => {
+  it('if the dragged tab is pressed before the revert lands, switch_tab is sent even if the model active is that tab — if the shell applies in order the final active = the pressed tab', async () => {
     // The shell — applies the commands it received in order (a restore changes only when `expect` matches). The apply is pushed by hand.
     let shellActive = 'a'
     const queue: Array<() => void> = []
@@ -1218,7 +1211,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(onSwitch).not.toHaveBeenCalled()
   })
 
-  it('끄는 중 그 탭이 그 창에서 빠지면(LLM 닫기) 풀린다 — 남은 머리를 모델대로', async () => {
+  it('if that tab leaves that window during the drag (LLM close) it is released — remaining heads as the model says', async () => {
     const bar = await mount('b')
     await startA(bar)
     leaveZone()
@@ -1230,7 +1223,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
 
   // ── The vertical line of another window's drag (the root dragover writes it) ──
 
-  it('세로선 = 2 px · 그 x 를 가운데로(양쪽 머리 끝에 1 px 씩) · 없으면 그리지 않는다', async () => {
+  it('vertical line = 2 px · centered on that x (1 px at each head end) · not drawn if absent', async () => {
     await mount('a')
     expect(screen.queryByTestId('tab-drop-marker')).toBeNull()
     act(() => localDrag.setTargetMarker(160))
@@ -1253,7 +1246,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     return settle
   }
 
-  it('끌기가 풀리고 자리 전환까지 끝나면 머리 DOM 순서를 보이는 순서로 맞춘다 — 같은 노드 · 같은 자리 · 줄 그대로', async () => {
+  it('once the drag is released and the position transition ends, head DOM order is aligned to the visible order — same node · same position · row as is', async () => {
     const bar = await mount('b')
     const row = screen.getByTestId('tab-strip-row')
     const [a, b, c, d] = screen.getAllByTestId('tab')
@@ -1267,7 +1260,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(screen.getByTestId('tab-strip-row')).toBe(row)
   })
 
-  it('놓았지만 끌기가 풀리기 전(done 을 기다림)은 전환이 끝나도 맞추지 않는다', async () => {
+  it('after dropping but before the drag is released (waiting for done) it does not align even when the transition ends', async () => {
     const bar = await mount('b')
     const [a, b, c, d] = screen.getAllByTestId('tab')
     const dt = await startA(bar)
@@ -1281,7 +1274,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(screen.getAllByTestId('tab')).toEqual([b, a, c, d])
   })
 
-  it('맞추기 전에 온 누름은 그동안 전환이 끝나도 맞추기를 막고, 떼면 그 뗌 다음 사건 뒤에 맞춘다', async () => {
+  it('a press arriving before aligning blocks aligning even if the transition ends meanwhile, and on release it aligns after the event following that release', async () => {
     const bar = await mount('b')
     const [a, b, c, d] = screen.getAllByTestId('tab')
     const settle = await reorderAThenRelease(bar)
@@ -1296,7 +1289,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(screen.getAllByTestId('tab')).toEqual([b, a, c, d])
   })
 
-  it('끝나고 채움으로 남은 애니메이션은 기다리지 않는다', async () => {
+  it('an animation left as fill after finishing is not waited for', async () => {
     const bar = await mount('b')
     const [a, b, c, d] = screen.getAllByTestId('tab')
     await reorderAThenRelease(bar)
@@ -1310,7 +1303,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(polls).toBe(1)
   })
 
-  it('쉴 때 다른 경로가 바꾼 순서는 곧바로 DOM 순서가 되고, 이름 편집 중에는 편집이 끝날 때까지 미룬다', async () => {
+  it('an order changed by another path at rest becomes the DOM order at once, and during name edit it is deferred until the edit ends', async () => {
     const bar = await mount('a')
     const [a, b, c, d] = screen.getAllByTestId('tab')
     bar.rerender({ tabs: BACD })
@@ -1325,7 +1318,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
   })
 
   // ── Name edit · narrow tab bar ──
-  it('좁은 탭바 — 비활성 머리 더블클릭의 둘째 클릭이 막 생긴 닫기 버튼에 떨어져도 닫지 않고 편집을 연다 · 그 뒤 따로 누른 닫기는 닫는다', () => {
+  it('narrow tab bar — even if the second click of an inactive head double-click lands on a just-appeared close button it does not close and opens edit · a close pressed separately after that closes', () => {
     rowWidth = 140 // Usable width 100 → a 52 · b 32 (no close button) · visible = the first two · b is at screen x 152..184
     const bar = renderBar('a', ABCD)
     expect(head('b').querySelector('[data-testid="tab-close"]')).toBeNull()
@@ -1348,7 +1341,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(bar.onClose).toHaveBeenCalledWith('b')
   })
 
-  it('좁은 탭바 — 이름 칸 폭이 0 인 활성 머리도 머리 더블클릭으로 편집을 열고, 편집 중 머리는 표준 폭 · 맨 위 · 줄 왼쪽 끝까지 당겨져 쓸 수 있는 폭 너머(+ 자리)까지 덮는다', () => {
+  it('narrow tab bar — even an active head whose name field width is 0 opens edit by a head double-click, and the head under edit is pulled to the standard width · on top · to the row\'s left end and covers beyond the usable width (the + spot)', () => {
     rowWidth = 140 // Active b → a 32 (x 0) · b 52 (x 32) · + x 84 · usable width 100 — while editing b is 0..160
     renderBar('b', ABCD)
     expect(xOf(head('b'))).toBe(32)
@@ -1363,14 +1356,14 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(xOf(head('b'))).toBe(32)
   })
 
-  it('편집 중 머리는 오른쪽에 자리가 있으면 제자리에서 넓어진다', () => {
+  it('a head under edit widens in place if there is room on the right', () => {
     rowWidth = 500 // Usable width 460 → heads 115 · x 0 · 115 · 230 · 345
     renderBar('a', ABCD)
     fireEvent.doubleClick(nameOf('c'))
     expect([xOf(head('c')), head('c').style.width]).toEqual([230, '160px'])
   })
 
-  it('넓힌 편집 머리가 덮은 이웃 자리의 누름은 편집을 확정하고 그 이웃으로 전환만 한다 · 넓히기 전 자리 · 입력 칸의 누름은 그대로다', () => {
+  it('a press on a neighbour spot covered by the widened edit head commits the edit and only switches to that neighbour · presses on the pre-widening spot · on the input field are as is', () => {
     rowWidth = 500 // Heads 115 · x 0 · 115 · 230 · 345 → while editing, c 230..390 covers the left of d (345..460)
     const bar = renderBar('c', ABCD)
     fireEvent.doubleClick(nameOf('c'))
@@ -1388,7 +1381,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(screen.queryByTestId('tab-rename-input')).toBeNull()
   })
 
-  it('자동 이름 탭 — 글자를 안 바꾸고 덮인 이웃 자리를 누르면 onRename 안 부르고 그 이웃으로 전환만 한다', () => {
+  it('auto-named tab — pressing a covered neighbour spot without changing the text does not call onRename and only switches to that neighbour', () => {
     rowWidth = 500 // The same place as the test above — while editing, c 230..390 covers the left of d (345..460)
     const bar = renderBar('c', ABCD.map(tab => ({ ...tab, named: false })))
     fireEvent.doubleClick(nameOf('c'))
@@ -1398,7 +1391,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(screen.queryByTestId('tab-rename-input')).toBeNull()
   })
 
-  it('좁은 탭바 — 왼쪽으로 당긴 편집 머리가 덮은 이웃 자리의 누름도 그 이웃으로 전환하고, 밑에 머리가 없는 + 자리의 누름은 지금처럼 둔다', () => {
+  it('narrow tab bar — a press on a neighbour spot covered by the edit head pulled left also switches to that neighbour, and a press on the + spot with no head underneath is left as now', () => {
     rowWidth = 140 // Active b → a 32 (x 0) · b 52 (x 32) · + x 84 — while editing b is 0..160
     const bar = renderBar('b', ABCD)
     fireEvent.doubleClick(head('b'))
@@ -1411,7 +1404,7 @@ describe('TabBar — 탭 끌기(OS 끌기 출처)', () => {
     expect(screen.queryByTestId('tab-rename-input')).toBeNull()
   })
 
-  it('이름 편집 중인 탭의 × 는 누름에 입력 칸 포커스를 뺏지 않고 첫 클릭에 닫는다 · 그 탭이 모델에서 빠지면 편집도 끝나 머리 DOM 순서를 다시 맞춘다', () => {
+  it('the × of a tab under name edit does not steal input field focus on press and closes on the first click · when that tab leaves the model the edit also ends and head DOM order is aligned again', () => {
     const bar = renderBar('a', ABCD)
     const [a, b, , d] = screen.getAllByTestId('tab')
     fireEvent.doubleClick(nameOf('c'))

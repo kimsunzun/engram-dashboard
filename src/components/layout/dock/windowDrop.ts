@@ -1,17 +1,8 @@
-// TRD S21-slot-docking §4-3 · §2-4: the receiving side of a drag in one window (webview) — decides (`judge`) our tab drag that arrived at the root and records the guide (preview · zone
-//   lines · layout frame) · another window's tab bar vertical line · the source window's own tab bar decision, and issues one drop command at drop. Deciding happens only here and
-//   it does not know the DOM — connecting document events to these values is `useWindowDrop`.
-// ★The drag command is sent only at drop★ (ADR-0296 · ADR-0297) — the only shell call of this module is the `tab_drop` at drop, and for the same window, same place
-//   even that is absent. During a drag the outside (window size · tabs · layout) is not blocked and keeps flowing, so the decision always uses current values — the shell looks up the target
-//   again at drop.
-// ★The guide stands for one drag round only★ — a round is opened by dragenter and closed by drop · window leave (dragleave · no related target) · `GUIDE_IDLE_MS` without dragover ·
-//   `GUIDE_IDLE_MS` after mousemove. A dragover draws only for an open round — a dragover arriving late after closing does not revive the guide · vertical line without a new
-//   dragenter (TRD §8-3). The closing deadline is fired holding the round it was set for and decided by a single 「지금 회차가 그 회차인가」 —
-//   it does not rely on the order in which events · deadlines arrive. Accepting (`preventDefault`) is always done regardless of the round — so that drop arrives.
-// Cheaply (S1 handler ≤ 0.5 ms) — bands · validity are recomputed only when the visible tab · its cache · canvas size · tab bar zone changes, and per dragover only
-//   tab bar geometry reading and point choosing are done. The canvas is re-measured only at dragenter and on size changes during a round (`watchCanvas`) — on a change it re-decides with the last
-//   point, so the preview follows the new size without waiting for dragover.
-// ★A drag is not an LLM command★ (TRD §3-6) — it is human input and its measurement, so it is not put on a global handle · bus.
+// TRD S21-slot-docking §4-3 · §2-4: the receiving side of a drag in one window (webview) — decides (`judge`) our tab drag that reached the root, records the guide (preview · zone lines · layout frame) · another window's tab bar vertical line · the source window's own tab bar decision, and issues one drop command at drop. No DOM knowledge — `useWindowDrop` connects document events.
+// ★The drag command is sent only at drop★ (ADR-0296 · ADR-0297) — this module's only shell call is `tab_drop` at drop (absent for same window, same place). The outside (window size · tabs · layout) keeps flowing during a drag, so decisions use current values; the shell looks up the target again at drop.
+// ★The guide stands for one drag round only★: opened by dragenter, closed by drop · window leave (dragleave · no related target) · `GUIDE_IDLE_MS` without dragover · `GUIDE_IDLE_MS` after mousemove. Dragover draws only for an open round — a late dragover does not revive the guide · vertical line without a new dragenter (TRD §8-3). The closing deadline carries its round and is decided by "is the current round that round", independent of event/deadline arrival order. Accepting (`preventDefault`) is always done regardless of the round so that drop arrives.
+// Cheap (S1 handler ≤ 0.5 ms): bands · validity are recomputed only when the visible tab · its cache · canvas size · tab bar zone changes; per dragover only tab bar geometry reading and point choosing. The canvas is re-measured at dragenter and on size changes during a round (`watchCanvas`), re-deciding with the last point so the preview follows without waiting for dragover.
+// ★A drag is not an LLM command★ (TRD §3-6) — it is human input and its measurement, not on a global handle · bus.
 
 import type { LayoutNode } from '../../../api/layoutTypes'
 import type { DropTo } from '../../../../src-tauri/bindings/DropTo'
@@ -41,7 +32,7 @@ export interface DropModel {
   active: string | null
 }
 
-/** The outside — in production `useWindowDrop` fills it with the store · tab bar geometry · Tauri, and tests plug in a fake (ADR-0012). */
+/** The outside: `useWindowDrop` fills it with the store · tab bar geometry · Tauri in production; tests plug in a fake (ADR-0012). */
 export interface WindowDropPorts {
   /** Tauri identifier (lowercase) — `null` = not known yet (no drag is read as ours). */
   app(): string | null
@@ -55,10 +46,7 @@ export interface WindowDropPorts {
   send(drop: TabDrop): Promise<TabDropReply>
   setTimer(fn: () => void, ms: number): unknown
   clearTimer(handle: unknown): void
-  /**
-   * Observe canvas size changes — `onResize` is called when the size changes (it may also be called with the same size, e.g. at first observation). The returned function
-   * stops it. If there is no canvas, nothing is observed.
-   */
+  /** Observe canvas size changes — `onResize` may also fire with the same size (e.g. at first observation). The returned function stops it; no canvas → nothing observed. */
   watchCanvas(onResize: () => void): () => void
 }
 
@@ -253,8 +241,7 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
       )
     }
     local.setTargetMarker(j.type === 'strip' ? j.marker : null)
-    // If the write above changed the source window's visible tab (R15 — the remaining tab after leaving the zone · the dragged tab after coming back), re-decide with that tab's bands — so it is not
-    //   drawn one dragover late. The tab bar zone decision is independent of the visible tab, so there is nothing to look at again.
+    // If that write changed the source window's visible tab (R15 — the remaining tab after leaving the zone · the dragged tab after coming back), re-decide with that tab's bands so it is not drawn one dragover late. The tab bar zone decision is independent of the visible tab.
     if (j.type !== 'strip' && ports.shownTab() !== d.bands.shown) d = decide(s, point)
     s.last = d
     s.point = point
@@ -275,7 +262,7 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
     const slot = j.zones === null ? null : wb.zones[j.zones]
     if (band === null) return slot === null ? null : { bands: [], outer: [], preview: null, slot }
     const b = wb.bands[band]
-    // The layout frame only when an outer band is chosen — the frame stands when this list is not empty (user decision 2026-10-19).
+    // The layout frame stands only when an outer band is chosen — i.e. this list is non-empty.
     const outer = b.anchor.type === 'outer' ? wb.bands.filter(x => x.anchor.type === 'outer').flatMap(x => x.areas) : []
     return { bands: [], outer, preview: b.landing, slot }
   }
@@ -308,13 +295,11 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
     if (j.type === 'strip') {
       let index = j.index
       if (d.ownStrip && d.source !== null) {
-        // Source's own tab bar — position to drop = the dragged tab's position in the order drawn now (the position confirmed past the order threshold · not the raw position of the decision).
-        //   Re-read at drop — the position the last dragover confirmed is carried into the geometry only in a later drawing.
+        // Source's own tab bar — the drop position = the dragged tab's position in the order drawn now (confirmed past the order threshold, not the decision's raw position); re-read at drop since the last dragover's confirmed position reaches the geometry only in a later drawing.
         const view = d.source.view
         const drawn = local.readStripGeometry()?.tabs.indexOf(view) ?? -1
         if (drawn >= 0) index = drawn
-        // ★Whether it is in place is decided by the current store★ (ADR-0297) — if after the last decision the dragged tab went to another window (LLM), the model seen then is still
-        //   「제자리」, so not sending would leave the tab in that window. If it does not hold, send it and the shell looks it up again by id.
+        // ★Whether it is in place is decided by the current store★ (ADR-0297): if the dragged tab moved to another window (LLM) after the last decision, the model seen then still says "in place" and not sending would leave the tab there. If it does not hold, send and the shell looks it up by id.
         if (index === ports.model().tabs.indexOf(view)) {
           // Same window, same place — do not send, and record it so the source dragend releases immediately (TRD §2-4 ④).
           local.markLocalDrop(d.source.drag)
@@ -326,21 +311,21 @@ export function createWindowDrop(ports: WindowDropPorts): WindowDrop {
       const b = d.bands.bands?.bands[j.band]
       const target = d.bands.shown
       if (b === undefined || target === null) {
-        console.warn('[windowDrop] 띠 놓기의 대상을 모른다 — 보내지 않는다:', { target })
+        console.warn('[windowDrop] target of the band drop is unknown — not sending:', { target })
         return
       }
       to = { type: 'seam', target, anchor: b.anchor, side: b.side, share: b.share }
     }
     const value = readTabDragValue(dt.getData(head.mime))
     if (value === null) {
-      console.warn('[windowDrop] 끌기 자료의 값을 못 읽어 놓기를 보내지 않는다:', head.mime)
+      console.warn('[windowDrop] could not read the drag data value, so not sending the drop:', head.mime)
       return
     }
     to ??= { type: 'new_window', by: { type: 'drop' }, size: value.size, grab: value.grab }
     ports.send({ drag: value.drag, view: value.view, from: value.from, initial: value.initial, to }).then(
       // The result is received by the source as `tab_drop:done` (TRD §4-6) — here we only leave it.
-      reply => console.debug('[windowDrop] tab_drop(drop) 답:', reply),
-      err => console.warn('[windowDrop] tab_drop(drop) 실패:', err),
+      reply => console.debug('[windowDrop] tab_drop(drop) reply:', reply),
+      err => console.warn('[windowDrop] tab_drop(drop) failed:', err),
     )
   }
 

@@ -1,16 +1,8 @@
-// ADR-0137: call-site wiring gate — checks by source text that **every documented path** that builds debug calls `scripts/build-client-shell.mjs`
-//   and that it has not gone back to a raw `cargo build -p engram-dashboard`.
-//
-// ★Why this axis is needed separately (do not delete)★: the build-artifact comparison (inside that script) runs **only when someone calls the
-//   script** — if the call itself disappears no signal is left. It actually regressed that way (473e82f:
-//   the launcher's `npm run tauri dev` was changed to a raw `cargo build`, dropping the overlay injection entirely, and all gates
-//   stayed green). This assertion is the only form that could have caught that commit.
-// The decision method is the same as the other isolation gates in this repo — source text comparison (core `use tauri` · messaging · net ·
-//   ADR-0130). The claim "unit tests cannot see wiring" is not true.
-// ★Comment lines are not counted★: the files below write "do not go back to a raw cargo build" in comments, so
-//   looking only for whether the string exists would catch that warning itself as a violation. Only executed lines are looked at.
-// The placement rationale (an exception to the colocation convention) is written once in the `devConfigOverlay.test.ts` header — it is not duplicated
-//   here.
+// ADR-0137: call-site wiring gate — checks by source text that **every documented path** that builds debug calls `scripts/build-client-shell.mjs` and has not gone back to a raw `cargo build -p engram-dashboard`.
+// ★Why this axis is separate (do not delete)★: the build-artifact comparison (inside that script) runs **only when someone calls the script** — if the call itself disappears no signal is left. It regressed that way once (473e82f: the launcher's `npm run tauri dev` became a raw `cargo build`, dropping the overlay injection entirely while all gates stayed green); this assertion is the only form that catches such a commit.
+// Same decision method as the other isolation gates here — source text comparison (core `use tauri` · messaging · net · ADR-0130); "unit tests cannot see wiring" is not true.
+// ★Comment lines are not counted★: the files below write "do not go back to a raw cargo build" in comments, so a bare string search would flag that warning itself; only executed lines are looked at.
+// The placement rationale (an exception to the colocation convention) is written once in the `devConfigOverlay.test.ts` header — not duplicated here.
 import { describe, expect, it } from 'vitest'
 
 // Only this file uses Node standard modules — a file-scope ambient declaration (the `src/store/chatStyleStore.test.ts` way).
@@ -26,8 +18,7 @@ const { join } = require('node:path')
 const ROOT = process.cwd()
 
 const BUILD_SCRIPT = 'build-client-shell.mjs'
-// Catches only the form that builds the client shell directly — sibling crates such as `-p engram-dashboard-daemon`·`-agent` are
-//   legitimate, so it matches only when no character follows the name.
+// Catches only the form that builds the client shell directly — sibling crates such as `-p engram-dashboard-daemon`·`-agent` are legitimate, so it matches only when no character follows the name.
 const BARE_CLIENT_BUILD = /cargo\s+build\b[^\n]*-p\s+engram-dashboard(?![-\w])/
 
 function read(relPath: string): string {
@@ -42,8 +33,7 @@ function batExecutableLines(text: string): string {
     .join('\n')
 }
 
-// The executed lines of Markdown = lines inside code fences with the trailing `#` comment removed. Prose paragraphs hold warnings, so
-//   they are not targets.
+// The executed lines of Markdown = lines inside code fences with the trailing `#` comment removed; prose paragraphs hold warnings, so they are not targets.
 function fencedExecutableLines(markdown: string): string {
   const lines = markdown.split(/\r?\n/)
   const out: string[] = []

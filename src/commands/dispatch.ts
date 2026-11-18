@@ -18,8 +18,8 @@ export function fireAndForget(id: string, args?: CommandArgs): void {
     //   do not pass the `humanOnly` gate (the doc of that field is canonical). Reverting this to `run` would block the path by which a human
     //   creates codex from the tree menu — the gate was aimed only at the LLM path.
     const result = runAsHuman(id, args)
-    Promise.resolve(result).catch((err) => console.warn(`[commands] '${id}' 실패(async):`, err))
+    Promise.resolve(result).catch((err) => console.warn(`[commands] '${id}' failed (async):`, err))
   } catch (err) {
-    console.warn(`[commands] '${id}' 실패:`, err)
+    console.warn(`[commands] '${id}' failed:`, err)
   }
 }

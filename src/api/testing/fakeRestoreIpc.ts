@@ -66,7 +66,7 @@ export function fakeRestoreIpc(initial: RestoreStatusView) {
   const ipc: RestoreIpc = {
     async listen(event, h) {
       calls.push(`listen:${event}`)
-      if (failListen) throw new Error('listen 실패(가짜)')
+      if (failListen) throw new Error('listen failed (fake)')
       await listenGate
       handler = h
       return () => {
@@ -77,7 +77,7 @@ export function fakeRestoreIpc(initial: RestoreStatusView) {
     async invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       calls.push(`invoke:${cmd}`)
       if (cmd === CMD_RESTORE_STATUS) {
-        if (failStatus) throw new Error('restore_status 실패(가짜)')
+        if (failStatus) throw new Error('restore_status failed (fake)')
         if (holdStatus) {
           const d = deferred<RestoreStatusView>()
           heldStatus.push(d.resolve)
@@ -90,7 +90,7 @@ export function fakeRestoreIpc(initial: RestoreStatusView) {
         answerArgs.push(accept)
         return (await onAnswer(accept)) as T
       }
-      throw new Error(`예상 밖 명령 ${cmd}`)
+      throw new Error(`unexpected command ${cmd}`)
     },
   }
 
@@ -104,7 +104,7 @@ export function fakeRestoreIpc(initial: RestoreStatusView) {
       return unlistenCalls
     },
     hasListener: () => handler !== undefined,
-    /** The currently registered handler — held and called even after release to imitate 「죽은 설치에 늦게 온 배달」 (a late delivery to a dead install). */
+    /** The currently registered handler — held and called even after release to imitate 「a late delivery to a dead install」. */
     currentHandler: () => handler,
     holdListen(): () => void {
       const d = deferred<void>()
@@ -126,7 +126,7 @@ export function fakeRestoreIpc(initial: RestoreStatusView) {
     },
     /** The shell's `restore:changed` — the payload is the single `crash_copy` field. */
     push(payload: CrashCopyStatus = server.view.crash_copy): void {
-      if (!handler) throw new Error(`${EVT_RESTORE_CHANGED} 리스너가 아직 없다`)
+      if (!handler) throw new Error(`no ${EVT_RESTORE_CHANGED} listener yet`)
       handler(payload)
     },
   }

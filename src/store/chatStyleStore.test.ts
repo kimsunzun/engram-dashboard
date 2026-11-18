@@ -29,7 +29,7 @@ function harness() {
     if (cmd === 'settings_get') return { rev, items: [] }
     if (cmd === 'settings_set') return { rev: ++rev, key: args?.key, value: args?.value, changed: true }
     if (cmd === 'settings_reset') return { rev, reset: [args?.key], changed: [] }
-    throw new Error(`예상 밖 명령 ${cmd}`)
+    throw new Error(`unexpected command ${cmd}`)
   })
   const ipc: SettingsIpc = {
     async listen(_event, h) {
@@ -43,7 +43,7 @@ function harness() {
     client,
     invoke,
     push(items: Array<[string, string]>) {
-      if (!handler) throw new Error('리스너가 아직 없다')
+      if (!handler) throw new Error('no listener yet')
       rev += 1
       handler({ rev, items: items.map(([key, value]) => ({ key, value, is_default: false })) })
     },
@@ -73,8 +73,8 @@ async function installed() {
   return h
 }
 
-describe('chatStyleStore — 적용자', () => {
-  it('chat.style.* 항목은 그 CSS 변수에 칠해진다', async () => {
+describe('chatStyleStore — applier', () => {
+  it('chat.style.* entries are painted into their CSS variables', async () => {
     const h = await installed()
     h.push([
       ['chat.style.fontSize', '16px'],
@@ -84,7 +84,7 @@ describe('chatStyleStore — 적용자', () => {
     expect(rootVar('--chat-rail-line-offset')).toBe('-1rem')
   })
 
-  it('설치 전에 받은 값도 설치하자마자 칠한다', async () => {
+  it('values received before install are painted as soon as it installs', async () => {
     const h = harness()
     disposers.push(h.client.install())
     await flush()
@@ -97,7 +97,7 @@ describe('chatStyleStore — 적용자', () => {
 
   // ★Do not measure by whether the style attribute is empty★ — if a prototype key passes, a function · object goes in the variable name slot and
   //   setProperty quietly leaves nothing, so even if the guard is weakened to `in` that assertion stays green. Count the calls themselves.
-  it('화이트리스트 밖 키 · 챗 스타일이 아닌 키 · 프로토타입 키는 setProperty 를 한 번도 부르지 않는다', async () => {
+  it('keys outside the whitelist · non-chat-style keys · prototype keys never call setProperty', async () => {
     const h = await installed()
     const setProperty = vi.spyOn(document.documentElement.style, 'setProperty')
     h.push([
@@ -112,7 +112,7 @@ describe('chatStyleStore — 적용자', () => {
     expect(setProperty).not.toHaveBeenCalled()
   })
 
-  it('구독을 풀면 더는 칠하지 않는다', async () => {
+  it('no more painting after unsubscribing', async () => {
     const h = harness()
     const off = installChatStyleApplier(h.client)
     disposers.push(h.client.install())
@@ -123,14 +123,14 @@ describe('chatStyleStore — 적용자', () => {
   })
 })
 
-describe('chatStyleStore — 쓰기는 셸 설정으로', () => {
-  it('setChatStyle 은 settings_set chat.style.<k> 로 간다', async () => {
+describe('chatStyleStore — writes go to the shell settings', () => {
+  it('setChatStyle goes to settings_set chat.style.<k>', async () => {
     const h = harness()
     await setChatStyle('fontSize', '15px', h.client)
     expect(h.invoke).toHaveBeenCalledWith('settings_set', { key: 'chat.style.fontSize', value: '15px' })
   })
 
-  it('resetChatStyle 은 한 키 또는 chat.style. 접두 전부를 settings_reset 으로 보낸다', async () => {
+  it('resetChatStyle sends one key or everything with the chat.style. prefix to settings_reset', async () => {
     const h = harness()
     await resetChatStyle('userPy', h.client)
     await resetChatStyle(undefined, h.client)
@@ -138,7 +138,7 @@ describe('chatStyleStore — 쓰기는 셸 설정으로', () => {
     expect(h.invoke).toHaveBeenNthCalledWith(2, 'settings_reset', { key: 'chat.style.' })
   })
 
-  it('설치 · 적용 · 쓰기 어디서도 localStorage 를 건드리지 않는다', async () => {
+  it('install · apply · write never touch localStorage', async () => {
     const getItem = vi.spyOn(Storage.prototype, 'getItem')
     const setItem = vi.spyOn(Storage.prototype, 'setItem')
     const removeItem = vi.spyOn(Storage.prototype, 'removeItem')
@@ -157,8 +157,8 @@ describe('chatStyleStore — 쓰기는 셸 설정으로', () => {
 
 // ── Whitelist ↔ theme.css fallback ─────────────
 //   The first paint is handled by `--chat-*` in theme.css `:root`. We only check that the set of variables the applier paints and the set of those declarations are the same
-//   — the values (whether they match the defaults in the shell schema table) are not measured (ADR-0265 「U2 의 대가」 (U2's cost)).
-describe('chatStyleStore 화이트리스트 ↔ theme.css', () => {
+//   — the values (whether they match the defaults in the shell schema table) are not measured (ADR-0265 「the cost of U2」).
+describe('chatStyleStore whitelist ↔ theme.css', () => {
   const KEYS: ChatStyleKey[] = [
     'railRowPt',
     'plainRowPt',
@@ -173,7 +173,7 @@ describe('chatStyleStore 화이트리스트 ↔ theme.css', () => {
     'waitStripH',
   ]
 
-  it('11키를 모두 받으면 theme.css 에 선언된 --chat-* 변수 전부를, 그것만 칠한다', async () => {
+  it('receiving all 11 keys paints all --chat-* variables declared in theme.css, and only those', async () => {
     const h = await installed()
     h.push(KEYS.map(k => [`chat.style.${k}`, '1px']))
 
@@ -182,7 +182,7 @@ describe('chatStyleStore 화이트리스트 ↔ theme.css', () => {
       .sort()
 
     const css = require('node:fs').readFileSync(`${process.cwd()}/src/styles/theme.css`, 'utf8')
-    // Strip the comments first so a variable-name citation inside a comment (`--chat-rail-row-pt(커플링)` etc.) is not counted as a declaration.
+    // Strip the comments first so a variable-name citation inside a comment (`--chat-rail-row-pt(coupling)` etc.) is not counted as a declaration.
     const declared = Array.from(
       css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/(--chat-[a-z0-9-]+)\s*:/g),
       (m: RegExpMatchArray) => m[1],

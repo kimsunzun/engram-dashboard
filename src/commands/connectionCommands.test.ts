@@ -91,8 +91,8 @@ describe('connection commands — replies', () => {
     ['connected', { state: 'connected', band: null }, { state: 'connected', band: null, text: null }],
     [
       'band ① with a start cause',
-      { state: 'down', band: PLAIN, error: '폴더 문제' },
-      { state: 'down', band: PLAIN, text: '데몬에 연결하지 못했습니다. 폴더 문제' },
+      { state: 'down', band: PLAIN, error: 'folder problem' },
+      { state: 'down', band: PLAIN, text: '데몬에 연결하지 못했습니다. folder problem' },
     ],
     [
       'band ① refused',
@@ -105,14 +105,14 @@ describe('connection commands — replies', () => {
     ],
     [
       'band ②',
-      { state: 'reconnecting', band: VERSION, error: '폴더 문제' },
+      { state: 'reconnecting', band: VERSION, error: 'folder problem' },
       {
         state: 'reconnecting',
         band: VERSION,
         text: '데몬에 연결하지 못했습니다. 실행 중인 데몬이 이 앱과 버전이 다릅니다. 데몬을 끈 뒤 다시 연결하세요',
       },
     ],
-    ['no band while down (boot hold)', { state: 'down', band: null, error: '폴더 문제' }, { state: 'down', band: null, text: null }],
+    ['no band while down (boot hold)', { state: 'down', band: null, error: 'folder problem' }, { state: 'down', band: null, text: null }],
   ])('connection.status replies {state, band, text} — %s', async (_name, status, reply) => {
     await install(fakeClient(status))
     expect(registry.run('connection.status')).toEqual(reply)
@@ -141,7 +141,7 @@ describe('connection commands — replies', () => {
   })
 
   it('connection.reconnect rethrows the start error', async () => {
-    const boom = new Error('데이터 폴더에 쓸 수 없음')
+    const boom = new Error('cannot write to the data folder')
     await install(fakeClient({ state: 'down', band: PLAIN }), {
       start: async () => {
         throw boom

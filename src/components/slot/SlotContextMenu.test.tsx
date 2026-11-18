@@ -1,6 +1,4 @@
-// ★Reject leak safety is not retested here★: the menu drops its bespoke .catch and calls only fireAndForget, so
-//   the contract "swallows sync throw · async reject · thenable with no leak" is owned by dispatch.test.ts (structural inheritance).
-//   The only concern here is "does the menu route through that shared helper".
+// ★Reject-leak safety is not retested here★: the menu calls only fireAndForget, so "swallows sync throw · async reject · thenable with no leak" is owned by dispatch.test.ts. The only concern here is "does the menu route through that shared helper".
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -28,8 +26,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('SlotContextMenu — 오버레이 표지(ADR-0237)', () => {
-  it('뿌리가 표지를 단다 — 열린 동안 채팅 칸의 Esc 가 턴을 끊지 않는다', () => {
+describe('SlotContextMenu — overlay marker (ADR-0237)', () => {
+  it('the root carries the marker — while open the chat area\'s Esc does not interrupt the turn', () => {
     const { container } = render(
       <SlotContextMenu
         x={0}
@@ -43,8 +41,8 @@ describe('SlotContextMenu — 오버레이 표지(ADR-0237)', () => {
   })
 })
 
-describe('SlotContextMenu — 바깥 누름으로 닫기', () => {
-  it('창 끌 자리 누름에도 닫는다 — Tauri `drag.js` 가 뒤에 건 document 거품 단계 듣기를 끊어도', () => {
+describe('SlotContextMenu — close on outside press', () => {
+  it('it also closes on pressing the window-drag spot — even if the document bubble-phase listener hooked later by Tauri `drag.js` cuts it', () => {
     const drag = document.createElement('div')
     drag.setAttribute('data-tauri-drag-region', '')
     document.body.appendChild(drag)
@@ -75,8 +73,8 @@ describe('SlotContextMenu — 바깥 누름으로 닫기', () => {
   })
 })
 
-describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
-  it('항목 클릭 → fireAndForget(item.id, ctx) 로 라우팅(run 직접 호출 아님)', () => {
+describe('SlotContextMenu — shared dispatch path (FIX-3)', () => {
+  it('item click → routed with fireAndForget(item.id, ctx) (not a direct run call)', () => {
     const onClose = vi.fn()
     const it0 = item('slot.close')
     render(
@@ -98,7 +96,7 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
-  it('컨테이너(children) 항목: hover 로 flyout 이 열리고 자식 클릭 → fireAndForget(child.id, ctx)', () => {
+  it('container (children) item: the flyout opens on hover and a child click → fireAndForget(child.id, ctx)', () => {
     const onClose = vi.fn()
     const container = item('container:slot.newContent', {
       title: '새 콘텐츠',
@@ -127,7 +125,7 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
-  it('agentId 미배정(null)도 ctx 그대로 전달', () => {
+  it('an unassigned agentId (null) is also passed through as ctx', () => {
     render(
       <SlotContextMenu
         x={0}
@@ -147,7 +145,7 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
 })
 
 // ── on/off items · disabled · role (ADR-0252) ──
-describe('SlotContextMenu — checked · enabled · 역할', () => {
+describe('SlotContextMenu — checked · enabled · role', () => {
   const slotCtx = {
     viewId: 'v1',
     slotId: 's1',
@@ -156,7 +154,7 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
   }
   const row = (id: string) => document.querySelector(`[data-slot-menu-item="${id}"]`) as HTMLElement
 
-  it('checked 가 있으면 menuitemcheckbox + aria-checked, 없으면 menuitem · aria-checked 없음 — checked 는 ctx 를 받는다', () => {
+  it('with checked it is menuitemcheckbox + aria-checked, without it menuitem · no aria-checked — checked receives ctx', () => {
     const seen: unknown[] = []
     render(
       <SlotContextMenu
@@ -184,7 +182,7 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
     expect(seen[0]).toBe(slotCtx)
   })
 
-  it('역할 — 뿌리·서브메뉴 = menu · 구분선 = separator · 컨테이너 줄 = 서브메뉴를 여는 menuitem', () => {
+  it('role — root · submenu = menu · divider = separator · container line = a menuitem that opens a submenu', () => {
     const container = item('container:묶음', { title: '묶음', children: [item('kid')] })
     render(
       <SlotContextMenu
@@ -208,7 +206,7 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
     expect(row('kid').getAttribute('role')).toBe('menuitem')
   })
 
-  it('실행 인자 = 좌표 + 슬롯 내용(content) — ctx 에 더해진 다른 칸도 호출자 표지도 넘기지 않는다', () => {
+  it('execution argument = coordinates + slot content (content) — neither other fields added to ctx nor a caller marker are passed', () => {
     const withState = { ...slotCtx, menuState: true } // A case where the assembler added a menu state field
     render(<SlotContextMenu x={0} y={0} items={[item('toggle.x')]} ctx={withState} onClose={vi.fn()} />)
     fireEvent.click(screen.getByText('toggle.x'))
@@ -217,7 +215,7 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
     expect(args).toStrictEqual({ viewId: 'v1', slotId: 's1', agentId: null, content: slotCtx.content })
   })
 
-  it('enabled 가 false → 역할 있는 줄에 aria-disabled · 클릭해도 실행 안 함 · 메뉴를 닫지 않음 — enabled 는 ctx 를 받는다', () => {
+  it('enabled false → aria-disabled on a line with a role · clicking does not run · does not close the menu — enabled receives ctx', () => {
     const onClose = vi.fn()
     const enabled = vi.fn(() => false)
     render(<SlotContextMenu x={0} y={0} items={[item('gated.x', { enabled })]} ctx={slotCtx} onClose={onClose} />)
@@ -229,7 +227,7 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
     expect(enabled).toHaveBeenCalledWith(slotCtx)
   })
 
-  it('enabled 가 true(또는 없음) → 평소처럼 실행한다', () => {
+  it('enabled true (or absent) → runs as usual', () => {
     render(
       <SlotContextMenu
         x={0}
@@ -245,7 +243,7 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
     expect(dispatchMock.fireAndForget).toHaveBeenCalledTimes(1)
   })
 
-  it('ctx 가 바뀌면 열린 메뉴가 그 자리에서 다시 판정한다', () => {
+  it('if ctx changes the open menu re-judges in place', () => {
     const enabled = (ctx: { agentId?: string | null }) => ctx.agentId != null
     const menu = (agentId: string | null) => (
       <SlotContextMenu
@@ -262,7 +260,7 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
     expect(row('gated.x').getAttribute('aria-disabled')).toBe('true')
   })
 
-  it('checked · enabled 가 throw → 렌더는 살고 끔 · 비활성으로 그린다', () => {
+  it('checked · enabled throw → rendering survives and draws off · disabled', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     const boom = () => {
       throw new Error('boom')
@@ -279,11 +277,11 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
     expect(row('a').getAttribute('aria-checked')).toBe('false')
     expect(row('b').getAttribute('aria-disabled')).toBe('true')
     // It is decided on every redraw, so look per item rather than per count.
-    expect(error).toHaveBeenCalledWith(expect.stringMatching(/checked 판정 실패 — "a"/), expect.any(Error))
-    expect(error).toHaveBeenCalledWith(expect.stringMatching(/enabled 판정 실패 — "b"/), expect.any(Error))
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/checked verdict failed — drawing "a"/), expect.any(Error))
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/enabled verdict failed — drawing "b"/), expect.any(Error))
   })
 
-  it('서브메뉴 자식도 같은 줄로 그린다(checked · enabled)', () => {
+  it('submenu children are drawn as the same line (checked · enabled)', () => {
     const container = item('container:묶음', {
       title: '묶음',
       children: [item('kid', { checked: () => true, enabled: () => false })],
@@ -295,27 +293,20 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
   })
 })
 
-// ── ★Viewport clamp (Bug1)★: unit-tests the pure helper clampMenuPosition broadly. In jsdom
-//    getBoundingClientRect returns 0 so the component path cannot produce overflow, so the real clamp logic is owned by this helper
-//    test (the component only calls this helper — GUI measurement is separate). ──
-describe('clampMenuPosition — 넘치면 뒤집는다(앵커는 메뉴 밖 간격만큼 떨어져 유지)', () => {
+// ── ★Viewport clamp (Bug1)★: the pure helper clampMenuPosition is unit-tested broadly — jsdom's getBoundingClientRect returns 0, so the component path cannot overflow; the component only calls this helper (GUI measurement is separate). ──
+describe('clampMenuPosition — flips on overflow (the anchor stays at the gap outside the menu)', () => {
   const VW = 1000
   const VH = 800
   const W = 150
   const H = 300
 
   /**
-   * ★The required value is written apart from the implementation constant (ANCHOR_GAP)★: if `ANCHOR_GAP` were used in the assertion as is, then
-   * changing that constant to 0 would make the assertion go to 0 with it and be neutralized. The value here is a *lower bound* derived from the OS — the Windows default double-click
-   * tolerance rectangle is 4px (= radius 2px), so twice that is required. It passes if the implementation shrinks from 8 to 6, but fails if it shrinks below
-   * the radius.
+   * ★The required value is written apart from the implementation constant (ANCHOR_GAP)★: using `ANCHOR_GAP` in the assertion would neutralize it if the constant became 0. This is a *lower bound* derived from the OS — Windows' default double-click tolerance rectangle is 4px (radius 2px), so twice that is required. Passes if the implementation shrinks from 8 to 6, fails below the radius.
    */
   const REQUIRED_GAP = 4
 
   /**
-   * The *larger* of the per-axis distances from the anchor to the menu rectangle. For the second click to land on the menu, both axes must be inside the rectangle,
-   * so if even one axis is this far off, it does not reach the menu within that tolerance radius. If 0, the anchor is inside the rectangle
-   * (= an item is under the cursor).
+   * The *larger* of the per-axis distances from the anchor to the menu rectangle. The second click lands on the menu only if both axes are inside the rectangle, so one axis this far off does not reach it within the tolerance radius. 0 = the anchor is inside the rectangle (an item under the cursor).
    */
   function anchorClearance(x: number, y: number, pos: { top: number; left: number }, w: number, h: number) {
     const dx = Math.max(pos.left - x, x - (pos.left + w), 0)
@@ -323,101 +314,98 @@ describe('clampMenuPosition — 넘치면 뒤집는다(앵커는 메뉴 밖 간�
     return Math.max(dx, dy)
   }
 
-  it('넘치지 않으면 앵커에서 간격만큼 띄운 자리(앵커 아래·오른쪽)', () => {
+  it('if it does not overflow a position the gap away from the anchor (below and right of the anchor)', () => {
     expect(clampMenuPosition(100, 100, W, H, VW, VH)).toEqual({
       top: 100 + ANCHOR_GAP,
       left: 100 + ANCHOR_GAP,
     })
   })
 
-  it('하단 넘침 → 위로 뒤집고 그 방향에도 간격을 둔다(메뉴 하단이 앵커보다 위)', () => {
+  it('bottom overflow → flips up and also keeps the gap in that direction (menu bottom is above the anchor)', () => {
     const pos = clampMenuPosition(100, 700, W, H, VW, VH)
     expect(pos.top).toBe(700 - ANCHOR_GAP - H)
     expect(pos.top + H).toBeLessThanOrEqual(VH)
     expect(anchorClearance(100, 700, pos, W, H)).toBeGreaterThanOrEqual(REQUIRED_GAP)
   })
 
-  it('우측 넘침 → 왼쪽으로 뒤집고 그 방향에도 간격을 둔다', () => {
+  it('right overflow → flips left and also keeps the gap in that direction', () => {
     const pos = clampMenuPosition(950, 100, W, H, VW, VH)
     expect(pos.left).toBe(950 - ANCHOR_GAP - W)
     expect(pos.left + W).toBeLessThanOrEqual(VW)
     expect(anchorClearance(950, 100, pos, W, H)).toBeGreaterThanOrEqual(REQUIRED_GAP)
   })
 
-  it('우하단 코너 넘침 → 두 축 다 뒤집고 두 축 다 간격을 둔다', () => {
+  it('bottom-right corner overflow → flips both axes and keeps the gap on both axes', () => {
     const pos = clampMenuPosition(950, 700, W, H, VW, VH)
     expect(pos).toEqual({ top: 700 - ANCHOR_GAP - H, left: 950 - ANCHOR_GAP - W })
     expect(anchorClearance(950, 700, pos, W, H)).toBeGreaterThanOrEqual(REQUIRED_GAP)
   })
 
-  it('메뉴가 뷰포트보다 큼(h>vh) → 뒤집어도 안 들어가므로 밀기 폴백(상단 고정, 음수 방지)', () => {
+  it('the menu is larger than the viewport (h>vh) → it does not fit even flipped, so push fallback (top fixed, prevents negative)', () => {
     // In a degenerate case "it is inside the screen" beats the anchor rule (including the gap) — the anchor is allowed to come inside.
     const { top } = clampMenuPosition(100, 700, W, 900, VW, VH)
     expect(top).toBe(4)
   })
 
-  it('간격까지 정확히 맞음(y+GAP+h===vh)은 넘침 아님 → 뒤집지 않는다', () => {
+  it('an exact fit including the gap (y+GAP+h===vh) is not an overflow → it does not flip', () => {
     // Pins that the overflow decision boundary includes the gap (deciding without the gap lets the menu go 1..GAP px off screen).
     const y = VH - H - ANCHOR_GAP
     expect(clampMenuPosition(0, y, W, H, VW, VH).top).toBe(VH - H)
   })
 
-  // ★Property assertion★: pins not a specific number but "the anchor is at least the required gap away from the menu + the menu is inside the screen"
-  //   — even if the placement formula is touched again, if this property breaks it is caught here (the whole normal range where menu ≤ viewport).
-  //   ★Strengthened from "it is enough that it does not go inside" (ADR-0143 decision 4)★: a placement flush against a corner
-  //   passed the old assertion, but the second click of a double-click executed an item.
-  it('뷰포트 안 어느 앵커에서도 앵커는 메뉴에서 요구 간격 이상 떨어지고 메뉴는 화면 안에 있다', () => {
+  // ★Property assertion★: pins "the anchor is at least the required gap from the menu + the menu is on screen" rather than a number, so touching the placement formula again is caught (the whole normal range where menu ≤ viewport). ★Strengthened (ADR-0143 decision 4)★: a placement flush against a corner passed the old "does not go inside" assertion, yet a double-click's second click executed an item.
+  it('from any anchor inside the viewport the anchor stays at least the required gap from the menu and the menu is on screen', () => {
     for (const x of [0, 1, 100, 500, 841, 842, 843, 950, 999, VW]) {
       for (const y of [0, 1, 100, 400, 491, 492, 493, 700, 799, VH]) {
         const pos = clampMenuPosition(x, y, W, H, VW, VH)
         expect(
           anchorClearance(x, y, pos, W, H),
-          `앵커(${x},${y})가 메뉴에 너무 가깝다`,
+          `the anchor (${x},${y}) is too close to the menu`,
         ).toBeGreaterThanOrEqual(REQUIRED_GAP)
-        expect(pos.left >= 0 && pos.left + W <= VW, `left 화면 밖(${x},${y})`).toBe(true)
-        expect(pos.top >= 0 && pos.top + H <= VH, `top 화면 밖(${x},${y})`).toBe(true)
+        expect(pos.left >= 0 && pos.left + W <= VW, `left off screen (${x},${y})`).toBe(true)
+        expect(pos.top >= 0 && pos.top + H <= VH, `top off screen (${x},${y})`).toBe(true)
       }
     }
   })
 })
 
 // ── ★Submenu flyout placement (ADR-0065)★ ──
-describe('flyoutPosition — 서브메뉴 우측/좌측 전개', () => {
+describe('flyoutPosition — submenu right/left expansion', () => {
   const VW = 1000
   const VH = 800
   const FW = 150 // flyout width
   const FH = 200 // flyout height
 
-  it('우측 공간 충분 → 부모 오른쪽 가장자리(anchorRight)에서 오른쪽으로 편다', () => {
+  it('enough room on the right → opens to the right from the parent\'s right edge (anchorRight)', () => {
     expect(flyoutPosition(100, 250, 100, FW, FH, VW, VH)).toEqual({ top: 100, left: 250 })
   })
 
-  it('우측 오버플로 + 좌측 공간 有 → 왼쪽(anchorLeft - FW)으로 뒤집는다', () => {
+  it('right overflow + room on the left → flips left (anchorLeft - FW)', () => {
     const { left } = flyoutPosition(900, 980, 100, FW, FH, VW, VH)
     expect(left).toBe(900 - FW)
     expect(left + FW).toBeLessThanOrEqual(VW)
   })
 
-  it('하단 오버플로 → top 을 밀어올려 flyout 전체가 뷰포트 안', () => {
+  it('bottom overflow → pushes top up so the whole flyout is inside the viewport', () => {
     const { top } = flyoutPosition(100, 250, 700, FW, FH, VW, VH)
     expect(top).toBe(VH - FH - 4)
     expect(top + FH).toBeLessThanOrEqual(VH)
   })
 
-  it('flyout 이 뷰포트보다 큼(FH>VH) → top 은 최소 margin 으로 상단 고정(음수 방지)', () => {
+  it('the flyout is larger than the viewport (FH>VH) → top is fixed at the minimum margin (prevents negative)', () => {
     const { top } = flyoutPosition(100, 250, 700, FW, 900, VW, VH)
     expect(top).toBe(4)
   })
 })
 
 // ── Component path ──
-describe('SlotContextMenu — 마운트 후 뷰포트 배치 적용(Bug1)', () => {
+describe('SlotContextMenu — viewport placement applied after mount (Bug1)', () => {
   const origRect = HTMLElement.prototype.getBoundingClientRect
   afterEach(() => {
     HTMLElement.prototype.getBoundingClientRect = origRect
   })
 
-  it('하단 근처에서 열면 메뉴가 위로 뒤집히고 앵커는 메뉴 아래 간격 밖에 남는다', () => {
+  it('opening near the bottom flips the menu up and the anchor stays outside the menu\'s lower gap', () => {
     HTMLElement.prototype.getBoundingClientRect = function () {
       return { width: 150, height: 300, top: 0, left: 0, right: 150, bottom: 300, x: 0, y: 0, toJSON() {} } as DOMRect
     }

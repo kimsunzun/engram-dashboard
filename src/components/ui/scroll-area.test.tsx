@@ -16,8 +16,8 @@ globalThis.ResizeObserver ||= class {
 
 afterEach(() => cleanup())
 
-describe('ScrollArea (ADR-0053 오버레이 스크롤바 seam, 앱 전역)', () => {
-  it('children 을 렌더한다', () => {
+describe('ScrollArea (ADR-0053 overlay scrollbar seam, app-wide)', () => {
+  it('renders children', () => {
     render(
       <ScrollArea>
         <div>scrolled content</div>
@@ -26,7 +26,7 @@ describe('ScrollArea (ADR-0053 오버레이 스크롤바 seam, 앱 전역)', () 
     expect(screen.getByText('scrolled content')).toBeTruthy()
   })
 
-  it('forward 한 ref 가 실제 스크롤 엘리먼트(Radix Viewport)를 가리킨다 — auto-scroll 대상 계약', () => {
+  it('the ref forwarded points to the real scroll element (Radix Viewport) — auto-scroll target contract', () => {
     const ref = createRef<HTMLDivElement>()
     render(
       <ScrollArea ref={ref}>
@@ -40,7 +40,7 @@ describe('ScrollArea (ADR-0053 오버레이 스크롤바 seam, 앱 전역)', () 
     expect(ref.current && 'scrollTop' in ref.current).toBe(true)
   })
 
-  it('style/viewportStyle 을 각 노드에 얹는다 — 변수-only 소비자(트리·팝업·pre) 계약', () => {
+  it('style/viewportStyle are laid onto each node — contract of variables-only consumers (tree · popup · pre)', () => {
     const ref = createRef<HTMLDivElement>()
     render(
       <ScrollArea
@@ -57,7 +57,7 @@ describe('ScrollArea (ADR-0053 오버레이 스크롤바 seam, 앱 전역)', () 
     expect(root.style.background).toBe('rgb(1, 2, 3)')
   })
 
-  it('orientation prop 이 Radix Scrollbar 로 전달된다(기본 vertical)', () => {
+  it('the orientation prop is passed to Radix Scrollbar', () => {
     const { container } = render(
       <ScrollArea orientation="horizontal">
         <div style={{ width: 9999 }}>wide content</div>

@@ -1,8 +1,7 @@
 // The absence curtain shows up with **the same look** under **the same condition** in all three slots (ADR-0148 decisions 2·3 · user decision 2026-08-20).
 //
-// Background: terminal·DOM slots used to write text over a dark curtain — '에이전트 대기 중' · '종료됨' ·
-//   `Failed: <메시지>`. Only the rich slot had a single symbol. The same fact was told in a different sentence per slot, and in spans where the decision wavers such as a daemon
-//   restart, an assertion like '종료됨' stayed put. The three were merged into one symbol, and
+// Background: the slots told the same fact in different sentences ('agent waiting' · 'ended' · `Failed: <message>`; only the rich slot had a
+//   single symbol), and in spans where the decision wavers such as a daemon restart an assertion like 'ended' stayed put. The three were merged into one symbol, and
 //   this file is that agreement's regression net — it measures both the three conditions (exit · connection lost · waiting for subscription attach) and "no text".
 //
 // Strategy: same stub pattern as slotReplayRestart.test.tsx. The connection state holds subscribers like the real one and notifies
@@ -139,11 +138,11 @@ afterEach(() => {
   cleanup()
 })
 
-describe.each(SLOTS)('%s — 부재 막(세 슬롯 공통)', (_name, mount) => {
+describe.each(SLOTS)('%s — absence veil (common to the three slots)', (_name, mount) => {
   // ★Second common obligation, measured at the same place as the curtain★: a slot that does not pass the clear callback returns only the cursor to 0 and
   //   the screen still holds the previous incarnation's content, so the full replay is drawn on top of it and no error is left anywhere.
   //   When slots are added, just adding one line to the SLOTS list here puts that obligation on them too.
-  it('구독에 비우기 콜백(onReset)을 넘긴다', async () => {
+  it('passes the clear callback (onReset) to the subscription', async () => {
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 0 }]
     agentStoreState.agentsLoaded = true
     render(mount())
@@ -152,7 +151,7 @@ describe.each(SLOTS)('%s — 부재 막(세 슬롯 공통)', (_name, mount) => {
     expect(captured.onReset).toBeTypeOf('function')
   })
 
-  it('아무 조건도 아니면 막이 없다', async () => {
+  it('with no condition there is no veil', async () => {
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 0 }]
     agentStoreState.agentsLoaded = true
     render(mount())
@@ -161,7 +160,7 @@ describe.each(SLOTS)('%s — 부재 막(세 슬롯 공통)', (_name, mount) => {
     expect(veil()).toBeNull()
   })
 
-  it('명부를 아직 모르는 구간은 부재가 아니다(대기 표시를 그리지 않는다)', async () => {
+  it('the span where the roster is not yet known is not absence (the waiting indicator is not drawn)', async () => {
     agentStoreState.agentsLoaded = false
     render(mount())
     await flush()
@@ -169,7 +168,7 @@ describe.each(SLOTS)('%s — 부재 막(세 슬롯 공통)', (_name, mount) => {
     expect(veil()).toBeNull()
   })
 
-  it('연결이 끊기면 막이 뜬다', async () => {
+  it('when the connection drops the veil appears', async () => {
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 0 }]
     agentStoreState.agentsLoaded = true
     render(mount())
@@ -180,7 +179,7 @@ describe.each(SLOTS)('%s — 부재 막(세 슬롯 공통)', (_name, mount) => {
     expect(veil()).not.toBeNull()
   })
 
-  it('명부 수신 후에도 해석 안 되면 막이 뜬다(수거된 에이전트)', async () => {
+  it('if it is still unresolved after the roster is received the veil appears (a reaped agent)', async () => {
     agentStoreState.agents = []
     agentStoreState.agentsLoaded = true
     render(mount())
@@ -189,7 +188,7 @@ describe.each(SLOTS)('%s — 부재 막(세 슬롯 공통)', (_name, mount) => {
     expect(veil()).not.toBeNull()
   })
 
-  it("구독이 'detached' 라고 하면 막이 뜨고, 부착되면 내려간다", async () => {
+  it("if the subscription says 'detached' the veil appears, and when attached it comes down", async () => {
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 0 }]
     agentStoreState.agentsLoaded = true
     render(mount())
@@ -205,7 +204,7 @@ describe.each(SLOTS)('%s — 부재 막(세 슬롯 공통)', (_name, mount) => {
   })
 
   // ★Write no text (user decision)★: whether failure reason, exit or waiting, all the curtain says is one symbol.
-  it('막은 심볼 하나뿐 — 글자를 담지 않는다(실패 사유 포함)', async () => {
+  it('the veil is a single symbol only — it holds no text (including the failure reason)', async () => {
     agentStoreState.agents = [
       { id: AGENT, cwd: 'C:/x', status: { type: 'Failed', message: 'boom' }, epoch: 0 },
     ]

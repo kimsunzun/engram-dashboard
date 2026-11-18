@@ -35,8 +35,8 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
-describe('installNativeScrollActivity (ADR-0053: seam 밖 네이티브 스크롤러 가시성 규칙)', () => {
-  it('스크롤할 때만 표식이 붙는다 — 포인터가 올라오는 것만으로는 안 붙는다', () => {
+describe('installNativeScrollActivity (ADR-0053: visibility rule of native scrollers outside the seam)', () => {
+  it('the marker attaches only when scrolling — merely having the pointer come up does not attach it', () => {
     const vp = mountViewport()
 
     vp.dispatchEvent(new Event('mouseover', { bubbles: true }))
@@ -48,7 +48,7 @@ describe('installNativeScrollActivity (ADR-0053: seam 밖 네이티브 스크롤
     expect(vp.hasAttribute(SCROLL_ACTIVE_ATTR)).toBe(true)
   })
 
-  it('마지막 스크롤 뒤 seam 과 같은 지연만큼 남았다가 떨어진다', () => {
+  it('after the last scroll it stays for the same delay as the seam and then drops', () => {
     const vp = mountViewport()
     vp.dispatchEvent(new Event('scroll'))
 
@@ -59,7 +59,7 @@ describe('installNativeScrollActivity (ADR-0053: seam 밖 네이티브 스크롤
     expect(vp.hasAttribute(SCROLL_ACTIVE_ATTR)).toBe(false)
   })
 
-  it('스크롤이 이어지는 동안 숨김이 미뤄진다(연속 스크롤 중 깜빡임 방지)', () => {
+  it('while scrolling continues hiding is postponed (prevents flicker during continuous scrolling)', () => {
     const vp = mountViewport()
 
     vp.dispatchEvent(new Event('scroll'))
@@ -70,7 +70,7 @@ describe('installNativeScrollActivity (ADR-0053: seam 밖 네이티브 스크롤
     expect(vp.hasAttribute(SCROLL_ACTIVE_ATTR)).toBe(true)
   })
 
-  it('seam 밖 대상 명단에 없는 스크롤러는 건드리지 않는다', () => {
+  it('a scroller not on the outside-seam target list is not touched', () => {
     const other = document.createElement('div')
     other.className = 'some-other-scroller'
     document.body.appendChild(other)
@@ -79,7 +79,7 @@ describe('installNativeScrollActivity (ADR-0053: seam 밖 네이티브 스크롤
     expect(other.hasAttribute(SCROLL_ACTIVE_ATTR)).toBe(false)
   })
 
-  it('해제기가 리스너와 남은 표식을 함께 거둔다', () => {
+  it('the marker and the remaining marker are removed together by the releaser', () => {
     const vp = mountViewport()
     vp.dispatchEvent(new Event('scroll'))
     expect(vp.hasAttribute(SCROLL_ACTIVE_ATTR)).toBe(true)

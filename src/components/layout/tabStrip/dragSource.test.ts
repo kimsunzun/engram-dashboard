@@ -1,6 +1,4 @@
-// TRD S21-slot-docking §8-2 the source's share of 「훅 · 컴포넌트」 (where decisions are made `dragSource` — send · release · revert · order move confirmation) ·
-//   §8-3 source window order test (fast-check `fc.scheduler()` — mixes `done` · invoke responses · `window:tabs-updated` · `layout:updated` ·
-//   dragend in any order). The outside is a fake port (ADR-0012) · the tab bar geometry exactly emulates how the tab bar draws.
+// TRD S21-slot-docking §8-2 the source's share of `dragSource` (send · release · revert · order move confirmation) · §8-3 source window order test (fast-check `fc.scheduler()` mixes `done` · invoke responses · `window:tabs-updated` · `layout:updated` · dragend in any order). The outside is a fake port (ADR-0012); tab bar geometry exactly emulates how the tab bar draws.
 
 import fc from 'fast-check'
 import { describe, expect, it, vi } from 'vitest'
@@ -112,7 +110,7 @@ function started(h: Harness, s: DragStart = START): void {
 const tick = () => new Promise(resolve => setTimeout(resolve, 0))
 
 describe('dragSource — dragstart', () => {
-  it('바깥 표시를 세운다 — 나간 끌기 · 출처 탭바 첫 판정(누른 점 = 구역 안) · 그리는 순서 이동은 아직 없음', () => {
+  it('raises the outer mark — the leaving drag · the source tab bar\'s first verdict (press point = inside the zone) · no order move drawn yet', () => {
     const h = harness()
     h.src.start(START)
     expect(h.local.getOutgoing()).toEqual({ drag: DRAG, window: WIN, view: 'B', grabOffset: 80 })
@@ -126,8 +124,8 @@ describe('dragSource — dragstart', () => {
   })
 })
 
-describe('dragSource — 끄는 동안(출처 탭바 판정)', () => {
-  it('구역 밖(null) = 남은 탭 · 돌아오면 끄는 탭 · 순서 이동은 구역 안 판정이 온 뒤에만', () => {
+describe('dragSource — while dragging (source tab bar verdict)', () => {
+  it('outside the zone (null) = the remaining tab · when it comes back the dragged tab · the order move only after an inside-zone verdict arrives', () => {
     const h = harness()
     started(h)
     h.local.setSourceStrip(null)
@@ -138,9 +136,8 @@ describe('dragSource — 끄는 동안(출처 탭바 판정)', () => {
     expect(h.src.getSnapshot().motion).toEqual({ view: 'B', index: 1, left: 170, settled: false })
   })
 
-  // User decision 2026-10-26 (T-66 · D-a) — for its own tab too, once the cursor passes the right end of `+` it is outside the zone (rejected alternative = keep it attached up to the end of the usable width).
-  //   The decision is made by the source window root's `windowDrop` with the tab bar geometry's zone (`stripZoneArea`).
-  it('가로 넘침 — 커서가 + 오른 끝을 넘으면 구역 밖(순서 이동 멈춤 · 남은 탭) · 돌아오면 순서 이동이 다시 선다', () => {
+  // T-66 · D-a: for its own tab too, once the cursor passes the right end of `+` it is outside the zone (rejected: keep it attached up to the end of the usable width). Decided by the source window root's `windowDrop` with the tab bar geometry's zone (`stripZoneArea`).
+  it('horizontal overflow — if the cursor passes the right end of + it is outside the zone (order move stops · remaining tab) · when it returns the order move stands again', () => {
     // Three heads of 160 (0..480) · + 480..506 · usable width 600 (row 0..626 — the old zone went up to 600) · canvas origin (0, 28).
     const h = harness({}, 600)
     const type = buildTabDragType({ app: 'com.engram.test', drag: DRAG, original: { w: 800, h: 600 }, shape: 'l' })
@@ -187,7 +184,7 @@ describe('dragSource — 끄는 동안(출처 탭바 판정)', () => {
     expect(h.shown()).toBe('B')
   })
 
-  it('순서 문턱 — 구역에 든 첫 판정은 곧바로 확정 · 그 뒤는 마지막 이동 점에서 문턱(16 px)을 넘어야 판정의 자리로', () => {
+  it('order threshold — the first verdict entering the zone is confirmed at once · after that it must exceed the threshold (16 px) from the last move point to go to the verdict position', () => {
     const h = harness()
     started(h)
     // First decision (justAttached) — position 2 is confirmed even if the cursor barely moved.
@@ -204,15 +201,14 @@ describe('dragSource — 끄는 동안(출처 탭바 판정)', () => {
     expect(h.src.getSnapshot().motion).toBeNull()
     h.local.setSourceStrip({ index: 2, left: 205, x: 205 })
     expect(h.src.getSnapshot().motion?.index).toBe(2)
-    // Even past the threshold, if the position is the same the last move point stays (205) — if that point were moved, the next decision (180 − 187 = 7) would be inside the threshold.
-    //   ★The threshold 16 is the value of this harness (three tabs · 480 px) — if the width or tab count changes, recompute whether 187 passes the threshold★
+    // Even past the threshold, an unchanged position keeps the last move point (205) — moving it would put the next decision (180 − 187 = 7) inside the threshold. ★Threshold 16 is this harness's value (three tabs · 480 px) — recompute whether 187 passes it if width or tab count changes★
     h.local.setSourceStrip({ index: 2, left: 187, x: 187 })
     expect(h.src.getSnapshot().motion?.index).toBe(2)
     h.local.setSourceStrip({ index: 1, left: 180, x: 180 })
     expect(h.src.getSnapshot().motion?.index).toBe(1)
   })
 
-  it('dragend 뒤의 판정은 듣지 않는다 — 끄는 머리는 확정한 자리로(settled)', () => {
+  it('a verdict after dragend is not listened to — the dragged head goes to the confirmed position (settled)', () => {
     const h = harness()
     started(h)
     h.local.setSourceStrip({ index: 2, left: 330, x: 420 })
@@ -223,7 +219,7 @@ describe('dragSource — 끄는 동안(출처 탭바 판정)', () => {
     expect(h.shown()).toBe('B')
   })
 
-  it('끄는 중 그 탭이 그 창에서 빠지면(LLM 닫기 · 옮김) 바꿔 그리기를 푼다', () => {
+  it('if that tab leaves that window during the drag (LLM close · move) the swapped drawing is released', () => {
     const h = harness()
     started(h)
     h.local.setSourceStrip(null)
@@ -235,7 +231,7 @@ describe('dragSource — 끄는 동안(출처 탭바 판정)', () => {
 
 describe('dragSource — dragend', () => {
   it.each(['none', 'move'] as EndEffect[])(
-    'effect=%s → 리듀서에 끝을 먼저 넣고 NewWindow{by: DragEnd{effect}} 하나 · 두 번째 dragend 무동작',
+    'effect=%s → feeds the end to the reducer first and one NewWindow{by: DragEnd{effect}} · a second dragend is a no-op',
     effect => {
       let phaseAtSend: string | null = null
       const h = harness({
@@ -260,7 +256,7 @@ describe('dragSource — dragend', () => {
     },
   )
 
-  it('같은 웹뷰 제자리 놓기(표시) → 보내지 않음 · 곧바로 풂(순서 이동 거둠) · 표시를 가져감', () => {
+  it('same-webview in-place drop (mark) → sends nothing · release at once (order move reaped) · takes the mark', () => {
     const h = harness()
     started(h)
     h.local.setSourceStrip({ index: 2, left: 330, x: 420 })
@@ -272,7 +268,7 @@ describe('dragSource — dragend', () => {
     expect(h.local.takeLocalDrop(DRAG)).toBe(false)
   })
 
-  it('dragstart 와 같은 task 의 dragend(엔진이 접음) → 보내지 않음 · 풂 · 그 뒤 done 으로 되돌리지 않음', () => {
+  it('dragend in the same task as dragstart (the engine collapsed it) → sends nothing · release · not reverted by done afterwards', () => {
     const h = harness()
     h.src.start(START)
     h.src.end('B', 'none')
@@ -283,7 +279,7 @@ describe('dragSource — dragend', () => {
     expect(h.switches).toEqual([])
   })
 
-  it('다른 머리 · 끌기 밖의 dragend 는 무동작', () => {
+  it('dragend of another head · outside a drag is a no-op', () => {
     const h = harness()
     h.src.end('B', 'none')
     started(h)
@@ -292,7 +288,7 @@ describe('dragSource — dragend', () => {
     expect(h.src.getSnapshot().override.phase).toBe('live')
   })
 
-  it('invoke 오류 → 곧바로 풂(그 끌기만)', async () => {
+  it('invoke error → release at once (only that drag)', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const h = harness({ send: () => Promise.reject(new Error('ipc down')) })
     started(h)
@@ -306,8 +302,8 @@ describe('dragSource — dragend', () => {
   })
 })
 
-describe('dragSource — 결과 알림 · 원래 선택 되돌리기(§4-6)', () => {
-  it('done{canceled}(자기 dragend none) → switch_tab_if(창, initial, expect = 끄는 탭) 한 번 · 닿으면 풂', () => {
+describe('dragSource — result notice · restoring the original selection (§4-6)', () => {
+  it('done{canceled} (own dragend none) → switch_tab_if(window, initial, expect = dragged tab) once · release when it lands', () => {
     const h = harness()
     started(h)
     h.src.end('B', 'none')
@@ -320,7 +316,7 @@ describe('dragSource — 결과 알림 · 원래 선택 되돌리기(§4-6)', ()
     expect(h.local.getOutgoing()).toBeNull()
   })
 
-  it('되돌리지 않음 — 활성이 그사이 바뀜 · initial = 끄는 탭 · Rejected · 자기 dragend move · 남의 끌기', () => {
+  it('no revert — the active changed in between · initial = dragged tab · Rejected · own dragend move · someone else\'s drag', () => {
     const run = (outcome: DropOutcome, effect: EndEffect, setup?: (h: Harness) => void, drag = DRAG, s = START) => {
       const h = harness()
       started(h, s)
@@ -337,7 +333,7 @@ describe('dragSource — 결과 알림 · 원래 선택 되돌리기(§4-6)', ()
     expect(run('canceled', 'none', undefined, 'drag-0')).toEqual([])
   })
 
-  it('되돌리기 오류 → 잡아 로그만 · 모델 활성으로 물러남', async () => {
+  it('revert error → caught and only logged · falls back to the model active', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const h = harness({ switchTabIf: () => Promise.reject(new Error('TabNotFound')) })
     started(h)
@@ -351,7 +347,7 @@ describe('dragSource — 결과 알림 · 원래 선택 되돌리기(§4-6)', ()
     vi.restoreAllMocks()
   })
 
-  it('탭 알림은 적용마다 계기다 — 내용이 같아도(이름 바꿈 따위) dragend 뒤 활성이 끄는 탭이 아니면 푼다(②)', () => {
+  it('a tab notice is a trigger on every apply — even with the same content (rename etc.), if after dragend the active is not the dragged tab it releases (②)', () => {
     const h = harness()
     // The press's switch echo has not come yet — model active = A.
     h.setModel({ tabs: ['A', 'B', 'C'], active: 'A' })
@@ -362,7 +358,7 @@ describe('dragSource — 결과 알림 · 원래 선택 되돌리기(§4-6)', ()
     expect(h.src.getSnapshot().override.phase).toBe('idle')
   })
 
-  it('나간 끌기 표시는 그 끌기가 풀릴 때만 걷는다 — 다음 dragstart 가 덮은 표시는 앞 끌기가 걷지 않는다', () => {
+  it('the leaving-drag mark is lifted only when that drag is released — a mark covered by the next dragstart is not lifted by the earlier drag', () => {
     const h = harness()
     started(h)
     h.src.end('B', 'move')
@@ -372,7 +368,7 @@ describe('dragSource — 결과 알림 · 원래 선택 되돌리기(§4-6)', ()
   })
 })
 
-describe('dragSource — 되돌리기가 닿기 전 누름(forceSwitch)', () => {
+describe('dragSource — a press before the revert lands (forceSwitch)', () => {
   /** After issuing the revert (A, expect B) of the cancelled drag B — the model active is still B. */
   function reverted(over: Partial<Pick<DragSourcePorts, 'switchTabIf'>> = {}): Harness {
     const h = harness(over)
@@ -383,7 +379,7 @@ describe('dragSource — 되돌리기가 닿기 전 누름(forceSwitch)', () => 
     return h
   }
 
-  it('끄는 탭(expect) 누름만 · 그 창만 · 한 번만 true — 바꿔 그리기를 푼 다른 pointerdown · 활성이 그대로인 탭 알림 뒤에도', () => {
+  it('only a press on the dragged tab (expect) · only that window · true only once — also after another pointerdown that released the swapped drawing · a tab notice with the active unchanged', () => {
     const h = reverted()
     expect(h.src.forceSwitch(WIN, 'A')).toBe(false)
     expect(h.src.forceSwitch('slot-popup-1', 'B')).toBe(false)
@@ -395,7 +391,7 @@ describe('dragSource — 되돌리기가 닿기 전 누름(forceSwitch)', () => 
     expect(h.src.forceSwitch(WIN, 'B')).toBe(false)
   })
 
-  it('모델 활성이 expect 를 떠나면(되돌리기 닿음 · 남이 바꿈) · 되돌리기 오류면 · 되돌리기가 없으면 false', async () => {
+  it('when the model active leaves expect (revert landed · someone else changed) · on a revert error · with no revert it is false', async () => {
     const landed = reverted()
     landed.setModel({ tabs: ['A', 'B', 'C'], active: 'A' })
     expect(landed.src.forceSwitch(WIN, 'B')).toBe(false)
@@ -418,7 +414,7 @@ describe('dragSource — 되돌리기가 닿기 전 누름(forceSwitch)', () => 
     expect(none.src.forceSwitch(WIN, 'B')).toBe(false)
   })
 
-  it('다음 되돌리기가 앞 것을 갈음한다 — 앞 되돌리기의 오류는 새 것을 거두지 않는다', async () => {
+  it('the next revert replaces the earlier one — the earlier revert\'s error does not reap the new one', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     let fail: (err: Error) => void = () => {}
     let calls = 0
@@ -481,7 +477,7 @@ const layoutNoise: Arrival = { label: 'layout:updated', run: () => {} }
 
 const SCENARIOS: Scenario[] = [
   {
-    name: '다른 창 탭바 · 칸에 놓음(그 창의 Drop 적용) — 끄는 탭이 떠난다',
+    name: 'dropped on the tab bar of another window · area (the Drop of that window applied) — the dragged tab leaves',
     effect: 'move',
     out: true,
     dragEnd: { reply: { type: 'ignored', why: 'accepted-ours' }, done: 'ignored' },
@@ -491,7 +487,7 @@ const SCENARIOS: Scenario[] = [
     leaves: true,
   },
   {
-    name: '창 밖 새 창(DragEnd 적용) — 끄는 탭이 떠난다',
+    name: 'new window outside the window (DragEnd applied) — the dragged tab leaves',
     effect: 'none',
     out: true,
     dragEnd: {
@@ -510,7 +506,7 @@ const SCENARIOS: Scenario[] = [
     leaves: true,
   },
   {
-    name: 'Esc 취소 — 원래 선택으로 되돌린다',
+    name: 'Esc cancel — reverts to the original selection',
     effect: 'none',
     out: true,
     dragEnd: { reply: { type: 'canceled' }, done: 'canceled' },
@@ -520,7 +516,7 @@ const SCENARIOS: Scenario[] = [
     leaves: true,
   },
   {
-    name: '같은 창 순서 바꿈(이 창의 Drop 적용)',
+    name: 'same-window reorder (the Drop of this window applied)',
     effect: 'move',
     move: true,
     dragEnd: { reply: { type: 'ignored', why: 'accepted-ours' }, done: 'ignored' },
@@ -530,7 +526,7 @@ const SCENARIOS: Scenario[] = [
     reorder: true,
   },
   {
-    name: '자기 DragEnd invoke 오류',
+    name: 'own DragEnd invoke error',
     effect: 'none',
     out: true,
     dragEnd: null,
@@ -539,7 +535,7 @@ const SCENARIOS: Scenario[] = [
     reverts: 0,
   },
   {
-    name: '받은 창의 Drop 을 잃음 · dragend 뒤 LLM 이 다른 탭으로',
+    name: 'the Drop of the receiving window lost · after dragend the LLM moves to another tab',
     effect: 'move',
     out: true,
     dragEnd: { reply: { type: 'ignored', why: 'accepted-ours' }, done: 'ignored' },
@@ -548,7 +544,7 @@ const SCENARIOS: Scenario[] = [
     reverts: 0,
   },
   {
-    name: '같은 웹뷰 제자리 놓기 — 아무것도 보내지 않는다',
+    name: 'same-webview in-place drop — sends nothing',
     effect: 'move',
     move: true,
     local: true,
@@ -627,7 +623,7 @@ async function play(sc: Scenario, s: fc.Scheduler) {
 const shownOf = (f: Frame) => (f.snap.window === WIN ? shownTab(f.snap.override, f.model) : f.model.active)
 const drawnOf = (f: Frame) => f.snap.window === WIN && stripHeld(f.snap.override, f.model) && f.snap.motion !== null
 
-describe('dragSource — 순서 시험(fc.scheduler · 출처 창)', () => {
+describe('dragSource — order test (fc.scheduler · source window)', () => {
   for (const sc of SCENARIOS) {
     it(sc.name, async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -670,7 +666,7 @@ describe('dragSource — 순서 시험(fc.scheduler · 출처 창)', () => {
     })
   }
 
-  it('⑥ dragend 뒤 끄는 탭을 활성으로 두지 않는 tabs-updated(LLM) 가 오면 그 뒤 그리는 탭 = 모델 활성', async () => {
+  it('⑥ if a tabs-updated (LLM) that does not keep the dragged tab active comes after dragend, the tab drawn afterwards = the model active', async () => {
     const sc = SCENARIOS.find(x => x.name.includes('LLM'))!
     await fc.assert(
       fc.asyncProperty(fc.scheduler(), async s => {
@@ -683,7 +679,7 @@ describe('dragSource — 순서 시험(fc.scheduler · 출처 창)', () => {
     )
   })
 
-  it('⑤ 되돌리기가 셸에 닿기 전에 다른 탭(C)이 골라지면 C 가 남는다 — 끝 화면 = 모델 활성', async () => {
+  it('⑤ if another tab (C) is chosen before the revert reaches the shell, C stays — the end screen = the model active', async () => {
     const sc: Scenario = {
       name: 'pick C during revert',
       effect: 'none',

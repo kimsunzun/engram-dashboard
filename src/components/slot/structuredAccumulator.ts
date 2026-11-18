@@ -1,19 +1,13 @@
 // RichSlot live accumulator (tag1 StructuredEvent) — 1 frame = 1 StructuredEvent JSON (pure TS, React-independent).
 //
-// ★Why this differs from the S14 NDJSON accumulator (lab/richslot/streamParse.ts)★: since S15 (ADR-0045) live structured output is
-//   refined by the backend and flows as a **binary frame tag1** — the payload is one self-describing StructuredEvent JSON
-//   (internally-tagged `"type"` discriminator), not an NDJSON line stream. So no line reassembly (newline splitting)
-//   is needed, and one feed = one event. The NDJSON path stays in use by the fixture spike (lab/richslot/fixtureParse.ts)
-//   (that is a whole-file parser, this accumulator is for live tag1 only).
+// Live structured output is a binary frame tag1 carrying one self-describing StructuredEvent JSON (ADR-0045), not an NDJSON
+// line stream: no line reassembly, one feed = one event. The NDJSON parser (lab/richslot/fixtureParse.ts) is whole-file, fixture spike only.
 //
-// ★Render model = order-preserving item stream (ADR-0045 §52 render, user decision 2026-07-05)★: events pile up in the item array
-//   in the order they arrived.
+// Render model = order-preserving item stream (ADR-0045): events pile up in arrival order.
 //
-// ★idempotent reconstruction invariant (replay safety — why it matters)★: on a webview reload / slot reassignment the client shared buffer
-//   replays the whole history in seq order (replay, ADR-0043). The subscription effect resubscribes after reset(),
-//   so feeding the same event sequence again must yield the same snapshot (so a reload restores the screen as it was). This accumulator
-//   builds state only from feed order (order preserved) and reset clears everything, so reset→refeed in the same order = same result.
-//   Upstream (ProtocolClient) guarantees seq dedup and ordering, so this accumulator does no duplicate/inversion defense of its own.
+// ★Idempotent reconstruction (replay safety)★: on webview reload / slot reassignment the client buffer replays the whole history in seq order (ADR-0043)
+// after reset(), so feeding the same sequence again must yield the same snapshot. State derives only from feed order and reset clears everything.
+// Upstream (ProtocolClient) guarantees seq dedup and ordering, so no duplicate/inversion defense here.
 
 import type { QueuedInputEvent } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
 import type { QueuedInputRow } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
@@ -23,10 +17,7 @@ import type { ToolOutcome } from '../../../crates/engram-dashboard-protocol/bind
 import type { TurnOutcome } from '../../../crates/engram-dashboard-protocol/bindings/TurnOutcome'
 import { entryOfListedRow, QueuedInputRegistry, type QueuedEntry } from './queuedInputReducer'
 
-/**
- * Marker left on screen when a turn closed with an outcome that is **not a normal completion** — neutral vocabulary (no backend name).
- * ★Do not draw 'interrupted' as a failure★ — a user interrupt is a first-class normal path in this repository.
- */
+/** Non-normal turn outcome marker (neutral vocabulary, no backend name). Do not draw 'interrupted' as a failure — a user interrupt is a normal path. */
 export type TurnOutcomeMark = 'failed' | 'interrupted' | 'unknown'
 
 // ADR-0239 · ADR-0241: re-export the generated types here so consumers get them from this one module.
@@ -45,10 +36,7 @@ export type StructuredItem =
       argsJson: string
       id: string | null
       category: ToolCategory
-      /**
-       * Do not read no marker (`null`) as success — it is the same value for normal completion and also for a call whose end has not come (interrupted and still running · old daemon ·
-       * pushed out of the ring) and for an unknown outcome. A later result overwrites an earlier marker (clears it for completion · an unknown outcome).
-       */
+      /** `null` is not success: it also covers a call whose end has not come (running · interrupted · old daemon · pushed out of the ring) and an unknown outcome. A later result overwrites an earlier marker. */
       resultMark: ToolResultMark | null
       itemId: number
     }
@@ -57,30 +45,23 @@ export type StructuredItem =
   // Escape-hatch event (absorbs codex/gemini · API model leaks).
   | { kind: 'structured'; label: string; json: string; itemId: number }
   | { kind: 'separator'; itemId: number }
-  // Turn outcome marker — `detail` = failure reason (only when the other side gave one). A normal completion makes no such item (divider only).
+  // Turn outcome marker; `detail` = failure reason when given. A normal completion makes no item (divider only).
   | { kind: 'outcome'; outcome: TurnOutcomeMark; detail: string | null; itemId: number }
-  // Interrupt notice the backend writes in an interrupted turn (where it is emitted today = claude synthetic line) — `text` = verbatim. A turn containing this item
-  //   does not draw the interrupt outcome row (ADR-0243).
+  // Interrupt notice the backend writes in an interrupted turn, `text` verbatim; a turn containing it draws no interrupt outcome row (ADR-0243).
   | { kind: 'interruptNote'; text: string; itemId: number }
-  // Marker that an event this shell does not know arrived. `count` = consecutive accumulated amount. ★The original payload is not carried★ (default arm below).
+  // Unknown event arrived; `count` = consecutive accumulated. The original payload is not carried.
   | { kind: 'unsupported'; count: number; itemId: number }
 
 export type ToolItem = Extract<StructuredItem, { kind: 'tool' }>
 
-/**
- * The list query answer handed to reattach reconciliation — the answer of `AgentClient.listQueuedInputs` fits as is.
- * `as_of_seq` = seq of the last list event the daemon registry reduced (`null` = all list events of that incarnation are after the snapshot).
- */
+/** Answer of `AgentClient.listQueuedInputs`. `as_of_seq` = last list event seq the daemon registry reduced (`null` = all list events of that incarnation are after the snapshot). */
 export interface QueuedSnapshot {
   readonly inputs: readonly QueuedInputRow[]
   readonly as_of_seq: number | null
   readonly epoch: number
 }
 
-/**
- * Outcome of `offerQueuedSnapshot`. `held` = the view has not yet been delivered up to the snapshot seq so it holds and waits (it is applied when that seq
- * arrives via `feed`·`observeSeq`) · `stale` = discarded because it was an answer of another generation or incarnation.
- */
+/** Outcome of `offerQueuedSnapshot`: `held` = view not yet delivered up to the snapshot seq (applied when it arrives via `feed`·`observeSeq`); `stale` = answer of another generation or incarnation. */
 export type QueuedReconcileOutcome = 'applied' | 'held' | 'stale'
 
 /** One reattach reconciliation in progress — after sending the query it records the list events received, and holds the answer that came first. */
@@ -94,43 +75,30 @@ interface QueuedReconcile {
 export class StructuredEventAccumulator {
   private items: StructuredItem[] = []
   private turnDone = false
-  // ADR-0244: count of turn boundaries consumed — ★reset does not roll it back either★ (the caller compares only before and after one `feed`).
+  // ADR-0244: turn boundaries consumed; reset does not roll it back (callers compare before/after one `feed`).
   private turnBoundaries = 0
-  // Monotonic item id — back to 0 on reset(). Refeeding the same event sequence reproduces the same ids (replay idempotence).
+  // Monotonic item id; 0 after reset(), so a refeed reproduces the same ids.
   private nextId = 0
-  // ★user message uuid dedup (blunt-suppress → uuid dedup swap, text blocks only)★: in json mode, right after write_input the
-  //   session first flows the synthetic user echo (Structured{kind:"user", uuid attached to json}), and later claude echoes back the **same uuid**
-  //   as is via --replay-user-messages (the backend decoder carries the line-level uuid
-  //   into the block json). A user item with an already seen uuid is skipped here so exactly one remains.
-  //   ★Dedup applies only to `type==="text"` user blocks★: the synthetic echo makes only a single text block (the dedup partner
-  //   also arises only from text), so non-text blocks such as tool_result in the same replay line are kept without dedup
-  //   even if they share the same uuid (extractUserUuid returns null for non-text — HIGH FIX against multi-block tool_result loss).
-  //   User items without a uuid (past/non-replay) are also all kept without dedup (vanish prevention).
-  //   reset() clears it so replay idempotence holds (on refeed it sees the same uuids in the same order again and reconverges).
-  // ADR-0231: the bubble of a queued input also keeps 「한 id 에 한 번」 (once per id) with this set — the `Delivered` placement · ascertained copy
-  //   put into it here, and a uuid in it is not drawn in the list (`snapshotQueued`) either.
+  // User uuid dedup (text blocks only): after write_input the synthetic user echo arrives first, then claude echoes the same uuid via
+  //   --replay-user-messages; a user item with an already seen uuid is skipped so exactly one remains.
+  //   ★Only `type==="text"` blocks dedup★ (extractUserUuid returns null for non-text): tool_result blocks of the same replay line share the uuid and must be kept.
+  //   User items without a uuid are kept. reset() clears the set (replay idempotence).
+  // ADR-0231: a queued input's bubble uses this set too (`Delivered` placement · ascertained copy put the uuid here); a uuid in it is not drawn in `snapshotQueued` either.
   private seenUserUuids = new Set<string>()
-  // ADR-0231: reduced state of the queued-input registry (same rule · same golden as the agent registry). The draw filter is applied outside this.
+  // ADR-0231: reduced queued-input registry (same rule · golden as the agent registry); the draw filter applies outside.
   private readonly queued = new QueuedInputRegistry()
-  // ADR-0231 reattach reconciliation: the largest seq this instance was delivered (regardless of tag — one seq space). reset returns it to -1.
+  // ADR-0231 reattach reconciliation: largest seq delivered (any tag — one seq space); reset returns it to -1.
   private deliveredSeq = -1
-  // Reconciliation generation. ★reset does not return it to 0★ — if it did, the answer to a query sent before clearing would be read as the answer to a new
-  //   query carrying the same number and applied (the record was cleared meanwhile, so there is no material to reduce the after-snapshot events again).
+  // Reconciliation generation. ★reset does not return it to 0★: an answer to a pre-clear query would otherwise match a new query with the same number.
   private reconcileGen = 0
   private reconcile: QueuedReconcile | null = null
 
   /**
-   * The live path is always Uint8Array; string is for tests/convenience.
-   * tag1 is 1 frame = 1 event so no line reassembly or buffering is needed.
-   *
-   * @param seq the seq of this frame. ★Reattach reconciliation stands on this value alone★ — if omitted, this frame's list events are not left in the reconciliation
-   *   record and a held answer does not count this frame as delivered either (omitted only for test convenience).
-   * @returns whether the caller may release its own waiting state because of this frame. `false` is two cases — ① parsing failed or
-   *   it is a kind this shell does not know, so none of this frame's meaning is reflected in the returned state (`snapshot`·`isTurnDone`)
-   *   ② it is a tool end result (`ToolResult`) — the marker of an earlier tool row may have changed (if there is no row pointed at or the marker is
-   *   the same, `snapshot` stays as it is) but a response did not arrive (ADR-0241).
-   *   ★The caller looks at this value to decide whether to hand its waiting state to the accumulator★ — if it hands over
-   *   just because a frame arrived, a frame that was not understood is disguised as 「응답이 왔다」 (a response came) and the waiting indicator goes off (`awaiting` of RichSlot).
+   * Live path is Uint8Array; string is for tests. tag1 = 1 frame = 1 event, no buffering.
+   * @param seq this frame's seq. Reattach reconciliation stands on it alone — if omitted, the frame's list events are not recorded and a held answer does not count it as delivered (tests only).
+   * @returns whether the caller may release its waiting state. `false` when ① parse failed or unknown kind (nothing reflected in `snapshot`·`isTurnDone`)
+   *   ② a tool end result (`ToolResult`): an earlier row's marker may change but no response arrived (ADR-0241).
+   *   Callers must use this, not "a frame arrived", or an un-understood frame turns off the waiting indicator (`awaiting` of RichSlot).
    */
   feed(payload: Uint8Array | string, seq?: number): boolean {
     const understood = this.parseAndConsume(payload, seq)
@@ -146,13 +114,13 @@ export class StructuredEventAccumulator {
     try {
       parsed = JSON.parse(json)
     } catch (err) {
-      // The path is a dumb pipe (unrefined) — malformed JSON is a protocol-level data loss signal, so warn then skip.
-      console.warn('[structuredAccumulator] tag1 JSON 파싱 실패 — 이벤트 스킵:', err)
+      // Dumb pipe (unrefined): malformed JSON is protocol-level data loss — warn, then skip.
+      console.warn('[structuredAccumulator] tag1 JSON parse failed — skipping the event:', err)
       return false
     }
-    // If `null` is not filtered here, `consume`'s read of `ev.type` throws up to the subscription callback (a primitive is not an event either).
+    // Filter null/primitive: `consume` reading `ev.type` would throw into the subscription callback.
     if (parsed === null || typeof parsed !== 'object') {
-      console.warn('[structuredAccumulator] tag1 payload 가 객체가 아니다 — 이벤트 스킵:', parsed)
+      console.warn('[structuredAccumulator] tag1 payload is not an object — skipping the event:', parsed)
       return false
     }
     return this.consume(parsed as StructuredEvent, seq)
@@ -162,9 +130,9 @@ export class StructuredEventAccumulator {
   private consume(ev: StructuredEvent, seq: number | undefined): boolean {
     switch (ev.type) {
       case 'TextDelta': {
-        // Skip an empty delta ("") so it does not make a phantom item (which would cause an empty Markdown block · a meaningless divider).
+        // Skip an empty delta so no phantom item (empty Markdown block · meaningless divider).
         if (!ev.text) break
-        // copy-on-write: a previously returned snapshot() reference points at this object, so no in-place mutation.
+        // copy-on-write: a returned snapshot() reference points at this object.
         const last = this.items[this.items.length - 1]
         if (last && last.kind === 'text') {
           this.items[this.items.length - 1] = { ...last, text: last.text + ev.text }
@@ -180,7 +148,7 @@ export class StructuredEventAccumulator {
           name: ev.name,
           argsJson: ev.args_json,
           id: ev.id,
-          // ADR-0239: the type is narrow but the wire value carries an old daemon (no field) · a newer daemon (unknown word).
+          // ADR-0239: the wire value may be an old daemon (no field) or a newer daemon (unknown word).
           category: normalizeToolCategory(ev.category),
           resultMark: null,
           itemId: this.nextId++,
@@ -196,16 +164,11 @@ export class StructuredEventAccumulator {
         })
         break
       case 'Error':
-        // Do not accumulate as text; show as a separate item.
-        // ★Does not close the turn — do not revive that★: this vocabulary is 「턴 경계 아님」 (not a turn boundary) on both backends. codex emits
-        //   a retryable stream error (overload · rate limit) with this and the same turn continues after that line
-        //   (`error` notification in `backend/codex/decoder.rs`), and claude closes even a failed turn with `MessageDone`
-        //   (the result line in `backend/claude/mod.rs` always attaches MessageDone after Error). The turn classifiers
-        //   of both backends also give no signal to this vocabulary — closing only here puts the two axes out of step.
-        //   Symptom when closed = during a retry the waiting indicator goes off and revives on the next delta, flickering.
-        // ★Known hole (the frontend cannot plug it)★: the wire `StructuredEvent::Error` has no retryable field.
-        //   So on a path of 「정말 턴을 끝낸 오류인데 경계가 안 오는」 (an error that truly ended the turn but no boundary comes) the waiting indicator stays.
-        //   Do not tell them apart by searching the string — not writing that distinction in the string is the decoder side's decision.
+        // ★Does not close the turn — do not revive that★: not a boundary on either backend. codex emits retryable stream errors (overload · rate limit)
+        //   with this and the turn continues (`error` in `backend/codex/decoder.rs`); claude always follows Error with MessageDone (`backend/claude/mod.rs`).
+        //   Closing here would flicker the waiting indicator off during a retry.
+        // ★Known hole★: wire `StructuredEvent::Error` has no retryable field, so an error that truly ended the turn with no boundary leaves the waiting indicator on.
+        //   Do not tell them apart by string search — that is the decoder side's decision.
         this.items.push({ kind: 'error', message: ev.message, itemId: this.nextId++ })
         break
       case 'Structured': {
@@ -217,30 +180,19 @@ export class StructuredEventAccumulator {
             break
           }
         }
-        // ★user uuid dedup (text blocks only)★: a user item arrives twice with the **same uuid** from the synthetic input-time echo and the claude replay
-        //   (backend uuid dedup contract). If the uuid was already seen, skip so only one remains.
-        //   But dedup applies only to `type==="text"` user blocks — the synthetic echo makes only a single text block, so
-        //   the dedup partner also arises only from text. Non-text blocks such as tool_result in one replay line, even if they share the same line-level
-        //   uuid, get null from extractUserUuid, so they are not dedup targets and are always kept
-        //   (prevents tool_result loss in multi-block — HIGH FIX). If there is no uuid (past/non-replay) keep as is.
-        //   (kind!=='user' escape-hatch events are not dedup targets — they have no uuid concept.)
+        // User uuid dedup (text blocks only; see `seenUserUuids`): the synthetic echo and the claude replay deliver the same uuid; skip an already seen one.
+        //   Non-text blocks (tool_result) get null from extractUserUuid and are always kept. No uuid → kept.
         if (ev.kind === 'user') {
           const uuid = extractUserUuid(ev.json)
           if (uuid !== null) {
-            // ADR-0231: ★the echo of a queued uuid is neither drawn nor put into 「본 것」 (seen)★ — that bubble is drawn by the `Delivered` of that id
-            //   at the receipt spot. Measurement showed both orders: if the echo comes right before `Delivered` it is received
-            //   here, if after, the uuid dedup below receives it. So 「첫 항목이 이긴다」 (the first item wins) stands only for
-            //   uuids that are not queued.
+            // ADR-0231: the echo of a queued uuid is neither drawn nor marked seen — that bubble is drawn by `Delivered` of that id.
+            //   The echo may arrive before `Delivered` (received here) or after it (the dedup below receives it).
             if (this.queued.row(uuid) !== undefined) break
             if (this.seenUserUuids.has(uuid)) break
             this.seenUserUuids.add(uuid)
           }
-          // ★New user turn start → clear turnDone (=idle)★: the previous MessageDone left turnDone=true, but when a new user
-          //   message arrives we are waiting for the assistant response (no longer idle). If this is not cleared, at the moment a follow-up send's
-          //   synthetic user echo releases awaiting (RichSlot subscription callback setAwaiting(false)) derived
-          //   streaming drops to false, and the waiting indicator (WaitRow) flickers off until the first assistant token
-          //   (follow-up send flicker). Replay idempotence kept: the final MessageDone of a complete history sets turnDone=true again,
-          //   so the final state after refeed is unchanged — only the intermediate transition becomes correct. (Dedup-skipped ones cannot get here due to the break above.)
+          // New user turn → turnDone=false (not idle): otherwise a follow-up send's synthetic echo releases awaiting and the waiting indicator (WaitRow)
+          //   flickers off until the first assistant token. Replay idempotence holds: the final MessageDone sets it true again.
           this.turnDone = false
         }
         // Escape-hatch event — flow even an unknown kind (kind) through to prevent loss.
@@ -248,20 +200,15 @@ export class StructuredEventAccumulator {
         break
       }
       case 'MessageDone':
-        // ADR-0045: the claude decoder emits MessageDone exactly once per result line · per turn, and its
-        //   `turn_id` is still always None (both emit points in `backend/claude/mod.rs` are literal None).
-        //   ★So do not derive the boundary from turn_id here★ — it is always-None, so the boundary would vanish.
-        // ★But it is not the 「유일한 턴 경계 트리거」 (only turn-boundary trigger)★ — the codex decoder emits no MessageDone at all and closes the turn with
-        //   `TurnEnd` below (its turn_id arrives filled in). The two vocabularies coexist and the render path is one.
+        // ADR-0045: claude emits MessageDone once per turn with `turn_id` always None, so do not derive the boundary from turn_id.
+        // Not the only boundary trigger: codex emits no MessageDone and closes with `TurnEnd` below (turn_id filled).
         this.closeTurn()
         break
       case 'TurnEnd':
-        // ★All four outcomes close the turn★ — what the outcome field decides is the on-screen marker, not 「닫을지 말지」 (whether to close).
-        //   If even one does not close it, that conversation's waiting indicator spins forever.
+        // All four outcomes close the turn; the outcome only decides the marker. Not closing leaves the waiting indicator spinning forever.
         {
           const mark = outcomeMark(ev.outcome)
-          // ADR-0243: if an interrupt-notice row already told of that turn's interrupt, the outcome row is not drawn on top — decided not by the backend but
-          //   by the presence of the notice row (a turn where no notice row arrived keeps its outcome row as is).
+          // ADR-0243: if an interrupt-notice row already told of the interrupt, the outcome row is not drawn on top.
           const alreadyNoted = mark?.outcome === 'interrupted' && this.currentTurnHasInterruptNote()
           if (mark !== null && !alreadyNoted) this.items.push({ kind: 'outcome', ...mark, itemId: this.nextId++ })
         }
@@ -273,32 +220,23 @@ export class StructuredEventAccumulator {
         // ADR-0241
         return this.consumeToolResult(ev)
       default: {
-        // ★Do not swallow unknown events silently★: if nothing is done the screen does not change by one pixel while the caller
-        //   acts as if a frame came. Release WebView2 has no devtools, so the console does not reach the user
-        //   (same reason ConnectionNotice exists), so make a marker that stays on screen.
-        // ★Do not carry the original payload · event name★ — the decision that protocol words do not go on the user's screen
-        //   (trd-phase2a §6-2). The diagnostic name goes out to the console only.
-        // ★Do not expect this item to prop up the waiting indicator (an old misunderstanding — do not revive it)★: the consumer's derivation is
-        //   `!turnDone && items.length>0`, so after the previous turn has already closed (= from the second turn on), adding an item
-        //   leaves turnDone true and the waiting indicator goes off just the same. What guards the waiting indicator is **the false return below**
-        //   (the caller does not release its own waiting state), and this item takes only the side of leaving 「무슨 일이 있었나」 (what happened).
-        // ★Even so, do not lower `turnDone`★ — we do not know whether the unknown event ended the turn, and lowering it to
-        //   false here changes things toward the waiting indicator spinning forever **when the last frame of a restored history is an unknown kind**
-        //   (if a newer daemon attaches a new vocabulary at turn end, every restored session takes that shape). A live gap is
-        //   fixed by the next frame itself, but the end of a history has no next frame to fix it — so the axes were split.
-        // ★Known hole★: if the last frame of a history is an unknown kind and what precedes it is an unfinished turn, the waiting indicator stays.
-        //   It cannot be told apart from frontend information alone (no separate signal on the wire tells the turn state).
-        // ★The `never` assignment is a compile-time defense★ — if variants grow in **this shell's bindings** a type error arises
-        //   here (the thing to do then is not lean on this arm but add a proper arm). The runtime defense is below
-        //   that — a kind a newer daemon sends that is **not at all** in this shell's bindings. The two target different windows.
+        // ★Do not swallow unknown events silently★: Release WebView2 has no devtools, so leave an on-screen marker (same reason ConnectionNotice exists).
+        // ★Do not carry the original payload · event name★ (protocol words stay off the user's screen — trd-phase2a §6-2); the name goes to the console only.
+        // ★This item does not prop up the waiting indicator (do not revive that misunderstanding)★: the consumer derives `!turnDone && items.length>0`, so from the
+        //   second turn on adding an item changes nothing. What guards it is the `false` return below.
+        // ★Do not lower `turnDone`★: we do not know whether the unknown event ended the turn, and lowering it makes the waiting indicator spin forever
+        //   when the last frame of a restored history is an unknown kind (a newer daemon's new turn-end vocabulary).
+        // ★Known hole★: an unknown last frame after an unfinished turn leaves the waiting indicator on; the wire has no turn-state signal.
+        // ★The `never` assignment is a compile-time defense★: new variants in this shell's bindings give a type error — add a proper arm. The runtime defense is below
+        //   (a kind absent from the bindings entirely).
         const exhaustive: never = ev
         console.warn(
-          '[structuredAccumulator] 모르는 StructuredEvent type — 표식만 남기고 버린다:',
+          '[structuredAccumulator] unknown StructuredEvent type — dropped, leaving only a marker:',
           (exhaustive as { type?: unknown }).type,
         )
         const last = this.items[this.items.length - 1]
         if (last && last.kind === 'unsupported') {
-          // copy-on-write — a previously returned snapshot() reference points at this object (same discipline as the TextDelta arm).
+          // copy-on-write (same as the TextDelta arm).
           this.items[this.items.length - 1] = { ...last, count: last.count + 1 }
         } else {
           this.items.push({ kind: 'unsupported', count: 1, itemId: this.nextId++ })
@@ -319,10 +257,7 @@ export class StructuredEventAccumulator {
     return false
   }
 
-  /**
-   * Close a turn boundary — 1 divider + `turnDone`. Consecutive ends do not pile up dividers, and if there is no preceding item
-   * no divider is made (prevents an empty boundary at the very front).
-   */
+  /** Close a turn boundary — 1 divider + `turnDone`. Consecutive ends do not stack dividers; no divider if no preceding item. */
   private closeTurn(): void {
     if (this.items.length > 0 && this.items[this.items.length - 1].kind !== 'separator') {
       this.items.push({ kind: 'separator', itemId: this.nextId++ })
@@ -332,10 +267,9 @@ export class StructuredEventAccumulator {
   }
 
   /**
-   * Attach the tool end result as a marker to the earlier tool row of the same id — no new item is made. If there is no row pointed at
-   * (pushed out of the ring) discard it.
-   * ★Does not touch `turnDone` and always returns `false` — whether attached or not found★: the tool of an interrupted turn keeps running and ends after the turn end
-   * (possibly in the middle of the next turn). Releasing waiting with this frame would turn off the new turn's waiting indicator without an answer.
+   * Attach the tool end result as a marker to the earlier tool row of the same id; no new item. No row (pushed out of the ring) → discard.
+   * ★Does not touch `turnDone` and always returns `false`★: an interrupted turn's tool ends after the turn end (maybe mid next turn);
+   * releasing waiting here would turn off the new turn's waiting indicator without an answer.
    */
   // ADR-0241
   private consumeToolResult(ev: ToolResultEvent): boolean {
@@ -345,7 +279,7 @@ export class StructuredEventAccumulator {
     for (let i = this.items.length - 1; i >= 0; i--) {
       const item = this.items[i]
       if (item.kind !== 'tool' || item.id !== ev.id) continue
-      // copy-on-write — a previously returned snapshot() reference points at this object (same discipline as the TextDelta arm).
+      // copy-on-write (same as the TextDelta arm).
       if (item.resultMark !== mark) this.items[i] = { ...item, resultMark: mark }
       return false
     }
@@ -354,8 +288,7 @@ export class StructuredEventAccumulator {
 
   /**
    * Queued-input registry event — after reduction only three draw rules change the conversation lines (`Delivered` placement · ascertained copy placement ·
-   * `Rejected` bubble erase). ★Does not touch `turnDone`★ — list events are not output (only when it draws a bubble
-   * does it lower it like the user arm). A termination just leaves the list and draws no notice row.
+   * `Rejected` bubble erase). Does not touch `turnDone` (list events are not output). A termination draws no notice row.
    */
   // ADR-0231
   private consumeQueued(op: QueuedInputEvent | null | undefined, seq: number | undefined): boolean {
@@ -367,21 +300,20 @@ export class StructuredEventAccumulator {
     if (op.kind === 'HandedOver' && typeof op.sent !== 'boolean') return false
     if (this.queued.reduce(op) === null) {
       console.warn(
-        '[structuredAccumulator] 모르는 QueuedInput kind — 버린다:',
+        '[structuredAccumulator] unknown QueuedInput kind — dropped:',
         (op as { kind?: unknown }).kind,
       )
       return false
     }
-    // Reconciliation record — write only events the reduction accepted (they are run again through the same reducer at apply time, so it must be the filtered shape).
+    // Reconciliation record: only events the reduction accepted (re-run through the same reducer at apply time).
     if (seq !== undefined && this.reconcile !== null) this.reconcile.log.push({ seq, op })
     switch (op.kind) {
       case 'Delivered':
-        // An id that was not queued (revival · unknown id · a second `Delivered`) is not drawn — the bubble of a revival is
-        //   drawn by the vendor echo, which is not suppressed because that id is no longer queued.
+        // An id not queued (revival · unknown id · second `Delivered`) is not drawn; a revival's bubble is drawn by the vendor echo.
         if (pending !== undefined) this.placeUserBubble(pending.id, pending.text)
         break
       case 'AckUnavailable':
-        // For each copy (list order) in that spot — even if this window lost that `Queued` from the ring, draw it with the copy's body.
+        // Per copy (list order) — draw with the copy's body even if this window lost that `Queued` from the ring.
         for (const copy of op.delivered) this.placeUserBubble(copy.id, copy.text)
         break
       case 'Dropped':
@@ -407,11 +339,7 @@ export class StructuredEventAccumulator {
     this.turnDone = false
   }
 
-  /**
-   * Remove the user bubble (text block) drawn with that uuid. ★The uuid stays in 「본 것」 (seen)★ — a refusal cannot be revived so
-   * a later same uuid is not drawn again. A non-text block (tool_result) of the same line, as it is not a dedup target, also
-   * stays here.
-   */
+  /** Remove the user bubble (text block) drawn with that uuid. The uuid stays in 「seen」 (a refusal cannot be revived); a non-text block of the same line stays too. */
   private removeUserBubbles(id: string): void {
     for (let i = this.items.length - 1; i >= 0; i--) {
       const item = this.items[i]
@@ -422,12 +350,10 @@ export class StructuredEventAccumulator {
   }
 
   /**
-   * Items `QueuedInputList` will draw — among open items only uuids not yet drawn as a bubble, in held order (oldest
-   * first). A new array each time.
-   * ★Cancel-pending is drawn too★ (ADR-0235 — ✕ removes the row only after the registry confirms it removed it): a row where ✕ was pressed
-   *   stays until an outcome event (`CancelAnswered{removed:true}` · `Dropped{Withdrawn}` etc.) is reduced — hiding it in advance
-   *   creates a window where text that could not be withdrawn is seen neither in the list nor in the conversation.
-   * ★The filter stands on drawing only★ — the reduced state same as the registry is `queuedRows()`.
+   * Items `QueuedInputList` draws — open items whose uuid is not yet drawn as a bubble, oldest first; a new array each time.
+   * ★Cancel-pending rows are drawn too★ (ADR-0235): a ✕ row stays until an outcome event is reduced — hiding it early opens a window where
+   *   text that could not be withdrawn is in neither list nor conversation.
+   * The filter is drawing only; the registry's reduced state is `queuedRows()`.
    */
   // ADR-0231
   snapshotQueued(): QueuedEntry[] {
@@ -440,11 +366,10 @@ export class StructuredEventAccumulator {
   }
 
   /**
-   * Open a reattach reconciliation (TRD §5-7) — call it **right before** sending the list query. From this moment it records list events received
-   * (events after the snapshot are all issued after the query read the registry, so they fall inside this record). A reconciliation
-   * in progress is discarded.
-   * @param epoch marker of the incarnation this view currently reads — discard if the answer's marker differs.
-   * @returns reconciliation generation of this query — hand it along when passing the answer to `offerQueuedSnapshot`.
+   * Open a reattach reconciliation (TRD §5-7) — call **right before** sending the list query; it records list events received from now on
+   * (events after the snapshot are all issued after the query read the registry). A reconciliation in progress is discarded.
+   * @param epoch incarnation this view reads — discard if the answer's marker differs.
+   * @returns generation of this query — pass it to `offerQueuedSnapshot`.
    */
   // ADR-0231
   beginQueuedReconcile(epoch: number): number {
@@ -454,10 +379,9 @@ export class StructuredEventAccumulator {
   }
 
   /**
-   * Hand over the list query answer. If generation and incarnation match, apply **after** the view has been delivered up to the snapshot seq — for an
-   * id in the snapshot, start from that row and re-reduce only recorded events with a larger seq; an id not in it is closed, if it stood after the snapshot, as the current
-   * state as is · otherwise with cause unknown (`QueuedInputRegistry.adoptSnapshot`). Applying fixes only the list
-   * (draws no bubble). A row's unknown word drops only that row — that id is left as its current state.
+   * Hand over the list query answer. If generation and incarnation match, apply **after** the view has been delivered up to the snapshot seq: ids in the snapshot
+   * restart from that row and re-reduce only recorded events with a larger seq; ids not in it close as current state (if after the snapshot) or with cause unknown
+   * (`QueuedInputRegistry.adoptSnapshot`). Fixes only the list (draws no bubble). A row's unknown word drops only that row.
    */
   // ADR-0231
   offerQueuedSnapshot(gen: number, snapshot: QueuedSnapshot): QueuedReconcileOutcome {
@@ -483,9 +407,8 @@ export class StructuredEventAccumulator {
   }
 
   /**
-   * Discard the reconciliation in progress — when the view leaves `'live'` and enters a new replay cycle (`reset` calls this too). It
-   * raises the generation, so an old answer arriving after that is `stale`.
-   * @param gen if given, discard only when that generation is the current one (query failure — if a new reconciliation opened meanwhile, do not touch it).
+   * Discard the reconciliation in progress — when the view leaves `'live'` for a new replay cycle (`reset` calls this too). Raises the generation, so an old answer is `stale`.
+   * @param gen if given, discard only when it is the current generation (on query failure, do not touch a newer reconciliation).
    */
   // ADR-0231
   abandonQueuedReconcile(gen?: number): void {
@@ -522,24 +445,20 @@ export class StructuredEventAccumulator {
     return this.items
   }
 
-  /**
-   * Was the last signal a turn end (MessageDone · TurnEnd) — streaming/idle display hint (optional).
-   * ★`Error` is not in this list★ — it is not a turn boundary on either backend (comment on that arm).
-   */
+  /** Was the last signal a turn end (MessageDone · TurnEnd) — streaming/idle display hint. `Error` is not included (not a turn boundary on either backend). */
   isTurnDone(): boolean {
     return this.turnDone
   }
 
   /**
-   * Count of turn boundaries consumed so far (MessageDone · TurnEnd — regardless of outcome). Monotonic and `reset` does not roll it back — the difference before and after one `feed`
-   * is itself 「그 프레임이 턴 경계였다」 (that frame was a turn boundary). ★Do not substitute `isTurnDone` going false → true★ — a boundary received while already reading the end
-   * (right after sending · before a new turn's first frame) has no such transition.
+   * Count of turn boundaries consumed (MessageDone · TurnEnd, any outcome); `reset` does not roll it back — the difference before/after one `feed` means "that frame was a boundary".
+   * ★Do not substitute `isTurnDone` going false → true★: a boundary received while already ended has no such transition.
    */
   turnBoundaryCount(): number {
     return this.turnBoundaries
   }
 
-  /** Initialize before resubscribing (replay) — so the whole history flows again and is reconstructed to the same state (idempotent invariant above). */
+  /** Initialize before resubscribing (replay) so the whole history reconstructs to the same state. */
   reset(): void {
     this.items = []
     this.turnDone = false
@@ -553,13 +472,9 @@ export class StructuredEventAccumulator {
 }
 
 /**
- * Outcome → on-screen marker. ★A normal completion leaves no marker (null)★ — end with the divider alone so an ordinary completion
- * does not look like a warning.
- * ★`default` receives two things★ — ① a fifth outcome a newer daemon added ② a frame with no outcome field or a malformed shape. Both
- * have unknown meaning so record them as 「모름」 (unknown) — folding into one of the three known would make the screen draw a false outcome
- * (same discipline as the wire `TurnOutcome` comment).
- * ★Accepting nullish even though the type is `TurnOutcome` is intentional★ — the try/catch in `feed` wraps only JSON.parse, so
- * if it throws here the exception rises as is up to the subscription callback (RichSlot). Make no shape assumptions.
+ * Outcome → on-screen marker. A normal completion leaves no marker (null): the divider alone.
+ * `default` receives ① a fifth outcome a newer daemon added ② a missing/malformed outcome; both are recorded as 'unknown' — folding into a known one would draw a false outcome.
+ * ★Nullish is accepted despite the `TurnOutcome` type★: the try/catch in `feed` wraps only JSON.parse, so a throw here rises to the subscription callback (RichSlot).
  */
 function outcomeMark(
   outcome: TurnOutcome | null | undefined,
@@ -582,12 +497,8 @@ function outcomeMark(
 // ADR-0241
 type ToolResultEvent = Extract<StructuredEvent, { type: 'ToolResult' }>
 
-/**
- * ★An unknown word (newer daemon) · a broken shape means no marker★ — folding into one of the three known would make the screen draw a false outcome
- * (same discipline as `outcomeMark`).
- */
-// ADR-0241: the argument is the generated `ToolOutcome`, so if words grow or change tsc goes red at the `never` assignment in `default`
-//   (word drift alarm). At runtime a newer daemon's unknown value falls straight into `default`.
+/** An unknown word (newer daemon) or broken shape means no marker — folding into a known one would draw a false outcome (same as `outcomeMark`). */
+// ADR-0241: the argument is the generated `ToolOutcome`; changed words turn tsc red at the `never` in `default` (drift alarm). A newer daemon's unknown value falls into `default` at runtime.
 function toolResultMark(outcome: ToolOutcome): ToolResultMark | null {
   switch (outcome) {
     case 'Failed':
@@ -600,7 +511,7 @@ function toolResultMark(outcome: ToolOutcome): ToolResultMark | null {
       return null
     default: {
       const unknownWord: never = outcome
-      console.warn('[structuredAccumulator] 모르는 ToolResult outcome — 표식 없이 둔다:', unknownWord)
+      console.warn('[structuredAccumulator] unknown ToolResult outcome — left without a marker:', unknownWord)
       return null
     }
   }
@@ -648,18 +559,11 @@ function extractInterruptText(json: string): string | null {
 }
 
 /**
- * Extract the dedup key `uuid` from the json of a user Structured item (attached in common by the synthetic echo · replay).
- * Shape the backend plants: `{"type":"text","text":…,"uuid":"X"}` (synthetic echo) / a replay block has the uuid in the same place.
- * null if there is no uuid or it is not a string (→ the caller keeps it without dedup).
+ * Extract the dedup key `uuid` from the json of a user Structured item (synthetic echo · replay): `{"type":"text","text":…,"uuid":"X"}`.
+ * null if no uuid or not a string (the caller keeps it without dedup).
  *
- * ★dedup only on `type==="text"` blocks★ (prevents multi-block loss — HIGH FIX): the backend decoder
- *   passes the same line-level uuid into **all content blocks** (text · tool_result etc.) of one user replay line
- *   (claude.rs consume_block). The only block the synthetic echo can make is a single
- *   `{"type":"text"}` (user_text_echo_json), so a dedup partner arises only for text blocks too.
- *   If we extract only the uuid here without looking at type, the text (echo) + tool_result of one line share **the same uuid**,
- *   and the tool_result is skipped as an "already seen uuid" and lost (tool OUT body vanishes). So
- *   only a user block with `type==="text"` returns a uuid, and non-text blocks such as tool_result get null →
- *   excluded from dedup → always kept (regardless of uuid presence). (Recommended seam — a local frontend fix, matches the dedup intent.)
+ * ★Only `type==="text"` blocks★: the backend decoder puts the same line-level uuid on **all content blocks** of one user replay line (claude.rs consume_block),
+ * while the synthetic echo (user_text_echo_json) is a single text block. Returning the uuid for tool_result would skip it as "already seen" and lose the tool OUT body.
  */
 function extractUserUuid(json: string): string | null {
   try {

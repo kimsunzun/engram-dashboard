@@ -1,13 +1,7 @@
 // Queued-input list — text sent mid-turn stands in gray above the input box until it is handed over to the agent (ADR-0231).
-//
 // ★No head line — it does not read turn or tool state★ (PRD §3-2): only the items received decide what to draw.
-// ★✕ only dispatches the command and never hides itself★: an item leaves when the daemon registry's outcome returns as a ring event and
-//   the accumulator removes that item — keeping a hidden state per window would diverge across other windows and app restarts. On a refusal (input
-//   lease) there is no event, so the item rightly stays. A case where the text could not be withdrawn is not reported separately either.
-// ★The shape of ✕ is decided by registry state★ (ADR-0235): a row whose cancel request is waiting for a reply cannot have ✕ pressed
-//   (the row stays), and a row the path handed to the agent (`sent`) has no ✕ — handed-over text cannot be withdrawn and only
-//   leaves on receipt. A row whose reply said it could not be removed (`not_removed`) is drawn like a handed-over row (no ✕) — the text already
-//   went through and pressing ✕ again can do nothing.
+// ★✕ only dispatches the command and never hides itself★: an item leaves when the daemon registry's outcome returns as a ring event and the accumulator removes it — a per-window hidden state would diverge across windows and app restarts. On a refusal (input lease) there is no event, so the item rightly stays; a text that could not be withdrawn is not reported separately either.
+// ★The shape of ✕ is decided by registry state★ (ADR-0235): a row whose cancel request awaits a reply cannot have ✕ pressed (the row stays), and a row handed to the agent (`sent`) has no ✕ — handed-over text cannot be withdrawn and leaves only on receipt. A row whose reply said it could not be removed (`not_removed`) is drawn like a handed-over row (no ✕) — the text already went through.
 
 import { useState } from 'react'
 import { X } from 'lucide-react'
@@ -21,12 +15,11 @@ export interface QueuedInputListProps {
   /** The agent ✕ aims at. */
   agentId: string
   /**
-   * Items to draw — in the order held (oldest first). Pass the accumulator's `snapshotQueued()` as is (a uuid already
-   * drawn as a bubble is dropped there). Cancel-pending items are drawn too — only ✕ is locked while waiting for the reply.
+   * Items to draw — held order (oldest first). Pass the accumulator's `snapshotQueued()` as is (a uuid already drawn as a bubble is dropped there). Cancel-pending items are drawn too; only ✕ is locked while awaiting the reply.
    */
   entries: readonly QueuedEntry[]
-  // ★The three below are values the user decided to 「나중에 조정」 (adjust later)★ — so adjusting ends at this one place for defaults.
-  /** Number visible while collapsed. If there are more, the rest fold into 「외 N개」 (N more). */
+  // ★The three below are tunable defaults★ — adjust them at this one place.
+  /** Number visible while collapsed. If there are more, the rest fold into 「N more」. */
   collapsedCount?: number
   /** The side visible while collapsed. */
   collapsedSide?: 'oldest' | 'newest'
@@ -98,8 +91,7 @@ export function QueuedInputList({
                 title={t('chat.queuedRemove')}
                 aria-label={t('chat.queuedRemove')}
                 disabled={asking}
-                // ADR-0237: this button will soon lock (waiting for the cancel reply) or leave with its row — leave the held focus inside the area so Esc reaches
-                //   that area.
+                // ADR-0237: this button soon locks (awaiting the cancel reply) or leaves with its row — keep the held focus inside the area so Esc reaches it.
                 onClick={(e) => {
                   fireAndForget('agent.cancelQueuedInput', { agentId, inputId: entry.id })
                   keepFocusInSlot(e.currentTarget)

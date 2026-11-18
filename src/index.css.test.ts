@@ -20,7 +20,7 @@ import { describe, expect, it } from 'vitest'
 //   Vite gives the original text as is with no CSS processing.
 import cssSource from './index.css?raw'
 
-/** Remainder after deleting whole `@layer <이름> { ... }` blocks = text left with only unlayered rules. */
+/** Remainder after deleting whole `@layer <name> { ... }` blocks = text left with only unlayered rules. */
 function unlayeredPart(css: string): string {
   let out = ''
   let i = 0
@@ -47,8 +47,8 @@ function unlayeredPart(css: string): string {
   return out
 }
 
-describe('index.css — 계층 밖 전역 리셋 금지', () => {
-  it('계층 밖에 전역 * 선택자 padding/margin 리셋이 없다', () => {
+describe('index.css — no global reset outside layers', () => {
+  it('there is no global * selector padding/margin reset outside layers', () => {
     const unlayered = unlayeredPart(cssSource)
 
     // Check after stripping comments — so the comment explaining this convention is not itself a false positive.
@@ -61,7 +61,7 @@ describe('index.css — 계층 밖 전역 리셋 금지', () => {
     expect(offenders).toEqual([])
   })
 
-  it('Tailwind 진입점이 남아 있다(preflight 가 리셋을 대신하는 전제)', () => {
+  it('the Tailwind entry point remains (the premise that preflight replaces the reset)', () => {
     expect(cssSource).toContain('@import "tailwindcss"')
   })
 })
@@ -74,7 +74,7 @@ describe('index.css — 계층 밖 전역 리셋 금지', () => {
 //   and that a rule reviving it on hover has not reappeared.
 // The side that attaches the marker (the JS half) is measured by components/ui/nativeScrollActivity.test.ts.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('index.css — xterm 스크롤바는 스크롤 중에만 보인다', () => {
+describe('index.css — the xterm scrollbar is visible only while scrolling', () => {
   // Strip comments — so the comment explaining this convention is not itself a false positive (same shape as the gate above).
   const code = cssSource.replace(/\/\*[\s\S]*?\*\//g, '')
 
@@ -83,7 +83,7 @@ describe('index.css — xterm 스크롤바는 스크롤 중에만 보인다', ()
     .map(m => ({ selector: m[1].trim(), body: m[2] }))
     .filter(r => r.selector.includes('xterm-viewport'))
 
-  it('thumb 색을 켜는 규칙은 전부 스크롤 중 표식으로 게이트된다', () => {
+  it('every rule that turns the thumb color on is gated by the scrolling marker', () => {
     expect(thumbRules.length).toBeGreaterThan(0)
     const ungated = thumbRules.filter(
       r => /--scrollbar-thumb/.test(r.body) && !r.selector.includes('[data-scroll-active]'),
@@ -92,14 +92,14 @@ describe('index.css — xterm 스크롤바는 스크롤 중에만 보인다', ()
     expect(ungated.map(r => r.selector)).toEqual([])
   })
 
-  it('스크롤 중에는 색을 켜는 규칙이 실제로 있다(영구 비표시 = 세 번째 룰 금지)', () => {
+  it('there really is a rule that turns the color on while scrolling (permanently hidden = third rule forbidden)', () => {
     const gated = thumbRules.filter(
       r => r.selector.includes('[data-scroll-active]') && /--scrollbar-thumb/.test(r.body),
     )
     expect(gated.length).toBeGreaterThan(0)
   })
 
-  it('hover 로 스크롤바를 되살리는 규칙이 없다', () => {
+  it('there is no rule that revives the scrollbar by hover', () => {
     const offenders = [...code.matchAll(/[^{}]*\{[^{}]*\}/g)]
       .map(m => m[0])
       .filter(r => /xterm-viewport/.test(r) && /scrollbar/.test(r) && /:hover/.test(r))
@@ -118,12 +118,12 @@ describe('index.css — xterm 스크롤바는 스크롤 중에만 보인다', ()
 //   index.css, and here we measure only up to **the formula's internal consistency** (subtracted width = margin×2). We do not take the detour of reading with fs
 //   — @types/node is not installed so the `tsc --noEmit` gate breaks (same reason as the `?raw` comment above).
 // ─────────────────────────────────────────────────────────────────────────────
-describe('index.css — xterm .slider 두께는 seam thumb 과 같은 산식', () => {
+describe('index.css — xterm .slider thickness uses the same formula as the seam thumb', () => {
   const code = cssSource.replace(/\/\*[\s\S]*?\*\//g, '')
 
   const sliderRule = /\.scrollbar\.vertical\s*>\s*\.slider\s*\{([^{}]*)\}/.exec(code)
 
-  it('.slider 폭이 --scrollbar-size 파생식이고 좌우 여백이 대칭이다', () => {
+  it('the .slider width is a --scrollbar-size derived formula and the left/right margins are symmetric', () => {
     expect(sliderRule).not.toBeNull()
     const calc = /width:\s*calc\(\s*var\(--scrollbar-size,\s*[\d.]+px\)\s*-\s*([\d.]+)px\)/.exec(
       sliderRule![1],
@@ -135,14 +135,14 @@ describe('index.css — xterm .slider 두께는 seam thumb 과 같은 산식', (
     expect(Number(calc![1])).toBe(Number(right![1]) * 2)
   })
 
-  it('폭·위치 선언은 !important 를 유지한다', () => {
+  it('the width · position declarations keep !important', () => {
     // xterm JS plants width/left as inline style (verticalScrollbarSize), so if !important is missing it quietly goes back to the default 14px
     // — a cascade failure, so type checks · render tests do not catch it.
     expect(/width:[^;]*!important/.test(sliderRule![1])).toBe(true)
     expect(/left:[^;]*!important/.test(sliderRule![1])).toBe(true)
   })
 
-  it('트랙(.scrollbar.vertical) 자체의 폭은 건드리지 않는다', () => {
+  it('the width of the track (.scrollbar.vertical) itself is not touched', () => {
     // The track is the hit area and is paired with the value xterm uses as its reserved width, so narrowing it is a separate matter to decide.
     // What is touched here must be only the painted width.
     const offenders = [...code.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
@@ -161,7 +161,7 @@ describe('index.css — xterm .slider 두께는 seam thumb 과 같은 산식', (
 //   screen diverge. jsdom does not compute cascade · `@supports` · `round()`, so we measure by source string (same reason as the gate above).
 //   Whether the frame gets this class is measured by ViewLayoutRenderer.flat.test.tsx.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('index.css — 칸 틀 위치 규칙', () => {
+describe('index.css — area frame position rules', () => {
   const code = cssSource.replace(/\/\*[\s\S]*?\*\//g, '')
   const SUPPORTS = '@supports (width: round(nearest, 1.5px, 1px))'
 
@@ -176,7 +176,7 @@ describe('index.css — 칸 틀 위치 규칙', () => {
         if (depth === 0) return { inner: css.slice(open + 1, j), end: j + 1 }
       }
     }
-    throw new Error('블록이 닫히지 않았다')
+    throw new Error('the block is not closed')
   }
 
   /** The declaration list of the `.engram-slot-frame { ... }` rules (whitespace normalized). */
@@ -193,7 +193,7 @@ describe('index.css — 칸 틀 위치 규칙', () => {
   const supports = at < 0 ? null : blockAt(code, at)
   const outside = supports === null ? code : code.slice(0, at) + code.slice(supports.end)
 
-  it('기본 규칙은 네 경계를 반올림 없는 % 로 놓는다', () => {
+  it('the base rule places the four edges as % without rounding', () => {
     expect(frameRules(outside)).toEqual([
       [
         'left: calc(var(--x0) * 100%)',
@@ -205,7 +205,7 @@ describe('index.css — 칸 틀 위치 규칙', () => {
   })
 
   // A declaration mixed with var() becomes unset at computed-value time, so a fallback writing the same property twice does not work — separate them with @supports.
-  it('round() 지원 시 규칙은 @supports 안에서 셸의 px 경계식과 같은 모양으로 반올림한다', () => {
+  it('where round() is supported the rule rounds inside @supports in the same shape as the shell\'s px boundary formula', () => {
     expect(supports).not.toBeNull()
     expect(frameRules(supports!.inner)).toEqual([
       [

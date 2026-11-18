@@ -51,7 +51,7 @@ afterEach(() => {
 })
 
 describe('LatestValueReporter', () => {
-  it('submit 은 곧바로 보내고, 성공하면 lastSent · onAccepted — 같은 값은 다시 보내지 않는다', async () => {
+  it('submit sends right away, and on success lastSent · onAccepted — the same value is not sent again', async () => {
     const a = v(1)
     rep.submit(a)
     await ticks()
@@ -66,7 +66,7 @@ describe('LatestValueReporter', () => {
     expect(accepted).toHaveLength(1)
   })
 
-  it('한 번에 하나 — 날아가는 동안 온 값은 마지막 하나만 응답 뒤에 보낸다', async () => {
+  it('one at a time — of the values that came while in flight, only the last one is sent after the response', async () => {
     const first = holdSend()
     rep.submit(v(1))
     rep.submit(v(2))
@@ -81,7 +81,7 @@ describe('LatestValueReporter', () => {
     expect(accepted).toEqual([v(1), v(3)])
   })
 
-  it('날아가는 값과 같은 값이 차례를 기다리면 응답 뒤에 다시 보내지 않는다', async () => {
+  it('when a value equal to the one in flight waits its turn, it is not sent again after the response', async () => {
     const first = holdSend()
     rep.submit(v(1))
     rep.submit(v(1))
@@ -90,7 +90,7 @@ describe('LatestValueReporter', () => {
     expect(sentNs()).toEqual([1])
   })
 
-  it('취소된 값의 성공도 lastSent 가 된다 — 응답 순서가 곧 셸 적용 순서다', async () => {
+  it("a cancelled value's success also becomes lastSent — the response order is the shell's apply order", async () => {
     const first = holdSend()
     rep.submit(v(1))
     rep.observe(v(2))
@@ -100,7 +100,7 @@ describe('LatestValueReporter', () => {
     expect(sentNs()).toEqual([1])
   })
 
-  it('실패하면 스스로 재시도하고 성공한 값만 lastSent 가 된다 — 소진되면 console.error 한 번', async () => {
+  it('on failure it retries by itself and only a succeeded value becomes lastSent — when exhausted, console.error once', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -111,7 +111,7 @@ describe('LatestValueReporter', () => {
     expect(sentNs()).toEqual([1, 1, 1, 1])
     expect(rep.lastSent).toBeNull()
     expect(err).toHaveBeenCalledTimes(1)
-    expect(err).toHaveBeenCalledWith('[test] report(1) 최종 실패(재시도 소진):', expect.any(Error))
+    expect(err).toHaveBeenCalledWith('[test] report(1) finally failed (retries exhausted):', expect.any(Error))
 
     // A failed value is not lastSent, so even the same value goes out again.
     send.mockReset()
@@ -122,7 +122,7 @@ describe('LatestValueReporter', () => {
     expect(rep.lastSent).toEqual(v(1))
   })
 
-  it('observe 가 다른 값이면 옛 값의 재시도를 멈추고 대기 값을 버린다 — 취소는 실패 로그가 아니다', async () => {
+  it('when observe gives a different value, it stops the retries of the old value and drops the waiting value — a cancel is not a failure log', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -144,7 +144,7 @@ describe('LatestValueReporter', () => {
     expect(sentNs()).toEqual([1, 3])
   })
 
-  it('observe 가 같은 값이면 아무것도 거두지 않는다', async () => {
+  it('when observe gives the same value, it reaps nothing', async () => {
     const first = holdSend()
     rep.submit(v(1))
     rep.submit(v(2))
@@ -154,7 +154,7 @@ describe('LatestValueReporter', () => {
     expect(sentNs()).toEqual([1, 2])
   })
 
-  it('release — 디바운스 · 대기 값 · 재시도를 멈추고, 날아가던 응답은 lastSent 를 맞춘다', async () => {
+  it('release — stops the debounce · waiting value · retries, and the response in flight sets lastSent', async () => {
     vi.useFakeTimers()
     const first = holdSend()
     rep.submit(v(1))
@@ -167,7 +167,7 @@ describe('LatestValueReporter', () => {
     expect(rep.lastSent).toEqual(v(1))
   })
 
-  it('schedule — 디바운스 동안 다시 부르면 마지막 measure 만 타이머 끝에 부르고, null 이면 보내지 않는다', async () => {
+  it('schedule — calling again during the debounce calls only the last measure at the end of the timer, and sends nothing for null', async () => {
     vi.useFakeTimers()
     const early = vi.fn(() => v(1))
     rep.schedule(early)

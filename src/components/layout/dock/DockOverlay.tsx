@@ -1,4 +1,4 @@
-// TRD S21-slot-docking §4-4 「안내」: draws the drag guide on the layer over that window's canvas — the zone lines of the area under the cursor (a center rectangle + four diagonals from the area
+// TRD S21-slot-docking §4-4 「guide」: draws the drag guide on the layer over that window's canvas — the zone lines of the area under the cursor (a center rectangle + four diagonals from the area
 //   corners to that corner) · the layout frame when inside an outer band · the rectangle to attach for the chosen band (light fill + thin border).
 //   It does not decide — it draws the received `OverlayView` as is. No hatching · dark fill — so the guide does not hide area content
 //   (user decision 2026-10-19).

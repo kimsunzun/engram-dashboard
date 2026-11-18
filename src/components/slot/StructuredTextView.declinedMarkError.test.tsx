@@ -30,7 +30,7 @@ const tool = (id: string, resultMark: ToolItem['resultMark']): ToolItem => ({
 })
 
 describe("DECLINED_MARK = 'error'", () => {
-  it('거부 둘 다 오류로 센다 — 머리 「오류 2」 · 붉은 Error 배지 · 사유 줄 없음 · data-tool-mark 는 표식 그대로', () => {
+  it('rejections both counted as errors — head 「error 2」 · red Error badge · no reason line · data-tool-mark as the marker as is', () => {
     useToolGroupStore.getState().bind('s1', 'agent-1')
     const { container } = render(
       <StructuredTextView items={[tool('c1', 'refused'), tool('c2', 'declined')]} slotId="s1" />,

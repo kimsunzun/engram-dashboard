@@ -72,7 +72,7 @@ export const en = {
   },
   agent: {
     spawn: 'Create agent (spawn)',
-    create: 'Create agent', // ADR-0078 create-submenu container label; the value is reused.
+    create: 'Create agent', // ADR-0078: create-submenu container label; the value is reused
     createTerminal: 'Claude Code terminal', // Always created in Terminal render mode (xterm PTY) (ADR-0078).
     createJson: 'Claude Code JSON', // Always created in StreamJson render mode (headless NDJSON → RichSlot) (ADR-0078).
     createCodex: 'Codex terminal', // Always created in Terminal output mode (interactive TUI).

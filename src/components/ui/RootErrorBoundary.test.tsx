@@ -23,7 +23,7 @@ describe('RootErrorBoundary', () => {
     consoleError.mockRestore()
   })
 
-  it('렌더 중 throw 하면 창 전체 대체 표시와 두 버튼을 그린다', () => {
+  it('on a render throw it draws the whole-window fallback and two buttons', () => {
     render(
       <RootErrorBoundary>
         <Bomb />
@@ -36,7 +36,7 @@ describe('RootErrorBoundary', () => {
     expect(consoleError.mock.calls.some((c: unknown[]) => String(c[0]).includes('[RootErrorBoundary]'))).toBe(true)
   })
 
-  it('다시 그리기 — 오류가 멎었으면 자식이 돌아오고, 계속되면 대체 표시가 다시 선다', () => {
+  it('redraw — if the error stopped the children return, and if it continues the fallback stands again', () => {
     render(
       <RootErrorBoundary>
         <Bomb />
@@ -51,7 +51,7 @@ describe('RootErrorBoundary', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('새로고침 — window.location.reload 를 부른다', () => {
+  it('reload — calls window.location.reload', () => {
     const reload = vi.fn()
     const original = window.location
     Object.defineProperty(window, 'location', { configurable: true, value: { ...original, reload } })

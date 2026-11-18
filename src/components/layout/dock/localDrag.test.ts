@@ -15,7 +15,7 @@ const GEOMETRY: StripGeometry = {
 }
 
 describe('localDrag', () => {
-  it('칸을 적고 읽는다 · 바뀔 때만 알린다(같은 값 · 같은 객체는 알리지 않음)', () => {
+  it('writes and reads the area · notifies only when it changes (the same value · same object is not notified)', () => {
     const local = createLocalDrag()
     const seen = vi.fn()
     const off = local.subscribe(seen)
@@ -36,7 +36,7 @@ describe('localDrag', () => {
     expect(seen).toHaveBeenCalledTimes(4)
   })
 
-  it('제자리 놓기 표시 — 그 끌기만 · 한 번만 가져간다 · 표시는 알림이 아니다', () => {
+  it('in-place drop mark — only that drag · taken only once · the mark is not a notification', () => {
     const local = createLocalDrag()
     const seen = vi.fn()
     local.subscribe(seen)
@@ -47,7 +47,7 @@ describe('localDrag', () => {
     expect(seen).not.toHaveBeenCalled()
   })
 
-  it('탭바 기하 — 마지막 등록이 읽힌다 · 앞 것을 떼도 뒤 것은 남는다 · 없으면 null', () => {
+  it('tab bar geometry — the last registration is read · detaching the earlier one leaves the later · null if none', () => {
     const local = createLocalDrag()
     expect(local.readStripGeometry()).toBeNull()
     const offA = local.registerStripGeometry(() => ({ ...GEOMETRY, left: 1 }))
@@ -59,7 +59,7 @@ describe('localDrag', () => {
     expect(local.readStripGeometry()).toBeNull()
   })
 
-  it('useLocalDrag — 고른 칸이 바뀔 때만 다시 그린다', () => {
+  it('useLocalDrag — redraws only when the chosen area changes', () => {
     const local = createLocalDrag()
     let renders = 0
     const { result } = renderHook(() => {

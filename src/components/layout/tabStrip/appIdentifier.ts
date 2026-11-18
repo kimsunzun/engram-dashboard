@@ -23,15 +23,15 @@ export function createAppIdentifier(get: () => Promise<string>): AppIdentifier {
       if (asked) return
       asked = true
       void retryAsync(get, {
-        onRetry: (err, attempt) => console.warn(`[appIdentifier] getIdentifier 재시도 #${attempt}:`, err),
+        onRetry: (err, attempt) => console.warn(`[appIdentifier] getIdentifier retry #${attempt}:`, err),
       }).then(
         got => {
           if (typeof got === 'string' && got.length > 0) id = got.toLowerCase()
-          else console.warn('[appIdentifier] getIdentifier: 빈 답 — 탭 끌기를 열지 않는다:', got)
+          else console.warn('[appIdentifier] getIdentifier: empty answer — not starting the tab drag:', got)
         },
         err => {
           asked = false
-          console.error('[appIdentifier] getIdentifier 최종 실패 — 다음 탭바 · 창 마운트에 다시 묻는다:', err)
+          console.error('[appIdentifier] getIdentifier final failure — will ask again on the next tab bar · window mount:', err)
         },
       )
     },

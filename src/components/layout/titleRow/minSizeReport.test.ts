@@ -35,7 +35,7 @@ const flush = async (): Promise<void> => {
 function holdNext(): (fail?: boolean) => Promise<void> {
   let answer: (fail: boolean) => void = () => {}
   invokeMock.mockImplementationOnce(
-    () => new Promise((resolve, reject) => (answer = fail => (fail ? reject(new Error('거절(시험)')) : resolve(undefined)))),
+    () => new Promise((resolve, reject) => (answer = fail => (fail ? reject(new Error('refused (test)')) : resolve(undefined)))),
   )
   return async (fail = false) => {
     answer(fail)
@@ -63,7 +63,7 @@ afterEach(() => {
 })
 
 describe('reportMinWindowSize', () => {
-  it('report_window_min_width { width, height, seq, epoch } 로 보낸다 — 첫 순번 1 · epoch = 페이지 timeOrigin 의 정수 ms · 같은 값은 다시 보내지 않는다', async () => {
+  it('sends as report_window_min_width { width, height, seq, epoch } — first sequence 1 · epoch = integer ms of the page timeOrigin · the same value is not sent again', async () => {
     setTimeOrigin(1_761_000_000_123.75)
     __resetMinSizeReportForTest()
     reportMinWindowSize({ width: 286, height: 64 })
@@ -74,7 +74,7 @@ describe('reportMinWindowSize', () => {
     ])
   })
 
-  it('epoch 는 페이지마다 하나 — 다시 읽으면(초기화) 그 페이지의 epoch 에서 순번이 1 부터 다시 간다', async () => {
+  it('epoch is one per page — on reading again (reset) the sequence restarts from 1 at that page\'s epoch', async () => {
     setTimeOrigin(1_761_000_000_000.5)
     __resetMinSizeReportForTest()
     reportMinWindowSize({ width: 286, height: 64 })
@@ -93,7 +93,7 @@ describe('reportMinWindowSize', () => {
     ])
   })
 
-  it('한 번에 하나 — 날아가는 동안 맡은 값은 마지막 하나만 응답 뒤에 보낸다', async () => {
+  it('one at a time — of the values taken while in flight only the last is sent after the response', async () => {
     const answer = holdNext()
     reportMinWindowSize({ width: 286, height: 64 })
     await flush()
@@ -110,7 +110,7 @@ describe('reportMinWindowSize', () => {
     expect(seqs()).toEqual([1, 2])
   })
 
-  it('닿은 값과 같은 값은 — 그 사이 맡은 다른 값을 보내기 전에 밀렸으면 — 보내지 않는다', async () => {
+  it('a value equal to the reached value — if it was pushed out before sending another value taken in between — is not sent', async () => {
     reportMinWindowSize({ width: 286, height: 64 })
     await flush()
     reportMinWindowSize({ width: 295, height: 64 })
@@ -119,7 +119,7 @@ describe('reportMinWindowSize', () => {
     expect(sent()).toEqual([{ width: 286, height: 64 }])
   })
 
-  it('앞서 닿은 값으로 돌아와도 그 사이 다른 값을 보냈으면 다시 보낸다 — 그 값의 답(닿음 · 거절)을 따지지 않는다', async () => {
+  it('even returning to the earlier reached value, if another value was sent in between it is sent again — the answer of that value (reached · refused) is not weighed', async () => {
     reportMinWindowSize({ width: 286, height: 64 })
     await flush()
     let answer = holdNext()
@@ -149,7 +149,7 @@ describe('reportMinWindowSize', () => {
     expect(seqs()).toEqual([4, 5])
   })
 
-  it('답이 오지 않는 시도는 시한에 놓는다 — 더 새 값이 유계 시간 안에 새 순번으로 나가고 · 늦게 온 옛 순번의 답은 「닿음」을 바꾸지 않는다', async () => {
+  it('an attempt that gets no answer is put on a deadline — a newer value goes out within a bounded time with a new sequence · the late answer of an old sequence does not change 「reached」', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const late = holdNext()
@@ -169,7 +169,7 @@ describe('reportMinWindowSize', () => {
     await vi.advanceTimersByTimeAsync(MIN_SIZE_ATTEMPT_TIMEOUT_MS * 10)
     expect(sent()).toHaveLength(2)
 
-    // If the late 286 was recorded as 「닿음」, this report is skipped.
+    // If the late 286 was recorded as 「reached」, this report is skipped.
     reportMinWindowSize({ width: 286, height: 64 })
     await vi.advanceTimersByTimeAsync(0)
     expect(sent()).toEqual([
@@ -180,7 +180,7 @@ describe('reportMinWindowSize', () => {
     expect(seqs()).toEqual([1, 2, 3])
   })
 
-  it('늦은 답이 섞여도 가장 큰 순번이 마지막 값을 싣고 · 그 순번의 답만 「닿음」이 된다', async () => {
+  it('even if late answers mix in, the largest sequence carries the last value · only that sequence\'s answer becomes 「reached」', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const lateFirst = holdNext()
@@ -204,14 +204,14 @@ describe('reportMinWindowSize', () => {
     await vi.advanceTimersByTimeAsync(MIN_SIZE_ATTEMPT_TIMEOUT_MS * 10)
     expect(sent()).toHaveLength(3)
 
-    // 「닿음」 = exactly 295 of sequence 3 — if it went back to 286 of the late sequence 1, this report is skipped.
+    // 「reached」 = exactly 295 of sequence 3 — if it went back to 286 of the late sequence 1, this report is skipped.
     reportMinWindowSize({ width: 286, height: 64 })
     await vi.advanceTimersByTimeAsync(0)
     expect(sent()).toHaveLength(4)
     expect(args()[3]).toMatchObject({ width: 286, height: 64, seq: 4 })
   })
 
-  it('시한에 놓인 시도의 답이 재시도 전에 오면 — 그 순번이 아직 마지막이라 「닿음」으로 치고 다시 보내지 않는다', async () => {
+  it('if the answer of an attempt put on the deadline comes before the retry — that sequence is still the last so it counts as 「reached」 and is not sent again', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const late = holdNext()
@@ -223,7 +223,7 @@ describe('reportMinWindowSize', () => {
     expect(sent()).toEqual([{ width: 286, height: 64 }])
   })
 
-  it('더 새 값이 없으면 시한에 놓인 같은 값을 새 순번으로 다시 보낸다', async () => {
+  it('if there is no newer value the same value put on the deadline is sent again with a new sequence', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     holdNext()
@@ -236,7 +236,7 @@ describe('reportMinWindowSize', () => {
     expect(seqs()).toEqual([1, 2])
   })
 
-  it('시한을 넘긴 시도 뒤에는 셸의 값을 모름으로 친다 — 앞서 닿은 값으로 돌아와도 다시 보낸다', async () => {
+  it('after an attempt that passed the deadline the shell\'s value is treated as unknown — even returning to the earlier reached value it is sent again', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     reportMinWindowSize({ width: 286, height: 64 })
@@ -253,12 +253,12 @@ describe('reportMinWindowSize', () => {
     ])
   })
 
-  it('재시도가 소진되면 오류를 남기고 · 같은 값을 다시 맡으면 다시 보낸다 — 재시도마다 새 순번', async () => {
+  it('when retries are exhausted it leaves an error · if the same value is taken again it is sent again — a new sequence on each retry', async () => {
     vi.useFakeTimers()
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     invokeMock.mockImplementation(async () => {
-      throw new Error('거절(시험)')
+      throw new Error('refused (test)')
     })
     reportMinWindowSize({ width: 286, height: 64 })
     await vi.runAllTimersAsync()
@@ -272,8 +272,8 @@ describe('reportMinWindowSize', () => {
   })
 })
 
-describe('minWindowSizeSettled — 첫 화면 알림이 기다리는 끝', () => {
-  it('맡은 보고가 없으면 곧바로 · 있으면 그 응답 뒤에 풀린다', async () => {
+describe('minWindowSizeSettled — the end the first-screen notice waits for', () => {
+  it('if no report is taken then at once · if there is one it releases after its response', async () => {
     let settled = false
     void minWindowSizeSettled().then(() => (settled = true))
     await flush()
@@ -289,7 +289,7 @@ describe('minWindowSizeSettled — 첫 화면 알림이 기다리는 끝', () =>
     expect(settled).toBe(true)
   })
 
-  it('응답이 오지 않아도 상한 뒤에는 풀린다 — 첫 화면 알림을 막지 않는다', async () => {
+  it('even with no response it releases after the cap — it does not block the first-screen notice', async () => {
     vi.useFakeTimers()
     invokeMock.mockImplementation(() => new Promise(() => {}))
     reportMinWindowSize({ width: 286, height: 64 })
@@ -301,12 +301,12 @@ describe('minWindowSizeSettled — 첫 화면 알림이 기다리는 끝', () =>
     expect(settled).toBe(true)
   })
 
-  it('보고가 거절되면 재시도를 다 기다리지 않는다 — 상한 안에 풀린다', async () => {
+  it('if the report is refused it does not wait out all retries — it releases within the cap', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     vi.spyOn(console, 'error').mockImplementation(() => {})
     invokeMock.mockImplementation(async () => {
-      throw new Error('거절(시험)')
+      throw new Error('refused (test)')
     })
     reportMinWindowSize({ width: 286, height: 64 })
     let settled = false

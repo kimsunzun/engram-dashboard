@@ -15,9 +15,9 @@ vi.mock('../api/clientFactory', () => ({
   },
   getAgentClient: vi.fn(),
 }))
-// preset.add 가 네이티브 폴더 다이얼로그를 부른다 — import 부수효과로 register 만 하므로 open 은 no-op mock.
+// preset.add calls the native folder dialog — the import side effect only registers, so open is a no-op mock.
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }))
-// slotMenu registerSlotMenu 부수효과는 무해하나, registry 중복 등록 회피를 위해 side-effect import 는 1회만.
+// The slotMenu registerSlotMenu side effect is harmless, but the side-effect import happens once only to avoid duplicate registry registration.
 
 import './presetCommands' // side-effect register
 import { run } from './registry'
@@ -28,30 +28,30 @@ beforeEach(() => {
   clientMock.renamePreset.mockClear()
 })
 
-describe('preset.rename 라우팅(§5 — ADR-0061 리치화)', () => {
+describe('preset.rename routing (§5 — ADR-0061 enrichment)', () => {
   it('id + name → renamePreset(id, trimmed)', () => {
-    run('preset.rename', { id: '  pr1  ', name: '  내 프리셋  ' })
-    expect(clientMock.renamePreset).toHaveBeenCalledWith('pr1', '내 프리셋')
+    run('preset.rename', { id: '  pr1  ', name: '  my preset  ' })
+    expect(clientMock.renamePreset).toHaveBeenCalledWith('pr1', 'my preset')
   })
-  it('name 생략/빈문자열 → null(override 해제)', () => {
+  it('name omitted/empty string → null (clear the override)', () => {
     run('preset.rename', { id: 'pr1' })
     expect(clientMock.renamePreset).toHaveBeenCalledWith('pr1', null)
     clientMock.renamePreset.mockClear()
     run('preset.rename', { id: 'pr1', name: '   ' })
     expect(clientMock.renamePreset).toHaveBeenCalledWith('pr1', null)
   })
-  it('빈 id → throw(조용한 no-op 금지)', () => {
-    expect(() => run('preset.rename', { name: 'x' })).toThrow(/id 가 비어 있음/)
+  it('empty id → throw (no silent no-op)', () => {
+    expect(() => run('preset.rename', { name: 'x' })).toThrow(/id is empty/)
     expect(clientMock.renamePreset).not.toHaveBeenCalled()
   })
 })
 
-describe('preset.delete 라우팅(기존 배선 회귀 가드)', () => {
-  it('id → deletePreset(trim 된 id)', () => {
+describe('preset.delete routing (regression guard for the existing wiring)', () => {
+  it('id → deletePreset(trimmed id)', () => {
     run('preset.delete', { id: '  pr1  ' })
     expect(clientMock.deletePreset).toHaveBeenCalledWith('pr1')
   })
-  it('빈 id → throw', () => {
-    expect(() => run('preset.delete', {})).toThrow(/id 가 비어 있음/)
+  it('empty id → throw', () => {
+    expect(() => run('preset.delete', {})).toThrow(/id is empty/)
   })
 })

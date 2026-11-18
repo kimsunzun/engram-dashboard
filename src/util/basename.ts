@@ -1,7 +1,4 @@
-// ADR-0061: 이름을 저장하지 않고 cwd basename 을 쓴다.
-//
-// ★단일 출처★: 프리셋 표시명(PresetPalette)과 에이전트 행 표시명(AgentList)이 같은 규칙으로 이름을
-//   파생해야 한다. 각자 복제하면 win/posix·root 엣지 처리가 갈려 표시가 어긋나므로 여기 한 곳에 둔다.
+// ADR-0061: names are not stored; the cwd basename is used. ★Single source★: the preset display name (PresetPalette) and the agent row display name (AgentList) must derive names by the same rule — copies would diverge on win/posix and root edges.
 
 import { t } from '../i18n'
 
@@ -9,14 +6,9 @@ import { t } from '../i18n'
 export const PATH_NAME_PLACEHOLDER = 'common.noPath'
 
 /**
- * The display name derived from `cwd`, in the current UI language when the path is blank — call it where the name is shown,
- *   and do not keep the result as a key or a comparison baseline (ADR-0373).
- *
- * ★The result is never blank (empty or whitespace only)★: the label above draws only this value, so a blank one would show
- *   the row as an empty cell.
- *
- * Edges with no basename or a misleading one, like a root or a drive root, are not derived and fall back to the raw cwd
- *   (collapsing to "C:" would mislead).
+ * Display name derived from `cwd`; in the current UI language when the path is blank — call it where the name is shown, never keep the result as a key or comparison baseline (ADR-0373).
+ * ★The result is never blank (empty or whitespace only)★: the label draws only this value, so a blank one would show an empty cell.
+ * Edges with no or a misleading basename (a root, a drive root) are not derived and fall back to the raw cwd (collapsing to "C:" would mislead).
  */
 export function basename(cwd: string): string {
   if (!cwd || cwd.trim().length === 0) return t(PATH_NAME_PLACEHOLDER)

@@ -1,11 +1,7 @@
-// Sender-side helper for measurement reporting — 「한 번에 하나 · 같은 값 안 보냄 · 디바운스」 (one at a time · the same value is not sent · debounce) (ADR-0227 · TRD S21-slot-docking §5-3). The window canvas
-//   size (`windowCanvasReport.ts`) uses it. The value left in the shell = the last successful report.
-// ★One reporter's invoke is launched only one at a time★: if the shell handles two overlapping requests in reverse arrival order, the shell's value
-//   stays stale until the next report. Whether WebView2 sends overlapping requests in JS issue order is not documented (unknown). With one at a time the response order is the shell's apply order, so
-//   even the success of a cancelled job can be trusted as the shell's current value. Cost: if a response never comes, that reporter stops there.
-// A value that arrives while one is in flight is put in a single pending field and a new value overwrites it — after the response only that last value is sent.
-// A failure is retried by itself with a bounded retry (`retryAsync`) — measurements come only when they change, so waiting for the next measurement may mean it never goes out. If a different
-//   value arrives meanwhile, the old value's retry stops.
+// Sender-side helper for measurement reporting — one at a time · the same value is not sent · debounce (ADR-0227 · TRD S21-slot-docking §5-3). The window canvas size (`windowCanvasReport.ts`) uses it. The value left in the shell = the last successful report.
+// ★One invoke per reporter at a time★: if the shell handled two overlapping requests in reverse arrival order its value would stay stale until the next report, and WebView2's overlapping-request order is undocumented. One at a time makes the response order the shell's apply order, so even a cancelled job's success can be trusted as the shell's current value. Cost: if a response never comes, that reporter stops there.
+// A value arriving while one is in flight goes into a single pending field (a new value overwrites it); only the last value is sent after the response.
+// A failure retries itself with a bounded retry (`retryAsync`) — measurements come only on change, so waiting for the next one may mean never; if a different value arrives meanwhile, the old value's retry stops.
 
 import { retryAsync, RetryCancelledError } from './retryInvoke'
 
@@ -21,8 +17,7 @@ export interface LatestValueReporterOptions<T> {
   /** Report name to put in the log — e.g. `report_window_canvas(800x600)`. */
   describe: (value: T) => string
   /**
-   * Called after the shell answered success with a value different from `lastSent` and `lastSent` changed — not called on a failure · a repeat success of the same value.
-   * ★Do not throw★ — it is called inside response handling, and if it throws it is counted as a report failure and the same value is sent again.
+   * Called after the shell answered success with a value different from `lastSent` and `lastSent` changed — not on a failure or a repeat success of the same value. ★Do not throw★: it runs inside response handling, and a throw counts as a report failure and resends the same value.
    */
   onAccepted?: (value: T) => void
 }
@@ -50,8 +45,7 @@ export class LatestValueReporter<T extends object> {
   }
 
   /**
-   * One observation before debounce — if the value being sent · the pending value differs from this, withdraw it without waiting for the debounce. If we waited, in the meantime an old retry or
-   * the turn after a response would send a stale value once more.
+   * One observation before debounce — if the value being sent · pending differs from it, withdraw without waiting for the debounce; waiting would let an old retry or the turn after a response send a stale value once more.
    */
   observe(value: T): void {
     if (this.job && !this.opts.same(this.job.value, value)) this.cancelJob()
@@ -66,8 +60,7 @@ export class LatestValueReporter<T extends object> {
   }
 
   /**
-   * After `delayMs` call `measure` and `submit` that value — if called again in between, reset the timer and use only the last `measure`.
-   * Since measuring is deferred to the end of the timer, it measures the DOM at that time. If `measure` gives `null`, nothing is sent.
+   * After `delayMs` call `measure` and `submit` that value; a call in between resets the timer and only the last `measure` is used. Measuring at timer end reads the DOM at that time; a `null` measure sends nothing.
    */
   schedule(measure: () => T | null, delayMs: number = REPORT_DEBOUNCE_MS): void {
     if (this.timer !== null) clearTimeout(this.timer)
@@ -79,8 +72,7 @@ export class LatestValueReporter<T extends object> {
   }
 
   /**
-   * When detaching the observation — discard the debounce · pending value and stop retrying. Keep the in-flight invoke and `lastSent` — that response sets the shell's current
-   * value, and the reattached side also waits for that response so one at a time is kept.
+   * When detaching the observation — discard the debounce · pending value and stop retrying; keep the in-flight invoke and `lastSent` (that response sets the shell's current value, and the reattached side waits for it so one at a time holds).
    */
   release(): void {
     if (this.timer !== null) clearTimeout(this.timer)
@@ -127,7 +119,7 @@ export class LatestValueReporter<T extends object> {
     void retryAsync(attempt, {
       isCancelled: () => this.gen !== gen,
       onRetry: (err, n) => {
-        if (this.gen === gen) console.warn(`[${this.opts.log}] ${this.opts.describe(value)} 재시도 ${n}:`, err)
+        if (this.gen === gen) console.warn(`[${this.opts.log}] ${this.opts.describe(value)} retry ${n}:`, err)
       },
     })
       .then(() => {
@@ -136,7 +128,7 @@ export class LatestValueReporter<T extends object> {
       .catch(err => {
         if (err instanceof RetryCancelledError || this.gen !== gen) return
         this.job = null
-        console.error(`[${this.opts.log}] ${this.opts.describe(value)} 최종 실패(재시도 소진):`, err)
+        console.error(`[${this.opts.log}] ${this.opts.describe(value)} finally failed (retries exhausted):`, err)
       })
   }
 }

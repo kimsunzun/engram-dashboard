@@ -5,7 +5,7 @@
 //   does not jump. Moving it back to a tail at the end of the list would make the last lines bounce by the indicator height every time a turn ends.
 // ★Timer identity (load-bearing)★: the elapsed seconds are held by the `WaitRow` instance — it mounts when `streaming` turns on and counts from 0,
 //   and disappears when it turns off. It is the only one of the same type in the same position in the row, so a re-render in between does not remount it.
-// ★「중단하는 중」 (interrupting) (ADR-0244) is a prop of the same instance★ — if drawn split into another component or key, then when the interrupt is refused and it goes back to the wait
+// ★「interrupting」 (ADR-0244) is a prop of the same instance★ — if drawn split into another component or key, then when the interrupt is refused and it goes back to the wait
 //   indicator the elapsed seconds would be 0. So the timer keeps running in the meantime (it is just not visible).
 
 import { useEffect, useState, type ReactNode } from 'react'
