@@ -37,6 +37,7 @@ impl fmt::Debug for Frame {
     }
 }
 
+/// Close code. 4000~4999 = the application range of RFC 6455 §7.4.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CloseCode(pub u16);
 

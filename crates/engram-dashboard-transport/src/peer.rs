@@ -899,6 +899,8 @@ struct Supervisor<W: Wire> {
     dropped_out: u64,
     /// The accepted peer's upgrade permit (TRD 3 §5 14) — released on entering the operating phase (`shake_hands`) or where the channel is dropped (`run`, before teardown),
     /// never tied to teardown's wait. `None` for a dialed peer. The auth-wait and operating permits do not exist yet; this field covers their role.
+    /// When they arrive (3-3 U4), `Registry::attach` holds the auth-wait permit and releases this one, and the supervisor swaps it
+    /// for the operating permit on entering the operating phase.
     admission: Option<ConnPermit>,
     exit: RosterExit<W>,
     /// The `cause` of [`TransportEvent::Closed`]: dialed peer = `Explicit` (the preceding `Disconnected` carries the cause); accepted peer = the real cause.

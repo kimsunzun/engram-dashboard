@@ -215,7 +215,8 @@ impl<W: Wire> Registry<W> {
     /// (receiving tags are assumed not reused).
     ///
     /// ★The upgrade permit ([`crate::ConnPermit`]) is released on entering the operating phase★, or where the channel is dropped if it never does (before the receiver end
-    /// drains — TRD 3 §5 14); it also covers the not-yet-existing auth-wait permit's role. After [`Registry::close_all`] it is not registered and closes before the
+    /// drains — TRD 3 §5 14); it also covers the not-yet-existing auth-wait permit's role (3-3 U4).
+    /// After [`Registry::close_all`] it is not registered and closes before the
     /// handshake with [`CloseCode::GOING_AWAY`], without reading or writing the channel.
     pub fn attach_with_policy(
         &self,

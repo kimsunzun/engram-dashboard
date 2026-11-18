@@ -110,7 +110,7 @@
 //!   `"`/`#` sticks to a name cannot be read); calls to functions named `cfg` are false positives that only list
 //!   the file. Unbitten (measured): `cfg_select!`, `cfg_aliases`, a comment between `cfg` and `(`, `cfg!{…}`, `cfg![…]`; `cfg_if!` is
 //!   bitten by its inner `#[cfg(…)]`. Nesting 19+ levels hits the PCRE2 limit — rg errors and the gate FAILs (not a
-//!   silent pass). Do not grow the regex.
+//!   silent pass; measured with rg 14.1.1 · PCRE2 10.45 — the limit may differ per rg build). Do not grow the regex.
 //!
 //! **⑤ Production OS crate dependencies only in this crate**: among workspace members, only this crate may have an OS crate **directly**
 //!   as a production dependency (normal, build — any target OS).

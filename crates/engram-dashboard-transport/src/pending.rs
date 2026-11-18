@@ -151,6 +151,7 @@ impl<T: Eq + Hash + Clone, S> Pending<T, S> {
         }
     }
 
+    /// Registers a slot. ★Call it **before sending**★ — reversed, a fast reply cannot find its slot.
     pub fn insert(&mut self, tag: T, slot: S, deadline: Instant) -> Insert<S> {
         if self.retired.contains(&tag) {
             return Insert::Retired(slot);

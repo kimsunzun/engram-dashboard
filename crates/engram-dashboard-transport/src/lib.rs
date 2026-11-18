@@ -125,6 +125,7 @@
 //!   [`PermitPool`] also run on multi_thread with real-time waits.
 //! - ★**The only receiving-side permit is the upgrade permit**★ — [`Registry::attach`] holds it until the operating phase and also bears the auth-wait permit's share
 //!   (TRD 3 §5 14); accepted peers are uncapped while operating. [`Accepted`] comes from `ws::WsListener` and in-memory `testing::MemoryListener`.
+//!   The auth-wait and operating permits do not exist yet (3-3 U4).
 //! - ★**An accepted peer's label is assumed not reused**★ — accepted peers stay out of the generation table, so a label never `add`ed and absent from the registry
 //!   restarts at generation 1 on re-attach or [`Registry::add`] ([`Registry::attach_with_policy`] · [`Registry::add_with_policy`]); fine with a new label per
 //!   connection (TRD 3 §3-1 ① `conn-<ConnId>`).
@@ -137,6 +138,7 @@
 //! real TCP★, behind `all(feature = "ws", feature = "test-support")`, ports requested as 0. `ws_dial` · `ws_write_deadline` measure what memory cannot (e.g.
 //! whether the write deadline cuts in front of the kernel buffer); `ws_reject` re-measures that the close code and message cross the kernel (reason in its header);
 //! `ws_accept` measures the accept policy on a real HTTP upgrade (TRD 3 §6-0 U7; header of `tests/ws_accept.rs`). Moving them in-memory removes what they measure.
+//! `ws_dial` · `ws_write_deadline` are the two ADR-0177 decision 8 lists as needing a real socket; `ws_reject` has no decision record yet.
 //! ★Do not add `-- --test-threads=4`★ — this crate spawns no child process.
 // hangul-ok-begin
 //! It is exactly the decision rule of `.claude/skill-bindings/qa.md` 「모듈별 명령」, the same situation as `command` · `protocol` · `messaging` · `net`.
