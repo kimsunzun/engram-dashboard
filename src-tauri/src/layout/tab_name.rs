@@ -404,9 +404,9 @@ mod tests {
         }
         assert_eq!(
             name_of(&mgr, detached),
-            "에이전트 트리",
+            "에이전트 트리", // hangul-ok: the Korean UI table
             "name of the moved area"
-        ); // hangul-ok: the Korean UI table
+        );
         let listed = mgr.list_tabs(MAIN_WINDOW_LABEL).unwrap();
         assert!(listed.tabs.iter().all(|t| !t.named));
     }
