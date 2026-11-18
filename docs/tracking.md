@@ -87,6 +87,7 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-108 | Convert the existing Korean log messages to English (one batch) | Minor feature · cleanup | Not started · user decision 2026-11-13 — the convention changed now, the existing lines later in one batch |
 | T-92 | The codex real-terminal cwd guard repeats `& ^ \| < >` instead of using the platform set | Minor feature · cleanup | Not started · found by S25 step 6 review |
 | T-93 | The codex live test L5 leaves its temporary folder on every run (os error 32) | Minor feature · cleanup | Not started · found by S25 step 6 QA |
+| T-116 | Drop the CI Hangul check (ADR-0383) once the English habit has settled | Minor feature · cleanup | Waiting for trigger — after S25 · user 2026-11-19 |
 | T-100 | CLAUDE.md 「최소한만 막기」 — add 「그 밖의 막기는 실제로 불편이 생기면 그때 더한다.」 | Minor feature · cleanup | Waiting for trigger — the next CLAUDE.md revision |
 | T-71 | Do not point at tracking numbers — just delete when resolved | Minor feature · cleanup | To do — later as an issue |
 | T-70 | Criterion for guessing the version ahead of a branch — 0.5.0 side if it is a feature | Minor feature · cleanup | To do — later as an issue |
@@ -584,6 +585,11 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Status:** not started · found 2026-11-10 by the S25 step 6 QA (main recycled the leftovers by hand).
 - **Problem:** `crates/engram-dashboard-agent/tests/codex_launch_live.rs` L5 cannot remove its temporary folder when the test drops it — os error 32, a codex child process still holds it. Each codex-lane run leaves one folder under the temp directory.
 - **Next:** wait for (or kill) the codex child before the cleanup, or retry the removal briefly.
+
+### T-116. Drop the CI Hangul check once the English habit has settled
+- **Status:** waiting for trigger — after S25 (user 2026-11-19: 「초반에만 좀 적용하다가 나중에 배자」, a light note, not a decision to act now).
+- **What:** the `gates` step 「Hangul check」 in `.github/workflows/ci.yml` runs `node scripts/check-hangul.mjs` (ADR-0383, master S38). Removing it amends ADR-0383.
+- **Weigh then:** keeping it costs `hangul-ok` markers on intentional Korean fixtures and user quotes; dropping it loses the only guard against workers writing Korean code text from Korean briefs. Count how often the gate fired during S25 before deciding.
 
 ### T-100. CLAUDE.md 「최소한만 막기」 — add the follow-up rule
 - **Status:** waiting for trigger — the next CLAUDE.md revision (user 2026-11-10: record it as feedback, do not edit CLAUDE.md now).
