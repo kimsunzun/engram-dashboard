@@ -1,20 +1,19 @@
-//! Recover the codex thread id as the **owner of a lock file** — the name of the lock file held by the child we
-//! spawned is that child's thread id (ADR-0218 decision 1).
+//! Recover the codex thread id as the **owner of a lock file** — the lock file held by the child we spawned is named by that child's
+//!   thread id (ADR-0218 decision 1).
 //!
-//! ★This file holds only two pieces of codex knowledge★ — the location of the lock directory ([`lock_dir`]) and that the file name is the id.
-//! 「who holds this file」 and 「what is alive under this PID」 need zero domain knowledge, so the OS-layer crate's
-//! [`engram_dashboard_platform::file_holders`] and [`engram_dashboard_platform::process::subtree`] answer them
-//! (ADR-0004 · ADR-0218 decision 11 · ADR-0266). ★**The file content is never read**★ — it is 0 bytes, and starting to read it would make us depend on the vendor
-//! storage format (ADR-0203).
+//! ★Only two pieces of codex knowledge live here★ — the lock directory ([`lock_dir`]) and that the file name is the id. 「Who holds this
+//!   file」 and 「what is alive under this PID」 need no domain knowledge, so
+//! [`engram_dashboard_platform::file_holders`] and [`engram_dashboard_platform::process::subtree`] answer them (ADR-0004 · ADR-0218
+//!   decision 11 · ADR-0266). ★**The file content is never read**★ (0 bytes; reading it would tie us
+//! to the vendor storage format, ADR-0203).
 //!
-//! Two entry points — [`plan_capture`] (chooses whether to run recovery for this spawn, and its inputs)
-//! and [`spawn_capture`] (starts the polling thread with those inputs). [`scan_for_child`] carries the decision, and
-//! [`CaptureClock`] carries the waiting and the child liveness check. All filesystem and OS queries sit behind those two and [`LockHolderProbe`],
-//! so the loop rules are measured without an OS (ADR-0012).
+//! Entry points: [`plan_capture`] (whether to run recovery for this spawn, and its inputs) and [`spawn_capture`] (starts the polling
+//!   thread). [`scan_for_child`] carries the decision, [`CaptureClock`] the waiting and child
+//! liveness; all filesystem and OS queries sit behind those and [`LockHolderProbe`], so the loop rules are measured without an OS (ADR-0012).
 //!
-//! ★The recovered value leaves through exactly one path, [`crate::backend::SessionIdSink`]★ — the same verb
-//! the assembly point handed over bound to the incarnation marker, and this file knows neither the profile nor its schema (ADR-0004 · ADR-0218 decision 6). Do not
-//! create a second write path — the moment you do, there is a branch that bypasses the incarnation guard.
+//! ★The recovered value leaves through exactly one path, [`crate::backend::SessionIdSink`]★ — the verb the assembly point handed over,
+//!   bound to the incarnation marker; this file knows neither the profile nor its schema
+//! (ADR-0004 · ADR-0218 decision 6). A second write path would bypass the incarnation guard.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -27,68 +26,54 @@ use uuid::Uuid;
 
 use crate::backend::SessionIdSink;
 
-/// The name of the folder under the codex home where the writer locks live.
+/// The folder under the codex home where the writer locks live.
 ///
-/// ★This is an undocumented layout★ — if upstream changes it, we silently get 0 candidates instead of an error (ADR-0218 rationale section,
-/// unmeasured item ③). The failure mode is 「not received」, so that silence does not spread into false detections.
+/// ★Undocumented layout★ — if upstream changes it we silently get 0 candidates instead of an error (ADR-0218 rationale, unmeasured item
+///   ③); the failure mode is 「not received」, never a false detection.
 const LOCK_DIR: &str = "thread-writer-locks";
 
-/// The extension of the lock file. The rest of the name is the thread id.
 const LOCK_EXTENSION: &str = "lock";
 
-/// The codex home when [`CODEX_HOME_ENV`] is absent (a path relative to the user home).
 const CODEX_HOME_SUBDIR: &str = ".codex";
 
-/// The env variable that moves the whole codex state directory — its existence is confirmed by measurement, and it applies **only to the process that sets it**
-/// (the `CODEX_HOME` section of `docs/research/codex-session-id-recovery-survey-2026-09-19.md`).
+/// The env variable that moves the whole codex state directory — confirmed by measurement; it applies **only to the process that sets it**
+/// (`docs/research/codex-session-id-recovery-survey-2026-09-19.md`, `CODEX_HOME` section).
 pub(super) const CODEX_HOME_ENV: &str = "CODEX_HOME";
 
-/// Every place where this module meets the OS — file holders · folder listing · our process tree.
-///
-/// ★The three sit on one seam so the decision rules can be measured without an OS★ — that way [`scan_for_child`] runs
-/// without a single real file or a single real process (ADR-0012).
+/// Every place where this module meets the OS — file holders · folder listing · our process tree — on one seam, so [`scan_for_child`] runs
+///   without a real file or process (ADR-0012).
 pub(crate) trait LockHolderProbe {
-    /// **No distinction** between "could not ask" and "no holders" — both are an empty list. The decision lands in the same
-    /// place either way (「not a candidate」), and polling asks again on the next round.
+    /// **No distinction** between "could not ask" and "no holders" — both are an empty list (「not a candidate」); polling asks again next round.
     fn holders(&self, path: &Path) -> Vec<Holder>;
 
-    /// The identities of the child we spawned and every **live** descendant under it. An empty list = that PID is no longer our
-    /// child.
+    /// The identities of the child we spawned and every **live** descendant under it. An empty list = that PID is no longer our child.
     ///
-    /// ★Why a tree — the PID we hold is not codex★: on Windows the spawn passes through a `cmd.exe /c codex …`
-    ///   layer ([`engram_dashboard_platform::shell::console_command`]), so the PID the path returned is
-    ///   **that wrapper**. The one holding the lock is the `codex.exe` below it (ADR-0218 rationale section — the holder was neither the wrapper nor the child but
-    ///   codex.exe). ★Compare only the wrapper PID and a match **never** shows up, and the symptom is silence, not an error★
-    ///   — the thread spins empty-handed for the whole agent lifetime (measured 2026-09-21: `cmd.exe /c …` →
-    ///   wrapper 38240 · 4816,19468 below it).
-    /// ★Resolve it again every round — do not reuse a list copied aside once★: the shim launches codex late and
-    ///   codex launches more tools, so the tree grows over time. Freeze it and the late-launched codex goes unseen.
-    /// ★What the tree rules block in this recovery, and the residue we accepted★ — the factual source of record for the rules (root identity check · dropping
-    ///   entries born before their parent) and for the cases ①②③ they cannot filter is the doc of [`process::subtree`].
-    ///   Here we only write what that means for codex recovery.
-    ///   - **The real sequence the ordering rule blocks:** a `codex.exe` the user launched by hand becomes an orphan and stays with the recorded ppid
-    ///     `P` intact, and Windows **reuses** `P` for our wrapper. Without the rule that stranger is
-    ///     enumerated as our child, and since the stranger's own identity matches its own lock holder, it becomes **the only candidate for 0.7–21 seconds
-    ///     before our codex creates its lock** — not even `Ambiguous` shows up, and another party's thread is written into our
-    ///     handle (the silent failure the ADR-0218 impact/invariants section names).
-    ///   - ★**We accept residue ①②③ (do not argue it again — decision of 2026-09-21)**★. ① PID reuse between enumeration and start-time reading
-    ///     has no atomic fix and the window is microseconds. ② Blocking the same tick would lose a normal
-    ///     child. ③ For an explicit-parent case to become a **real false detection**, the stranger would have to hold a `<uuid>.lock` under our `CODEX_HOME`
-    ///     as well — closing the common path (an orphan with a reused ppid) keeps the rule's
-    ///     worth intact.
-    ///   - A tree enumeration that fails and returns less is also not treated as an error — there is no way to handle it differently from 「not a candidate」,
-    ///     and the next round asks again.
+    /// ★Why a tree — the PID we hold is not codex★: on Windows the spawn passes through `cmd.exe /c codex …`
+    ///   ([`engram_dashboard_platform::shell::console_command`]), so the returned PID is **the wrapper**; the lock holder is the
+    ///   `codex.exe` below it (ADR-0218 rationale). ★Comparing only the wrapper PID **never** matches, and the symptom is silence, not an
+    ///   error★ (measured 2026-09-21: wrapper 38240 · 4816,19468 below it).
+    /// ★Resolve again every round — never reuse a copied list★: the shim launches codex late and codex launches more tools, so the tree grows.
+    /// ★What the tree rules block, and the accepted residue★ — the source of record for the rules (root identity check · dropping entries
+    ///   born before their parent) and the unfilterable cases ①②③ is the doc of [`process::subtree`].
+    ///   - **The sequence the ordering rule blocks:** a hand-launched `codex.exe` becomes an orphan keeping the recorded ppid `P`, and
+    ///   Windows **reuses** `P` for our wrapper; without the rule that stranger is enumerated as our child and,
+    ///     matching its own lock holder, is **the only candidate for 0.7–21 s before our codex creates its lock** — not even `Ambiguous` —
+    ///   and another party's thread is written into our handle (ADR-0218 impact/invariants).
+    ///   - ★**Residue ①②③ is accepted (do not argue again)**★: ① PID reuse between enumeration and start-time reading has no atomic fix
+    ///   (microsecond window); ② blocking the same tick would lose a normal child; ③ a **real false detection**
+    ///     also needs the stranger to hold a `<uuid>.lock` under our `CODEX_HOME`.
+    ///   - A tree enumeration that fails and returns less is not an error — it cannot be handled differently from 「not a candidate」; the
+    ///   next round asks again.
     fn our_processes(&self, root_pid: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
         process::subtree(root_pid, root_start_time)
     }
 
-    /// All **regular file** paths directly under `dir` (the name decision belongs to [`scan_for_child`]). If it cannot be read, an empty
-    /// list: a directory that does not exist yet is a normal path, so we do not raise an error.
+    /// All **regular file** paths directly under `dir` (the name decision belongs to [`scan_for_child`]). Unreadable → empty list (a
+    ///   directory that does not exist yet is normal).
     ///
-    /// ★Directories and reparse points (symlink·junction) are left out of the candidates★ — a folder named `<uuid>.lock`
-    ///   is not a lock, and passing a reparse point to the holder query opens a target we did not choose.
-    ///   `file_type()` does not follow links, so `is_file()` filters out both. Entries whose type
-    ///   cannot be read are left out too — we do not promote what we do not know to a candidate.
+    /// ★Directories and reparse points (symlink·junction) are not candidates★ — a folder named `<uuid>.lock` is not a lock, and passing a
+    ///   reparse point to the holder query opens a target we did not choose. `file_type()` does not
+    ///   follow links, so `is_file()` filters both; entries whose type cannot be read are left out too.
     fn entries(&self, dir: &Path) -> Vec<PathBuf> {
         let Ok(read) = std::fs::read_dir(dir) else {
             return Vec::new();
@@ -100,8 +85,8 @@ pub(crate) trait LockHolderProbe {
     }
 }
 
-/// The implementation used in production — asks [`engram_dashboard_platform::file_holders`], and if the query itself fails folds to an empty
-/// list (the reason for that folding is the contract of [`LockHolderProbe::holders`]).
+/// Production implementation — asks [`engram_dashboard_platform::file_holders`]; a failed query folds to an empty list (contract of
+///   [`LockHolderProbe::holders`]).
 pub(crate) struct RestartManagerProbe;
 
 impl LockHolderProbe for RestartManagerProbe {
@@ -116,49 +101,40 @@ impl LockHolderProbe for RestartManagerProbe {
     }
 }
 
-/// The answer of [`scan_for_child`]. ★Only `Found` can be adopted★.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScanOutcome {
     /// Exactly one lock held by a process in our tree — the thread id of that file name.
     Found(Uuid),
     /// 0 candidates. No lock yet, or this child does not create a lock — keep waiting (ADR-0218 decision 4).
     NotYet,
-    /// n (≥2) candidates — ★adopt nothing this round★. It is unmeasured whether one codex process can hold two or more locks,
-    /// so we refuse instead of guessing (ADR-0218 decision 3 · not receiving is
-    /// better than receiving wrongly). ★「refusal」 is not 「giving up」 — polling continues★ (this outcome is not in decision 4's list of stops).
+    /// n (≥2) candidates — ★adopt nothing this round★: whether one codex process can hold two or more locks is unmeasured, so we refuse
+    ///   rather than guess (ADR-0218 decision 3). ★「Refusal」 is not 「giving up」 — polling continues★
+    /// (not in decision 4's stop list).
     Ambiguous(usize),
 }
 
 /// Within `lock_dir`, find the lock file **held by a process in our tree** and return the thread id of its name.
 ///
 /// Decision rules (all ADR-0218):
-/// - **The comparison target is not `child_pid` alone but the whole tree rooted at that PID**
-///   ([`LockHolderProbe::our_processes`] is the source of record for the reason — the PID we hold is the `cmd.exe` wrapper and the one holding the
-///   lock is the `codex.exe` below it).
-/// - Candidate = a file named `<uuid>.lock` where some holder matches an entry of the tree on **both PID and start time**.
-///   ★A match on only one of them is not a candidate★ — PIDs are reused, so that decision would write another party's thread
-///   into our handle (decision 2). Widening the tree does not loosen this pair: the start time of descendants is
-///   read together at the same place where they are enumerated.
-/// - ★**What we count is not files but 「matched holders」**★ — decision 3's 「exactly one candidate」 is the number of **pairs**, not
-///   the number of file names. If two of our processes hold one file together, 「who owns that lock」 is
-///   not narrowed to one, and counting only files lets that state pass as `Found`.
-///   ★We chose this knowing its cost★: if a child inherits the handle (a tool launched by codex inherits the same lock handle),
-///   adoption does not happen during that whole span. It is tolerable because [`run_capture`] does **not stop** on `Ambiguous`
-///   — once the inheriting side ends, we adopt on the next round. Whether inheritance really happens is
-///   unmeasured, and if it does, the symptom is 「recovery gets late」, not a false detection.
-///   ★**There is dissent on this cost — read this line before raising it again**★ (2026-09-21): there was a counterargument 「if both are **ours**,
-///   the lock is ours, so adopting is right」, and that decision itself was outside this round's scope, so the code was
-///   left as is. That is, the current shape is **a hold, not a decision**. To change it, first measure whether inheritance exists and
-///   reopen ADR-0218 decision 3 on top of that measurement — do not flip it silently here.
-/// - Exactly one matched holder gives [`ScanOutcome::Found`], 0 gives [`ScanOutcome::NotYet`], two or more give
-///   [`ScanOutcome::Ambiguous`] (decision 3).
-/// - If `child_pid` or `child_start_time` is 0, the answer is `NotYet` **without even asking**. 0 means 「unknown」, and counting unknown as
-///   a match leaves a PID-only comparison, which is the decision decision 2 forbids.
-/// - If the tree is empty (the child died or the PID was reused), `NotYet` without asking about a single file —
-///   the holder query opens one Restart Manager session per candidate file per round and is an expensive question, so we do not burn it
-///   where the answer is already fixed.
+/// - **The comparison target is the whole tree rooted at `child_pid`**, not `child_pid` alone ([`LockHolderProbe::our_processes`] has the
+///   reason).
+/// - Candidate = a file named `<uuid>.lock` with a holder matching a tree entry on **both PID and start time**. ★One alone is not a
+///   candidate★ — PIDs are reused (decision 2); descendants' start times are read where they are enumerated.
+/// - ★**We count 「matched holders」, not files**★ — decision 3's 「exactly one candidate」 is the number of **pairs**; two of our processes
+///   holding one file leaves 「who owns that lock」 unnarrowed, and counting files would let it pass as `Found`.
+///   ★The cost, chosen knowingly★: if a child inherits the handle (a tool launched by codex), adoption waits for that span; tolerable
+///   because [`run_capture`] does **not stop** on `Ambiguous`. Whether inheritance happens is unmeasured; the symptom would be
+///   「recovery gets late」, not a false detection.
+///   ★**Dissent exists — read before raising again**★: the counterargument 「if both are **ours**, the lock is ours, so adopt」 was outside
+///   that round's scope, so the shape is **a hold, not a decision**. To change it, first measure inheritance and reopen
+///   ADR-0218 decision 3 — do not flip it silently.
+/// - One matched holder → [`ScanOutcome::Found`], 0 → [`ScanOutcome::NotYet`], two or more → [`ScanOutcome::Ambiguous`] (decision 3).
+/// - `child_pid` or `child_start_time` 0 → `NotYet` **without asking** (0 = 「unknown」; counting it as a match leaves a PID-only
+///   comparison, forbidden by decision 2).
+/// - Empty tree (child died or PID reused) → `NotYet` without asking about a single file — the holder query opens one Restart Manager
+///   session per candidate file per round, an expensive question.
 ///
-/// Many processes may have the same file open — if one of them is inside our tree, it is a candidate.
+/// Many processes may have the same file open — if one is inside our tree it is a candidate.
 pub(crate) fn scan_for_child(
     lock_dir: &Path,
     child_pid: u32,
@@ -200,26 +176,23 @@ pub(crate) fn scan_for_child(
     }
 }
 
-/// The lock directory as seen from **our process's** environment. `None` if the home cannot be found.
+/// The lock directory as seen from **our process's** environment; `None` if the home cannot be found.
 ///
-/// ★This function does not answer for a spawn that carries its own [`CODEX_HOME_ENV`]★ — a child that set that variable
-/// through the profile env uses another home. In that case pass that home directly to [`lock_dir_under`].
+/// ★Does not answer for a spawn carrying its own [`CODEX_HOME_ENV`]★ (profile env) — pass that home to [`lock_dir_under`].
 pub(crate) fn lock_dir() -> Option<PathBuf> {
     Some(lock_dir_under(&codex_home()?))
 }
 
-/// For callers that know the home — `<codex home>/thread-writer-locks`.
 pub(crate) fn lock_dir_under(codex_home: &Path) -> PathBuf {
     codex_home.join(LOCK_DIR)
 }
 
-/// Lock file name → thread id. `None` if it is not `<uuid>.lock` — it is **skipped**, not an error (measured: files that are not ids, like `.coordination.lock`,
-/// live in the same folder).
+/// Lock file name → thread id. `None` if it is not `<uuid>.lock` — **skipped**, not an error (measured: non-id files like
+///   `.coordination.lock` live in the same folder).
 ///
-/// ★Accept only the canonical form (36 chars with hyphens) — do not leave `Uuid::parse_str` alone★: that function
-///   also accepts 32 chars without hyphens, braces and `urn:uuid:`, so names codex never creates come up as candidates. One more
-///   candidate flips the decision from `Found` to `Ambiguous` and **recovery stops entirely** — and it happens just because
-///   one file we did not create sits in someone else's folder. Case is not distinguished (Windows file names behave that way).
+/// ★Accept only the canonical form (36 chars with hyphens) — not bare `Uuid::parse_str`★: it also accepts 32 chars without hyphens, braces
+///   and `urn:uuid:`, so names codex never creates become candidates; one extra candidate flips
+///   `Found` to `Ambiguous` and **stops recovery entirely**. Case is not distinguished (Windows file names).
 fn thread_id_from_lock_name(path: &Path) -> Option<Uuid> {
     if !path.extension()?.eq_ignore_ascii_case(LOCK_EXTENSION) {
         return None;
@@ -236,7 +209,6 @@ fn codex_home() -> Option<PathBuf> {
     )
 }
 
-/// Only the rule of [`codex_home`] — split off so it can be measured without touching env.
 fn codex_home_from(override_var: Option<OsString>, user_home: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(dir) = override_var {
         if !dir.is_empty() {
@@ -246,38 +218,32 @@ fn codex_home_from(override_var: Option<OsString>, user_home: Option<PathBuf>) -
     user_home.map(|home| home.join(CODEX_HOME_SUBDIR))
 }
 
-/// The wait until the first scan. ★Non-zero is intended★ — the measured minimum of the spawn→lock-creation delay is 0.735 s
-/// (ADR-0218 rationale section), so scanning right at launch buys one certain empty-handed round for free.
+/// The wait until the first scan. ★Non-zero is intended★ — the measured minimum spawn→lock-creation delay is 0.735 s (ADR-0218 rationale),
+///   so scanning at launch buys one certain empty round.
 const FIRST_DELAY: Duration = Duration::from_millis(500);
 
 /// The cap when the wait is doubled after each empty-handed round.
 ///
-/// ★Why backoff — a round is not free★: [`scan_for_child`] opens one Restart
-///   Manager session per candidate file. A real user's lock folder had 8 files (measured). So a fixed short interval,
-///   under a child that never creates a lock (upstream changed the layout, or it is `codex exec`), burns several RM sessions per second
-///   for as long as that agent lives.
-/// ★Even so, we set no upper **time** limit (ADR-0218 decision 4)★ — the decision is ownership, not time, so
-///   catching late adds no false detections. Slowing down without giving up is the difference between backoff and a time window.
-/// ★Why the first few rounds are dense★: 0.735 · 0.879 · 0.907 · 1.891 s are the measured creation delays, and there is one
-///   21 s case that was not reproduced. Doubling from 0.5 s puts the sixth round near 30 s, which covers that tail too.
+/// ★Why backoff★: a round is not free — [`scan_for_child`] opens one Restart Manager session per candidate file (a real user's folder had
+///   8). A fixed short interval under a child that never creates a lock (layout changed, or `codex exec`)
+///   burns several RM sessions per second for the agent's lifetime.
+/// ★Still no upper **time** limit (ADR-0218 decision 4)★ — the decision is ownership, not time, so catching late adds no false detections.
+/// ★Dense early rounds★: measured creation delays 0.735 · 0.879 · 0.907 · 1.891 s plus one unreproduced 21 s case; doubling from 0.5 s
+///   puts the sixth round near 30 s, covering that tail.
 const MAX_DELAY: Duration = Duration::from_secs(15);
 
 /// The other two places where the polling loop meets the OS — whether the child is still alive, and the wait until the next round.
 ///
-/// ★It is split from [`LockHolderProbe`] because the axis differs★ — that one is 「what is visible」, this one is
-///   「when to look again, and whether a reason to look remains」. Merging them mixes a place where measuring the loop rules would force faking the clock too
-///   with a place where only the list needs to change.
+/// ★Split from [`LockHolderProbe`] because the axis differs★: that one is 「what is visible」, this one 「when to look again and whether a
+///   reason remains」; merging would force faking the clock where only the list needs to change.
 pub(crate) trait CaptureClock {
-    /// `false` = that PID is no longer **our child** (it died or the PID was reused). It is the loop's normal exit
-    /// condition and not an error.
+    /// `false` = that PID is no longer **our child** (died or PID reused) — the loop's normal exit, not an error.
     fn child_alive(&self) -> bool;
 
-    /// Wait until the next round. ★Called while holding no lock at all★ — this is the place where the loop
-    /// spends the most time.
+    /// Wait until the next round. ★Called holding no lock★ — the loop spends most of its time here.
     fn sleep(&self, delay: Duration);
 }
 
-/// The clock used in production — the child decision looks at PID and start time **together** (the same rule as ADR-0218 decision 2).
 struct ChildClock {
     pid: u32,
     start_time: u64,
@@ -293,46 +259,38 @@ impl CaptureClock for ChildClock {
     }
 }
 
-/// One set of inputs for running recovery in this spawn. ★That it was built at all means 「all conditions to run are met」★ —
-/// if [`plan_capture`] misses even one it is `None`, so no conditional is left inside [`run_capture`].
+/// One set of inputs for running recovery in this spawn. ★Its existence means 「all conditions to run are met」★ — [`plan_capture`] returns
+///   `None` otherwise, so [`run_capture`] holds no conditional.
 pub(crate) struct CapturePlan {
-    /// The lock folder used by this **child** — not ours (the contract of [`plan_capture`]).
     pub(crate) lock_dir: PathBuf,
     pub(crate) child_pid: u32,
     pub(crate) child_start_time: u64,
-    /// The record verb the assembly point handed over bound to the incarnation marker. It is the **only** path the recovered value leaves through.
+    /// The record verb the assembly point handed over, bound to the incarnation marker — the **only** path the recovered value leaves through.
     ///
-    /// ★What does this `Arc` keep alive — checked again★: the inner closure holds an `Arc<ProfileRegistry>`.
-    ///   But that registry is a single owned object that `AgentManager` holds **for the whole daemon lifetime**, so this
-    ///   clone does not extend that lifetime for even a moment. What it extends is only the thread's own lifetime, and that
-    ///   ends when the child dies (the stop condition of [`run_capture`]).
-    ///   ★Why it is not a `Weak`★: there is no place to hold the strong side — the assembly point passes this verb to
-    ///   `open_spawn` and lets go. To make the session hold it, the ownership split of `AgentSession` (the
-    ///   「ownership split」 invariant) would have to change, and that is not a change this recovery path alone should demand.
+    /// ★What this `Arc` keeps alive★: the inner closure holds an `Arc<ProfileRegistry>`, but that registry is owned by `AgentManager` for
+    ///   the whole daemon lifetime, so this clone extends nothing; the thread's own lifetime ends when the
+    ///   child dies ([`run_capture`]). ★Not a `Weak`★: nobody holds the strong side — the assembly point passes the verb to `open_spawn`
+    ///   and lets go; making the session hold it would change the `AgentSession` ownership split.
     pub(crate) sink: SessionIdSink,
 }
 
 /// Should this spawn run lock recovery — if so, its inputs, otherwise `None`.
 ///
-/// Conditions (if any one is missing, `None`):
-/// - **This spawn does not emit resume argv** (`resumes_by_argv == false`). ★The point is that what is asked is
-///   not 「is there a stored handle」 but 「did that handle actually go out as argv」★ —
-///   even with a handle, if its value cannot be loaded (a value `resume_argument` refuses) codex comes up as a **new conversation**,
-///   and nobody writes the id of that incarnation. The old form that decided on 「there is one」 was exactly that hole
-///   (found 2026-09-21). We make the two decisions look at the **same single predicate** to remove that mismatch
-///   (ADR-0218 decision 5 · source of record for the predicate = `super::resume_argument`).
-///   ★The combination of Fresh with a handle coming along is blocked by the assembly point★ — `manager::resume_handle_for`
-///   (its doc and its tests are the source of record). So this entry holds without taking the mode.
-/// - There is somewhere to record (`sink`). Without it, there is nowhere to keep what we receive.
-/// - Both the child's PID and **start time** are known. If either is unknown, the decision sinks to a PID-only comparison
-///   and becomes the shape ADR-0218 decision 2 forbids — so we cut it off here.
+/// Conditions (any missing → `None`):
+/// - **This spawn does not emit resume argv** (`resumes_by_argv == false`). ★The question is not 「is there a stored handle」 but 「did it
+///   actually go out as argv」★ — a handle whose value `resume_argument` refuses makes codex come up as a
+///   **new conversation** and nobody would write that incarnation's id (the old form deciding on 「there is one」 was that hole). Both
+///   decisions look at the **same predicate** (ADR-0218 decision 5; source of record `super::resume_argument`).
+///   ★Fresh with a handle coming along is blocked by the assembly point★ (`manager::resume_handle_for`), so this entry holds without
+///   taking the mode.
+/// - There is somewhere to record (`sink`).
+/// - Both the child's PID and **start time** are known — otherwise the decision sinks to PID-only, forbidden by ADR-0218 decision 2.
 /// - The lock folder is known.
 ///
-/// ★Resolve the lock folder from the **child's** environment — do not substitute ours★: `CODEX_HOME` applies only to the process that sets it,
-///   so if the profile sets that value, the child's lock **never** appears in the folder we look at. That mismatch is
-///   not an error but 「still empty-handed」, so there is no signal on screen.
-/// `our_lock_dir` = the value to use when the child inherited our environment as is ([`lock_dir`]). It is taken as an argument
-///   so this decision can be measured without env.
+/// ★Resolve the lock folder from the **child's** environment — not ours★: `CODEX_HOME` applies only to the process that sets it, so a
+///   profile-set value means the child's lock **never** appears in our folder — not an error but 「still empty-handed」, no
+/// on-screen signal. `our_lock_dir` = the value when the child inherited our environment ([`lock_dir`]); an argument so the decision is
+///   measured without env.
 // ADR-0218
 pub(crate) fn plan_capture(
     child_env: &[(String, String)],
@@ -353,15 +311,15 @@ pub(crate) fn plan_capture(
     })
 }
 
-/// Only the folder rule of [`plan_capture`] — if the spawn env sets `CODEX_HOME`, that home wins, otherwise ours does.
+/// Only the folder rule of [`plan_capture`] — a spawn env `CODEX_HOME` wins, otherwise ours.
 ///
-/// ★Pick the **last** entry★ — the spawn env is a list and the same key can be loaded twice, and the path pushes that list
-///   into `cmd.env` in order, so what the child actually receives is the later one.
-/// ★Key comparison follows the OS rule for environment variable names ([`env_key_eq`])★ — on Windows case is not distinguished.
-/// ★An empty value counts as 「not set」★ — [`codex_home_from`] reads our side's env that way, so we use the same rule.
-/// ★Known hole — relative paths★: such a value is resolved later against **our** cwd, but the child would resolve it
-///   against its own cwd, so the two can diverge. The symptom is not a false detection but 「still empty-handed」 — candidate decision still requires the child's
-///   PID and start time. Whether such a profile really exists is unconfirmed, so we do not fix it and only write it down.
+/// ★Pick the **last** entry★ — the env is a list and the same key can be loaded twice; the path pushes it into `cmd.env` in order, so the
+///   child receives the later one.
+/// ★Key comparison follows the OS rule ([`env_key_eq`])★ — Windows is case-insensitive. ★An empty value counts as 「not set」★
+///   ([`codex_home_from`] reads our env the same way).
+/// ★Known hole — relative paths★: resolved here against **our** cwd but by the child against its own, so they can diverge; the symptom is
+///   「still empty-handed」, not a false detection (the PID + start time still apply). Whether such a profile
+/// exists is unconfirmed, so it is documented, not fixed.
 fn child_lock_dir(
     child_env: &[(String, String)],
     our_lock_dir: Option<PathBuf>,
@@ -378,13 +336,12 @@ fn child_lock_dir(
     }
 }
 
-/// Start the recovery polling on a **separate thread** — the spawn goes ahead even if it fails.
+/// Start the recovery polling on a **separate thread** — the spawn proceeds even if it fails.
 ///
-/// ★It blocks neither the spawn path nor the pump★: this thread only does `sleep` and OS queries and holds none of the session's
-///   locks. It does not hold the session either — what it holds is just one record verb, so the agent is not reaped late
-///   because this thread remains.
-/// ★If the thread cannot be started, only a warning is left and it ends★ — the failure mode is 「cannot receive the id」 and that is not a reason
-///   to cut the spawn (the same handling as ADR-0218 decision 10).
+/// ★Blocks neither the spawn path nor the pump★: the thread only sleeps and queries the OS, holds none of the session's locks, and holds
+///   only one record verb (not the session), so the agent is not reaped late because of it.
+/// ★A thread that cannot start leaves only a warning★ — the failure mode is 「cannot receive the id」, not a reason to cut the spawn (as
+///   ADR-0218 decision 10).
 pub(crate) fn spawn_capture(plan: CapturePlan) {
     let clock = ChildClock {
         pid: plan.child_pid,
@@ -403,43 +360,33 @@ pub(crate) fn spawn_capture(plan: CapturePlan) {
     }
 }
 
-/// Poll until caught — ★there are only three stop conditions and a time limit is not among them★ (ADR-0218 decision 4).
+/// Poll until caught — ★three stop conditions, no time limit★ (ADR-0218 decision 4).
 ///
-/// 1. [`ScanOutcome::Found`] — adopt and stop.
-/// 2. The child died ([`CaptureClock::child_alive`]).
-/// 3. The session goes down — ★having no separate signal is intended★: shutdown starts with the path killing the child
-///    (「kill causality」), so its outcome arrives as item 2. Attaching a second signal would put this observer into the shutdown order.
+/// 1. [`ScanOutcome::Found`] — adopt and stop. 2. The child died ([`CaptureClock::child_alive`]). 3. The session goes down — ★no separate
+///   signal, intentionally★: shutdown starts with the path killing the child (「kill causality」), so it arrives as item 2;
+///    a second signal would put this observer into the shutdown order.
 ///
-/// ★[`ScanOutcome::Ambiguous`] is not a stop — it means 「not adopted this round」★: what ADR-0218 decision 3
-///   says is **refusal**, and this outcome is not in decision 4's list of stops. The overlap may be momentary
-///   (a short overlap at the moment the thread switches), and if the thread ended there the agent would lose recovery **forever**.
-///   The warning is emitted only on the first round — emitting it every round would bury the log under that one fact.
+/// ★[`ScanOutcome::Ambiguous`] is not a stop — 「not adopted this round」★ (decision 3 says **refusal**, not in decision 4's stops): the
+///   overlap may be momentary, and ending here would lose recovery **forever**. The warning is emitted on the first round only.
 ///
-/// Adoption goes out only through [`CapturePlan::sink`] — even if that verb discards the value (refused
-/// because it is a dead incarnation's record), we end right there without leaking through another path.
+/// Adoption goes out only through [`CapturePlan::sink`] — even if that verb discards the value (a dead incarnation's record), we end there
+///   without another path.
 ///
-/// ★The window between kill and record was not closed — a conclusion we left after re-checking★: if the child dies
-///   after the liveness check, this round's record still goes out. **That is correct** — the written value is the thread id
-///   that incarnation, which just died, actually used, and the point is for the next activation to resume that conversation. The only harmful combination is
-///   the case where **the next incarnation is already up** in between, and then the markers differ and the assembly point's incarnation guard refuses.
-///   ★Why that 「refuses」 has no gap — we leave the grounds, not only the conclusion (so the next reader does not derive it
-///   again)★:
-///     1. The only place that **raises** the incarnation marker is `ProfileRegistry::epoch_for_spawn`. The one other
-///        write (`merge_preserving_live`) only **preserves** the live value and does not raise it.
-///     2. `AgentManager::spawn_agent` calls it exactly once per spawn, and that call is **before** `release_session_id`,
-///        where Fresh clears the handle.
-///     So there is no span where 「the marker is unchanged but only the handle is cleared」 exists. At the moment a late record can arrive with the old marker,
-///     the clearing has not yet happened, and if the clearing has happened the marker has already changed. When the profile is
-///     deleted entirely, the lookup itself fails in the assembly point's record verb (`commit_session_id`) and it
-///     drops out at the same place.
-///   ★「the record goes out」 means it is **handed** to this incarnation's first-submission latch (ADR-0226)★ — it is written to the registry only
-///     when there was a submission. The value of an incarnation that died without a submission is not written (there is no conversation to resume).
-///   That is why we did not add a new cancellation signal here — it is not a hole to close but an **intended outcome**.
+/// ★The window between kill and record is left open — conclusion after re-checking★: if the child dies after the liveness check, this
+///   round's record still goes out. **That is correct** — it is the thread id that just-dead incarnation used, and the next
+///   activation should resume that conversation. The only harmful case is **the next incarnation already being up**, where the markers
+///   differ and the assembly point's incarnation guard refuses. ★Why that 「refuses」 has no gap (grounds, so nobody re-derives it)★:
+///     1. The only place that **raises** the marker is `ProfileRegistry::epoch_for_spawn` (`merge_preserving_live` only preserves).
+///     2. `AgentManager::spawn_agent` calls it once per spawn, **before** `release_session_id` clears the handle in Fresh.
+///   So there is no span with 「marker unchanged but handle cleared」; a late record with the old marker arrives before the clearing, and
+///   after the clearing the marker has changed. A deleted profile fails the lookup in `commit_session_id` and drops out there.
+///   ★「The record goes out」 = **handed** to this incarnation's first-submission latch (ADR-0226)★ — written to the registry only if there
+///   was a submission; a dead incarnation without one writes nothing (no conversation to resume).
+///   Hence no new cancellation signal: it is an **intended outcome**, not a hole.
 ///
-/// ★Once caught, it does not follow later thread changes — a known unconfirmed item★: if the user opens
-///   a new thread mid-conversation, codex will take over the lock anew (unmeasured), but this loop has already stopped, so the profile keeps the first
-///   thread id. Resuming in that state opens that first conversation, not the conversation the user was last looking at.
-///   「stop immediately once caught」 is a choice of ADR-0218 decision 4, so we do not flip it here.
+/// ★Once caught, later thread changes are not followed — known, unconfirmed★: if the user opens a new thread mid-conversation codex will
+///   take over the lock anew (unmeasured) but this loop has stopped, so the profile keeps the first thread id and Resume
+///   opens that first conversation. 「Stop immediately once caught」 is ADR-0218 decision 4; not flipped here.
 fn run_capture(plan: &CapturePlan, probe: &dyn LockHolderProbe, clock: &dyn CaptureClock) {
     let mut delay = FIRST_DELAY;
     let mut warned_ambiguous = false;
@@ -474,7 +421,6 @@ fn run_capture(plan: &CapturePlan, probe: &dyn LockHolderProbe, clock: &dyn Capt
     }
 }
 
-/// The next wait after an empty-handed round — doubled each time, stopping at [`MAX_DELAY`] (reason = the doc of that constant).
 fn next_delay(previous: Duration) -> Duration {
     (previous * 2).min(MAX_DELAY)
 }
@@ -484,23 +430,19 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    // ★The fake tree is **the shape that actually appears in production** — if it is flat, the whole test becomes a lie★:
-    //   the PID we hold is the `cmd.exe` wrapper (`engram_dashboard_platform::shell::console_command`) and the one holding the lock is the
-    //   `codex.exe` below it. If the holder is planted with the wrapper PID, even an implementation that 「compares only the wrapper」 goes green — we actually
-    //   planted it that way once and it passed an implementation whose recovery never happens (found 2026-09-21).
+    // ★The fake tree is **the production shape — flat would make the test a lie**★: the PID we hold is the `cmd.exe` wrapper
+    //   (`engram_dashboard_platform::shell::console_command`) and the lock holder is the `codex.exe` below it. Planting the holder
+    //   with the wrapper PID passes even a 「compare only the wrapper」 implementation whose recovery never happens (it did once, 2026-09-21).
     const WRAPPER_PID: u32 = 4242;
     const WRAPPER_START: u64 = 134_344_468_098_866_343;
-    /// The wrapper's child = the process that actually holds the lock.
     const CODEX_PID: u32 = 4816;
     const CODEX_START: u64 = 134_344_468_099_111_111;
-    /// A tool launched by codex — must be caught even if the tree is one level deeper.
     const TOOL_PID: u32 = 19_468;
     const TOOL_START: u64 = 134_344_468_099_222_222;
 
     const ID_A: &str = "01a0c2c4-97f5-75e2-8ea0-4855b7a0997d";
     const ID_B: &str = "01a0c2c3-4f4c-7ee2-a858-3db9f72c2e78";
 
-    /// A fake holding the list, holders and tree whole — it touches neither the filesystem nor the OS.
     struct FakeProbe {
         entries: Vec<PathBuf>,
         holders: HashMap<PathBuf, Vec<Holder>>,
@@ -508,7 +450,6 @@ mod tests {
     }
 
     impl Default for FakeProbe {
-        /// Default tree = wrapper + codex, two levels. Only tests that need a deeper tree widen it with [`FakeProbe::with_tool`].
         fn default() -> Self {
             Self {
                 entries: Vec::new(),
@@ -539,7 +480,6 @@ mod tests {
         fn holders(&self, path: &Path) -> Vec<Holder> {
             self.holders.get(path).cloned().unwrap_or_default()
         }
-        /// If the root's identity does not match there is no tree — the same rule as the real `process::subtree`.
         fn our_processes(&self, root_pid: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
             if root_pid != WRAPPER_PID || root_start_time != WRAPPER_START {
                 return Vec::new();
@@ -572,7 +512,6 @@ mod tests {
         }
     }
 
-    /// The side holding the lock — ★not the PID we hold but its **child**★.
     fn codex() -> Holder {
         Holder {
             pid: CODEX_PID,
@@ -587,7 +526,6 @@ mod tests {
         }
     }
 
-    /// ★Always ask with the **wrapper** PID — that is what we hold in production★.
     fn scan(probe: &FakeProbe) -> ScanOutcome {
         scan_for_child(Path::new("Z:/locks"), WRAPPER_PID, WRAPPER_START, probe)
     }
@@ -598,15 +536,14 @@ mod tests {
 
     // ── Adoption ────────────────────────────────────────────────────────────────────
 
-    /// ★What this entry guards = 「do not compare only the wrapper PID」★: the PID asked is the wrapper but the holder is its
-    /// child. Unless the comparison target is widened to the tree, `NotYet` comes out here.
+    /// ★Guards 「do not compare only the wrapper PID」★: the asked PID is the wrapper but the holder is its child; without widening to the
+    ///   tree this gives `NotYet`.
     #[test]
     fn a_lock_held_by_our_childs_child_is_found() {
         let probe = FakeProbe::default().file(&format!("{ID_A}.lock"), &[codex()]);
         assert_eq!(scan(&probe), found(ID_A));
     }
 
-    /// Caught even when the tree is one level deeper — a lock held by a tool launched by codex.
     #[test]
     fn a_lock_held_by_a_deeper_descendant_is_found() {
         let probe = FakeProbe::default()
@@ -615,14 +552,12 @@ mod tests {
         assert_eq!(scan(&probe), found(ID_A));
     }
 
-    /// A lock held by a process the enumeration did not see is not a candidate — there is no ground to say it is ours.
     #[test]
     fn a_holder_outside_the_reported_tree_is_not_a_candidate() {
         let probe = FakeProbe::default().file(&format!("{ID_A}.lock"), &[tool()]);
         assert_eq!(scan(&probe), ScanOutcome::NotYet);
     }
 
-    /// If the tree is empty (the child died or the PID was reused) we do not even ask about files.
     #[test]
     fn an_empty_tree_short_circuits_to_not_yet() {
         let probe = FakeProbe::default()
@@ -631,7 +566,6 @@ mod tests {
         assert_eq!(scan(&probe), ScanOutcome::NotYet);
     }
 
-    /// If the root's identity is off, the tree itself does not stand — we do not call another party's PID tree ours.
     #[test]
     fn a_root_whose_start_time_drifted_owns_no_tree() {
         let probe = FakeProbe::default().file(&format!("{ID_A}.lock"), &[codex()]);
@@ -774,8 +708,8 @@ mod tests {
         assert_eq!(scan(&probe), ScanOutcome::NotYet);
     }
 
-    /// ★A uuid name that is not in canonical form is not a candidate★ — if accepted, one file we did not create raises the candidate count,
-    /// flips the decision to `Ambiguous`, and that agent's recovery stops entirely.
+    /// ★A non-canonical uuid name is not a candidate★ — accepted, one file we did not create would flip the decision to `Ambiguous` and
+    ///   stop that agent's recovery.
     #[test]
     fn non_canonical_uuid_names_are_not_candidates() {
         let simple = ID_A.replace('-', "");
@@ -793,15 +727,14 @@ mod tests {
         }
     }
 
-    /// The uppercase hyphenated form is accepted — Windows file names do not distinguish case.
     #[test]
     fn an_uppercase_canonical_name_is_still_a_candidate() {
         let probe = FakeProbe::default().file(&format!("{}.lock", ID_A.to_uppercase()), &[codex()]);
         assert_eq!(scan(&probe), found(ID_A));
     }
 
-    /// ★What we count is not files but matched **holders**★ — if two of our processes hold one lock, 「who owns that lock」
-    /// has not been narrowed to one yet. Counting only files lets that state pass as `Found`.
+    /// ★Count matched **holders**, not files★ — two of our processes holding one lock leaves 「who owns it」 unnarrowed; counting files
+    ///   would pass it as `Found`.
     #[test]
     fn two_of_our_processes_on_one_lock_are_ambiguous() {
         let probe = FakeProbe::default()
@@ -810,7 +743,6 @@ mod tests {
         assert_eq!(scan(&probe), ScanOutcome::Ambiguous(2));
     }
 
-    /// Something held jointly by others does not raise the count — we count only **our** holders.
     #[test]
     fn strangers_sharing_the_lock_do_not_make_it_ambiguous() {
         let probe = FakeProbe::default().file(
@@ -870,13 +802,10 @@ mod tests {
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
-    /// The field that counts rounds — the fake clock raises it and the fake probe reads it, writing 「this is visible on round n」.
-    /// Both fakes looking at the same field is the whole of this bundle.
     type Ticks = Rc<Cell<usize>>;
 
     struct FakeClock {
         ticks: Ticks,
-        /// The child is alive only up to this round count.
         alive_through: usize,
         slept: RefCell<Vec<Duration>>,
     }
@@ -911,7 +840,6 @@ mod tests {
         }
     }
 
-    /// A probe that shows a different folder state each round — when the list runs out the last state keeps going.
     struct ScriptedProbe {
         ticks: Ticks,
         rounds: Vec<FakeProbe>,
@@ -931,9 +859,8 @@ mod tests {
         fn holders(&self, path: &Path) -> Vec<Holder> {
             self.round().holders(path)
         }
-        /// ★Delegate **all** three methods — miss even one and only that spot silently goes to the real OS★.
-        /// When this was actually missed, the tree query leaked to the default implementation, scanned the real process table with a fake PID,
-        /// and since the answer was always empty-handed the loop never ended (measured 2026-09-21 — three items hung for over 60 seconds).
+        /// ★Delegate **all** three methods — a missed one silently goes to the real OS★ (when missed, the tree query scanned the real
+        ///   process table with a fake PID, always came back empty, and the loop never ended: 3 items hung >60 s, 2026-09-21).
         fn our_processes(&self, root_pid: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
             self.round().our_processes(root_pid, root_start_time)
         }
@@ -942,7 +869,6 @@ mod tests {
         }
     }
 
-    /// A record verb that accumulates the strings it receives as is — the **same type** the assembly point hands over.
     fn recording_sink() -> (SessionIdSink, Arc<Mutex<Vec<String>>>) {
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let write = seen.clone();
@@ -991,9 +917,8 @@ mod tests {
         );
     }
 
-    /// ★A refusal, not a giving up (ADR-0218 decision 3 vs decision 4)★ — once the overlap clears, we adopt on the next round.
-    /// If the thread were ended here, one short overlap at the moment the thread switches would end that agent's recovery
-    /// for good.
+    /// ★A refusal, not a giving up (ADR-0218 decision 3 vs 4)★ — once the overlap clears we adopt next round; ending the thread would end
+    ///   that agent's recovery for good after one short overlap.
     #[test]
     fn an_ambiguous_scan_adopts_nothing_but_keeps_polling() {
         let (got, rounds) = drive(
@@ -1013,7 +938,6 @@ mod tests {
         assert_eq!(rounds, 2, "ended the thread on the overlapping round");
     }
 
-    /// If the overlap never clears, adoption never happens — the 「refusal」 side stays as is.
     #[test]
     fn an_ambiguous_scan_that_never_clears_adopts_nothing() {
         let (got, rounds) = drive(
@@ -1041,12 +965,12 @@ mod tests {
         );
     }
 
-    /// ★Adoption goes out through the handed-over verb **alone** — even if that verb discards the value there is no second path★.
+    /// ★Adoption goes out through the handed-over verb **alone** — even if it discards the value there is no second path★.
     ///
-    /// The fake used here has the same shape as a dead incarnation's record verb (it receives but leaves nothing in the profile).
-    /// That the production verb really carries the incarnation guard is measured on the assembly point's side by
-    /// `manager::tests::a_dead_incarnations_sink_cannot_overwrite_a_live_value` —
-    /// ADR-0004 says `ProfileRegistry` does not enter the backend, so this spot is set up with a **refusing verb**.
+    /// The fake has the shape of a dead incarnation's record verb (receives, leaves nothing in the profile). That the production verb
+    ///   carries the incarnation guard is measured on the assembly side by
+    /// `manager::tests::a_dead_incarnations_sink_cannot_overwrite_a_live_value` (ADR-0004: `ProfileRegistry` does not enter the backend),
+    ///   so this spot uses a **refusing verb**.
     #[test]
     fn a_sink_that_drops_the_value_does_not_make_the_loop_look_elsewhere() {
         let calls = Arc::new(Mutex::new(0usize));
@@ -1113,8 +1037,8 @@ mod tests {
         )
     }
 
-    /// ★The plan carries the **handed-over** record verb as is★ — if another verb is invented here, the incarnation guard the assembly point
-    /// bound goes missing entirely (the real guard is `manager::session_id_sink`).
+    /// ★The plan carries the **handed-over** record verb as is★ — inventing another here would lose the incarnation guard bound at the
+    ///   assembly point (`manager::session_id_sink`).
     #[test]
     fn the_plan_carries_the_sink_it_was_handed() {
         let (sink, seen) = recording_sink();
@@ -1145,9 +1069,8 @@ mod tests {
         assert_eq!(made.lock_dir, lock_dir_under(Path::new(OUR_HOME)));
     }
 
-    /// ★What the gate looks at is 「did argv actually resume」★ — not 「is there a handle」. The spot that
-    /// tells the two apart (a handle that cannot be loaded) is measured by this folder's
-    /// `tests::a_handle_we_refuse_to_resume_with_is_still_captured`.
+    /// ★The gate looks at 「did argv actually resume」, not 「is there a handle」★; the tell-apart case (an unloadable handle) is measured by
+    ///   this folder's `tests::a_handle_we_refuse_to_resume_with_is_still_captured`.
     #[test]
     fn a_resume_incarnation_never_starts_the_loop() {
         assert!(
@@ -1190,8 +1113,8 @@ mod tests {
         .is_none());
     }
 
-    /// ★A `CODEX_HOME` set by the profile beats ours★ — that variable applies only to the process that sets it, so if we
-    /// scan our folder the child's lock is never seen (empty-handed forever, with no error).
+    /// ★A profile-set `CODEX_HOME` beats ours★ — it applies only to the process that sets it, so scanning our folder never sees the
+    ///   child's lock (empty-handed forever, no error).
     #[test]
     fn the_lock_dir_comes_from_the_childs_environment() {
         let made = plan(
@@ -1243,9 +1166,9 @@ mod tests {
 
     // ── Coupling with the real probe (Windows) ──────────────────────────────────────
 
-    /// One round with [`RestartManagerProbe`] instead of a fake — it finds the `<uuid>.lock` this process opened, pretending it is the child
-    /// (asking with its own PID and start time). We put in the same folder a lock that is **not held** and a name that is not an id,
-    /// so the list-side rules also pass through the real thing.
+    /// One round with [`RestartManagerProbe`] instead of a fake — finds the `<uuid>.lock` this process opened, pretending it is the child
+    ///   (own PID and start time). A **not held** lock and a non-id name sit in the same folder so list-side rules pass through the real
+    ///   thing too.
     #[cfg(windows)]
     #[test]
     fn the_real_probe_finds_a_lock_this_process_holds() {
@@ -1270,8 +1193,8 @@ mod tests {
         assert_eq!(outcome, found(ID_A));
     }
 
-    /// The real [`ChildClock`] stops the capture loop for a child that exited while its object is still held (the
-    /// spawner keeps the handle) — the start time alone still matched it (TRD S21 trd-3-2-u5 R4).
+    /// The real [`ChildClock`] stops the capture loop for a child that exited while its object is still held (the spawner keeps the
+    ///   handle) — start time alone still matched it (TRD S21 trd-3-2-u5 R4).
     #[cfg(windows)]
     #[test]
     fn the_real_child_clock_sees_an_exited_child_as_gone() {

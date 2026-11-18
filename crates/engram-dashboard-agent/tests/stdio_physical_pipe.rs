@@ -1,15 +1,14 @@
 //! ③ Physical OS-pipe layer integration test — verifies delivery accuracy with a real StdioTransport + a real OS pipe.
 //!
-//! The daemon seam test of ADR-0088 Stage 1 (control_send.rs) has `SeamTransport` capture an already complete Vec with an
-//!   atomic `push`, so it **bypasses the physical pipe layer** — this file is that "return follow-up",
-//!   i.e. it covers the physical stdin write path of the production StdioTransport (`stdin.lock()` + `write_all` + `flush`).
+//! The ADR-0088 Stage 1 daemon seam test (control_send.rs) has `SeamTransport` capture an already complete Vec with an atomic `push`, so
+//!   it **bypasses the physical pipe layer**; this file covers the production StdioTransport's physical stdin write path.
 //!
-//! ★The one that runs that path has changed — the items in this file stand on top of that★: `send_input` now only
-//!   puts into a bounded queue, and the physical write is done by the **dedicated writer thread** (`transport::input_queue`). So this file
-//!   always calls `transport.start()` (the writer is spawned there), and reads the `Ok` of `send_input` as **"accepted"**,
-//!   not "delivered". Whether it was delivered is always measured by the child's echo.
+//! ★The path's runner changed — the items here stand on that★: `send_input` only enqueues into a bounded queue and the **dedicated writer
+//!   thread** writes (`transport::input_queue`). So this file always calls `transport.start()` (the writer spawns there) and reads
+//!   `send_input`'s `Ok`
+//!   as **"accepted"**, not "delivered"; delivery is always measured by the child's echo.
 //!
-//! ★Windows only★: the child is powershell, so it compiles and runs only on Windows (a project premise).
+//! ★Windows only★: the child is powershell (a project premise).
 // ADR-0088
 #![cfg(windows)]
 
@@ -90,34 +89,28 @@ fn spec(program: &str, args: &[&str]) -> CommandSpec {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════
 // Test 1 — physical OS-pipe concurrent write with no interleaving (stdin.lock() regression net)
-// ═══════════════════════════════════════════════════════════════════════════════════════════
 
-/// ★Proves★: **application-layer serialization** of the physical pipe layer — even if one logical message is split across several OS
-///   writes, another writer's write cannot slip in between. ★The one that bears that serialization has changed★: before it was
-///   `send_input` holding `stdin.lock()` throughout write_all+flush, and now it is
-///   **one chunk being one entry of the queue and only one thread taking it out and writing it** (`transport::input_queue`).
-///   The property measured and this item's oracle are unchanged. If the concatenated stream is **exactly N
-///   contiguous runs** (1 per fill byte, each of length exactly L): no interleaving (otherwise more than N runs) +
-///   no loss (total and each run length exact) + no duplication/substitution (each byte value is exactly 1 run).
-///   ▷ The verified regression shape = **"writing one logical message with several OS writes without an exclusive lock"**. Empirical check:
-///     mutating it to drop the lock and write in chunks (chunked-writes-lock-dropped) grew the runs to 6 (more than N=4)
-///     and the test failed → a regression of this shape is caught.
+/// ★Proves★: **application-layer serialization** of the physical pipe — even if one logical message is split across several OS writes,
+///   another writer cannot slip in. ★The bearer changed★: formerly `send_input` held `stdin.lock()` across write_all+flush; now **one
+///   chunk is one queue entry and
+///   only one thread takes it out and writes** (`transport::input_queue`). The measured property and oracle are unchanged: the
+///   concatenated stream is **exactly N contiguous runs** (1 per fill byte, each exactly L) = no interleaving (else > N runs) + no loss
+///   (total and each run exact) + no duplication/substitution.
+///   ▷ Verified regression shape = **"one logical message written with several OS writes without an exclusive lock"** (mutating to
+///   chunked-writes-lock-dropped grew the runs to 6 > N=4 and failed).
 /// ★Does not prove★:
-///   (1) It cannot force that interleaving **actually occurs when there is no lock** — under the current implementation (lock present) it only proves
-///       the **absence of interleaving**. It was built with a slow reader · backpressure · L ≥ pipe buffer to maximize the interleaving window
-///       "when the lock is removed" (the best as a regression net).
-///   (2) It does **not claim** that this test catches a **lock-free single-WriteFile implementation** (firing each 256KiB message with
-///       one blocking WriteFile) — in that case NPFS (anonymous byte-mode pipe) serializes the whole write request
-///       in the kernel, so the runs could still be N. The atomicity of a single write request on a byte-mode pipe is
-///       **undocumented kernel behavior**, so we assert neither way. Since we cannot touch production, we cannot force a multi-syscall
-///       write from outside, so the claimed scope is limited to application-layer serialization.
+///   (1) That interleaving **actually occurs without the lock** cannot be forced — with the lock present it proves only the **absence**;
+///   slow reader · backpressure · L ≥ pipe buffer maximize the window.
+///   (2) It does **not claim** to catch a **lock-free single-WriteFile implementation** (each 256 KiB message as one blocking WriteFile) —
+///   NPFS (anonymous byte-mode pipe) serializes the whole request in the kernel, so runs could still be N; that atomicity is
+///   **undocumented kernel behavior**, asserted neither way. Production
+///       cannot be touched to force a multi-syscall write, so the claim is limited to application-layer serialization.
 #[test]
 fn physical_pipe_concurrent_sends_no_interleave() {
-    // Slow reader echo child (1ms per 8KiB chunk) → the pipe fills with backpressure. Backpressure, in an implementation where a write is
-    //   split across several OS writes (verified regression shape = chunked write without an exclusive lock), **widens the interleaving window**.
-    //   It is a byte loop over the Console standard streams, so cmd.exe cannot do it (no byte-level control) — use powershell.
+    // Slow reader echo child (1 ms per 8 KiB chunk) → the pipe fills with backpressure, which **widens the interleaving window** for a
+    //   write split across several OS writes. A byte loop over the Console standard streams — cmd.exe cannot (no byte-level control), so
+    //   powershell.
     let child_script = "\
 $stdin=[Console]::OpenStandardInput();\
 $stdout=[Console]::OpenStandardOutput();\
@@ -143,13 +136,13 @@ $stdout.Write($buf,0,$n);$stdout.Flush();Start-Sleep -Milliseconds 1}";
     transport.start(core.clone());
     core.subscribe(Arc::new(sink.clone()));
 
-    // L comfortably exceeds the OS pipe buffer — maximizes the interleaving window when the lock is removed.
-    //   256KiB × 4 = 1MiB total, and even with a slow reader (8KiB/1ms ≈ 8MiB/s) within a few seconds of wall clock.
+    // L comfortably exceeds the OS pipe buffer (maximizes the interleaving window without the lock); 256 KiB × 4 = 1 MiB, within seconds
+    //   even at 8 KiB/1 ms ≈ 8 MiB/s.
     const N: usize = 4;
     const L: usize = 256 * 1024;
 
-    // ★FIX 3★: every failure/timeout/panic-join/spawn-failure path cleans up the blocked
-    //   writer · child · pump with transport.shutdown() before panicking (to prevent leaks while other tests run concurrently).
+    // ★FIX 3★: every failure/timeout/panic-join/spawn-failure path cleans up the blocked writer · child · pump with transport.shutdown()
+    //   before panicking (no leaks while other tests run concurrently).
     macro_rules! fail {
         ($($arg:tt)*) => {{
             transport.shutdown();
@@ -162,11 +155,11 @@ $stdout.Write($buf,0,$n);$stdout.Flush();Start-Sleep -Milliseconds 1}";
     for i in 0..N {
         let t = transport.clone();
         let b = barrier.clone();
-        // ★Handling thread-creation failure (round-3 MEDIUM)★: a raw spawn panics immediately when OS thread creation fails and
-        //   breaks the all-panic-paths-cleanup contract without shutdown → receive the Err with Builder::spawn and route it to fail!(panic after
-        //   shutdown). However, the writers already spawned are parked at Barrier::wait, a stage before send_input
-        //   (an N-party barrier does not open until N arrive), so even shutdown's pipe kill cannot wake them —
-        //   they stay detached and are reclaimed at process exit (a spawn failure is already a big failure, so it ends here with a loud panic).
+        // ★Thread-creation failure (round-3 MEDIUM)★: a raw spawn would panic at once and break the all-panic-paths-cleanup contract
+        //   without shutdown → take the Err from Builder::spawn and route it to fail! (panic after shutdown). Writers already spawned are
+        //   parked at Barrier::wait (an N-party barrier
+        //   opens only when N arrive), so even shutdown's pipe kill cannot wake them — they stay detached until process exit (a spawn
+        //   failure is already a big failure).
         let h = match std::thread::Builder::new().spawn(move || {
             let fill = b'A' + i as u8;
             let payload = vec![fill; L];
@@ -178,9 +171,8 @@ $stdout.Write($buf,0,$n);$stdout.Flush();Start-Sleep -Milliseconds 1}";
         };
         handles.push(h);
     }
-    // ★watchdog (FIX 2)★: if the child stops draining stdin, write_all blocks holding the lock by pipe backpressure
-    //   → a naive `join()` never returns (it cannot even reach the output deadline later).
-    //   Polls `is_finished()` until the deadline to turn the hang into a big failure.
+    // ★watchdog (FIX 2)★: a child that stops draining stdin blocks write_all holding the lock by backpressure → a naive `join()` never
+    //   returns; poll `is_finished()` until the deadline to turn the hang into a failure.
 
     let join_deadline = Instant::now() + Duration::from_secs(120);
     for (i, h) in handles.into_iter().enumerate() {
@@ -258,7 +250,6 @@ fn run_length_encode(bytes: &[u8]) -> Vec<(u8, usize)> {
     runs
 }
 
-/// With interleaving the runs explode, so only the first 20.
 fn summarize_runs(runs: &[(u8, usize)]) -> Vec<(char, usize)> {
     runs.iter()
         .take(20)
@@ -270,21 +261,20 @@ fn summarize_runs(runs: &[(u8, usize)]) -> Vec<(char, usize)> {
 // Test 2 — exceeding the bound is a **refusal** (it is not silently dropped)
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
-/// ★The item that was once here (`physical_pipe_partial_write_then_err_surfaces_as_err`) **no longer
-///   holds — because the contract changed, not because it weakened**★.
-///   The old item relied on 「send_input runs write_all on the calling thread」 and measured 「that call returns Err even after the prefix has physically gone out」.
-///   Now `send_input` does not touch the OS and only puts into a bounded
-///   queue (module = `transport::input_queue`), so **the only failure that call can see is 「not accepted」**.
-///   The other half the old item measured (「how a failure after accepting is reported」) went to Test 3.
+/// ★The item once here (`physical_pipe_partial_write_then_err_surfaces_as_err`) **no longer holds — the contract changed, it was not
+///   weakened**★: it relied on 「send_input runs write_all on the calling thread」 and measured 「that call returns Err even after the prefix
+///   has gone out」. Now `send_input` only enqueues
+///   (`transport::input_queue`), so **the only failure that call can see is 「not accepted」**; the other half (「how a failure after
+///   accepting is reported」) moved to Test 3.
 ///
-/// ★This item proves★: a payload over the queue bound is **refused whole** (`Err`), and ★as direct evidence that the refusal is not a silent
-///   loss, **the child receives not a single byte**★. A regression that partially accepts an overflow or
-///   writes only the front part and returns `Ok` is certain to be caught by one of the two assertions below.
-/// (The physical-layer edition of the ADR-0190 disposition — "if exceeded, that call returns `Err` — it is not discarded".)
+/// ★Proves★: a payload over the queue bound is **refused whole** (`Err`), and ★as direct evidence the refusal is not a silent loss, **the
+///   child receives not a single byte**★; a regression that partially accepts an overflow or writes only the front and returns `Ok` is
+///   caught by one of the two assertions.
+/// (The physical-layer edition of ADR-0190: "if exceeded, that call returns `Err` — it is not discarded".)
 #[test]
 fn physical_pipe_oversized_payload_is_refused_whole() {
-    // The child keeps reading stdin and echoing — that is, this is where we measure that **it could have been delivered but was not**
-    // (not that it could not go because the child did not read).
+    // The child keeps reading stdin and echoing — this measures that **it could have been delivered but was not** (not that it could not
+    //   because the child did not read).
     let child_script = "\
 $stdin=[Console]::OpenStandardInput();\
 $stdout=[Console]::OpenStandardOutput();\
@@ -318,8 +308,8 @@ $stdout.Write($buf,0,$n);$stdout.Flush()}";
         );
     }
 
-    // ★Direct evidence that it is not a silent loss★: for 1s after the refusal the child echoes nothing back.
-    //   With a partial-acceptance regression, that front part would come back as echo and be caught here.
+    // ★Direct evidence that it is not a silent loss★: for 1 s after the refusal the child echoes nothing back; a partial-acceptance
+    //   regression would echo that front part.
     std::thread::sleep(Duration::from_secs(1));
     let leaked = sink.total_len();
 
@@ -354,19 +344,17 @@ $stdout.Write($buf,0,$n);$stdout.Flush()}";
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
 /// ★Proves★:
-///   (a) If the accepted bytes **cannot go out because the child died**, the path closes and ★the **next** `send_input` returns
-///       `Err` carrying the reason★ — the failure is not silently swallowed. (That there is no way to return it to the call that
-///       accepted is the known cost of this design, and this item pins down the **boundary** of that cost: from the next
-///       call on it is always honest.) ★Which thread notices first is a race, so it is not measured★ — the basis for not relying on the reason
-///       string is the comment at the (a) assertion below.
-///   (b) The prefix that went out before the failure is **exactly the first K bytes of the payload** — if the child died before its first read or
-///       the writer failed before writing anything, this equality breaks (blocks a vacuous pass). It inherits the old Test 2's
-///       non-repeating payload oracle as is.
-/// ★The only place it differs from the old Test 2 is (a)★ — there **that call** was Err and here it is the **next call**.
+///   (a) If accepted bytes **cannot go out because the child died**, the path closes and ★the **next** `send_input` returns `Err` carrying
+///   the reason★ — the failure is not swallowed. (No way to return it to the accepting call is the design's known cost; this pins the
+///   cost's **boundary**: from the next
+///       call on it is honest.) ★Which thread notices first is a race, so it is not measured★ (see the (a) assertion below).
+///   (b) The prefix that went out before the failure is **exactly the first K bytes of the payload** — a child dying before its first read
+///   or a writer failing before writing breaks this equality (blocks a vacuous pass); the old Test 2's non-repeating payload oracle, inherited.
+/// ★Differs from the old Test 2 only in (a)★ — there **that call** was Err, here the **next call**.
 #[test]
 fn physical_pipe_write_failure_after_acceptance_surfaces_on_the_next_call() {
-    // K = 64KiB: reads and echoes each chunk and then exits. After exit the pipe breaks and the remaining write_all fails.
-    //   Caps the last read at the remaining (K - total) so total consumption · echo is exactly K.
+    // K = 64 KiB: reads and echoes each chunk then exits; afterwards the pipe breaks and the remaining write_all fails. The last read is
+    //   capped at the remaining (K - total) so consumption · echo is exactly K.
     const K: usize = 64 * 1024;
     let child_script = format!(
         "\
@@ -400,11 +388,11 @@ exit 0"
     transport.start(core.clone());
     core.subscribe(Arc::new(sink.clone()));
 
-    // 1MiB — overwhelms K + the pipe buffer but is under the queue bound (2MiB). ★Lowering it from the old 8MiB was because of the bound, and
-    //   the property this item measures (the child eats only K and dies, so the remaining write fails) is unchanged★ — 1MiB is over 10 times the default
-    //   pipe buffer, so unsent remainder surely remains when the child exits.
-    //   ★Non-repeating stream★: fixed-seed xorshift64 (seed=0x9E37_79B9_7F4A_7C15). Deterministic, and no K-window at any offset
-    //   overlaps payload[..K], so (b) catches a regression where the prefix is written at a wrong offset.
+    // 1 MiB — overwhelms K + the pipe buffer but is under the queue bound (2 MiB). ★Lowered from the old 8 MiB because of the bound; the
+    //   measured property (the child eats only K and dies, the rest fails) is unchanged★ — over 10× the default pipe buffer, so unsent
+    //   remainder surely remains.
+    //   ★Non-repeating stream★: fixed-seed xorshift64 (seed=0x9E37_79B9_7F4A_7C15) — deterministic, and no K-window at any offset overlaps
+    //   payload[..K], so (b) catches a prefix written at a wrong offset.
     const PAYLOAD_LEN: usize = 1024 * 1024;
     let payload: Vec<u8> = {
         let mut v = Vec::with_capacity(PAYLOAD_LEN);
@@ -420,7 +408,6 @@ exit 0"
     };
     let expected_prefix = payload[..K].to_vec();
 
-    // Every failure path cleans up the child · pump · writer with transport.shutdown() before panicking.
     macro_rules! fail {
         ($($arg:tt)*) => {{
             transport.shutdown();
@@ -428,8 +415,8 @@ exit 0"
         }};
     }
 
-    // ★self-check (machine verification) — no aliasing★: at every shift s, payload[s..s+K] != payload[..K].
-    //   If the same window exists, the (b) oracle is blind at that offset and cannot catch a regression. Fast thanks to early-exit.
+    // ★self-check — no aliasing★: at every shift s, payload[s..s+K] != payload[..K]; the same window would blind the (b) oracle at that
+    //   offset. Fast thanks to early-exit.
     let p0 = payload[0];
     for s in 1..=(payload.len() - K) {
         if payload[s] == p0 && payload[s..s + K] == expected_prefix[..] {
@@ -472,15 +459,13 @@ exit 0"
     }
 
     // (a) The child dies and the path closes → the **next** call is refused carrying the reason.
-    //     ★Why polling★: the moment of closing is another thread's work and is not in sync with this thread. We wait until the close is
-    //     observed, but if it never closes (= a regression that swallows the failure) the deadline turns it into a big failure.
-    // ★★Which reason wins is a **race, and both are true** — so we do not assert on the reason string★★:
-    //   when the child dies, ⓐ the writer's blocked write being freed with an error and ⓑ the pump seeing stdout EOF and
-    //   closing with `WriterStop` start **at the same time**, and in measurement ⓑ won first (2026-09-17).
-    //   `InputQueue::close` keeps the first reason, so the phrase then is "the stream ended". The property this item means to measure is
-    //   **「a failure after accepting is not silently swallowed」**, not which thread notices first,
-    //   so the assertion is set as 「it is refused」 + 「that reason is not the bound」 (if it were the bound, this item would pass
-    //   for a different reason than it set out to measure, so only that is ruled out).
+    //     ★Polling★: the close is another thread's work; wait until observed, and the deadline turns a swallowed-failure regression (never
+    //   closes) into a failure.
+    // ★★Which reason wins is a **race, and both are true** — so the reason string is not asserted★★: when the child dies, ⓐ the writer's
+    //   blocked write freed with an error and ⓑ the pump seeing stdout EOF and closing with `WriterStop` start **together**; ⓑ won first
+    //   in measurement (2026-09-17). `InputQueue::close`
+    //   keeps the first reason, so the phrase is then "the stream ended". The property is **「a failure after accepting is not silently
+    //   swallowed」**, so the assertion is 「refused」 + 「the reason is not the bound」 (the bound would pass for a different reason than measured).
     let close_deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match transport.send_input(InputEvent::Raw(b"after\n".to_vec())) {

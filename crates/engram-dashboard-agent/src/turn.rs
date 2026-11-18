@@ -1,41 +1,33 @@
-//! turn — a **turn-progress observation table** per (agent, epoch). The agent "fact" layer owned by the core
-//! (ADR-0113 decision 1 · ADR-0119 decision 4 — next to the registry).
+//! turn — a **turn-progress observation table** per (agent, epoch): the agent "fact" layer owned by the core (ADR-0113 decision 1 ·
+//!   ADR-0119 decision 4 — next to the registry).
 //!
-//! ★What this module owns = observed facts only★: "is this incarnation in a turn now" · "when was the last turn signal" ·
-//!   "was the last turn end an error and is there no clean end after it yet" (stall after error — ADR-0231).
-//!   **Interpretation is the consumers' job** — fallbacks, bounds, doorbells (ADR-0113 decision 2) — the cost of a misjudgment differs per consumer
-//!   (for mail, "not delivered" is the worst, so it uses a fallback that collapses toward idle, and input locking wants a different bound).
-//!   Putting policy here would force one consumer's value judgment on everyone.
+//! ★Owns observed facts only★: "is this incarnation in a turn now" · "when was the last turn signal" · "was the last turn end an error
+//!   with no clean end after it yet" (stall after error — ADR-0231). **Interpretation is the consumers' job** — fallbacks, bounds, doorbells
+//!   (ADR-0113 decision 2); a misjudgment costs differently per consumer (mail's worst case is "not delivered", so it falls back toward
+//!   idle; input locking wants another bound), and policy here would force one consumer's judgment on all.
 //!
-//! ★The event→signal **mapping is not here** (in the spirit of ADR-0004/0110 decision 4)★: which output event is turn progress is
-//!   backend knowledge, so `backend::AgentBackend::turn_classifier` owns it. All this module knows is the signal vocabulary
-//!   (`TurnSignal`) and how to accumulate those signals.
+//! ★The event→signal **mapping is not here** (ADR-0004/0110 decision 4)★: which output event is turn progress is backend knowledge
+//!   (`backend::AgentBackend::turn_classifier`); this module knows only the signal vocabulary (`TurnSignal`) and accumulation.
 //!
-//! ★The write path = `OutputCore::emit` alone, but it has **two callers** (load-bearing)★: ① the output pump thread
-//!   ② the input echo path (`AgentSession::write_input_observed` — the injecting thread emits as is: the mail
-//!   flush lane's blocking thread · the MCP HTTP handler · the Tauri command thread). So an argument that
-//!   assumes a "single thread" does not hold. What does hold instead:
-//!     - The mutex of this table is a **leaf** — never held together with another lock, and no outside call while held. So
-//!       calling it from any thread creates no cycle in the lock-order rule (ADR-0006).
-//!     - The critical section is only a few lines of hash-map operations. This is mandatory because one of the callers is the **output pump** — if this
-//!       grows long, that agent's whole output stream backs up behind it.
+//! ★The write path = `OutputCore::emit` alone, but with **two callers** (load-bearing)★: ① the output pump thread ② the input echo path
+//!   (`AgentSession::write_input_observed` — the injecting thread: the mail flush lane's blocking thread · the MCP HTTP handler · the Tauri
+//!   command thread). A "single thread" argument does not hold. Instead: the table's mutex is a **leaf** (never held with another lock, no
+//!   outside call while held, so no cycle in the lock order — ADR-0006), and the critical section is a few hash-map operations (mandatory:
+//!   one caller is the **output pump**, whose whole output stream would back up behind a longer one).
 //!
-//! ★Lock = this table only (a structure that needs no order rule)★: key entries by `AgentId` and hold the epoch as a **value**,
-//!   ending with one map. If the epoch went into the key, a second table to answer "what is this id's current epoch" would be needed,
-//!   and at that moment an order rule between two locks arises.
+//! ★Lock = this table only★: entries are keyed by `AgentId` with the epoch as a **value**, one map; an epoch in the key would need a
+//!   second table for 「this id's current epoch」 and with it an order rule between two locks.
 //!
-//! ★One entry per id★: there is always exactly one live incarnation. The only verb that takes that place is [`TurnObservations::register`]
-//!   (owner = `AgentManager::spawn_session`), and the main cleanup path of an entry is `forget` (owner = `OutputCore::finish`).
-//!   ★The incarnation marker guarantees only that markers are **different from each other** — order has no meaning★: every spawn, whatever the mode, passes
-//!   the single issuing point of `AgentManager::spawn_agent` (`ProfileRegistry::epoch_for_spawn`), where
-//!   a fresh random number is drawn per incarnation and guaranteed different from the previous value. **Do not scatter issuing across call sites** — in the
-//!   era that did, the Fresh respawn paths reused markers and two incarnations sat here under the same key (that regression is the reason
-//!   this paragraph exists).
-//!   ★So marker comparison is only **equal/unequal** — never ask which is larger (do not revive it)★: once `observe_at`
-//!   filtered late signals by "drop if the marker is smaller". When the marker was an ordered counter it fired 100% of the time, but
-//!   after it became a random number, **half the time the dying incarnation's marker was larger** and passed as is, and that signal overwrote the
-//!   live incarnation's entry. After that, the live incarnation's query answered unobserved (= not in a turn), so **mail goes in mid-turn.**
-//!   Narrowing the authority to change the place to `register` alone closes that hole — a late signal is discarded because its marker does not match.
+//! ★One entry per id★: there is exactly one live incarnation. The only verb that takes its place is [`TurnObservations::register`] (owner
+//!   = `AgentManager::spawn_session`); the main cleanup is `forget` (owner = `OutputCore::finish`).
+//!   ★Markers are only guaranteed **different from each other** — order has no meaning★: every spawn passes the single issuing point
+//!   `AgentManager::spawn_agent` (`ProfileRegistry::epoch_for_spawn`), drawing a random number guaranteed different from the previous one.
+//!   **Do not scatter issuing** — when it was scattered, Fresh respawns reused markers and two incarnations sat under one key.
+//!   ★So comparison is **equal/unequal** only — never which is larger (do not revive it)★: `observe_at` once dropped late signals whose
+//!   marker was smaller; with random markers **half the time the dying incarnation's marker was larger**, passed, and overwrote the live
+//!   entry — the live
+//!   incarnation then answered unobserved (= not in a turn) and **mail went in mid-turn**. Restricting the authority to change the place
+//!   to `register` closes it: a late signal is discarded because its marker does not match.
 // ADR-0113
 // ADR-0006
 
@@ -47,13 +39,12 @@ use engram_dashboard_base::sync;
 
 use crate::types::AgentId;
 
-/// A turn signal read out of an output event — the entire vocabulary the table knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnSignal {
     /// The backend that emitted that event classified it as "this incarnation is in a turn".
     Progress,
-    /// This turn hit an error — ★does not change `in_turn`★. The table holds it, and at that turn's `Ended`
-    /// folds it into `last_end_failed` (the stall does not stand before the end is seen).
+    /// This turn hit an error — ★does not change `in_turn`★. The table holds it and folds it into `last_end_failed` at that turn's `Ended`
+    ///   (the stall does not stand before the end is seen).
     // ADR-0231
     Failed,
     /// The backend that emitted that event classified it as "this incarnation's turn has ended" — carries the kind of end.
@@ -71,26 +62,26 @@ pub enum TurnEndKind {
     Other,
 }
 
-/// Turn-observation snapshot of one (agent, epoch). Absence (`Option::None`) is **unobserved**, not idle —
-/// how to treat the two is decided by the consumer (module header).
+/// Turn-observation snapshot of one (agent, epoch). Absence (`Option::None`) is **unobserved**, not idle — how to treat the two is the
+///   consumer's decision (module header).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnObservation {
     pub in_turn: bool,
-    /// The time the last turn signal was observed for this incarnation. The axis on which a consumer judges "how old is this observation" by its own
-    /// standard (stuck-turn detection etc.).
+    /// The time the last turn signal was observed — the axis on which a consumer judges "how old is this observation" (stuck-turn
+    ///   detection etc.).
     pub last_signal: Instant,
-    /// This incarnation's last turn end was an error and there is no clean success end after it yet (stall after error). An end of kind 「other」 does
-    /// not change this value. Right after registration = false.
+    /// This incarnation's last turn end was an error with no clean success end after it yet (stall after error). An end of kind 「other」
+    ///   does not change it. Right after registration = false.
     // ADR-0231
     pub last_end_failed: bool,
 }
 
-/// Turn observation table — one is owned by `AgentManager` and shared by all `OutputCore`s of that manager.
+/// Turn observation table — one owned by `AgentManager`, shared by all of its `OutputCore`s.
 ///
-/// ★Observation target = "sessions that actually emit turn signals" (why there is no separate capability gate)★: whether to emit a signal
-///   is decided by that session's backend classifier (`backend::turn_classifier` — a backend that does not declare it stays silent).
-///   So we do not filter again here by the "structured output capability" — that would make the core retrace session assembly information,
-///   and on the day the two criteria diverge it would be unclear which is canonical.
+/// ★Observation target = "sessions that actually emit turn signals" (why no separate capability gate)★: whether to emit is that session's
+///   backend classifier's decision (`backend::turn_classifier`; undeclared = silent). Filtering again by the "structured output
+///   capability" would make
+///   the core retrace session assembly information, and when the two criteria diverge it would be unclear which is canonical.
 pub struct TurnObservations {
     entries: Mutex<HashMap<AgentId, Entry>>,
 }
@@ -99,8 +90,8 @@ struct Entry {
     epoch: u32,
     in_turn: bool,
     last_signal: Instant,
-    /// The **output seq** that last updated this entry (comparable only within the same epoch — when the incarnation changes, seq counts from 0
-    /// again). The axis that filters out late signals when emit order and apply order diverge (`observe_at`).
+    /// The **output seq** that last updated this entry (comparable only within the same epoch — a new incarnation counts from 0). Filters
+    ///   late signals when emit order and apply order diverge (`observe_at`).
     /// ★The cursor of `in_turn` · `last_signal` — the stall field is filtered separately by `last_end_seq`★.
     last_seq: u64,
     /// The seq of the last folded `Ended` — the cursor of the stall fields (`error_seq` · `last_end_failed`) (ADR-0231).
@@ -137,87 +128,82 @@ impl TurnObservations {
         }
     }
 
-    /// ★Poison tolerance (the same judgment as the sessions lock in reaper.rs)★: this is a **manager-global** table, so if any holder
-    ///   panics, after that the turn-signal emit of **every** agent re-panics in a chain — a different nature from the core's per-agent
-    ///   locks (the ones whose `expect` justification is "does not propagate to other agents"). It holds only a hash map, so
-    ///   no invariant is broken, and we recover the guard and keep going. (In the production process the only case this tolerance receives is when the contained
-    ///   pump panicked while holding this lock — a holder panic elsewhere has the hook end the process · ADR-0292 ·
+    /// ★Poison tolerance (same judgment as the sessions lock in reaper.rs)★: this is a **manager-global** table, so one holder panic would
+    ///   re-panic the turn-signal emit of **every** agent in a chain — unlike the core's per-agent locks (whose `expect` is justified by
+    ///   "does not
+    ///   propagate to other agents"). It holds only a hash map (no invariant to break), so recover the guard and go on. (In production the
+    ///   only case this covers is a contained pump panic while holding the lock — elsewhere the hook ends the process · ADR-0292 ·
     ///   command execution is not contained · ADR-0293.)
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<AgentId, Entry>> {
         sync::lock(&self.entries)
     }
 
-    /// This incarnation takes this id's place — **unconditionally** replaces whatever entry was there.
+    /// This incarnation takes this id's place — **unconditionally** replaces any entry.
     ///
-    /// ★The only caller is `AgentManager::spawn_session`, and the call point is **before the session becomes observable**
-    ///   (before the sessions map insert = before pump start). This order underpins the correctness of this table★: if registration is later than that incarnation's
-    ///   first signal, that signal is discarded for not matching the old entry's marker, and that incarnation answers **permanently unobserved**
-    ///   (= not in a turn) until the old entry is `forget`-ed — mail injection mid-turn is that outcome.
-    /// ★Ordering against the dying previous incarnation is safe either way★: if the previous incarnation's `forget` comes first, the entry is empty and we
-    ///   fill it. If we come first, the previous incarnation's `forget` is a no-op because the marker differs, and a late signal is discarded for the same reason.
-    /// ★The value put in is "no signal yet"★: `in_turn=false`. The table holds only facts, so registration itself does not mean a turn.
-    ///   So the entry of a backend that emits no signal at all is not carried in `in_turn_snapshot`, and `finish` clears it.
+    /// ★The only caller is `AgentManager::spawn_session`, **before the session becomes observable** (before the sessions map insert =
+    ///   before pump start). This order underpins the table's correctness★: registered after the incarnation's first signal, that signal
+    ///   is discarded for
+    ///   mismatching the old entry's marker and the incarnation answers **permanently unobserved** (= not in a turn) until the old entry
+    ///   is `forget`-ed — mail injected mid-turn.
+    /// ★Ordering against the dying previous incarnation is safe either way★: its `forget` first → empty, we fill it; ours first → its
+    ///   `forget` is a no-op (marker differs) and its late signal is discarded likewise.
+    /// ★The value put in is "no signal yet"★ (`in_turn=false`): the table holds facts only, so registration is not a turn; a backend
+    ///   emitting no signal is not in `in_turn_snapshot`, and `finish` clears it.
     pub fn register(&self, id: AgentId, epoch: u32) {
         self.register_at(id, epoch, Instant::now());
     }
 
-    /// Time-injected [`Self::register`].
     pub fn register_at(&self, id: AgentId, epoch: u32, at: Instant) {
         self.lock().insert(id, Entry::fresh(epoch, at));
     }
 
-    /// Applies one turn signal (observation time = now).
-    /// `seq` = that event's output sequence (canonical for emit order — the order-inversion defense axis of `observe_at`).
+    /// Applies one turn signal (observation time = now). `seq` = that event's output sequence (canonical emit order — the order-inversion
+    ///   defense axis of `observe_at`).
     pub fn observe(&self, id: AgentId, epoch: u32, seq: u64, signal: TurnSignal) {
         self.observe_at(id, epoch, seq, signal, Instant::now());
     }
 
     /// Time-injected — tests drive the bound boundary · time refresh · order inversion without real-time waits.
     ///
-    /// ★This is where late signals of an old incarnation are filtered (secondary defense)★: even right after an incarnation swap the old `OutputCore` keeps draining the events
-    ///   left in its queue for a moment (before the pump ends on EOF). Receiving such a signal revives the entry of an incarnation already destined to vanish,
-    ///   and since that incarnation's end signal **never comes** (the stream is already past),
-    ///   it becomes a ghost entry no one can erase.
-    /// ★The range this rule blocks is narrow (no overclaiming)★: late signals with the same marker — especially an input echo arriving **after** `forget` —
-    ///   cannot be blocked here. The caller (`OutputCore::emit`) blocks that with the finalize flag
-    ///   (the comment there is canonical for that causality). The main line of defense is there too.
-    /// ★If the marker differs, **discard unconditionally** — never ask which is larger★: the marker is a random number, so order has no meaning
-    ///   (`AgentProfile::epoch`). The authority to change the place belongs to [`Self::register`] alone, and that registration coming before the live incarnation's
-    ///   first signal is what makes this discarding safe (the order paragraph of that function).
-    /// ★If there is no entry at all, accept it★: assemblies that skip registration (harnesses · a hand-built `OutputCore`) are a door left
-    ///   so they too can be observed. In production a late signal after `finish` cleared may come in through this door, but the
-    ///   caller's finalize recheck takes it back out (paragraph above).
+    /// ★Filters late signals of an old incarnation (secondary defense)★: right after a swap the old `OutputCore` drains queued events for
+    ///   a moment; accepting such a signal revives an entry destined to vanish, whose end signal **never comes** — a ghost entry no one
+    ///   can erase.
+    /// ★The blocked range is narrow (no overclaiming)★: late signals with the **same** marker — notably an input echo arriving **after**
+    ///   `forget` — cannot be blocked here; the caller (`OutputCore::emit`) blocks them with the finalize flag (its comment is canonical),
+    ///   the main defense.
+    /// ★Marker differs → **discard unconditionally**, never compare size★ (random number; `AgentProfile::epoch`). Only [`Self::register`]
+    ///   changes the place, and registering before the live incarnation's first signal is what makes this safe (that function's order
+    ///   paragraph).
+    /// ★No entry at all → accept★: assemblies skipping registration (harnesses · hand-built `OutputCore`) stay observable. In production a
+    ///   late signal after `finish` may enter here, and the caller's finalize recheck takes it back out.
     ///
-    /// ★Within the same marker, **order is set by seq** (load-bearing)★: emit has two callers (the output pump ·
-    ///   the injecting thread that issued the input echo), so when two signals run in parallel **emit order and apply order can diverge** — if the injecting
-    ///   thread emits a progress signal with seq N and pauses, and meanwhile the pump applies the end signal of seq N+1,
-    ///   the progress signal waking up late **turns the ended turn back to in-progress** (mail addressed to that receiver
-    ///   gets parked again up to the bound). seq is issued inside the replay lock and is the canonical order of the output (output_core.rs
-    ///   emit), so ignoring lower seqs closes that inversion.
-    /// ★seq comparison is valid **only within the same marker**★: a new incarnation is a new `OutputCore`, so seq starts from 0
-    ///   again — so when the marker differs, seq is not looked at at all (that entry is replaced by [`Self::register`]).
-    /// ★The cost (honest note)★: the time is stamped outside the lock, so the displaced signal usually carries a **newer time**.
-    ///   That is, this guard keeps `last_signal` slightly toward the **older side** — meaning the bound decision may
-    ///   fire that much earlier, and the width is one scheduler quantum, meaningless at a 30-minute bound. This is the result of making the canonical **emit order**
-    ///   the axis (making it apply order revives ended turns — paragraph above).
+    /// ★Within the same marker, **seq sets the order** (load-bearing)★: emit has two callers (pump · the injecting thread of the input
+    ///   echo), so **emit order and apply order can diverge** — the injecting thread emits progress seq N and pauses, the pump applies the
+    ///   end seq N+1, and
+    ///   the late progress would **turn the ended turn back to in-progress** (mail to that receiver parked again up to the bound). seq is
+    ///   issued inside the replay lock (output_core.rs emit) and is the canonical order, so lower seqs are ignored.
+    /// ★seq is valid **only within the same marker**★: a new incarnation is a new `OutputCore` counting from 0, so seq is not looked at
+    ///   when markers differ (the entry is replaced by [`Self::register`]).
+    /// ★Cost (honest)★: time is stamped outside the lock, so a displaced signal usually carries a **newer time**; the guard keeps
+    ///   `last_signal` slightly **older**, so the bound may fire earlier by one scheduler quantum — meaningless at a 30-minute bound — the
+    ///   price of making
+    ///   **emit order** the axis (apply order would revive ended turns).
     ///
-    /// ★The time is refreshed on every observation★: a turn that runs normally for long keeps receiving signals so it does not age, and only
-    ///   one whose signals stopped ages — the consumer's "stuck turn" decision holds on that axis.
-    /// ★`last_end_failed` folding (both backends — `TurnEndKind`)★: at `Ended`, true if it is an error end or it holds a `Failed` with a smaller seq ·
-    ///   false if a clean end · otherwise unchanged. The held `Failed` is cleared by that `Ended`.
-    /// ★The stall field is filtered by **its own cursor** (`last_end_seq`) — do not filter by the progress cursor (`last_seq`)★: if the pump
-    ///   is issued `Failed` with seq N and, before it is written to the table, another thread's progress (N+1) is written first, the progress cursor
-    ///   discards that `Failed`, and the later `Ended(Clean)` (N+2) folds the turn that ended in error as clean in ring order (mail addressed to
-    ///   that receiver goes in without a stall after error). So `Failed` · `Ended` are discarded only if their seq is smaller than the last folded `Ended`,
-    ///   and `Failed` is held (earliest seq) and folded by an `Ended` with a larger seq.
-    ///   `in_turn` · `last_seq` · `last_signal` change only when that signal is the newest — progress with a later seq is the next turn.
-    /// ★The remaining gap (honest note)★: a `Failed` with a seq smaller than the folded `Ended` is discarded if written **after** that `Ended` —
-    ///   we hold no seq of the previous end that would tell which end that `Failed` belongs to. As long as the same
-    ///   thread (the output pump) emits `Failed` and that turn's `Ended`, this apply order does not occur.
-    /// ★The remaining residue and why we do not block it now★: if two incarnations' markers collide at 2^-32, this equality check is
-    ///   disabled for that one incarnation's lifetime (`ProfileRegistry::epoch_for_spawn` — the adjacency guarantee
-    ///   holds only within the same process). The outcome when it happens is "in a turn but looks idle, so mail goes in early", and this project
-    ///   nailed down that early injection as better than "mail that never goes" (ADR-0104).
+    /// ★Time is refreshed on every observation★: a long normal turn keeps receiving signals and does not age; only a stopped one ages (the
+    ///   consumer's "stuck turn" axis).
+    /// ★`last_end_failed` folding (both backends — `TurnEndKind`)★: at `Ended`, true if an error end or a held `Failed` with a smaller seq
+    ///   · false if a clean end · else unchanged; the held `Failed` is cleared by that `Ended`.
+    /// ★The stall field is filtered by **its own cursor** (`last_end_seq`), not the progress cursor (`last_seq`)★: with `Failed` seq N and
+    ///   another thread's progress N+1 written first, the progress cursor would discard that `Failed` and the later `Ended(Clean)` (N+2)
+    ///   would fold an
+    ///   error-ended turn as clean (mail goes in without a stall after error). So `Failed` · `Ended` are discarded only if their seq is
+    ///   below the last folded `Ended`; `Failed` is held (earliest seq) and folded by a larger `Ended`.
+    ///   `in_turn` · `last_seq` · `last_signal` change only for the newest signal — later-seq progress is the next turn.
+    /// ★Remaining gap (honest)★: a `Failed` with a seq below the folded `Ended` is discarded if written **after** it — no previous-end seq
+    ///   tells which end it belongs to. It does not occur while one thread (the output pump) emits `Failed` and that turn's `Ended`.
+    /// ★Residue not blocked now★: two incarnations' markers colliding at 2^-32 disable this equality check for that incarnation's lifetime
+    ///   (`ProfileRegistry::epoch_for_spawn` — adjacency holds only within one process); the outcome is "in a turn but looks idle, mail goes in
+    ///   early", which the project chose over "mail that never goes" (ADR-0104).
     // ADR-0007
     // ADR-0231
     pub fn observe_at(&self, id: AgentId, epoch: u32, seq: u64, signal: TurnSignal, at: Instant) {
@@ -263,15 +249,13 @@ impl TurnObservations {
             }
         }
         if newest {
-            // ★Do not rewind `last_signal`★: the time is stamped **outside** the lock (`observe` above), so a late-stamped
-            //   signal may be applied first. If rewound, the bound decision misjudges it as wreckage that much earlier — it closes for
-            //   free, so we close it.
+            // ★Do not rewind `last_signal`★: time is stamped **outside** the lock (`observe` above), so a late-stamped signal may apply
+            //   first; rewinding would make the bound misjudge wreckage earlier — free to close.
             e.last_signal = at.max(e.last_signal);
             e.last_seq = seq;
         }
     }
 
-    /// Observed value of this (agent, epoch). `None` = unobserved (including when only another epoch was observed).
     pub fn get(&self, id: AgentId, epoch: u32) -> Option<TurnObservation> {
         let g = self.lock();
         g.get(&id)
@@ -283,13 +267,12 @@ impl TurnObservations {
             })
     }
 
-    /// Whether it is in a turn by observation. ★Unobserved is false★ — "unknown" is not turned into true here (if the fact layer
-    /// guesses, the consumer cannot choose its own fallback).
+    /// Whether it is in a turn by observation. ★Unobserved is false★ — the fact layer does not turn 「unknown」 into true (the consumer
+    ///   picks its own fallback).
     pub fn is_in_turn(&self, id: AgentId, epoch: u32) -> bool {
         self.get(id, epoch).is_some_and(|o| o.in_turn)
     }
 
-    /// All agents observed as in a turn now. The entrance the consumer sweeps with its own bound.
     pub fn in_turn_snapshot(&self) -> Vec<(AgentId, u32, Instant)> {
         let g = self.lock();
         g.iter()
@@ -298,16 +281,15 @@ impl TurnObservations {
             .collect()
     }
 
-    /// Removes this incarnation's entry. ★Only when the epoch matches★ — keeps a late call from
-    /// erasing the observation of an incarnation newly attached in between (the same principle as the reaper's sessions removal guard).
+    /// Removes this incarnation's entry. ★Only when the epoch matches★ — a late call must not erase the observation of an incarnation
+    ///   attached in between (as the reaper's sessions removal guard).
     ///
-    /// ★What happens if we do not erase★: the "in a turn" mark of an agent that died mid-turn stays, and a consumer waiting
-    ///   addressed to that name (mail parking etc.) is never released.
-    /// ★The owner of cleanup is `OutputCore::finish`★ (the comment there is canonical for the causality — it also closes the race with a late emit after
-    ///   termination there). There are **intentionally two call sites**: `finish` (the owner) and the finalize recheck
-    ///   path of `emit` (it takes back what it just put in — both going through the same table mutex is the argument that
-    ///   closes the race itself). **Adding a third caller** splits that causality — reading the emit side as a "forbidden
-    ///   second caller" and deleting it reopens the ghost-entry hole.
+    /// ★If not erased★: the "in a turn" mark of an agent that died mid-turn stays and a consumer waiting on that name (mail parking etc.)
+    ///   is never released.
+    /// ★Owner = `OutputCore::finish`★ (its comment is canonical, including the race with a late emit after termination). **Intentionally
+    ///   two call sites**: `finish` and the finalize recheck path of `emit` (taking back what it just put in; both through the same table
+    ///   mutex is what closes the race).
+    /// **A third caller** would split that causality — deleting the emit side as a "forbidden second caller" reopens the ghost-entry hole.
     pub fn forget(&self, id: AgentId, epoch: u32) {
         let mut g = self.lock();
         if g.get(&id).is_some_and(|e| e.epoch == epoch) {
@@ -380,10 +362,10 @@ mod tests {
         );
     }
 
-    // ★Regression target — that half after the marker became a random number★: the old comparison was "drop if the current marker is larger". In a permutation where the dying
-    //   incarnation's marker was larger, that guard passed and the late signal **overwrote the live incarnation's entry**, and after that
-    //   the live incarnation's query answered unobserved (= not in a turn), so mail went in mid-turn. So the two markers of this test are
-    //   **deliberately inverted** (live incarnation 5 < dead incarnation 900) — reverting to a size comparison breaks it here.
+    // ★Regression target — the half after the marker became a random number★: the old guard "drop if the current marker is larger" passed
+    //   when the dying incarnation's marker was larger, so the late signal **overwrote the live entry** (mail went in mid-turn). Hence the
+    //   two markers
+    //   here are **deliberately inverted** (live 5 < dead 900) — reverting to a size comparison breaks it.
     #[test]
     fn a_late_signal_from_a_larger_tag_cannot_evict_the_live_incarnation() {
         let t = TurnObservations::new();
@@ -399,7 +381,6 @@ mod tests {
             "premise: the live incarnation is observed as in a turn"
         );
 
-        // A dead incarnation whose draining was not finished now emits a signal.
         t.observe(id, dying, 4, TurnSignal::Ended(TurnEndKind::Clean));
 
         assert!(
@@ -447,8 +428,8 @@ mod tests {
 
     #[test]
     fn a_signal_that_arrives_out_of_publication_order_is_ignored() {
-        // ★Order inversion regression★: if a progress signal (seq N) is applied **later** than the end signal (seq N+1), the ended turn
-        //   returns to in-progress, and mail addressed to that receiver is parked again up to the bound.
+        // ★Order inversion regression★: a progress signal (seq N) applied **after** the end signal (seq N+1) would return the ended turn
+        //   to in-progress, parking mail to that receiver again up to the bound.
         let t = TurnObservations::new();
         let id = AgentId::new_v4();
         let t0 = Instant::now();
@@ -456,7 +437,6 @@ mod tests {
         t.observe_at(id, 0, 6, TurnSignal::Ended(TurnEndKind::Clean), t0);
         assert!(!t.is_in_turn(id, 0));
 
-        // The progress signal of seq 5 that arrived late — must be ignored.
         t.observe_at(id, 0, 5, TurnSignal::Progress, t0 + Duration::from_secs(1));
         assert!(
             !t.is_in_turn(id, 0),
@@ -468,24 +448,20 @@ mod tests {
             "a superseded signal does not stamp the cap axis again"
         );
 
-        // The guard does not block even normal progress.
         t.observe_at(id, 0, 7, TurnSignal::Progress, t0 + Duration::from_secs(2));
         assert!(t.is_in_turn(id, 0));
     }
 
     #[test]
     fn an_accepted_signal_never_rewinds_last_signal() {
-        // ★The only defense of `at.max(cur.last_signal)`★: the time is stamped **outside** the lock, so a late-stamped signal may
-        //   be applied first — even then the bound axis must not be rewound (if rewound, it misjudges wreckage that much
-        //   earlier). The seq test above sweeps only the **rejected** side, so it cannot protect this line.
+        // ★The only defense of `at.max(cur.last_signal)`★: time is stamped **outside** the lock, so a late-stamped signal may apply first
+        //   and must not rewind the bound axis. The seq test above sweeps only the **rejected** side and cannot protect this line.
         let t = TurnObservations::new();
         let id = AgentId::new_v4();
         let t0 = Instant::now();
         let later = t0 + Duration::from_secs(1);
 
-        // seq 5 is applied first carrying a later time.
         t.observe_at(id, 0, 5, TurnSignal::Progress, later);
-        // seq 6 is accepted normally (a newer emit) but its time is earlier.
         t.observe_at(id, 0, 6, TurnSignal::Ended(TurnEndKind::Clean), t0);
 
         assert!(
@@ -513,8 +489,8 @@ mod tests {
         );
     }
 
-    // Registration itself makes no fact — if a backend that emits no signal at all rose into the bound sweep, a false doorbell would ring
-    // every 60 seconds until it dies.
+    // Registration itself makes no fact — a backend that emits no signal rising into the bound sweep would ring a false doorbell every 60
+    //   s until it dies.
     #[test]
     fn registration_alone_is_not_a_turn() {
         let t = TurnObservations::new();
@@ -657,7 +633,8 @@ mod tests {
         );
     }
 
-    // ★Cursor regression of the stall field★: if filtered by the progress cursor, an error end is discarded just because progress with a later seq was written first.
+    // ★Cursor regression of the stall field★: if filtered by the progress cursor, an error end is discarded just because progress with a
+    //   later seq was written first.
     #[test]
     fn an_error_end_applied_behind_a_newer_progress_still_sets_the_halt() {
         let t = TurnObservations::new();

@@ -1,15 +1,14 @@
-//! claude's active usage query — sends one `get_usage` control request line to a short-lived `claude -p` (stream-json) and
-//! decodes the response into [`UsageObservation`]. Callers see [`CLAUDE_USAGE_PROBE`] only as [`UsageProbe`] (ADR-0248).
+//! claude's active usage query — sends one `get_usage` control request line to a short-lived `claude -p` (stream-json) and decodes the
+//!   response into [`UsageObservation`]. Callers see [`CLAUDE_USAGE_PROBE`] only as [`UsageProbe`] (ADR-0248).
 //!
-//! ★A request with no model call — not a single user message line is written★: the only thing going to stdin is one control request line.
-//!   stdin is kept open until the response arrives (closing it may end the CLI before the response is received). Once the response arrives, stdin is closed,
-//!   it waits briefly, then ends ([`finish_after_answer`]).
-//! ★The response shape is an experimental feature★ (starting with the SDK method name `…_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET`) —
-//!   measurements and sources = `docs/research/claude-usage-query-method-survey-2026-09-27.md` §3·§7 (claude 2.1.280). So
-//!   if one field is wrong, only that field is dropped, and it is [`ProbeError::Parse`] only when the skeleton of the response is broken.
-//! ★Response and error texts are not put in logs or error strings★ — account information may be in them. What is carried is only sentences and figures
-//!   we wrote. The upstream original text goes only into the dedicated [`UsageDetail::upstream`] field, and even then only the values of named fields
-//!   (the `error` of an error response · the two limit fields `rate_limits_available`·`rate_limits` · the `subscription_type` of 「no limit info」).
+//! ★No model call — not one user message line is written★: only one control request goes to stdin, kept open until the response arrives
+//!   (closing may end the CLI first); after the answer stdin is closed, it waits briefly, then ends ([`finish_after_answer`]).
+//! ★The response shape is experimental★ (SDK method name `…_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET`; measurements and
+//!   sources: `docs/research/claude-usage-query-method-survey-2026-09-27.md` §3·§7, claude 2.1.280), so a wrong field drops only that
+//!   field and it is [`ProbeError::Parse`] only when the skeleton is broken.
+//! ★Response and error texts never go into logs or error strings★ (account information). Only our own sentences and figures are carried;
+//!   upstream text goes only into [`UsageDetail::upstream`], and only values of named fields (an error response's `error` · the
+//!   limit fields `rate_limits_available`·`rate_limits` · `subscription_type` of 「no limit info」).
 // ADR-0004
 
 use std::ffi::OsString;
@@ -31,16 +30,15 @@ use crate::usage::{
     UsageVendorKey, WindowObs,
 };
 
-/// Minimum interval between automatic queries (user decision 2026-09-27 — the same value as Codex).
+/// Minimum interval between automatic queries (same value as Codex).
 const CLAUDE_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 
-/// Time limit of one query. Measured 1.2–1.4 s (claude 2.1.280 · probe) — a stall guard that amply covers slow startup and network.
+/// Time limit of one query. Measured 1.2–1.4 s (claude 2.1.280) — a stall guard that amply covers slow startup and network.
 const CLAUDE_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The core arguments that **must be the same** as the stream-json mode of an agent spawn — in that mode the CLI requires this combination
-/// (without `--verbose` it dies immediately — see that line's comment in `super::ClaudeBackend::build_spec`). Not derived from the spawn arguments but
-/// written separately — the spawn side mixes in permission, session and control-channel arguments, so deriving would leak those changes into the query.
-/// A test catches the two copies drifting apart.
+/// The core arguments that **must equal** the agent spawn's stream-json mode — the CLI requires this combination (without `--verbose` it
+///   dies immediately; see `super::ClaudeBackend::build_spec`). Written separately, not derived: the spawn side mixes in permission,
+/// session and control-channel arguments that would leak into the query. A test catches the two copies drifting.
 const STREAM_JSON_CORE: [&str; 7] = [
     "-p",
     "--input-format",
@@ -58,14 +56,15 @@ const SETTINGS_JSON: &str = r#"{"disableAllHooks":true}"#;
 /// No MCP servers — paired with `--strict-mcp-config`, so other MCP settings are not read.
 const MCP_CONFIG_JSON: &str = r#"{"mcpServers":{}}"#;
 
-/// What is kept while stripping keys starting with `CLAUDE` from the daemon env — the two pointing at the default login. Stripping these too
-/// could query with a login other than the daemon's default account (TRD §3 #9).
+/// Kept while stripping `CLAUDE*` keys from the daemon env — the two pointing at the default login (stripping them could query with a
+///   login other than the daemon's default account, TRD §3 #9).
 const KEPT_CLAUDE_ENV: [&str; 2] = ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"];
 const STRIPPED_ENV_PREFIX: &str = "CLAUDE";
 
-/// env added to the query process — the first four are exactly the combination the probe (`get-usage-probe.mjs`) measured (`MAX_THINKING_TOKENS` is
-/// the same value as an agent spawn's stream-json mode). ★What each of the four turns off was not checked beyond its name★.
-/// The last one, [`NO_AUTOUPDATE_ENV`], is outside the probe combination — added for the same reason as an agent spawn (this five-item combination has not been run against a real claude).
+/// env added to the query process — the first four are exactly the probe's (`get-usage-probe.mjs`) measured combination
+///   (`MAX_THINKING_TOKENS` equals the agent stream-json mode); ★what each turns off was not checked beyond its name★. The last,
+///   [`NO_AUTOUPDATE_ENV`], is outside the probe
+/// combination, added for the same reason as an agent spawn (this five-item combination has not been run against a real claude).
 const PROBE_ENV: [(&str, &str); 5] = [
     ("MAX_THINKING_TOKENS", "8000"),
     ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
@@ -80,8 +79,8 @@ const LABEL_MAX_CHARS: usize = 48;
 /// Cap on the per-model window list. Today's responses have one or two.
 const MODEL_SCOPED_MAX: usize = 16;
 
-/// Named per-model weekly window fields (fixed fields of the SDK type) and the display names attached to them. Unlike `model_scoped[]` entries, the response does not give
-/// a name, so we attach one.
+/// Named per-model weekly window fields (fixed SDK type fields) and their display names — the response gives no name, unlike
+///   `model_scoped[]` entries.
 const NAMED_MODEL_WINDOWS: [(&str, &str); 3] = [
     ("seven_day_opus", "Opus"),
     ("seven_day_sonnet", "Sonnet"),
@@ -93,7 +92,6 @@ const KIND_RATE_LIMITS_NULL: &str = "rate_limits_null";
 const KIND_CLAUDE_ERROR: &str = "claude_error";
 const KIND_LIMITS_UNAVAILABLE: &str = "limits_unavailable";
 
-/// claude usage prober. Callers use the singleton [`CLAUDE_USAGE_PROBE`].
 pub(crate) struct ClaudeUsageProbe;
 
 pub(crate) static CLAUDE_USAGE_PROBE: ClaudeUsageProbe = ClaudeUsageProbe;
@@ -115,38 +113,36 @@ impl UsageProbe for ClaudeUsageProbe {
     }
 }
 
-/// `daemon_env_keys` = all keys of the daemon process env (production = process env · test = stand-in).
 fn query_with(
     env: &ProbeEnv<'_>,
     daemon_env_keys: impl IntoIterator<Item = OsString>,
 ) -> Result<UsageObservation, ProbeFailure> {
     env.require_time_left()?;
-    // ★Declaration order sets drop order — the folder comes before the child★: the child must be dropped first (tree kill + wait for exit) so that
-    //   Windows can delete that working folder and the settings files.
+    // ★Declaration order sets drop order — folder before child★: the child must drop first (tree kill + wait) so Windows can delete the
+    //   working folder and settings files.
     let scratch = ScratchDir::create(env.scratch_root)?;
     let command = probe_command(scratch.path(), daemon_env_keys)?;
     let request_id = Uuid::new_v4().to_string();
     let mut child = env.spawner.spawn(&command, env.deadline)?;
-    // If the wrapping shell could not find the target and already ended, the write fails first — returning right away would miss the exit
-    //   status carrying 「not installed」. Holding the error, it reads until EOF and then decides by the exit.
+    // If the wrapping shell could not find the target and already ended, the write fails first — returning at once would miss the exit
+    //   status carrying 「not installed」; hold the error, read to EOF, then decide by the exit.
     let write_error = match child.write_line(&request_line(&request_id), env.deadline) {
         Ok(()) => None,
         Err(err @ ProbeError::Io(_)) => Some(err),
         Err(err) => return Err(err.into()),
     };
     let response = await_response(child.as_mut(), &request_id, env.deadline, write_error)?;
-    // ★Not killed right away★ — when stdin is closed claude ends by itself, but it takes about 1 second, during which it writes the global settings file
-    //   (`.claude.json`) (measured 2026-09-27 · 2.1.280 · two logged-in queries = 1060 and 862 ms from closing to ending, exit
-    //   code 0, and both times the modification time changed in between). Killing right after the answer left `.claude.json.lock`·
-    //   `.claude.json.tmp.<pid>.*` in the settings folder (same day · logged-out query). The grace period covers that 1 second — past it, it is cut off.
+    // ★Not killed right away★ — closing stdin makes claude end itself, but it takes ~1 s and writes the global settings file
+    //   (`.claude.json`) meanwhile (measured 2026-09-27 · 2.1.280: 1060 and 862 ms, exit 0, mtime changed). Killing right after the answer
+    //   left `.claude.json.lock` ·
+    //   `.claude.json.tmp.<pid>.*` in the settings folder. The grace period covers that 1 s; past it, cut off.
     finish_after_answer(child, env.deadline);
     observation_from_response(&response)
 }
 
-/// Writes the two settings files to `scratch` and builds the query command that launches from that folder.
-///
-/// Why the two settings are passed as file paths rather than inline JSON = on Windows it goes through one layer of `cmd.exe /c`, and its quoting
-/// rules silently break chunks of quotes and braces (the same situation as the `--settings` comment of the agent spawn).
+/// Writes the two settings files to `scratch` and builds the query command launched from that folder. The settings are passed as file
+///   paths, not inline JSON: on Windows one `cmd.exe /c` layer silently breaks quote and brace chunks (as the agent spawn's `--settings`
+///   comment).
 fn probe_command(
     scratch: &Path,
     daemon_env_keys: impl IntoIterator<Item = OsString>,
@@ -161,8 +157,7 @@ fn probe_command(
     args.push("--settings".to_owned());
     args.push(path_arg(&settings)?);
     args.push("--strict-mcp-config".to_owned());
-    // ★`--mcp-config` goes last★ — that flag takes multiple values (2.1.280 `--help`: `<configs...>`) and absorbs any bare
-    //   value that follows as a config too.
+    // ★`--mcp-config` goes last★ — it takes multiple values (2.1.280 `--help`: `<configs...>`) and would absorb a following bare value.
     args.push("--mcp-config".to_owned());
     args.push(path_arg(&mcp_config)?);
     // `--permission-mode bypassPermissions` is deliberately absent — there is no model turn, so there is nothing to ask permission for.
@@ -180,8 +175,8 @@ fn probe_command(
     })
 }
 
-/// Keys to strip from the daemon env — keys starting with `CLAUDE` (ASCII case-insensitive) other than [`KEPT_CLAUDE_ENV`].
-/// ★Non-UTF-8 keys cannot be stripped★ — [`ProbeCommand::env_remove`] is a string, so it cannot point at such a key.
+/// Keys to strip from the daemon env — keys starting with `CLAUDE` (ASCII case-insensitive) other than [`KEPT_CLAUDE_ENV`]. ★Non-UTF-8
+///   keys cannot be stripped★ ([`ProbeCommand::env_remove`] takes a string).
 fn stripped_env_keys(daemon_env_keys: impl IntoIterator<Item = OsString>) -> Vec<String> {
     daemon_env_keys
         .into_iter()
@@ -210,7 +205,6 @@ fn path_arg(path: &Path) -> Result<String, ProbeError> {
         .ok_or_else(|| ProbeError::Io("the query scratch folder path is not Unicode".to_owned()))
 }
 
-/// `skip_behaviors` = for callers that need only the plan limits — skips scanning 7 days of usage history (SDK type comment).
 fn request_line(request_id: &str) -> String {
     json!({
         "type": "control_request",
@@ -220,8 +214,8 @@ fn request_line(request_id: &str) -> String {
     .to_string()
 }
 
-/// Reads until the response line of our request arrives — other lines (init notices · responses to other requests · non-JSON lines) are discarded.
-/// `write_error` = the I/O error from a failed request write — returned if it ends without a response and is not 「not installed」 either.
+/// Reads until the response line of our request arrives — other lines (init notices · other requests' responses · non-JSON) are discarded.
+///   `write_error` = the I/O error of a failed request write — returned if it ends without a response and is not 「not installed」 either.
 fn await_response(
     child: &mut dyn ProbeChild,
     request_id: &str,
@@ -233,7 +227,8 @@ fn await_response(
         let line = match child.read_line(deadline) {
             Ok(Some(line)) => line,
             Ok(None) => return Err(ended_without_response(child, deadline, read_error)),
-            // Either a single line that hit the cap or a read failure — in the former case the stream continues to the next line, in the latter EOF comes soon.
+            // Either a single line that hit the cap or a read failure — in the former case the stream continues to the next line, in the
+            //   latter EOF comes soon.
             Err(err @ ProbeError::Io(_)) => {
                 read_error = Some(err);
                 continue;
@@ -243,8 +238,8 @@ fn await_response(
         match serde_json::from_str::<Value>(&line) {
             Ok(value) if is_response_to(&value, request_id) => return Ok(value),
             Ok(_) => {}
-            // If it is our response but not JSON (non-finite number literals etc.), no other response will come by waiting — do not drag on until the time limit.
-            // The request id is a uuid we drew, so it cannot appear in another line by chance.
+            // Our response but not JSON (non-finite number literals etc.): no other response will come, so do not drag on to the time
+            //   limit. The request id is a uuid we drew, so it cannot appear in another line by chance.
             Err(_) if line.contains(request_id) && line.contains("control_response") => {
                 return Err(ProbeError::Parse(
                     "the claude usage response line is not JSON".to_owned(),
@@ -255,8 +250,8 @@ fn await_response(
     }
 }
 
-/// Response line = `{"type":"control_response","response":{"subtype":…,"request_id":…}}` (probe measurement). The request id is
-/// inside `response` — it is accepted even if it comes at the top level of the envelope.
+/// Response line = `{"type":"control_response","response":{"subtype":…,"request_id":…}}` (probe measurement). The request id is inside
+///   `response`; accepted at the envelope's top level too.
 fn is_response_to(line: &Value, request_id: &str) -> bool {
     let id_matches = |holder: Option<&Value>| {
         holder
@@ -299,24 +294,22 @@ fn ended_without_response(
 /// The response line of our request → an observation.
 ///
 /// - `response.subtype == "error"` → [`classify_error`] · any other unknown subtype → `Parse`.
-/// - On success `response.response` is the usage: `rate_limits` · within it `five_hour`/`seven_day`
-///   (`{utilization 0–100, resets_at ISO 8601}`) · per-model weekly windows · `subscription_type` → plan.
-/// - The meaning of the two fields is set by the response schema description of CLI 2.1.280: `rate_limits_available` = "`false` if plan limits do not apply
-///   (API key · Bedrock · Vertex · a token without profile permission)", `rate_limits` = "`null` if the CLI could not fetch it".
-///   So `null` alone is 「query failure」, and only an explicit `false` is 「this account has no limits」.
-/// - `rate_limits_available` is bool `false` → 「no limit info」 (`limits_unavailable` — grounds =
-///   [`limits_unavailable_detail`]). All windows are `None`, and `rate_limits` is not read whatever its shape (even if missing) —
-///   plan is read as usual.
-/// - Otherwise (`true` · no field · not a bool — a non-bool counts as absent), if `rate_limits` is an explicit `null`, it is
-///   `Upstream` (= query failure). The receiver keeps the value it held. ★Even when the CLI-side query gets a 429, it comes not as an error subtype
-///   but as this `null` (from reading the CLI code)★ — so it cannot be told apart as `RateLimited` and is folded into `Upstream`.
-///   The limit-text table of [`classify_error`] is kept for when another version answers with an error subtype. ★It is a failure without upstream
-///   error text, so the original = the two fields received as is★ ([`KIND_RATE_LIMITS_NULL`] — if the `rate_limits_available` field is missing, that field is left out).
-/// - ★Otherwise, if the `rate_limits` field is missing or is neither an object nor `null`, it is `Parse`★ — reading that as 「no windows」 would let a response whose
-///   shape changed come in as a success and erase all the values held. On failure the receiver keeps the value. The grounds are only the category.
-/// - A `None` field = not carried (the receiver keeps the value it held). A window where neither field can be read is also folded into `None`.
-///   ★Per-model windows are `Some` even when empty, as long as the `rate_limits` object was read★ — folding into `None` would leave a vanished model window on the receiving
-///   side forever.
+/// - On success `response.response` is the usage: `rate_limits` · within it `five_hour`/`seven_day` (`{utilization 0–100, resets_at ISO
+///   8601}`) · per-model weekly windows · `subscription_type` → plan.
+/// - Field meanings from the CLI 2.1.280 response schema: `rate_limits_available` = "`false` if plan limits do not apply (API key ·
+///   Bedrock · Vertex · a token without profile permission)", `rate_limits` = "`null` if the CLI could not fetch it". So `null` alone is
+///   「query failure」 and only an explicit `false` is 「this account has no limits」.
+/// - `rate_limits_available` bool `false` → 「no limit info」 (`limits_unavailable` — grounds: [`limits_unavailable_detail`]); all windows
+///   `None`, `rate_limits` not read whatever its shape (even missing); plan read as usual.
+/// - Otherwise (`true` · no field · non-bool counts as absent), an explicit `null` `rate_limits` → `Upstream` (query failure; the receiver
+///   keeps its value). ★Even a CLI-side 429 arrives as this `null`, not an error subtype (from the CLI code)★, so it folds into `Upstream`, not
+///   `RateLimited`; [`classify_error`]'s limit-text table stays for versions answering with an error subtype. ★No upstream error text, so
+///   the original = the two fields as received★ ([`KIND_RATE_LIMITS_NULL`]; a missing `rate_limits_available` is left out).
+/// - ★Otherwise, `rate_limits` missing or neither object nor `null` → `Parse`★ — reading it as 「no windows」 would let a shape change erase
+///   all held values as a success. The grounds are only the category.
+/// - A `None` field = not carried (the receiver keeps its value); a window with neither field readable also folds to `None`. ★Per-model
+///   windows are `Some` even when empty once the `rate_limits` object was read★ — `None` would leave a vanished model window on the
+///   receiver forever.
 fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeFailure> {
     let response = line
         .get("response")
@@ -335,7 +328,8 @@ fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeFail
     let limits_unavailable =
         (flag.and_then(Value::as_bool) == Some(false)).then(|| limits_unavailable_detail(usage));
     let (five_hour, weekly, model_scoped) = if limits_unavailable.is_some() {
-        // Even if `false` comes with values in `rate_limits`, they are not read — an observation of 「no info」 carrying windows would be a contradiction.
+        // Even if `false` comes with values in `rate_limits`, they are not read — an observation of 「no info」 carrying windows would be a
+        //   contradiction.
         (None, None, None)
     } else {
         match usage.get("rate_limits") {
@@ -383,8 +377,8 @@ fn parse_error(what: &str) -> ProbeError {
     ProbeError::Parse(format!("claude usage response: {what}"))
 }
 
-/// Grounds of 「no limit info」 — original = the decided field and `subscription_type` as received (including `null` · a missing field is left out).
-/// The plan field is carried along as a clue to the cause (a logged-out CLI answers with `null` — measured).
+/// Grounds of 「no limit info」 — original = the decided field and `subscription_type` as received (including `null`; a missing field is
+///   left out); the plan is carried as a clue to the cause (a logged-out CLI answers `null` — measured).
 fn limits_unavailable_detail(usage: &Map<String, Value>) -> UsageDetail {
     let received = match usage.get("subscription_type") {
         Some(plan) => format!("rate_limits_available: false, subscription_type: {plan}"),
@@ -419,9 +413,9 @@ fn epoch_secs_from_iso(text: &str) -> Option<i64> {
     resets_at_from_epoch_secs(at.timestamp())
 }
 
-/// Per-model weekly windows — after `model_scoped[]` (`{display_name, utilization, resets_at}`), the named fields that have values
-/// ([`NAMED_MODEL_WINDOWS`]). For the same name (ASCII case-insensitive) only the first one stays.
-/// ★The `model_scoped` entry shape is not in the SDK type★ — it is a field the CLI carries ahead of the type, so only entries whose name is a string are accepted.
+/// Per-model weekly windows — `model_scoped[]` (`{display_name, utilization, resets_at}`) first, then the named fields with values
+///   ([`NAMED_MODEL_WINDOWS`]); the same name (ASCII case-insensitive) keeps only the first.
+/// ★The `model_scoped` entry shape is not in the SDK type★ (a CLI field ahead of it), so only entries whose name is a string are accepted.
 fn model_scoped_windows(limits: &Map<String, Value>) -> Vec<ScopedWindowObs> {
     let listed = limits
         .get("model_scoped")
@@ -452,8 +446,8 @@ fn model_scoped_windows(limits: &Map<String, Value>) -> Vec<ScopedWindowObs> {
     windows
 }
 
-/// Error response → category + grounds ([`KIND_CLAUDE_ERROR`] · original = the `error` field value). If `error` is not a string, its JSON notation is taken as is
-/// as the text — for both the category and the original. If `error` is missing, `null` or only whitespace, there is no original either.
+/// Error response → category + grounds ([`KIND_CLAUDE_ERROR`] · original = the `error` field value). A non-string `error` uses its JSON
+///   notation as the text (category and original); missing, `null` or whitespace-only → no original either.
 fn classify_error(error: Option<&Value>) -> ProbeFailure {
     let text = match error {
         Some(Value::String(text)) => Some(text.clone()),
@@ -472,10 +466,10 @@ fn classify_error(error: Option<&Value>) -> ProbeFailure {
     )
 }
 
-/// ★This text table is a guess★ — the real texts of limit and logout errors have not been seen yet (TRD §6 #4). Even if it is wrong, where it lands is
-///   `Upstream` (= query failure). ★Not reading unknown errors as limits is intended★ — showing 「refused」 would mislead the user
-///   and block refresh. The `Upstream` text is fixed — the upstream text is not repeated.
-/// `text` = the error text folded to lowercase.
+/// ★This text table is a guess★ — real limit and logout error texts have not been seen (TRD §6 #4). Wrong guesses land in `Upstream`
+///   (query failure). ★Not reading unknown errors as limits is intended★ — 「refused」 would mislead the user and block refresh. The
+///   `Upstream` text is fixed;
+///   upstream text is not repeated. `text` = the error text lowercased.
 fn classify_error_text(text: &str) -> ProbeError {
     const UNSUPPORTED: &str = "not supported in this context";
     const RATE_LIMITED: [&str; 5] = [
@@ -525,7 +519,6 @@ mod tests {
     const SHORT: Duration = Duration::from_millis(300);
     const ROOMY: Duration = Duration::from_secs(4);
 
-    /// 2026-09-27T05:00:00Z · 2026-10-01T09:00:00Z.
     const FIVE_HOUR_RESET: i64 = 1_790_485_200;
     const WEEKLY_RESET: i64 = 1_790_845_200;
 
@@ -611,7 +604,8 @@ mod tests {
         ChildScript::new().reply(move |written| success_line(written, usage))
     }
 
-    /// The shape the probe saw (figures are fake) — two windows · plan · a model window with only a key and a null value · a field not in the type.
+    /// The shape the probe saw (figures are fake) — two windows · plan · a model window with only a key and a null value · a field not in
+    ///   the type.
     fn typical_usage() -> Value {
         json!({
             "subscription_type": "max",
@@ -647,7 +641,6 @@ mod tests {
         observe(json!({ "rate_limits": limits }))
     }
 
-    /// Whether it is a `Parse` whose only grounds are the category.
     fn is_bare_parse(result: &Result<UsageObservation, ProbeFailure>) -> bool {
         matches!(
             result,
@@ -662,7 +655,6 @@ mod tests {
         detail.upstream.as_ref().map(UpstreamText::as_str)
     }
 
-    // ── Policy ──
 
     #[test]
     fn policy_and_key_are_the_claude_values() {
@@ -677,7 +669,6 @@ mod tests {
         );
     }
 
-    // ── Interpretation ──
 
     #[test]
     fn success_carries_both_windows_and_the_plan() {
@@ -756,7 +747,6 @@ mod tests {
         }
     }
 
-    /// 「no limit info」 — grounds = [`KIND_LIMITS_UNAVAILABLE`] + the decided field and plan field as received (`upstream`).
     fn assert_unavailable(obs: &UsageObservation, upstream: &str) {
         let detail = obs.limits_unavailable.as_ref().expect("no limit info");
         assert_eq!(detail.kind, KIND_LIMITS_UNAVAILABLE);
@@ -855,7 +845,6 @@ mod tests {
         );
     }
 
-    /// Only the grounds word goes into the log text of a failure (`Display`) — the two received fields are only in the original field.
     #[test]
     fn a_fetch_failure_shows_only_the_kind_in_its_display() {
         let failure = observe(json!({ "rate_limits_available": true, "rate_limits": null }))
@@ -1145,7 +1134,6 @@ mod tests {
         }
     }
 
-    // ── Error classification ──
 
     fn kind(err: &ProbeError) -> &'static str {
         match err {
@@ -1200,8 +1188,8 @@ mod tests {
         }
     }
 
-    /// ★Upstream text goes only into the original field★ — for all four categories the grounds = [`KIND_CLAUDE_ERROR`] + the `error` field value (token shapes masked), and
-    ///   it does not show in the failure's `Display`·`Debug`.
+    /// ★Upstream text goes only into the original field★ — for all four categories grounds = [`KIND_CLAUDE_ERROR`] + the `error` field
+    ///   value (token shapes masked), never in the failure's `Display`·`Debug`.
     #[test]
     fn error_responses_carry_the_upstream_text_only_in_the_detail() {
         let secret = "someone@example.com org-1234";
@@ -1262,7 +1250,6 @@ mod tests {
         }
     }
 
-    // ── Conversation ──
 
     #[test]
     fn the_request_is_one_get_usage_control_line_with_a_fresh_uuid() {
@@ -1318,7 +1305,8 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
     }
 
-    /// A child that first produces one read error — the shape of the real spawner's 「one line over the cap」 (the script stand-in cannot produce an error line).
+    /// A child that first produces one read error — the shape of the real spawner's 「one line over the cap」 (the script stand-in cannot
+    ///   produce an error line).
     struct IoFirstSpawner {
         then_answer: bool,
     }
@@ -1466,8 +1454,8 @@ mod tests {
         assert_scratch_gone(&root);
     }
 
-    /// ★A failed request write does not mask 「not installed」★ — even if the wrapping shell has already ended and the write fails, it decides by the exit.
-    ///   If it is a failure on the installed side, it is the write error as is.
+    /// ★A failed request write does not mask 「not installed」★ — even if the wrapping shell already ended and the write fails, the exit
+    ///   decides; a failure on the installed side is the write error as is.
     #[test]
     fn a_failed_request_write_still_reads_the_exit() {
         let (result, spawner) = run(ChildScript::new().fail_writes().exit_not_installed());
@@ -1503,7 +1491,6 @@ mod tests {
         assert_scratch_gone(&root);
     }
 
-    // ── Launch spec ──
 
     #[test]
     fn the_command_runs_in_its_own_scratch_dir_with_hooks_and_mcp_off() {
@@ -1512,7 +1499,6 @@ mod tests {
         let seen = seen_files.clone();
         let scan_root = root.path().to_path_buf();
         let spawner = ScriptedSpawner::new(ChildScript::new().reply(move |written| {
-            // While the child is up — the settings files must be in place.
             let dir = fs::read_dir(&scan_root)
                 .expect("root")
                 .flatten()
@@ -1648,8 +1634,8 @@ mod tests {
         }
     }
 
-    /// ★The two copies of the stream-json core arguments must be the same★ — if the agent spawn changes that combination (meaning the CLI requirement changed),
-    ///   this test breaks so the query side gets fixed too. The query arguments are not derived from the spawn.
+    /// ★The two copies of the stream-json core arguments must be equal★ — if the agent spawn changes that combination (the CLI requirement
+    ///   changed) this test breaks so the query side is fixed too; the query arguments are not derived from the spawn.
     #[test]
     fn stream_json_core_args_match_the_agent_spawn() {
         let spawn = ClaudeBackend.build_spec(
