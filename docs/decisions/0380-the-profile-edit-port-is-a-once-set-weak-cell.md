@@ -1,7 +1,7 @@
 # ADR-0380: The profile-edit port reaches the library through a once-set weak cell filled right after the manager is built; an empty or dead cell answers profile-edit-unavailable, never a silent Noop
 
-- 상태: 확정 (2026-11-17, 근거: S25 step-9a TRD §8 (b) B17, PRD+TRD review PASS 2026-11-17 (full))
-- 관련: ADR-0311 (crate edges · ports · the daemon only wires) · ADR-0335 (references fixed presets-then-agents) · ADR-0379 (`profile-edit-unavailable` is one of the two `INTERNAL` exceptions) · step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md` §0 · §1 · §2 · §3.5 · §3.6 · §4 · §5 · §8 (b) B17 · §9 U3 · parent TRD `docs/process/S25-preset-library/trd.md` §1-4 assembly order · §1-5 profile-edit port paragraph
+- 상태: 확정 (2026-11-17, 근거: S25 step-9a TRD §8 (b) B17, PRD+TRD review PASS 2026-11-17 (full)) · 부분 폐기 by ADR-0384 (relink cell check before any write)
+- 관련: ADR-0311 (crate edges · ports · the daemon only wires) · ADR-0335 (references fixed presets-then-agents) · ADR-0379 (`profile-edit-unavailable` is one of the two `INTERNAL` exceptions) · step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md` §0 · §1 · §2 · §3.5 · §3.6 · §4 · §5 · §8 (b) B17 · §9 U3 · parent TRD `docs/process/S25-preset-library/trd.md` §1-4 assembly order · §1-5 profile-edit port paragraph · Amended by ADR-0384 (relink cell check before any write)
 
 ## 맥락
 Agent edits go only through the profile-edit port (M18); asset-library never mutates `ProfileRegistry` and reads it directly (M5). The port is agent `ProfileEditPort`, implemented by `AgentManager` and unchanged by 9a. The port (the manager) is filled late into the library service, before `command_table_slot.set` (parent §1-4 assembly order ② ④ ⑥; handed over by step 8). Step 9a's agent-preset bodies (`attach` · `detach` · `reorder`), the `agent.presets` view (`workspace_lock` through the port) and relink's agent rewrite (`rewrite_preset_paths`) need it.
