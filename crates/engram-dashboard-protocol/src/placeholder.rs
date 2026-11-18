@@ -1,21 +1,21 @@
-//! Output frame placeholder — does not leave empty the seq of an event that could not be carried (ADR-0231).
+//! Output frame placeholder — fills the seq of an event that could not be carried (ADR-0231).
 //!
-//! ★Why it exists (load-bearing)★: in live mode a view holds `seq > last+1` with no deadline and releases it only when `last+1` arrives.
-//! So if the daemon sink or the shell relay silently drops one seq, the frames after it pile up to the hold cap — and
-//! for an idle agent, forever — and that view stalls. The dropping spot sends this frame **with the same seq** instead: a tag1
-//! `StructuredEvent::Error` with a fixed wording. The chat view draws one error row and the terminal view ignores tag1 but the seq
-//! advances.
+//! ★Why it exists★: a live view holds `seq > last+1` with no deadline until `last+1` arrives, so a silently dropped seq stalls the view
+//!   (forever for an
+//! idle agent). The dropping spot sends this frame **with the same seq**: a tag1 `StructuredEvent::Error` with fixed wording. The chat
+//!   view draws one error row;
+//! the terminal view ignores tag1 but the seq advances.
 //!
-//! ★The daemon sink and the shell share one set★ — the placeholders from the two places must match down to the bytes so the view cannot tell
-//! the source (a test measures that identity).
-//! ★The wording is a fixed string and the payload is frozen at compile time★ — the placeholder stands in for a dropped event,
-//! so it must have no room for its own serialization to fail. So it carries a constant instead of runtime serialization, and a test
-//! guards that the constant equals the serialization of `StructuredEvent::Error`.
+//! ★The daemon sink and the shell share one set★ — both must emit identical bytes so the view cannot tell the source (a test measures it).
+//! ★The payload is a compile-time constant, not runtime serialization★: the placeholder stands for a dropped event, so it must have no
+//!   room to fail serializing;
+//! a test guards that the constant equals the serialization of `StructuredEvent::Error`.
 
 use crate::codec::encode_structured_frame;
 use crate::ids::AgentId;
 
-// The single place for the wording literal — the public constant and the payload constant are both expanded from here (`concat!` accepts only literals).
+// The single place for the wording literal — the public constant and the payload constant are both expanded from here (`concat!` accepts
+//   only literals).
 macro_rules! placeholder_message {
     () => {
         "This output event could not be delivered"

@@ -1,33 +1,29 @@
-//! Wire shape of the connection's first frame (token handshake) — built by the shell and unpacked by the daemon (ADR-0129 0-4 · ADR-0310 decision 9).
+//! Wire shape of the connection's first frame (token handshake) — built by the shell and unpacked by the daemon (ADR-0129 0-4 · ADR-0310
+//!   decision 9).
 //!
-//! ★Not a variant of the command enum ([`crate::AgentCommand`])★: token auth decides 「whether to keep this socket alive」, so even if the
-//! network layer that makes that decision does not know the command vocabulary, it must be able to unpack this one frame (ADR-0129 decision 1).
-//! So it is a separate type, and reviving `Auth` in the command enum would make two definitions coexist and diverge (that enum's comment).
+//! ★Not a variant of [`crate::AgentCommand`]★: token auth decides whether to keep the socket alive, so the network layer must unpack this
+//!   frame without
+//! knowing the command vocabulary (ADR-0129 decision 1). Reviving `Auth` in the command enum would leave two diverging definitions.
 //!
-//! ★★The wire is frozen — the bytes must not move★★: it is an externally-tagged serde enum with **no** `#[serde(tag=…)]`-style
-//! override. So the frame is exactly
-//!   `{"Auth":{"token":"…","protocol_version":N}}`
-//! . The token field's [`Secret`] is `serde(transparent)`, so the bytes are unchanged. The senders that build this shape —
-//! the stop path (shell `daemon_client/link/stop.rs`) · the daemon client shell (`daemon_client/connection.rs`) · the frontend
-//! `wsTransport` · `scripts/engram.mjs`.
-//! ★The last two are **hand-assembled JS, which the compiler cannot catch**★: both build the frame as an untyped object literal, and
-//! the `scripts/engram.mjs` side is a path that runs even though no test covers it (`run-dashboard-release.bat` ·
-//! `docs/process/S17-llm-control-surface/spec/trd.md`). So what keeps the contract is the golden string test below.
-//! To change the shape, change those senders **at the same time** and raise the protocol version.
-//! ★The control CLI `engram` is not on that list★ — it attaches through the daemon's HTTP control route (`<base>/control/<route>` + Bearer) and
-//! does not build this frame, so even if the wire changes it is not affected.
+//! ★★The wire is frozen — the bytes must not move★★: an externally-tagged serde enum with **no** `#[serde(tag=…)]` override, so the frame
+//!   is exactly
+//! `{"Auth":{"token":"…","protocol_version":N}}` ([`Secret`] is `serde(transparent)`).
+//! Senders: the stop path (shell `daemon_client/link/stop.rs`), the shell client (`daemon_client/connection.rs`), the frontend
+//!   `wsTransport`, `scripts/engram.mjs`.
+//! ★The last two are hand-assembled JS the compiler cannot catch★ (untyped object literals; the `scripts/engram.mjs` path runs without
+//!   test coverage —
+//! `run-dashboard-release.bat`, `docs/process/S17-llm-control-surface/spec/trd.md`), so the golden string test below keeps the contract.
+//! To change the shape, change all senders at once and raise the protocol version.
+//! The control CLI `engram` is not a sender — it attaches through the daemon's HTTP control route (`<base>/control/<route>` + Bearer).
 //!
-//! ★Why a single-variant enum★: a struct would become `{"token":…}` and the tag would disappear. The tag `"Auth"` is
-//! part of the wire contract, so it must be an enum (the price is the redundancy `AuthFrame::Auth`, but the redundancy
-//! makes the wire tag visible).
+//! ★Why a single-variant enum★: a struct would drop the `"Auth"` tag, which is part of the wire contract.
 
 use crate::Secret;
 
-/// The auth frame, valid only as the **first frame** of a connection. The daemon accepts exactly this one within
-/// its auth window (`AUTH_TIMEOUT` in the daemon's `link::server`); the layer above rejects the same frame arriving later.
+/// The auth frame, valid only as the **first frame** of a connection. The daemon accepts exactly this one within its auth window
+/// (`AUTH_TIMEOUT` in the daemon's `link::server`); the layer above rejects the same frame arriving later.
 ///
-/// `token` is daemon.json's 256-bit hex · `protocol_version` is **the version the sending side was compiled with** —
-/// if the value daemon.json gave were echoed back, the receiver's version comparison would always pass and the version gate would die.
+/// `protocol_version` is **the version the sender was compiled with** — echoing the value daemon.json gave would make the receiver's comparison always pass and kill the version gate.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AuthFrame {
     Auth {
@@ -40,8 +36,7 @@ pub enum AuthFrame {
 mod tests {
     use super::*;
 
-    /// ★Source of truth for the wire contract★ — a **string literal**, not a comparison with another type. If changed to a form that
-    ///   matches a round-trip against another type, it **passes even when both definitions are wrong together**.
+    /// ★Source of truth for the wire contract★ — a **string literal**, not a comparison with another type (a round-trip against another type passes even when both definitions are wrong together).
     const GOLDEN: &str = r#"{"Auth":{"token":"deadbeefdeadbeef","protocol_version":3}}"#;
 
     fn golden_frame() -> AuthFrame {
@@ -106,7 +101,6 @@ mod tests {
     #[test]
     fn syntax_error_and_shape_error_are_distinguishable() {
         // The failure branches of the daemon's `link::auth` (the first frame is not auth / not JSON at all) rely on this classification.
-        // It is a value serde_json has already computed, so the branches split without re-parsing.
         let shape = serde_json::from_str::<AuthFrame>(r#"{"NotACommand":true}"#).unwrap_err();
         assert!(shape.is_data(), "JSON but a different shape = data error");
         let syntax = serde_json::from_str::<AuthFrame>("not json at all").unwrap_err();

@@ -1,15 +1,12 @@
-//! Daemon discovery shared contract — the contents of daemon.json.
+//! Daemon discovery shared contract — the contents of daemon.json: the daemon **writes** it (portfile::write_in_place); the src-tauri
+//!   shell or an
+//! external client **reads** it (discovery::ensure_daemon).
 //!
-//! It sits in protocol because it is a shared contract between two processes:
-//!   - the daemon **writes** this struct (portfile::write_in_place).
-//!   - the src-tauri shell (or an external client) **reads** it to attach to the daemon (discovery::ensure_daemon).
+//! ★Replacement is not atomic (ADR-0135)★: daemon.json doubles as the single-instance lock file held by the daemon, so it is written in
+//!   place and a
+//! reader can see **partially written content** — treat a parse failure as "not ready yet", not corruption.
 //!
-//! ★Replacement is not atomic (ADR-0135)★: daemon.json doubles as the single-instance lock file and is held by the daemon,
-//! so it cannot be swapped with a temp file + rename, and the daemon writes in place. The reading side can see **partially
-//! written content**, so it must treat a parse failure not as corruption but as "not ready yet".
-//!
-//! ★No ts-rs export★: it is a Rust-only IPC file that the frontend does not read directly (daemon.json flows
-//! only between the two backend processes). So it carries serde only and makes no TS binding.
+//! ★No ts-rs export★: a Rust-only file between the two backend processes; serde only.
 //!
 //! **Security:** `token` is kept in this file only.
 
@@ -27,20 +24,17 @@ pub struct DaemonInfo {
     /// Connection token (256-bit, 64 hex chars). No logging — `Debug` masks it, but a value taken out with [`Secret::expose`] cannot be masked.
     pub token: Secret,
     pub protocol_version: u32,
-    /// The daemon process's start time (Windows GetProcessTimes' creation FILETIME as a u64:
-    /// the number of 100-nanosecond intervals since 1601-01-01 UTC). It tells PID reuse apart so liveness is decided exactly
-    /// (PID alive AND creation time matches). 0 = unknown.
+    /// The daemon process's start time (Windows GetProcessTimes creation FILETIME: 100-ns intervals since 1601-01-01 UTC). It tells PID reuse
+    /// apart (PID alive AND creation time matches). 0 = unknown.
     ///
-    /// ★wire compatibility★: it is an appended field, so old readers ignore it. But an old daemon.json (no field) must also
-    /// parse, hence `#[serde(default)]` (0 if absent). default=0 is treated as "unknown", so liveness conservatively decides by
-    /// PID survival alone (so a living daemon is not wrongly declared stale).
+    /// ★wire compatibility★: an appended field — old readers ignore it; an old daemon.json without it parses via `#[serde(default)]` (0), and 0 makes
+    /// liveness decide by PID survival alone, so a live daemon is not wrongly declared stale.
     #[serde(default)]
     pub start_time: u64,
 }
 
 impl DaemonInfo {
-    /// A **pure function** separated from file IO —
-    /// the caller passes the bytes it read, making it testable (no filesystem needed).
+    /// A **pure function** separated from file IO: the caller passes the bytes it read (testable without a filesystem).
     pub fn parse(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(bytes)
     }
