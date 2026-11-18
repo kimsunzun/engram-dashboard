@@ -1,51 +1,38 @@
-//! groups — `@` address resolution seam (spec §4 · ADR-0104 decision 1 · **ADR-0111 decision 4 · ADR-0112 decision 1 ·
-//! ADR-0121 decision 1**).
+//! groups — `@` address resolution seam (spec §4, ADR-0104 decision 1, ADR-0111 decision 4, ADR-0112 decision 1, ADR-0121 decision 1).
 //!
-//! ★Role★: expands "`@` address → member (id · name) list". **The v1 source is a single built-in one, with two vocabulary words inside it**
-//!   (ADR-0121): **`@here`** = everyone alive right now · **`@all`** = everyone in the registry (alive **+ sleeping**). The expanded members
-//!   carry **the registry's id as is** (ADR-0309 decision 3 — no name → id round trip). The same profile has the same id even when launched again,
-//!   so it is the same member across re-spawns, and the address (`@all`) and the response notation are names (ADR-0101).
-//!
-//! ★The fact that the two words read **different list pools** is the decision itself (load-bearing — ADR-0121 §Impact)★: making them
-//!   see the same pool would turn "all" into a false name again (the sending LLM believes "everyone was told" while missing a sleeping peer)
-//!   and `@here` would lose its reason to exist. So the contract suite below asserts the source separation of the two words as an axis.
-//!
-//! ★A group is an **address-resolution macro**, not a send path (ADR-0111 decision 4 — this module's reason to exist)★: the expanded
-//!   members flow through **exactly the same** path as directly named recipients (spec §5 multi-recipient fan-out). The group-specific
-//!   delivery rules (skipping dead members · binding `(id,epoch)` at the send moment · a dedicated fan-out branch) were **all** abolished —
-//!   reviving them violates ADR-0111.
-//!
-//! ★User-defined groups were removed (ADR-0111 decision 4 · ADR-0112 decision 1)★: the runtime-registered list (registry) ·
-//!   the `group` MCP tool · the CLI `group` subcommand · ADR-0109 management semantics are all gone. Stored, named
-//!   groups will be **redesigned** when real demand stands up (folder groups are the first candidate) — no storage structure for groups
-//!   is laid down in advance.
-//!
-//! ★The resolution seam is kept (the *direction* of ADR-0104 decision 1 survives, only the sources shrink)★: the `GroupSource` extension point is left so a future source (folder `@folder-name`)
-//!   can be added without touching the messaging pipeline. The v1 implementation is
-//!   `BuiltinGroups` (= `@all`·`@here`) alone. **No over-build** — folder/hierarchy implementations are not built now.
-//!
-//! ★Pure, mechanical resolution (load-bearing boundary, ADR-0104)★: `resolve` **only expands** to a member list —
-//!   alive decisions, sender exclusion, deduplication and roster matching are all the upper layer's (`MessagingService`) job. In particular
-//!   **"expansion result of 0 members" is not an error here** (the empty list is returned as is): `GROUP_EMPTY` is a decision raised only when the **final recipient set** —
-//!   expansion plus explicit picks combined — is empty (ADR-0114 decision 3), so this layer cannot know.
-// ADR-0111
-// ADR-0112
+//! ★Role★: expands "`@` address → member (id, name) list". The v1 source is a single built-in one with two words (ADR-0121): **`@here`** =
+//!   everyone alive right now, **`@all`** = everyone in the registry
+//! (alive + sleeping). Members carry **the registry's id as is** (ADR-0309 decision 3 — no name → id round trip); the same profile keeps
+//!   its id across re-spawns; the address and response notation are names (ADR-0101).
+//! ★The two words reading **different pools** is the decision itself (ADR-0121 §Impact)★: one shared pool would make "all" a false name
+//!   again (the sender believes "everyone was told" while a sleeping peer is missed)
+//! and `@here` pointless; the contract suite below asserts the source separation as an axis.
+//! ★A group is an **address-resolution macro**, not a send path (ADR-0111 decision 4)★: expanded members flow through **exactly the same**
+//!   path as directly named recipients (spec §5 fan-out); group-specific
+//! delivery rules (skipping dead members, binding `(id,epoch)` at send, a fan-out branch) were all abolished — reviving them violates ADR-0111.
+//! ★User-defined groups were removed (ADR-0111 decision 4, ADR-0112 decision 1)★: registry, `group` MCP tool, CLI `group` subcommand,
+//!   ADR-0109 management are gone; stored named groups will be redesigned on real
+//! demand (folder groups first) — no storage structure is laid down in advance.
+//! ★The resolution seam is kept★: `GroupSource` lets a future source (folder `@folder-name`) be added without touching the pipeline; v1 is
+//!   `BuiltinGroups` alone — **no over-build**.
+//! ★Pure, mechanical resolution (ADR-0104)★: `resolve` **only expands**; alive decisions, sender exclusion, dedup and roster matching are
+//!   `MessagingService`'s. ★"0 members" is not an error here★ (returned as is):
+//! `GROUP_EMPTY` is raised only when the **final recipient set** (expansion + explicit picks) is empty (ADR-0114 decision 3), which this
+//!   layer cannot know.
+// ADR-0111, ADR-0112
 
 use crate::PeerId;
 
-/// Built-in word `@all` — **everyone in the registry** (alive + sleeping) **− sender** (spec §4 · ADR-0121 decision 1).
+/// Built-in word `@all` — **everyone in the registry** (alive + sleeping) **− sender** (spec §4, ADR-0121 decision 1).
 pub const ALL_GROUP: &str = "@all";
 
-/// Built-in word `@here` — **everyone alive right now** **− sender** (spec §4 · ADR-0121 decision 1).
-///
-/// ★Basis for the word choice★: Slack uses the same distinction (`@channel` = everyone / `@here` = currently active) — the LLM driving the agent
-///   likely already knows that convention (ADR-0121 §Rationale).
+/// Built-in word `@here` — **everyone alive right now** **− sender** (spec §4, ADR-0121 decision 1). ★Word choice★: Slack's same
+///   distinction (`@channel` / `@here`) is likely known to the driving LLM (ADR-0121 §Rationale).
 pub const HERE_GROUP: &str = "@here";
 
-/// One member of the expansion — the id the registry gave and the name at that moment.
-///
-/// The upper layer picks the recipient by this id directly — resolving again by name would fold same-name twins (different agents) into one
-/// recipient or turn them into `RECIPIENT_AMBIGUOUS` (ADR-0309 decision 3 · TRD S29 §4 X1).
+/// One member of the expansion — the id the registry gave and the name at that moment. The upper layer picks the recipient by this id
+///   directly; re-resolving by name would fold same-name twins into one recipient or
+/// `RECIPIENT_AMBIGUOUS` (ADR-0309 decision 3, TRD S29 §4 X1).
 // ADR-0309
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupMember {
@@ -53,21 +40,19 @@ pub struct GroupMember {
     pub name: String,
 }
 
-/// The **two list pools** the resolver reads (ADR-0121 decision 1) — the caller builds them from a snapshot taken outside the lock and injects them.
-///
-/// ★Why two pools and not one slice (load-bearing — so source knowledge does not leak into the pipeline)★: "which word
-///   reads which pool" is **knowledge of the source**. If the upper layer picked a different slice per word and passed it in,
-///   the pipeline would have to know `@all`/`@here`, and then a future source (folder `@folder-name`) could not pick its own pool
-///   (ADR-0104 "it is a violation if source knowledge leaks into the pipeline"). So **both** pools are passed and the source chooses.
-/// ★Sender exclusion arrives already applied by the caller★ (spec §4 — the sender is removed from the expansion. That the source of truth is the spec and not ADR-0111
-///   is load-bearing: decision 4 of 0111 lacks that phrase, so looking only there you would miss it).
+/// The **two list pools** the resolver reads (ADR-0121 decision 1) — built by the caller from a snapshot taken outside the lock. ★Two
+///   pools, not one slice (load-bearing)★: "which word reads which pool" is **source
+/// knowledge**; if the upper layer picked a slice per word the pipeline would know `@all`/`@here` and a future source (folder
+///   `@folder-name`) could not pick its own pool (ADR-0104: source knowledge must not leak into
+/// the pipeline). So both are passed and the source chooses. ★Sender exclusion arrives already applied★ (spec §4 — the spec is canonical;
+///   ADR-0111 decision 4 lacks that phrase).
 #[derive(Debug, Clone, Copy)]
 pub struct MemberPools<'a> {
-    /// Members alive right now — the list of `@here` and the first part of `@all`.
+    /// Members alive right now — the pool of `@here` and the first part of `@all`.
     pub live: &'a [GroupMember],
-    /// Sleeping members (profile exists, its session is not alive) — **only `@all`** reads this too.
-    ///   ★It arrives with same names not folded★: because the contract of this layer is to **return the pool the caller gave verbatim** (no sorting,
-    ///   dedup or filtering) — two members with the same name are different recipients (ADR-0309 · TRD S29 §4 X1).
+    /// Sleeping members (profile exists, session not alive) — read **only by `@all`**. ★Same names are not folded★: this layer returns the
+    ///   caller's pool verbatim (no sorting, dedup or filtering); two members with one name
+    ///   are different recipients (ADR-0309, TRD S29 §4 X1).
     pub dormant: &'a [GroupMember],
 }
 
@@ -76,21 +61,17 @@ pub struct MemberPools<'a> {
 pub enum GroupError {
     /// `@` namespace convention violation — normalization failed.
     InvalidName { name: String },
-    /// An `@name` that is not a built-in word — a nonexistent address → `GROUP_NOT_FOUND` (the whole send unit is bounced, ADR-0114 decision 3).
+    /// An `@name` that is not a built-in word → `GROUP_NOT_FOUND` (the whole send is bounced, ADR-0114 decision 3).
     NotFound { name: String },
 }
 
-/// ★Group address normalization — a **seam-level** free function (C4 review fix F · ADR-0104 decision 1)★
-///
-/// ★Why a free function and not a method of a source implementation (load-bearing — seam boundary)★: the send pipeline normalizes the name **before**
-///   asking the source (the envelope `to` token and the error hint use that value). If that normalization were a method of a specific source
-///   implementation, the pipeline would be tied to that type, and a future source with a different name grammar would become unreachable (ADR-0104
-///   "it is a violation if source knowledge leaks into the pipeline"). So the convention is placed at the seam level outside the sources and shared by all.
-///
-/// ★Strict convention (load-bearing — @-namespace contract)★: a group name **must start with exactly one leading `@`**.
-/// If there is no leading `@` (`coders`) it is `InvalidName` — lenient correction (`coders` → `@coders`) was rejected because it blurs the contract in which the person/group
-/// distinction hangs on a single `@`. If the body after `@` is empty or only whitespace, or the body has another `@`
-/// (`@@x`·`@a@b`), it is likewise `InvalidName`.
+/// ★Group address normalization — a **seam-level** free function (C4 review fix F, ADR-0104 decision 1)★. ★Why not a source method (seam
+///   boundary)★: the pipeline normalizes the name **before** asking the source (the envelope
+/// `to` token and error hint use it); a method of one source would tie the pipeline to that type and make a future source with a different
+///   name grammar unreachable (ADR-0104). So the convention sits outside the sources.
+/// ★Strict convention (@-namespace contract)★: a group name **must start with exactly one leading `@`**. No leading `@` (`coders`) is
+///   `InvalidName` — lenient correction (`coders` → `@coders`) was rejected because the
+/// person/group distinction hangs on one `@`. An empty/whitespace body or another `@` in the body (`@@x`, `@a@b`) is likewise `InvalidName`.
 // ADR-0104
 pub fn normalize_group_name(name: &str) -> Result<String, GroupError> {
     let trimmed = name.trim();
@@ -107,13 +88,14 @@ pub fn normalize_group_name(name: &str) -> Result<String, GroupError> {
     Ok(format!("@{body}"))
 }
 
-/// Group resolution source (seam — ADR-0104 decision 1). The extension point of the "`@` address → member list" resolver.
+/// Group resolution source (seam — ADR-0104 decision 1): the extension point of the "`@` address → member list" resolver.
 pub trait GroupSource {
     /// `NotFound` if this source does not know that address.
     fn resolve(&self, group: &str, pools: MemberPools<'_>) -> Result<Vec<GroupMember>, GroupError>;
 }
 
-/// The only v1 source — it knows only the two built-in words (`@all`·`@here`) (no storage, computed on the spot, ADR-0111 decision 4 · ADR-0121 decision 1).
+/// The only v1 source — knows only the two built-in words (`@all`·`@here`); no storage, computed on the spot (ADR-0111 decision 4,
+///   ADR-0121 decision 1).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BuiltinGroups;
 
@@ -134,18 +116,15 @@ impl GroupSource for BuiltinGroups {
     }
 }
 
-/// ★`GroupSource` contract suite — a safety net for durability under source swaps (user instruction 2026-07-26)★
-///
-/// ★Why it exists (load-bearing — this module's reason to exist)★: `GroupSource` is a seam laid down **on the premise that it will be swapped in the future**
-///   (ADR-0104 decision 1 — once folders become daemon-owned, an `@folder-name` source is added). The worst case is that the new implementation
-///   quietly takes on a different meaning: `@all` comes out sorted, **`@here` reads sleeping names too**,
-///   an empty snapshot is folded into an error, or the `@` convention turns lenient — all of these **compile and leave existing tests green**
-///   while only the broadcast meaning flips. So there is a reusable suite that asserts the resolution semantics **against the trait**, not the
-///   implementation.
-///
-/// ★When this suite goes red★: what to fix is **the decision, not the suite**. The resolution semantics are user-decided matters set by spec §4 · ADR-0111
-///   decision 4 · ADR-0114 decision 3 · ADR-0121 decision 1, so a fix that loosens the assertions here
-///   is a contract change — do not relax them without user ratification.
+/// ★`GroupSource` contract suite — a safety net for durability under source swaps★. ★Why (load-bearing)★: `GroupSource` is a seam laid
+///   down on the premise it will be swapped (ADR-0104 decision 1 — an
+/// `@folder-name` source once folders are daemon-owned). The worst case is a new implementation quietly changing meaning — `@all` sorted,
+///   **`@here` reading sleeping names too**, an empty snapshot folded into an error, a
+/// lenient `@` convention — which compiles and leaves existing tests green while the broadcast meaning flips. So this reusable suite
+///   asserts the semantics **against the trait**.
+/// ★When it goes red★: fix **the decision, not the suite** — the semantics are user-decided (spec §4, ADR-0111 decision 4, ADR-0114
+///   decision 3, ADR-0121 decision 1); loosening the assertions is a contract change
+/// needing user ratification.
 #[cfg(any(test, feature = "test-harness"))]
 pub mod contract {
     use super::{GroupError, GroupMember, GroupSource, MemberPools, ALL_GROUP, HERE_GROUP};
@@ -153,14 +132,13 @@ pub mod contract {
 
     #[derive(Debug, Clone)]
     pub struct GroupSourceFixture {
-        /// An address name this source **does not know** (the `NotFound` axis). It must already be in normalized form (`@nope`).
+        /// An address name this source **does not know** (the `NotFound` axis); must already be normalized (`@nope`).
         pub unknown: String,
-        /// Does this source **own** the built-in words (`@all`·`@here`). v1 `BuiltinGroups` = true.
-        ///   A future folder source = usually false.
+        /// Does this source **own** the built-in words (`@all`·`@here`). v1 `BuiltinGroups` = true; a future folder source usually false.
         pub handles_builtins: bool,
     }
 
-    /// A different id for each member (sequence from `base`) — if several share one name, those are same-name twins.
+    /// A different id per member (sequence from `base`) — several sharing one name are same-name twins.
     fn members(base: u128, names: &[&str]) -> Vec<GroupMember> {
         names
             .iter()
@@ -172,15 +150,14 @@ pub mod contract {
             .collect()
     }
 
-    /// ★`GroupSource` resolution semantics contract — any implementation must pass this (spec §4 · ADR-0111/0114/0121)★.
-    ///
-    /// ★The `axisN-…:` token before assertion messages (load-bearing)★: every failure message starts with a token that is **unique per
-    ///   axis**. The self-check tests confirm "the net bites" with `#[should_panic(expected = …)]`, and if a substring
-    ///   overlaps across axes, the wrong axis blowing up first still comes out green. **If you change a token, fix the pin too.**
+    /// ★`GroupSource` resolution semantics contract — any implementation must pass this (spec §4, ADR-0111/0114/0121)★. ★The `axisN-…:`
+    ///   token before assertion messages (load-bearing)★: each failure message
+    ///   starts with a token unique per axis; self-check tests confirm "the net bites" via `#[should_panic(expected = …)]`, and
+    ///   overlapping substrings would let the wrong axis blow up first and still pass. If you change a token, fix the pin too.
     pub fn assert_group_source_contract(src: &dyn GroupSource, fx: &GroupSourceFixture) {
         // ── 1·1b·1c·2. Built-in word axis ────────────────────────────────────────────────────────
-        // Sorting would scatter the upper layer's row-order rule (explicit tokens → expansion alphabetical) across two layers, and
-        //   deduping by name would fold same-name twins (different ids) into one recipient at the source stage (ADR-0309 · TRD S29 §4 X1).
+        // Sorting would scatter the upper layer's row-order rule (explicit tokens → expansion alphabetical) across two layers, and name
+        //   dedup would fold same-name twins at the source stage (ADR-0309, TRD S29 §4 X1).
         let live = members(1, &["zeta", "alpha", "zeta", "mid"]);
         let dormant = members(100, &["sleepy", "twin", "twin"]);
         let pools = MemberPools {
@@ -249,7 +226,7 @@ pub mod contract {
         }
 
         // ── 5. Determinism — the same input twice, the same answer ────────────────────────────────────────────
-        // If this breaks, the "one snapshot at the send moment" contract loses its meaning (two questions at the same moment see different worlds).
+        // If this breaks, "one snapshot at send time" loses its meaning (two questions at one moment see different worlds).
         assert_eq!(
             src.resolve(&fx.unknown, pools),
             src.resolve(&fx.unknown, pools),
@@ -272,7 +249,7 @@ mod tests {
     use super::contract::{assert_group_source_contract, GroupSourceFixture};
     use super::*;
 
-    /// A random id for each member — writing the same name twice makes same-name twins.
+    /// A random id per member — writing one name twice makes same-name twins.
     fn members(v: &[&str]) -> Vec<GroupMember> {
         v.iter()
             .map(|s| GroupMember {
