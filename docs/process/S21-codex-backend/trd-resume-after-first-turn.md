@@ -4,7 +4,7 @@
 >
 > **Landed (2026-09-24): A1–A4 of Phase A are in the code — the commits are in the §6-1 step table.** The statement above, 「코드는 아직 한 줄도 안 바뀌었다」 (Not one line of code has changed yet), and the `file:line` anchors in the body are a record of the reading point (`93f0f9f`). Where the implementation departs from the original design, that section records it as 「구현 결과」 (§3-5 gate expression · placement · loading spinner (always spins, including under e-ink and reduced-motion — user decision 2026-09-24) · §4-1 end-to-end test · §7 Q4).
 >
-> **What this document chose on its own** (places delegated to the implementation by D3 · internal implementation with no user-visible effect) is marked 「고름」 in the body. What needs a user decision is placed only in §7.
+> **What this document chose on its own** (places delegated to the implementation by D3 · internal implementation with no user-visible effect) is marked "(picked)" in the body. What needs a user decision is placed only in §7.
 >
 > **It splits into two lumps — Phase A (D1+D2+D5) · Phase B (D4).** Either one builds on its own if it lands alone; §6-3 and §6-4 describe the behavior when only one side has landed. The [A]/[B] in a section title is its membership. Whether to split and which goes first is §7 Q5 — **decided: A this round, B next round** (user, 2026-09-24).
 >

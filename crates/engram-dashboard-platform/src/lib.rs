@@ -101,7 +101,9 @@
 //! must be **exactly** the same as a fixed list.
 //! - **Where it is** — the regex (`os_cfg_re`) · file-finding function (`os_cfg_files`) · list (heredoc) are only in
 //!   the `platform gate 4` step of `.github/workflows/ci.yml`, and the local substitute (`.claude/skill-bindings/qa-verify.md`
-//!   「gates 잡」) runs that step as is — those three are not copied here or into other docs. Target = the `.rs` files of `crates` · // hangul-ok
+// hangul-ok-begin
+//!   「gates 잡」) runs that step as is — those three are not copied here or into other docs. Target = the `.rs` files of `crates` ·
+// hangul-ok-end
 //!   `src-tauri` minus this crate (including `src-tauri/tests/` · `build.rs` — wider than `src-tauri/src` of TRD §4-4,
 //!   and measuring showed the list was the same). Before running, check that the three paths (`crates` · `src-tauri` · this crate's `src`) exist
 //!   — without them rg dies without a reason.
@@ -146,7 +148,9 @@
 //! Among the workspace members, the one that has an OS crate **directly** as a **production dependency** (normal · build — regardless of the target OS) must be this crate
 //! alone.
 //! - **Where it is** — the OS crate list (`os_dep_re`) · the decision function (`os_dep_gate`) are only in the `platform gate 5` step of
-//!   `.github/workflows/ci.yml`, and the local substitute (qa-verify 「gates 잡」) runs that step as is. The list is a hand-written explicit // hangul-ok
+// hangul-ok-begin
+//!   `.github/workflows/ci.yml`, and the local substitute (qa-verify 「gates 잡」) runs that step as is. The list is a hand-written explicit
+// hangul-ok-end
 //!   list (cargo-deny style) — not copied here.
 //! - **What it reads** = the roots (members) of `cargo tree --workspace --no-dedupe --depth 1 --prefix depth -e normal,build --target all
 //!   --all-features` and the dependencies right below them. Members are not written by hand, so new members are visible too, and since it is the resolved
@@ -165,7 +169,9 @@
 //! crate that use `std::os::windows` · `std::os::unix` must be **exactly** the same as a fixed list.
 //! `std`'s general APIs (`std::fs` · `std::process` and the like) adapt to the OS on their own, so they are not targets.
 //! - **Where it is** — the regex (`std_os_re`) · the decision function (`std_os_gate` — target range · pair · comparison, all of it) ·
-//!   the list (heredoc) are only in the `platform gate 6` step of `ci.yml`, and the local substitute (qa-verify 「gates 잡」) runs that // hangul-ok
+// hangul-ok-begin
+//!   the list (heredoc) are only in the `platform gate 6` step of `ci.yml`, and the local substitute (qa-verify 「gates 잡」) runs that
+// hangul-ok-end
 //!   step as is. The target paths · path check ·
 //!   path separator normalization · the kinds that go in the list (files with only test branches · `tests/` · test harness bins · `examples/`) ·
 //!   two-way decision · pair (1 or more files inside this crate) are the same as ④.

@@ -87,7 +87,9 @@
 //!   from both sides that the item's temp path **was written to the temp home and not to the
 //!   real home**. This paragraph used to be only a promise, kept by nobody but a human eye.
 //!
+// hangul-ok-begin
 //! It launches real child processes, so it runs with `-- --test-threads=4` (TRD §7 0-2 · `.claude/skill-bindings/qa.md` 「모듈별 명령」).
+// hangul-ok-end
 //!   ★On a PC where a security-software DLL hooks process creation, lower it to 1★ — the same reason as that document's 「if it still
 //!   dies, lower it to 2」 clause, and in this suite one item launches the real CLI several times.
 

@@ -280,7 +280,9 @@
 //! ★Do not read it as 「moving them to the in-memory harness makes it faster」★ — the moment you move them, what they measured disappears.
 //!
 //! ★Do not add `-- --test-threads=4`★ — this crate spawns no child process at all.
-//! It is exactly the decision rule of `.claude/skill-bindings/qa.md` 「모듈별 명령」, the same situation as `command` · `protocol` · `messaging` · `net`. // hangul-ok
+// hangul-ok-begin
+//! It is exactly the decision rule of `.claude/skill-bindings/qa.md` 「모듈별 명령」, the same situation as `command` · `protocol` · `messaging` · `net`.
+// hangul-ok-end
 
 // ADR-0177
 // ADR-0180
