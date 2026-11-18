@@ -1,17 +1,17 @@
 //! `agent.*` commands — live next to the code that works with **declaration and body as one set** (`AgentManager`) (ADR-0155).
 //!
-//! ★This table is the real entry of the control verbs — there are **two** surfaces★: the CLI's `/control/agent` route (it finds `{verb}`
-//!   as `agent.<verb>`) and the envelope the client issues on the command bus (step 1 of the 3-step delivery). Both pass through the daemon's
-//!   one common entry (daemon `control/commands.rs`). That is, this file's return shapes, error codes and notification counts are
-//!   exactly the response of `engram agent …` and the answer the LLM receives on the bus.
-//! ★Hosted by the daemon, declared by the core★ — the only place where these two split (ADR-0029 + TRD §2-3).
+//! ★This table is the real entry of the control verbs — **two** surfaces★: the CLI's `/control/agent` route (finds `{verb}` as
+//!   `agent.<verb>`) and the envelope the client issues on the command bus. Both pass through the daemon's one common entry
+//!   (daemon `control/commands.rs`), so this file's return shapes, error codes and notification counts are exactly the response of `engram
+//!   agent …` and the answer the LLM receives on the bus.
+//! ★Hosted by the daemon, declared by the core★ (ADR-0029 + TRD §2-3).
 //!
-//! ★`usage.*` (the two usage-limit verbs) are also declared here — their bodies are not here★: the producer of the vocabulary (the backend word `AgentBackend` · row
-//!   types) is this crate, so the declaration lives here (ADR-0155 decision 1), and the real thing is plugged in by the daemon's usage service through the port
-//!   [`UsageCommandHost`] (TRD S21 usage-limit-slot §3 #18).
+//! ★`usage.*` (the two usage-limit verbs) are declared here too — their bodies are not★: this crate produces the vocabulary
+//!   (`AgentBackend` word · row types), so the declaration lives here (ADR-0155 decision 1) and the daemon's usage service plugs the real
+//!   thing in through [`UsageCommandHost`] (TRD S21 usage-limit-slot §3 #18).
 //!
 //! Entry points: [`make_table`](fn.make_table.html) (assembly) · [`AgentCommandHost`](trait.AgentCommandHost.html) (injection seam) ·
-//! [`UsageCommandHost`](trait.UsageCommandHost.html) (usage port).
+//!   [`UsageCommandHost`](trait.UsageCommandHost.html) (usage port).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,19 +37,18 @@ use crate::usage::UsageVendorKey;
 // ★Success responses are flat (user decision 2026-08-13)★: each command declares its return, so there is no reason to wrap one more
 //   layer `{"agent":{…}}`.
 declare_commands! {
-    // v8 (2026-10-26): one name was added — `agent.resolve` (ADR-0307 · TRD S28 §6).
-    // v7 (2026-10-10): the answer of `agent.list` gained the field `store` — the state of the two registry stores (agents · presets) (ADR-0291
-    //   R17 · D6). The names are unchanged and the shape of the answer changed.
-    // v6 (2026-09-28·29): three names were added — `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21
-    //   usage-limit-slot §1-6). Two branches each raised it to 6 separately, and v6 was never shipped in any release (tag), so they were merged into one generation.
-    // v5 (2026-09-26): two names were added — `agent.listQueuedInputs`·`agent.cancelQueuedInput` (ADR-0231).
-    // v4 (2026-09-22): the `backend` vocabulary of `agent.new` went from **`Claude` alone → the two `Claude`·`Codex`**
-    //   (ADR-0219). Neither names nor fields grew, but **the set of words that field accepts** changed, and that is the declaration
-    //   callers see — the generated output carries that difference as is (`"backend":{"enum":[…]}` of
-    //   `bindings/commands.schema.json`). Without raising it, a build that creates codex and a build that refuses it would report the same
-    //   generation. ★The generation is not a number raised **only when names grow** — it is raised when the declaration changes.★
-    // v3 (2026-09-08): the `backend` of `agent.new` went from **optional → required**. It is a breaking change removing the silent claude default,
-    //   so the generation is raised (reason = that field's doc). This number is diagnostic, and the receiving side does not use it for refusal
+    // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
+    // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
+    // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
+    //   6 and v6 never shipped, so they merged into one generation.
+    // v5: `agent.listQueuedInputs`·`agent.cancelQueuedInput` added (ADR-0231).
+    // v4: the `backend` vocabulary of `agent.new` went from `Claude` alone → `Claude`·`Codex` (ADR-0219). No names or fields grew but
+    //   **the set of words that field accepts** changed, and the generated output carries it
+    //   (`"backend":{"enum":[…]}` of `bindings/commands.schema.json`); without raising it, a build that creates codex and one that refuses
+    //   it would report the same generation.
+    //   ★The generation is raised when the declaration changes, not only when names grow.★
+    // v3: the `backend` of `agent.new` went from optional → required — a breaking change removing the silent claude default (reason: that
+    //   field's doc). This number is diagnostic; the receiving side does not refuse by it
     //   (the RegisterCommands branch of `connection_core`).
     catalog_version: 8;
 
@@ -74,8 +73,8 @@ declare_commands! {
     }
 
     // ── Roster store state (`store` of `agent.list` — ADR-0291 R17 · D6) ─────────────────────────────────────
-    // ★A macro enum is only a string enumeration, so the store state (the tag enum `profile::StoreStatus` carrying a reason) is spread into a word + optional
-    //   fields★ — the same shape as the usage rows.
+    // ★A macro enum is only a string enumeration, so the store state (the tag enum `profile::StoreStatus` carrying a reason) is spread
+    //   into a word + optional fields★ — same shape as the usage rows.
 
     /// The state of one store file — `Writable` (writable) | `ReadOnly` (the daemon did not accept that file when it started — the roster is
     /// empty, and for this whole run requests changing the roster are `CONFLICT` (`NOT_FOUND` if there is no entry to point at). It clears only by fixing
@@ -172,8 +171,8 @@ declare_commands! {
     }
 
     // ── Usage limits (`usage.*` — TRD S21 usage-limit-slot §1-6) ──────────────────────────────────────
-    // ★A macro enum is only a string enumeration, so the wire state (a tag enum carrying fields) is spread into a word + optional fields★ — the words map 1:1 to the six wire
-    //   states and the fields are carried only in that state (`UsageVendorRow`).
+    // ★A macro enum is only a string enumeration, so the wire state (a tag enum carrying fields) is spread into a word + optional fields★
+    //   — words map 1:1 to the six wire states, fields are carried only in that state (`UsageVendorRow`).
 
     /// The kind of usage window — `FiveHour` (5 hours) · `Weekly` (weekly) · `ModelWeekly` (per-model weekly — `label` is its name).
     enum UsageWindowWord {
@@ -228,8 +227,10 @@ declare_commands! {
                  errors [];
 
     // ADR-0307
-    // ★The head `targets[i]: ` of the failure text is a contract★ — the shell (TRD S28 §5-1) traces a failure back to its own argument name by this head.
-    //   The shell does not depend on this crate, so compilation does not stop if it changes. The place building the head = `target_failure` · the pinning test =
+    // ★The head `targets[i]: ` of the failure text is a contract★ — the shell (TRD S28 §5-1) traces a failure back to its own argument
+    //   name by this head.
+    //   The shell does not depend on this crate, so compilation does not stop if it changes. The place building the head =
+    //   `target_failure` · the pinning test =
     //   `tests::the_resolve_failure_prefix_is_a_stable_contract`.
     /// Resolves 1–8 words pointing at agents (name or id) at once — `agents` is in the same order as the request. The resolving rules are the same as other verbs
     /// taking `target` (exact id match first · then exact name match — case-sensitive · asleep agents included).
@@ -417,9 +418,9 @@ declare_commands! {
         /// Whose backend's limits — the same word as `agent.new`.
         backend: AgentBackend,
     } -> ok UsageRefreshOk {
-        // ★The fields must not differ by a single character from `UsageVendorRow`★ — the macro builds a new return struct per command,
-        //   so two commands cannot share one type. The pairing is carried by `From<UsageVendorRow>` (destructuring — compilation
-        //   stops if the fields diverge) and the test comparing the bytes of the two return schemas. The meaning of the fields is in the `UsageVendorRow` doc.
+        // ★The fields must not differ by a character from `UsageVendorRow`★ — the macro builds a new return struct per command, so two
+        //   commands cannot share a type. The pairing is `From<UsageVendorRow>` (destructuring — compilation stops on
+        //   divergence) and the test comparing the two return schemas' bytes. Field meanings: the `UsageVendorRow` doc.
         backend: AgentBackend,
         account_key: String,
         plan: Option<String>,
@@ -438,17 +439,13 @@ declare_commands! {
 
 /// Commands that **move the input** of a live agent — the common entry looks at the input lease (`check_input`) first.
 ///
-/// ★Kept here rather than adding a field to the declaration macro★ — putting a marker on `CommandSpec` would make the command crate know the domain of
-///   input leases. Every name of this list must be a `Write` declaration of this block (a test measures it).
-/// The query (`agent.listQueuedInputs`) does not look at the lease — it is a read.
-/// Interrupt (`agent.interrupt`) is included too — the same as WS `Interrupt` looking at the lease.
+/// ★Kept here rather than as a declaration-macro field★ — a marker on `CommandSpec` would make the command crate know the domain of input leases. Every name must be a `Write` declaration of this block (a test measures it).
+/// The query (`agent.listQueuedInputs`) is a read and skips the lease; interrupt (`agent.interrupt`) is included, like WS `Interrupt`.
 // ADR-0231
 // ADR-0237
 pub const INPUT_AFFECTING: &[&str] = &["agent.cancelQueuedInput", "agent.interrupt"];
 
-/// One roster row — only what this table sees from the manager.
-///
-/// `live` = if `Some(status)`, a session is attached (the liveness decision is [`AgentStatus::is_live`] alone, ADR-0116).
+/// One roster row — only what this table sees from the manager. `live` = `Some(status)` means a session is attached (liveness = [`AgentStatus::is_live`] alone, ADR-0116).
 pub struct AgentRosterRow {
     pub id: AgentId,
     pub canonical_name: String,
@@ -474,11 +471,8 @@ pub struct StartedAgent {
 
 /// **Everything** the `agent.*` handlers have the manager do.
 ///
-/// ★Why a trait★: taking `AgentManager` as is would drag in a real PTY process just to assert one handler —
-///   a direct violation of ADR-0012 「cut external dependencies with a seam」, the form rule T-1 forbids.
-///   With this seam, the whole table is verified without a process through a fake manager.
-/// ★Implementations only translate★: the verb rules (target resolution · mode derivation · outcome translation) are held **by the handlers**.
-///   If rules went into implementations, the real and the fake would run different rules and the harness would guard nothing.
+/// ★Why a trait★: taking `AgentManager` as is would drag in a real PTY process to assert one handler — a violation of ADR-0012 「cut external dependencies with a seam」 (form rule T-1). With this seam the whole table is verified with a fake manager.
+/// ★Implementations only translate★: the verb rules (target resolution · mode derivation · outcome translation) are held **by the handlers**; rules in implementations would make real and fake run different rules and the harness guard nothing.
 // ADR-0155
 // ADR-0012
 pub trait AgentCommandHost: Send + Sync {
@@ -503,10 +497,7 @@ pub trait AgentCommandHost: Send + Sync {
     /// ★`Ok(false)` does not tell the reason★ — the manager gives only one bool (`ProfileRegistry::try_reparent`).
     /// Absence and a structural conflict are told apart by the handler **by re-querying the roster** (`verb_move`).
     fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> Result<bool, PtyError>;
-    /// The working folder of one registered path bookmark (preset, ADR-0061).
-    ///
-    /// ★Pointing is **exact id match** only★ — it cannot be found by name (preset names are not unique). A missing id and
-    /// a string not in id format are both `None`: because the caller has the same thing to do (pick an id from the list again).
+    /// The working folder of one registered path bookmark (preset, ADR-0061). ★Pointing is **exact id match** only★ (preset names are not unique); a missing id and a non-id string are both `None` — the caller's remedy is the same (pick an id from the list again).
     fn preset_cwd(&self, id: &str) -> Option<String>;
     /// The waiting list of the live incarnation. `None` = no live session.
     // ADR-0231
@@ -518,19 +509,15 @@ pub trait AgentCommandHost: Send + Sync {
         id: AgentId,
         input_id: &str,
     ) -> Result<CancelOutcome, CancelError>;
-    /// Interrupts the running turn of the live incarnation. `PtyError::NotFound` if there is no live session · `PtyError::Unsupported` if there is no turn to interrupt or the link
-    /// cannot interrupt.
+    /// Interrupts the running turn of the live incarnation. `PtyError::NotFound` if no live session · `PtyError::Unsupported` if no turn to interrupt or the link cannot interrupt.
     // ADR-0237
     fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError>;
 }
 
 /// The exit (port) telling attached clients the roster changed.
 ///
-/// ★The symptom when this is missing★: even after creating or renaming an agent, the dashboard tree **shows the old roster until an unrelated event
-///   comes** (a silent stale). A verb that changed the **composition** of the roster must call this port —
-///   that decision differs per verb (waking does not change the composition), and the handler carries it.
-/// ★Why a port and not a dependency of the table★: the real notification is an all-connection fan-out, owned by the daemon. The consumer here holds only a narrow
-///   trait, and the assembly provides the real adapter (the same shape as daemon `control::RosterBroadcast`).
+/// ★Missing, the dashboard tree **shows the old roster until an unrelated event comes**★ (silent stale). A verb that changed the roster's **composition** must call it — that differs per verb (waking does not change composition), so the handler carries it.
+/// ★A port, not a dependency of the table★: the real notification is an all-connection fan-out owned by the daemon; the consumer holds a narrow trait and the assembly provides the adapter (like daemon `control::RosterBroadcast`).
 /// Must be non-blocking — the fan-out only does try_send to per-connection queues.
 // ADR-0155
 pub trait RosterChanged: Send + Sync {
@@ -539,13 +526,10 @@ pub trait RosterChanged: Send + Sync {
 
 /// **Everything** the `usage.*` handlers have the daemon's usage service do (a port) — the real thing = daemon `UsageService`.
 ///
-/// ★Synchronous — called on a blocking pool thread (TRD S21 usage-limit-slot §3 #17)★: the daemon's common entry drives only handlers that finish at the first poll
-///   (`call_daemon_command`), and an async handler that waits becomes `OUTCOME_UNKNOWN`. So the two
-///   methods wait for the query to end **on the calling thread** (cap 5 seconds). The real thing waits on a std channel — this crate stays
-///   unaware of an async runtime.
-/// ★The field is found by [`usage_vendor_of`], not by the incoming spelling★ — the bus word (`Claude`) and the wire word (`claude`) must hit one
-///   field (§3 #43).
-/// `None` = this daemon does not hold the field of that backend — the handler answers `NOT_FOUND`.
+/// ★Synchronous — called on a blocking pool thread (TRD S21 usage-limit-slot §3 #17)★: the daemon's common entry drives only handlers that finish at the first poll (`call_daemon_command`); an async handler that waits becomes `OUTCOME_UNKNOWN`.
+///   So both methods wait for the query to end **on the calling thread** (cap 5 s) on a std channel — no async runtime here.
+/// ★The field is found by [`usage_vendor_of`], not the incoming spelling★ — the bus word (`Claude`) and the wire word (`claude`) must hit one field (§3 #43).
+/// `None` = this daemon holds no field of that backend — the handler answers `NOT_FOUND`.
 // ADR-0155
 // ADR-0012
 pub trait UsageCommandHost: Send + Sync {
@@ -555,11 +539,9 @@ pub trait UsageCommandHost: Send + Sync {
     fn refresh(&self, backend: &AgentBackend) -> Option<UsageVendorRow>;
 }
 
-/// Bus word → the vendor key of the usage field. `None` = there is no prober for that word.
+/// Bus word → the vendor key of the usage field; `None` = no prober for that word.
 ///
-/// ★The same path as the wire entry★ — both entries find the prober with [`usage_probe_for`](crate::backend::usage_probe_for) and
-///   take that prober's key as the field (the wire-side pair in daemon `connection_core`). Making the key from the incoming spelling would have the two entries
-///   hit different fields.
+/// ★Same path as the wire entry★ — both find the prober with [`usage_probe_for`](crate::backend::usage_probe_for) and take its key as the field (wire-side pair: daemon `connection_core`); a key from the incoming spelling would hit different fields.
 // ADR-0004
 pub fn usage_vendor_of(backend: &AgentBackend) -> Option<UsageVendorKey> {
     crate::backend::usage_probe_for(&backend_word(backend)).map(|probe| probe.key())
@@ -682,91 +664,66 @@ impl AgentCommandHost for AgentManager {
 
 /// The backend output format of a newly created agent.
 ///
-/// ★Why StreamJson★: the caller of this family is the LLM, and the default of the creation command the LLM calls on the frontend
-///   (`agentlist.createAgent`) is already StreamJson (ADR-0078). If two entries gave different defaults to the same verb,
-///   it would become "created it, but the screen is different".
-/// ★The home of the value is here alone★ — even as entries opening the create verb grow, they reference this instead of keeping their own constant.
-/// ★**There is only one place pinning the value itself**★ — `tests::the_new_agent_default_output_format_is_pinned_to_a_literal`.
-/// All other assertions are **relative comparisons** with this constant, so they move along if the value is flipped (so without that one,
-/// an edit changing this line would pass with the whole suite green).
+/// ★Why StreamJson★: the LLM is the caller and the frontend creation command the LLM calls (`agentlist.createAgent`) already defaults to StreamJson (ADR-0078); different defaults per entry would give "created it, but the screen is different".
+/// ★The home of the value is here alone★ — new create-verb entries reference this instead of their own constant.
+/// ★**Only one place pins the value itself**★ — `tests::the_new_agent_default_output_format_is_pinned_to_a_literal`; all other assertions compare relatively and would stay green if the value flipped.
 pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat::StreamJson;
 
-// ── Backend creation policy of the LLM control surface (ADR-0219 — 2026-09-22 · ADR-0279) ───────────────────────────
+// ── Backend creation policy of the LLM control surface (ADR-0219 · ADR-0279) ───────────────────────────
 //
-// ★The grounds switched★ — what set up this table was 「do not open」 (user decision 2026-09-07 · TRD S21 §6-G), and that
-// decision stood on the premise that **the LLM cannot get past the folder trust modal**. That premise was overturned by measurement on 2026-09-22
-// (the app-server link has no such modal) and the refusal was removed — the canonical record of that reversal is ADR-0219. Do not close this table again
-// on the grounds of the old coordinates: that place was already reconsidered as (b) in the 「Rejected alternatives」 of ADR-0219.
+// ★The grounds switched★ — this table was set up as 「do not open」 (TRD S21 §6-G) on the premise that **the LLM cannot get past the folder
+//   trust modal**; measurement overturned it (the app-server link has no such modal) and the refusal was removed
+// (canonical record: ADR-0219). Do not close the table again on the old coordinates (already rejected as (b) in ADR-0219's 「Rejected
+//   alternatives」).
 //
-// ★The home of the policy is here alone★ — there are two doors asking this decision, and they live in different crates:
-//   ① `agent.new` (this file) — the declaration vocabulary `AgentBackend` stands narrowed by the vocabulary itself, and this table stands one more layer
-//      on top (it stops at runtime an edit that widens the vocabulary without widening the policy — that arm does not reach today).
-//   ② the daemon `SpawnByCwd` handler (`connection_core.rs` of `engram-dashboard-daemon`) — asks this table about the wire
-//      word of the spawn packet and refuses before an instant profile goes onto the roster and disk (ADR-0279). The shell
-//      `agent.spawnInto` and the frontend `slot.createAgentHere` · `agent.spawn` all send this packet.
-//      ★This door does not distinguish callers — though named 「LLM control surface」, human paths see this table too★
-//      (the daemon does not know who sent the packet · ADR-0279 「Accepted cost」 · impact 0 today — the table closes
-//      nothing).
-// ★The shell is not a door★ — the shell `agent.spawnInto` carries only a typo net (`parse_backend` — asks the wire enum) and
-// does not look at this table. The shell does not depend on this crate (ADR-0270 decision 1).
-// ★There are creation paths that do not look at the table — do not miss them when counting doors★ (an uncounted door stays open without ever
-// looking at the table): the agent bus `agent.spawn` (fixed to claude — that verb's comment) · the daemon `CreateProfile` (the frontend's reserved-
-// node creation doors — `agentlist.createCodex` etc. — go there). The frontend command registry (`humanOnly`) is not
-// a door looking at this table — the `humanOnly` of the codex door was removed on 2026-09-22.
-// If each door held its own list, 「a backend one door creates but another cannot」 would appear. The places measuring the mismatch
-// = ① `tests::new_creates_exactly_what_the_llm_backend_policy_opens` ·
-// `tests::new_advertises_exactly_the_backends_the_llm_policy_opens` (this file) · ② the daemon's
-// `every_wire_backend_declares_an_llm_policy` in `connection_core.rs` ·
-// `the_production_core_asks_the_agent_backend_policy` · `spawn_by_cwd_refuses_a_backend_the_policy_closes`.
+// ★The home of the policy is here alone★ — two doors ask this decision, in different crates:
+//   ① `agent.new` (this file) — the declaration vocabulary `AgentBackend` is already narrowed by itself and this table stands one more
+//   layer on top (stops at runtime an edit widening the vocabulary without widening the policy).
+//   ② the daemon `SpawnByCwd` handler (`connection_core.rs`) — asks this table about the spawn packet's wire word and refuses before an
+//   instant profile goes onto the roster and disk (ADR-0279); the shell `agent.spawnInto` and the frontend
+//      `slot.createAgentHere` · `agent.spawn` all send this packet. ★This door does not distinguish callers — despite the name 「LLM
+//   control surface」 human paths see this table too★ (ADR-0279 「Accepted cost」; impact 0 today).
+// ★The shell is not a door★ — `agent.spawnInto` carries only a typo net (`parse_backend`, asks the wire enum) and does not depend on this
+//   crate (ADR-0270 decision 1).
+// ★Creation paths that do not look at the table — do not miss them when counting doors★: the agent bus `agent.spawn` (fixed to claude) ·
+//   the daemon `CreateProfile` (the frontend's reserved-node creation doors such as `agentlist.createCodex`). The frontend
+// registry (`humanOnly`) is not a door looking at this table.
+// Per-door lists would show 「a backend one door creates but another cannot」. Mismatch measured at ①
+//   `tests::new_creates_exactly_what_the_llm_backend_policy_opens` · `tests::new_advertises_exactly_the_backends_the_llm_policy_opens`
+//   (this file) ·
+// ② the daemon's `every_wire_backend_declares_an_llm_policy` in `connection_core.rs` · `the_production_core_asks_the_agent_backend_policy`
+//   · `spawn_by_cwd_refuses_a_backend_the_policy_closes`.
 //
-// ★Why it asks by word and not by type★ — the type ② brings is the wire enum `protocol::AgentBackendKind`, but this
-// crate does not depend on protocol (the canonical source of that prohibition = the `[dependencies]` comment of this crate's `Cargo.toml`).
-// The only thing the two crates can share is the word, and a spelling divergence is caught by ②'s first test.
+// ★Why by word, not by type★ — ② would bring the wire enum `protocol::AgentBackendKind`, but this crate does not depend on protocol (see
+//   this crate's `Cargo.toml` `[dependencies]` comment); only the word is shared, and ②'s first test catches spelling divergence.
 
 /// One line of the policy table.
 pub struct LlmBackendPolicy {
-    /// The backend word. Compared **case-insensitively** — this crate's declaration vocabulary writes `Claude` and the wire vocabulary
-    /// `claude` (the reason for that difference is already carried by the docs of the two enums), and there is no reason to write the same backend
-    /// on two lines.
+    /// The backend word, compared **case-insensitively** — the declaration vocabulary writes `Claude`, the wire vocabulary `claude` (the two enums' docs carry why).
     pub word: &'static str,
     /// `None` = this surface creates it. `Some` = it does not — carries **the reason and when it opens** together.
     pub refusal: Option<&'static str>,
 }
 
-/// ★Which backends the LLM control surface can create — the only place of that policy★. Despite its name, the daemon `SpawnByCwd`
-/// door applies this table without distinguishing callers and blocks human paths too (② of the section header above · ADR-0279).
+/// ★Which backends the LLM control surface can create — the only place of that policy★. The daemon `SpawnByCwd` door applies this table without distinguishing callers and blocks human paths too (② of the section header · ADR-0279).
 ///
-/// ★Today this table refuses nothing★ (codex's refusal was removed on 2026-09-22 — the reason is on that line).
-/// Still, there are two reasons not to remove the table: when the next backend comes, 「no declaration = closed」 ([`NO_POLICY_DECLARED`]) must
-/// stand as is, and this is the place that keeps creation doors from each holding their own list.
+/// ★Today this table refuses nothing★ (codex's refusal was removed — reason on that line). It stays because the next backend must be 「no declaration = closed」 ([`NO_POLICY_DECLARED`]) and it keeps creation doors from each holding a list.
 ///
-/// ★Reopen ADR-0279 before changing any line's `refusal` to `Some` or bringing in an undeclared word★ —
-/// the daemon `SpawnByCwd` door blocks human paths too. The trigger for reopening that ADR is exactly that edit (then a caller axis is added
-/// to the spawn packet).
-///
-/// ★Opening one line alone does not finish it★ — `agent.new` actually creates only after adding that variant to the `AgentBackend` vocabulary and filling
-/// the pair in [`backend_command`]. Opening only this table without doing those two turns the tests above red — that is the only guidance
-/// left for whoever opens this table.
-///
-/// ★What this table splits is **only the backend word — but the output mode axis already has an LLM expression**★:
-/// it is the `output_format` field of `agent.new` (`Terminal`|`StreamJson`, unspecified = [`NEW_AGENT_OUTPUT_FORMAT`]), and
-/// [`verb_new`] passes that value as is to [`backend_command`] **regardless of the backend**. So
-/// opening a word opens both modes together. ★At one point this place said 「the output mode axis has no LLM expression anywhere」,
-/// but that field existed before that sentence — it was false from the moment it was written.★ Do not build a second entry on the mode axis
-/// on the grounds of that sentence (「do not make a second surface」 of CLAUDE.md 「LLM-first control」).
+/// ★Reopen ADR-0279 before changing any line's `refusal` to `Some` or bringing in an undeclared word★ — the daemon door blocks human paths too; that edit is the trigger for adding a caller axis to the spawn packet.
+/// ★Opening one line alone does not finish it★ — `agent.new` creates only after that variant is added to the `AgentBackend` vocabulary and the pair is filled in [`backend_command`]; otherwise the tests above go red.
+/// ★This table splits only the backend word — the output mode axis already has an LLM expression★: `output_format` of `agent.new` (`Terminal`|`StreamJson`, unspecified = [`NEW_AGENT_OUTPUT_FORMAT`]) which [`verb_new`] passes to [`backend_command`] **regardless of
+/// the backend**, so opening a word opens both modes. Do not build a second entry on the mode axis (CLAUDE.md 「LLM-first control」: do not make a second surface).
 pub const LLM_BACKEND_POLICY: &[LlmBackendPolicy] = &[
     LlmBackendPolicy {
         word: "claude",
         refusal: None,
     },
-    // ★codex's refusal was removed on 2026-09-22, and the reason it was removed is that the premise that refusal was built on was overturned
-    //   by measurement★. Old reason = 「in a never-seen folder codex shows its own trust confirmation modal and a non-human caller cannot get past it」.
-    //   Measured (codex 0.155.1, 2026-09-22) = the `app-server` path returns `thread/start`
-    //   as **success** for a never-seen folder (about 338ms · no error · no inbound trust
-    //   request). And it **writes that folder itself** into its own `config.toml` as `trust_level = "trusted"`.
-    //   That is, the folder trust modal was **a TUI-only device**.
-    // ★So no code checking trust is kept★ — this path has no gate to check in the first place, and building a check that pretends there is one
-    //   would only add a dependency reading codex's settings file (TOML) while guarding nothing.
+    // ★codex's refusal was removed because the premise it was built on was overturned by measurement★. Old reason: 「in a never-seen folder
+    //   codex shows its own trust modal and a non-human caller cannot get past it」. Measured (codex 0.155.1):
+    //   the `app-server` path returns `thread/start` as **success** for a never-seen folder (~338 ms · no error · no inbound trust
+    //   request) and **writes that folder itself** into its `config.toml` as `trust_level = "trusted"` — the modal was **TUI-only**.
+    // ★No code checking trust is kept★ — the path has no gate, and a pretend check would only add a dependency reading codex's TOML
+    //   settings while guarding nothing.
     LlmBackendPolicy {
         word: "codex",
         refusal: None,
@@ -779,12 +736,8 @@ const NO_POLICY_DECLARED: &str = "no LLM control surface policy has been declare
 
 /// Whether **the door asking this policy can create** the backend of this word now — `None` = creates, `Some(reason)` = does not.
 ///
-/// ★A different axis from 「an unknown word」★ — a value giving `Some` here is also a legitimate backend this repository knows, so lumping the two
-/// refusals into one text would make the caller try to fix a typo that does not exist. The caller must emit the two axes each with a different
-/// text.
-/// ★Do not read it as blocking only non-human callers★ — the daemon `SpawnByCwd` door applies this decision without distinguishing callers
-/// and blocks human paths too (frontend `slot.createAgentHere` · `agent.spawn`) (ADR-0279). Only on paths that do not ask this decision
-/// (the daemon `CreateProfile` etc. — the section header above) is it created as is.
+/// ★A different axis from 「an unknown word」★ — `Some` here is also a legitimate backend this repository knows; lumping the two refusals into one text would make the caller fix a typo that does not exist. Emit the two axes with different texts.
+/// ★Do not read it as blocking only non-human callers★ — the daemon `SpawnByCwd` door applies it without distinguishing callers (frontend `slot.createAgentHere` · `agent.spawn` too — ADR-0279); only paths that do not ask (daemon `CreateProfile` etc.) create as is.
 ///
 /// A word not in the table is also `Some` (fail-closed).
 pub fn llm_creation_refusal(backend_word: &str) -> Option<&'static str> {
@@ -794,9 +747,7 @@ pub fn llm_creation_refusal(backend_word: &str) -> Option<&'static str> {
         .map_or(Some(NO_POLICY_DECLARED), |policy| policy.refusal)
 }
 
-/// The word of the declaration vocabulary — asking the policy table needs a word. `AgentBackend` has only unit variants, so serde
-/// serialization is the word itself, and writing it by hand would silently diverge as variants grow. If serialization fails, it becomes an empty word
-/// and the policy closes (fail-closed).
+/// The word of the declaration vocabulary — asking the policy table needs a word. `AgentBackend` has only unit variants, so serde serialization is the word itself (hand-writing would silently diverge as variants grow); a serialization failure gives an empty word and the policy closes (fail-closed).
 fn backend_word(backend: &AgentBackend) -> String {
     serde_json::to_value(backend)
         .ok()
@@ -806,20 +757,17 @@ fn backend_word(backend: &AgentBackend) -> String {
 
 /// Declaration vocabulary → run command.
 ///
-/// ★This `match` sweeps **the declaration enum** — even if the core gains backends, compilation does not break here★.
-/// The net catching that direction (the core grew while the declaration stays narrow) is the reverse `match` sweeping `AgentCommand`,
-/// and its only place is `tests::the_declared_vocabularies_are_pinned_to_the_core_ones`.
-/// ★`output_format` is carried as is **regardless of the backend**★ — so opening one word opens both modes
-/// together (the place splitting codex's two modes is `backend::codex::is_app_server`, and that decision also looks at this field).
+/// ★This `match` sweeps **the declaration enum** — core backend growth does not break compilation here★. The net for that direction (core grew, declaration stays narrow) is the reverse `match` sweeping `AgentCommand` in
+/// `tests::the_declared_vocabularies_are_pinned_to_the_core_ones`.
+/// ★`output_format` is carried as is **regardless of the backend**★ — opening one word opens both modes (codex's two-mode split is `backend::codex::is_app_server`, which also reads this field).
 fn backend_command(backend: AgentBackend, output_format: CoreAgentOutputFormat) -> AgentCommand {
     match backend {
         AgentBackend::Claude => AgentCommand::Claude {
             extra_args: vec![],
             output_format,
         },
-        // ★`extra_args` being empty is a decision★ — this entry does not grow the argument surface (no field to choose the model, reasoning effort
-        //   and the like). The arguments codex actually receives are all assembled from this one command by
-        //   `backend::codex::build_spec`.
+        // ★`extra_args` empty is a decision★ — this entry does not grow the argument surface (no model / reasoning-effort field); codex's
+        //   arguments are all assembled from this command by `backend::codex::build_spec`.
         AgentBackend::Codex => AgentCommand::Codex {
             extra_args: vec![],
             output_format,
@@ -847,15 +795,11 @@ fn preset_not_found(id: &str) -> CommandError {
 
 /// Assembles the `agent.*` table — ★the only place real handlers come in★ (rule T-1).
 ///
-/// ★blocking contract★: handler bodies write to disk while holding the profile lock and poll for resume early exit
-///   (`AgentManager::activate_profile`). Polling on an async runtime thread would block that thread, so the assembly
-///   must call it behind `spawn_blocking` — the two surfaces calling this table (the daemon's `/control/agent` route and
-///   command bus delivery) come in through that one common entry, and that place sits on the blocking pool.
-/// ★Why `notify` is taken as an argument★: a verb that changed the roster must notify (see the port doc), but the real thing is
-///   owned by the daemon. Having the assembly pass it makes it **impossible to omit** — as a trait default implementation it would silently not be called.
-/// ★Even as commands grow, the assembly (the executable) does not change★ — what grows is the declaration block and one line of this function.
-/// ★`usage` is an argument for the same reason★: the real `usage.*` (the daemon usage service) is owned by the daemon, so the assembly passes it. Assemblies outside
-///   production (smoke bins · tests) pass a port without fields — in those assemblies `usage.*` answers `NOT_FOUND`.
+/// ★blocking contract★: handler bodies write to disk holding the profile lock and poll for resume early exit (`AgentManager::activate_profile`); polling on an async runtime thread would block it, so the assembly must call it behind `spawn_blocking` — both
+///   surfaces (the daemon's `/control/agent` route and command bus delivery) come through that one common entry, which sits on the blocking pool.
+/// ★`notify` is an argument★: a roster-changing verb must notify (port doc) but the real thing is the daemon's; passing it makes it **impossible to omit** (a trait default would silently not be called).
+/// ★`usage` is an argument for the same reason★: the daemon owns the real `usage.*`; assemblies outside production (smoke bins · tests) pass a port without fields, where `usage.*` answers `NOT_FOUND`.
+/// Command growth changes the declaration block and one line here, not the assembly (the executable).
 // ADR-0155
 pub fn make_table(
     host: Arc<dyn AgentCommandHost>,
@@ -876,9 +820,9 @@ pub fn make_table(
     let usage_get = Arc::clone(&usage);
     let usage_refresh = usage;
 
-    // ★Blow up at assembly★: the three insert rejects (a name not in the declared set · duplicate insertion · declared schema text
-    //   not JSON) are all **values the build decides**, so they do not differ at runtime. Which one it is is told by the `TableError`
-    //   carried with the panic, so the messages below do not assert the reason.
+    // ★Blow up at assembly★: the three insert rejects (name outside the declared set · duplicate insertion · declared schema text not
+    //   JSON) are **build-decided values**, never runtime-varying; the `TableError` carried with the panic tells which, so messages below
+    //   do not assert the reason.
     table
         .insert(
             "agent.list",
@@ -947,7 +891,8 @@ pub fn make_table(
             }),
         )
         .expect("could not plug agent.interrupt into the table");
-    // ★Both are `blocking_handler` (TRD §3 #17)★ — the bodies wait for the query to end, but as async the daemon entry would cut them off at the first
+    // ★Both are `blocking_handler` (TRD §3 #17)★ — the bodies wait for the query to end, but as async the daemon entry would cut them off
+    //   at the first
     //   poll with `OUTCOME_UNKNOWN`. The waiting ends inside the port (a std channel).
     table
         .insert(
@@ -996,7 +941,8 @@ fn no_usage_limits(backend: &AgentBackend) -> CommandError {
 }
 
 fn verb_list(host: &dyn AgentCommandHost) -> Result<AgentListOk, CommandError> {
-    // ★Everything is built from one roster lookup★: name · liveness · cwd · hierarchy must come from the same snapshot for the rows within one response
+    // ★Everything is built from one roster lookup★: name · liveness · cwd · hierarchy must come from the same snapshot for the rows within
+    //   one response
     //   to be consistent.
     let agents = host
         .roster()
@@ -1009,7 +955,8 @@ fn verb_list(host: &dyn AgentCommandHost) -> Result<AgentListOk, CommandError> {
             parent: row.parent.map(|p| p.to_string()),
         })
         .collect();
-    // Not a value at the same moment as the roster sheet — the store state is as of the last save attempt, so it only matches that well to begin with.
+    // Not a value at the same moment as the roster sheet — the store state is as of the last save attempt, so it only matches that well to
+    //   begin with.
     let store = host.store_status();
     Ok(AgentListOk {
         agents,
@@ -1056,7 +1003,8 @@ fn verb_resolve(
             CommandError::invalid_argument(message),
         ));
     }
-    // ★Resolve everything with one roster sheet★ — reading again per word would have the lines within one answer see the roster at different moments.
+    // ★Resolve everything with one roster sheet★ — reading again per word would have the lines within one answer see the roster at
+    //   different moments.
     let roster = host.roster();
     let mut agents = Vec::with_capacity(count);
     for (index, target) in args.targets.into_iter().enumerate() {
@@ -1115,9 +1063,9 @@ fn verb_spawn(
         args.cwd.as_deref(),
         args.name.as_deref(),
     );
-    // ★The constraint of this verb is not one field but **a combination**★: by declaration all three are `Option`, but a call must have either `target` or
-    //   `cwd`. So guiding with 「may be omitted」 would make a retry that omits it as told **rejected again** with 「one of the two must be given」
-    //   — a text looking at one field cannot state this condition, so it is written directly here.
+    // ★The constraint of this verb is **a combination**, not one field★: all three are `Option` by declaration but a call needs `target`
+    //   or `cwd`. 「May be omitted」 guidance would get the omitting retry **rejected again** with 「one of the two must be given」; a text
+    //   looking at one field cannot state this, so it is written here.
     let blanks = blank_fields(&[("target", target), ("cwd", cwd), ("name", name)]);
     if !blanks.is_empty() {
         return Err(CommandError::invalid_argument(format!(
@@ -1135,10 +1083,9 @@ fn verb_spawn(
         (None, None) => Err(CommandError::invalid_argument(
             "spawn needs either an existing agent to wake (target) or cwd to create a new one",
         )),
-        // Waking does not change the name, so name can do nothing — silently ignoring it would make the caller think the name
-        //   changed.
-        // ★No command identifier is written in the text★: `agent.rename` is a catalog name, not a command that can be typed,
-        //   so writing it as is would make the LLM type it into the shell. Per-surface notation is attached by the adapter.
+        // Waking does not change the name, so a name does nothing — silently ignoring it would make the caller think the name changed.
+        // ★No command identifier in the text★: `agent.rename` is a catalog name, not a typeable command, and writing it would make the LLM
+        //   type it into the shell; the adapter attaches per-surface notation.
         (Some(token), None) if name.is_some() => Err(CommandError::invalid_argument(format!(
             "name does not apply when waking an existing agent ({token}) — changing a name is a separate verb, so drop this field"
         ))),
@@ -1147,11 +1094,8 @@ fn verb_spawn(
     }
 }
 
-/// ★Waking also emits a roster notification — even if the entry count, names and hierarchy are unchanged★: the activation outcome changes that entry's
-/// 「last failure」 (success = clear / failure = record, ADR-0172), and that axis flows **only through the profile list**.
-/// The liveness transitions the manager emits (`agent_list_updated`) are the live session list and do not carry this value —
-/// if not announced here, the result of an LLM wake-up would never appear on screen (the human click path does = the two handles diverge,
-/// CLAUDE.md 「LLM-first control」).
+/// ★Waking also emits a roster notification — even with entry count, names and hierarchy unchanged★: the activation outcome changes that entry's 「last failure」 (success = clear / failure = record, ADR-0172), an axis that flows **only through the profile list**.
+/// The manager's liveness transitions (`agent_list_updated`) are the live session list and do not carry it — unannounced, an LLM wake-up result would never appear on screen (the human click path does; CLAUDE.md 「LLM-first control」).
 // ADR-0172
 fn wake_existing(
     host: &dyn AgentCommandHost,
@@ -1162,11 +1106,11 @@ fn wake_existing(
     let Some(profile) = host.agent_snapshot(id) else {
         return Err(not_found(token));
     };
-    // ★The mode derivation rule is the same as the WS path (ADR-0076)★: resume if there is a stored session, otherwise
-    //   new. Using a different rule here would make the same agent lose its conversation history depending on which entry wakes it.
-    //   ★Not split by sid presence alone (ADR-0185)★: it first asks the backend whether the stored sid is **resumable with that command**
-    //     — that decision is owned by the same dispatch as boot restore and the WS entry. Without asking,
-    //     a shape that cannot resume would launch as Resume, opening a new conversation reported as 「resumed」.
+    // ★The mode derivation rule is the same as the WS path (ADR-0076)★: resume if there is a stored session, otherwise new — a different
+    //   rule would make one agent lose its history depending on which entry wakes it.
+    //   ★Not split by sid presence alone (ADR-0185)★: first ask the backend whether the stored sid is **resumable with that command** —
+    //   owned by the same dispatch as boot restore and the WS entry; otherwise a non-resumable shape would launch as Resume,
+    //     opening a new conversation reported as 「resumed」.
     let mode = if crate::backend::can_resume_profile(&profile) {
         SpawnMode::Resume
     } else {
@@ -1199,15 +1143,13 @@ fn create_and_start(
     cwd: &str,
     name: Option<String>,
 ) -> Result<AgentSpawnOk, CommandError> {
-    // ★This verb has no format or backend field — so the two values below are now **chosen**★ (reconfirmed 2026-09-22).
-    //   Back when the vocabulary was claude alone, `Claude` was 「the only value」 so there was nothing to choose, but as `agent.new`
-    //   opened codex, this place became **an intended claude pin**.
-    // ★Still, no field is added here★ — the entry choosing backend and mode is `agent.new` alone, and adding a field to this verb
-    //   would split the same choice across two doors (bringing along a catalog generation bump and binding regeneration).
-    //   A caller wanting codex registers with `agent.new` and then wakes it with `agent.spawn {target}`.
-    // ★The frontend door of the same name (`agent.spawn` of `src/commands/agentCommands.ts`) is also pinned to claude
-    //   for the same reason — the two share the name, so they move together.★ But the policy table ([`LLM_BACKEND_POLICY`]) sees only the frontend door
-    //   — that one passes through the daemon `SpawnByCwd`, and this verb does not ask (ADR-0279).
+    // ★This verb has no format or backend field — the two values below are **chosen**★: when the vocabulary was claude alone `Claude` was
+    //   the only value, but since `agent.new` opened codex this is **an intended claude pin**.
+    // ★No field is added here★ — `agent.new` alone chooses backend and mode; a field here would split the choice across two doors (plus a
+    //   catalog generation bump and binding regeneration). A caller wanting codex registers with `agent.new` then wakes it with
+    //   `agent.spawn {target}`.
+    // ★The same-name frontend door (`agent.spawn` of `src/commands/agentCommands.ts`) is pinned to claude too — they move together.★ But
+    //   the policy table ([`LLM_BACKEND_POLICY`]) sees only the frontend door (via daemon `SpawnByCwd`); this verb does not ask (ADR-0279).
     let stored = register(
         host,
         cwd,
@@ -1216,17 +1158,17 @@ fn create_and_start(
     )?;
     notify.roster_changed();
     let started = host.activate_profile(&stored, SpawnMode::Fresh);
-    // ★It announces **after** activation too — the notification above is a pre-activation snapshot★: in between 「last failure」 is recorded or
-    //   cleared (ADR-0172), and that axis flows only through the profile list. It matters especially on the failure branch — the Err below
-    //   goes only to the caller and nothing remains on screen.
+    // ★Announce **after** activation too — the notification above is a pre-activation snapshot★: in between 「last failure」 is recorded or
+    //   cleared (ADR-0172), an axis that flows only through the profile list. Especially on the failure branch: the Err below goes only to
+    //   the caller
+    //   and nothing remains on screen.
     // ADR-0172
     notify.roster_changed();
     let started = started.map_err(|e| {
-            // ★The registration is not reverted★: the created agent stays in the roster asleep. Rewinding would create a second
-            //   deletion path, and the semantics of deletion itself are undecided (ADR-0122).
-            // ★The text carries the recovery path★: the created agent remains in the roster, so what the caller should do is
-            //   not 「create again」 but **launching again by that name**. Without writing it, they would create again with the same cwd
-            //   and names would grow one by one.
+            // ★The registration is not reverted★: the created agent stays in the roster asleep; rewinding would create a second deletion
+            //   path, and deletion semantics are undecided (ADR-0122).
+            // ★The text carries the recovery path★: the caller should **launch again by that name**, not 「create again」 — otherwise they
+            //   create again with the same cwd and names grow one by one.
             let created_but = |reason: String| {
                 format!(
                     "agent '{}' ({}) was created but did not start: {reason} — it is registered and asleep, so start it again by that name (in a moment) instead of creating another",
@@ -1235,13 +1177,14 @@ fn create_and_start(
                 )
             };
             match e {
-                // ★The reason carries only the cause ([`store_error_cause`]) — no instruction of what to do is attached★: here 「again a little later」
-                //   would read as creating again with the same `--cwd`, producing duplicates, and 「retrying is useless」 contradicts the later 「launch again by that name」.
-                //   What to do is given by the one trailing tail.
-                // ★Even on a save refusal it is not carried as `CONFLICT` — this branch already created the agent★: the daemon
-                //   reads `CONFLICT` as 「a rejection with nothing applied」 and lets go of that request number (daemon
-                //   `command_delivery::retains_the_id`). Letting go would make a retry with the same number create again, leaving an undeletable
-                //   duplicate (ADR-0122) — only `INTERNAL` holds on to the number.
+                // ★The reason carries only the cause ([`store_error_cause`]) — no instruction★: 「again a little later」 would read as
+                //   creating again with the same `--cwd` (duplicates) and 「retrying is useless」 contradicts the later 「launch again by
+                //   that name」; the one trailing tail
+                //   gives what to do.
+                // ★Not `CONFLICT` even on a save refusal — this branch already created the agent★: the daemon reads `CONFLICT` as 「a
+                //   rejection with nothing applied」 and lets go of the request number (`command_delivery::retains_the_id`); a retry with
+                //   the same number would then
+                //   create again, leaving an undeletable duplicate (ADR-0122). Only `INTERNAL` holds the number.
                 // ADR-0291 R17
                 PtyError::Store(error) => store_error(
                     "start",
@@ -1293,11 +1236,11 @@ fn verb_new(
         (Some(cwd), None) => cwd.to_string(),
         (None, Some(id)) => {
             let stored = host.preset_cwd(id).ok_or_else(|| preset_not_found(id))?;
-            // ★A value that came in a preset gets **the same check as a value given directly**★: the `reject_blanks` above looks only at the fields the caller
-            //   typed, so this branch passes that net entirely. Preset registration has no value validation
-            //   (`CreatePreset` stores the received string as is), and `register` below does not filter an empty folder either
-            //   (there is no code in the core producing `PtyError::CwdDenied`), so without looking here **an agent with an empty working
-            //   folder** would sit in the roster, and there is no verb to delete it (ADR-0122).
+            // ★A value that came in a preset gets **the same check as a value given directly**★: `reject_blanks` above looks only at
+            //   caller-typed fields, and preset registration has no value validation (`CreatePreset` stores the string as is) nor does
+            //   `register` filter an empty folder
+            //   (nothing in the core produces `PtyError::CwdDenied`), so an agent with an empty working folder would sit in the roster
+            //   with no verb to delete it (ADR-0122).
             if is_blank(Some(&stored)) {
                 return Err(CommandError::invalid_argument(format!(
                     "the registered path '{id}' has a blank folder, so there is nothing to work in — register that path again with a real folder, or pass cwd directly"
@@ -1306,24 +1249,20 @@ fn verb_new(
             stored
         }
     };
-    // ★There is no default★ — unspecified is rejected by deserialization (the doc of `AgentNewArgs::backend`). Do not bring back
-    //   `unwrap_or(Claude)` here: with two backends now, it is a path that silently folds 「did not choose」
-    //   into claude, and it was already removed from the spawn packet for the same reason.
+    // ★No default★ — unspecified is rejected by deserialization (`AgentNewArgs::backend` doc). Do not bring back `unwrap_or(Claude)`: with
+    //   two backends it silently folds 「did not choose」 into claude (already removed from the spawn packet for the same reason).
     let backend = args.backend.clone();
     let word = backend_word(&backend);
-    // ★Every door asking the policy looks at this one table★ — this `if` runs on every call but **the refusal arm does not reach today either**.
-    //   ★But the **reason** it does not reach changed on 2026-09-22★: before, it was 「because the declaration vocabulary was narrower than the policy table」,
-    //   and now it is because **the sets the vocabulary and the table open are exactly the same** (both claude · codex)
-    //   and **the table closes no word**. Words outside the table are still rejected by deserialization before that.
-    //   ★Still, do not delete it★ — the edit this arm blocks is 「widening the vocabulary without widening [`LLM_BACKEND_POLICY`]」,
-    //   and the day that edit comes, the arm comes alive. A test measures that fact =
-    //   `tests::new_creates_exactly_what_the_llm_backend_policy_opens` (it turns red if the vocabulary is widened without opening the
-    //   table). The sibling door's place = the daemon `SpawnByCwd` handler (`connection_core.rs` — does not distinguish callers ·
-    //   ADR-0279). ★**Today that door blocks nothing by policy either**★ (2026-09-22 · ADR-0219 — the wire vocabulary
-    //   is only the two claude · codex and the table opened both). The shell `agent.spawnInto` is not a door — the refusal remaining there is
-    //   not policy but the typo net of `parse_backend` (ADR-0270). The frontend `commands/registry.ts` is not a sibling door
-    //   — the `humanOnly` reason string of the codex door was deleted that day. ★At one point this place said 「the shell's runtime refusal still reaches today」,
-    //   which is false since the table opened.★
+    // ★Every door asking the policy looks at this one table★ — this `if` runs on every call but **the refusal arm does not reach today**:
+    //   the vocabulary and the table open exactly the same set (claude · codex) and **the table closes no word**; words outside the table
+    //   are rejected
+    //   earlier by deserialization (ADR-0219).
+    //   ★Do not delete it★ — it blocks 「widening the vocabulary without widening [`LLM_BACKEND_POLICY`]」 and comes alive the day that edit
+    //   arrives; `tests::new_creates_exactly_what_the_llm_backend_policy_opens` measures that (red if the vocabulary is widened without
+    //   opening the
+    //   table). Sibling door: the daemon `SpawnByCwd` handler (`connection_core.rs` — does not distinguish callers · ADR-0279), which also
+    //   blocks nothing by policy today. The shell `agent.spawnInto` is not a door (its refusal is the `parse_backend` typo net, ADR-0270);
+    //   the frontend `commands/registry.ts` is not a sibling door.
     if let Some(reason) = llm_creation_refusal(&word) {
         return Err(CommandError::invalid_argument(format!(
             "backend '{word}' is a known word, but this surface does not create it now — {reason}"
@@ -1343,21 +1282,19 @@ fn verb_new(
     })
 }
 
-/// The common part of roster registration — `agent.new` and `agent.spawn --cwd` use the same place.
+/// The common part of roster registration — `agent.new` and `agent.spawn --cwd` share it.
 ///
-/// ★The settled name can differ from the requested name★: a suffix is attached for global roster uniqueness (ADR-0120/0123).
-/// So the response reads the name from **the registered value** — returning the requested name would diverge from the screen and the address.
+/// ★The settled name can differ from the requested one★: a suffix is attached for global roster uniqueness (ADR-0120/0123), so the response reads the name from **the registered value** — the requested name would diverge from the screen and address.
 fn register(
     host: &dyn AgentCommandHost,
     cwd: &str,
     name: Option<String>,
     command: AgentCommand,
 ) -> Result<AgentProfile, CommandError> {
-    // ★The typed spelling is tidied here★: this field is filled by people and LLMs, and Windows paths are typed as `C:\work\thing`.
-    //   A value from the shell sometimes arrives still wrapped in `"…"` because of spaces. Without absorbing both here,
-    //   an agent 「whose folder name is weird as a whole」 would sit in the roster, and there is no verb to delete it (ADR-0122).
-    //   Only the spelling is tidied; the existence check is still later (spawn's `dunce::canonicalize`). The rule of not stripping a pair of quotes
-    //   with nothing inside guards the earlier blank-value check (`reject_blanks`).
+    // ★The typed spelling is tidied here★: people and LLMs fill this field, Windows paths are typed as `C:\work\thing`, and shell values
+    //   sometimes arrive wrapped in `"…"` because of spaces; unabsorbed, an agent 「whose folder name is weird as a whole」 would sit in the
+    //   roster with no verb to delete it (ADR-0122). Only the spelling is tidied; the existence check is later (spawn's
+    //   `dunce::canonicalize`). Not stripping an empty pair of quotes guards the earlier blank-value check (`reject_blanks`).
     let cwd = &normalize_spelling(cwd);
     let mut profile =
         AgentProfile::new(cwd.to_string(), command, PathBuf::from(cwd), vec![], false);
@@ -1365,7 +1302,8 @@ fn register(
     // ★The caller has different things to do per failure reason★ — free a slot (CONFLICT) · fix the arguments
     //   (INVALID_ARGUMENT) · retrying is useless (INTERNAL). Mashing them into one code would lose that split.
     host.create_agent(profile).map_err(|e| match e {
-        // ★The text reveals the **nature** of the cap★: without this line, the first reaction of a caller (person · LLM) hitting the cap would be
+        // ★The text reveals the **nature** of the cap★: without this line, the first reaction of a caller (person · LLM) hitting the cap
+        //   would be
         //   "raise the number" — that would be removing by oneself the backstop placed to stop runaway creation loops.
         PtyError::RosterFull { current, limit } => CommandError::of(
             ErrorCode::Conflict,
@@ -1406,7 +1344,8 @@ fn verb_rename(
         ("name", Some(name), Blank::NeedsValue),
     ])?;
     let id = resolve(host, token)?.id;
-    // ★A rename the store did not accept is an error without notification★ — the name is unchanged, so there is no change to announce (ADR-0291 D3).
+    // ★A rename the store did not accept is an error without notification★ — the name is unchanged, so there is no change to announce
+    //   (ADR-0291 D3).
     let outcome = host
         .rename_agent(id, Some(name.to_string()))
         .map_err(|e| match e {
@@ -1456,20 +1395,21 @@ fn verb_move(
     args: AgentMoveArgs,
 ) -> Result<AgentMoveOk, CommandError> {
     let token = args.target.as_str();
-    // ★Absence is not 「no parent given, so detach」★ — the instruction to detach to root is `null`. Folding absence would make one typo
+    // ★Absence is not 「no parent given, so detach」★ — detaching to root is the instruction `null`; folding absence would let one typo
     //   field run as a hierarchy release.
-    // ★Absence coming in over the wire cannot get this far★ — the declaration macro does not put `#[serde(default)]` on this field,
-    //   so deserialization rejects it with `missing field`. This branch is for paths where code builds the arguments directly and calls.
+    // ★Absence over the wire cannot get here★ — the declaration macro puts no `#[serde(default)]` on this field, so deserialization
+    //   rejects it with `missing field`; this branch is for code building the arguments directly.
     let Some(parent_token) = args.parent.as_ref() else {
         return Err(CommandError::invalid_argument(
             "move needs parent: a name/id to move under, or null to move it back to the top level",
         ));
     };
     let parent_token = parent_token.as_deref();
-    // ★The recovery path of `parent` differs from the other fields★ — rejecting a blank value only with 「fill in a value」 would hide, in this branch alone, the
-    //   `null` branch (detach to top level) the absence text above tells about. But rejecting only this field first would **hide the sibling
-    //   field**: a request with both blank would be told only about `parent`, and hear about `target` for the first time on the next trip after fixing it.
-    //   The two demands stand in the same check — different guidance per field, at once.
+    // ★The recovery path of `parent` differs from other fields★ — answering a blank value only with 「fill in a value」 would hide, in this
+    //   branch alone, the `null` branch (detach to top level) the absence text tells about. Rejecting only this field first would **hide
+    //   the sibling**:
+    //   with both blank the caller would hear about `target` only on the next trip. Both demands stand in the same check, different
+    //   guidance per field, at once.
     reject_blanks(&[
         ("target", Some(token), Blank::NeedsValue),
         (
@@ -1483,7 +1423,8 @@ fn verb_move(
         None => None,
         Some(p) => Some(resolve(host, p)?.id),
     };
-    // ★A move the store did not accept is an error without notification★ — the hierarchy is unchanged, so there is no change to announce (ADR-0291 D3).
+    // ★A move the store did not accept is an error without notification★ — the hierarchy is unchanged, so there is no change to announce
+    //   (ADR-0291 D3).
     let moved = host.reparent_agent(child.id, parent).map_err(|e| match e {
         PtyError::Store(error) => store_error(
             "move",
@@ -1499,11 +1440,12 @@ fn verb_move(
         other => CommandError::internal(format!("could not move '{token}': {other}")),
     })?;
     if !moved {
-        // ★`false` alone does not tell the reason★: the target just resolved may have vanished in between (NOT_FOUND),
-        //   or the tree structure may have refused it (CONFLICT). The two have different things for the caller to do, so the roster is looked at again
-        //   to tell them apart — the reason list corresponds line by line to the refusal conditions of `ProfileRegistry::try_reparent`.
-        // ★Name the side that vanished★: if the child's name were given whichever of the two vanished, then when only the parent vanished
-        //   the caller would hear that an agent that **is perfectly there** is missing and search in the wrong place.
+        // ★`false` alone does not tell the reason★: the resolved target may have vanished in between (NOT_FOUND) or the tree structure
+        //   refused it (CONFLICT) — different remedies, so the roster is looked at again (the reason list corresponds line by line to the
+        //   refusal
+        //   conditions of `ProfileRegistry::try_reparent`).
+        // ★Name the side that vanished★: naming the child whichever vanished would, when only the parent vanished, tell the caller an
+        //   agent that **is there** is missing.
         let roster = host.roster();
         let gone = |id: AgentId| !roster.iter().any(|row| row.id == id);
         if gone(child.id) {
@@ -1523,19 +1465,20 @@ fn verb_move(
         ));
     }
     notify.roster_changed();
-    // ★This response is **not** a snapshot of one moment (a scope left knowingly)★: the name is read from the roster after applying, and `parent` is
-    //   **the value this call instructed**. So if another call moves the same agent again right after, the response becomes 「the current name + the parent this call attached」,
-    //   a combination that may not be true at the same time at any moment. Still, this
-    //   report **is not false** — the move this call requested was actually applied, and that is all this answer states.
-    //   Wanting an atomic snapshot would need an API where the manager also returns 「the post-apply state」, and that is not a decision
-    //   for here. For the same reason, **a target that vanished after applying is also `Ok`** (the requested move happened).
+    // ★This response is **not** a one-moment snapshot (a scope left knowingly)★: the name is read from the roster after applying and
+    //   `parent` is **the value this call instructed**, so a concurrent move can make 「current name + the parent this call attached」 a
+    //   combination
+    //   never simultaneously true — still **not false**: the requested move was applied, which is all this answer states. An atomic
+    //   snapshot would need an API where the manager returns the post-apply state — not decided here. Likewise **a target that vanished
+    //   after applying is
+    //   also `Ok`**.
     Ok(AgentMoveOk {
         agent_id: child.id.to_string(),
-        // ★The name is read again from the roster **after** applying★: carrying the value at resolve time as is would, because of a rename committed in between,
-        //   make the response 「old name + new parent」, **a combination that never existed** (the caller types
-        //   the next command with that name). The cost is one roster lookup on the success path.
-        // ★If it cannot be read, fall back to the resolve-time name — do not fold it into an empty string★: if it vanished in between,
-        //   emitting a nameless row as a success response would make the caller's decider read it as "an unreadable response".
+        // ★The name is read again from the roster **after** applying★: the resolve-time value could, after a rename committed in between,
+        //   make the response 「old name + new parent」, **a combination that never existed** (the caller types the next command with that name).
+        //   Cost: one roster lookup on the success path.
+        // ★If unreadable, fall back to the resolve-time name — not an empty string★: a nameless row as a success response would be read by
+        //   the caller's decider as "an unreadable response".
         name: current_name(host, child.id).unwrap_or(child.name),
         parent: parent.map(|p| p.to_string()),
     })
@@ -1627,7 +1570,8 @@ fn verb_interrupt(
         Err(PtyError::NotFound(_)) => Err(CommandError::not_found(format!(
             "'{name}' is not running, so it has no turn to interrupt"
         ))),
-        // The two reasons (no turn to interrupt · a link that cannot interrupt) are not told apart — the link answers with one variant and the caller
+        // The two reasons (no turn to interrupt · a link that cannot interrupt) are not told apart — the link answers with one variant and
+        //   the caller
         //   has the same thing to do.
         Err(PtyError::Unsupported(reason)) => Err(CommandError::of(
             ErrorCode::Conflict,
@@ -1641,21 +1585,14 @@ fn verb_interrupt(
     }
 }
 
-/// A change with a caller that the store (profiles · presets) did not accept → a caller error (code + retry instruction). The bus and WS (daemon
-/// `connection_core`) use this one, and the shell settings (`settings.set` · `settings.reset`) follow the same split (user decision
-/// 2026-10-11):
-/// - A store refused at load (read-only for this whole run — regardless of cause) = `CONFLICT` · `never` — clears only by fixing or replacing the file and
-///   restarting the daemon.
-/// - A refusal by the re-decision right before writing — a file written by a newer edition = `CONFLICT` · `never` (retrying gives the same while that file stays) · unreadable =
-///   `CONFLICT` · `after-condition` (usually a briefly held lock, so retrying a little later works).
+/// A change with a caller that the store (profiles · presets) did not accept → a caller error (code + retry instruction). The bus and WS (daemon `connection_core`) use this, and the shell settings (`settings.set` · `settings.reset`) follow the same split:
+/// - A store refused at load (read-only for this whole run, any cause) = `CONFLICT` · `never` — clears only by fixing or replacing the file and restarting the daemon.
+/// - A refusal by the re-decision right before writing — file written by a newer edition = `CONFLICT` · `never` (same while that file stays) · unreadable = `CONFLICT` · `after-condition` (usually a briefly held lock).
 /// - Write failure = `INTERNAL`.
 ///
-/// ★In all three the roster is unchanged★ — a change with a caller commits only if the save succeeds (the `try_` versions of the registry · manager). So
-///   `CONFLICT` means exactly what the daemon reads as 「a rejection with nothing applied」 (daemon
-///   `command_delivery::retains_the_id`).
-/// ★Today that retry instruction does not reach the caller★ — the socket bus exit lowers it to `never` (daemon
-///   `command_delivery::send_reply` · ADR-0159) and the control route's answer does not carry that field. So 「again a little later」 is
-///   carried by the text ([`store_error_reason`]) and the help together.
+/// ★In all three the roster is unchanged★ — a change with a caller commits only if the save succeeds (the `try_` versions of registry · manager), so `CONFLICT` means what the daemon reads as 「a rejection with nothing applied」 (`command_delivery::retains_the_id`).
+/// ★Today the retry instruction does not reach the caller★ — the socket bus exit lowers it to `never` (daemon `command_delivery::send_reply` · ADR-0159) and the control route's answer carries no such field, so 「again a little later」 is carried by the text
+/// ([`store_error_reason`]) and the help.
 // ADR-0291 R17
 pub fn store_command_error(error: &StoreError, message: String) -> CommandError {
     match error {
@@ -1669,8 +1606,7 @@ pub fn store_command_error(error: &StoreError, message: String) -> CommandError 
     }
 }
 
-/// The reason carried in the caller text — which file (`file`) did not accept and why, and what the caller should do. ★It is English because it is a surface the LLM reads★ —
-/// the `Display` of the store errors themselves is for logs.
+/// The reason carried in the caller text — which file (`file`) did not accept and why, and what the caller should do. ★English on purpose: the LLM reads it★ (the stores' own `Display` is for logs).
 // ADR-0291 R17
 pub fn store_error_reason(file: &str, error: &StoreError) -> String {
     let cause = store_error_cause(file, error);
@@ -1691,8 +1627,7 @@ pub fn store_error_reason(file: &str, error: &StoreError) -> String {
     }
 }
 
-/// From the same reason, only the cause — which file (`file`) did not accept and why. Used where an instruction of what to do does not fit that request (a launch failure
-/// after already creating — what to do is given by that text's tail).
+/// The same reason, cause only — which file (`file`) did not accept and why. For requests where an instruction does not fit (a launch failure after creating — the text's tail gives what to do).
 // ADR-0291 R17
 fn store_error_cause(file: &str, error: &StoreError) -> String {
     match error {
@@ -1712,9 +1647,8 @@ fn store_error_cause(file: &str, error: &StoreError) -> String {
     }
 }
 
-/// Returns as is the caller error (`failure`) of a change the store did not accept, while recording it — ★the one line recording the refusal is
-/// here alone★ (the place where that request becomes an error on this surface). The store's log is the file-side fact (what blocked it) and this line is the request-side
-/// fact (which request was blocked). `action` = what it was trying to do when blocked. Values the caller typed (names · paths) are not put in the log.
+/// Returns the caller error (`failure`) of a change the store did not accept as is, while recording it — ★the one line recording the refusal is here alone★ (where that request becomes an error on this surface). The store's log is the file-side fact (what blocked),
+/// this line the request-side fact (which request). `action` = what it was trying to do. Caller-typed values (names · paths) are not logged.
 // ADR-0291 R17
 fn store_error(action: &'static str, error: &StoreError, failure: CommandError) -> CommandError {
     tracing::warn!(
@@ -1749,11 +1683,9 @@ fn started_payload(started: StartedAgent, created: bool) -> AgentSpawnOk {
     }
 }
 
-/// **The single mapping** of state → wire vocabulary. The predicate is [`AgentStatus::is_live`] alone (ADR-0116).
+/// **The single mapping** of state → wire vocabulary; the predicate is [`AgentStatus::is_live`] alone (ADR-0116).
 ///
-/// ★Why no literal is baked in (a place that actually diverged)★: if a change verb baked in `"live"`, an agent that dies right after waking
-/// (ADR-0082 resume early exit) would be reported as alive by `spawn` and as asleep by the `list` right after —
-/// and the caller would write mail to a corpse.
+/// ★No literal baked in (it diverged here)★: a change verb baking `"live"` would report an agent that dies right after waking (ADR-0082 resume early exit) as alive by `spawn` and asleep by the next `list`, and the caller would write mail to a corpse.
 fn state_of(status: Option<&AgentStatus>) -> &'static str {
     match status {
         Some(s) if s.is_live() => AGENT_STATE_LIVE,
@@ -1763,27 +1695,20 @@ fn state_of(status: Option<&AgentStatus>) -> &'static str {
 
 /// Pointing token → one agent.
 ///
-/// ★Rules (must be **the same** as the mail entry)★: ① an agent id match is looked at first — so a *name* that looks like a UUID cannot
-/// hijack id pointing ② then **exact** name match (case-sensitive · no prefix matching · no whitespace correction) ③ if the same name
-/// exists two or more times, nobody is chosen and it is refused.
-/// ★Do not bring in a lenient resolver★: people and LLMs read the mail recipient token and the control pointing token as pointing at the same X.
-/// If the two entries' resolutions diverged, the agent that got the mail and the agent that was renamed would differ —
-/// that match is guarded by the daemon crate's cross-check test, which runs [`resolve_in`].
+/// ★Rules (must be **the same** as the mail entry)★: ① an agent id match first — a *name* that looks like a UUID cannot hijack id pointing; ② then **exact** name match (case-sensitive · no prefix · no whitespace correction); ③ the same name two or more times → nobody chosen, refused.
+/// ★Do not bring in a lenient resolver★: people and LLMs read the mail recipient token and the control pointing token as the same X; diverging resolution would make the agent that got the mail differ from the one renamed — guarded by the daemon crate's cross-check
+/// test running [`resolve_in`].
 // ADR-0132
 fn resolve(host: &dyn AgentCommandHost, token: &str) -> Result<ResolvedAgent, CommandError> {
     resolve_in(&host.roster(), token)
 }
 
-/// The pure kernel of [`resolve`] — **the very resolution rule the control entry actually uses**.
+/// The pure kernel of [`resolve`] — **the very resolution rule the control entry uses**.
 ///
-/// ★Two reasons it is `pub`★: ① for the daemon crate's cross-check test to measure whether it is **the same rule** as the mail entry, it must run the resolver the real entry
-/// uses. Taking the roster as an argument means that test does not have to imitate the whole `AgentCommandHost`,
-/// and since no separate copy is kept, what is measured and what runs cannot diverge. ② the daemon's input lease check
-/// (`control::commands::admit_input` — the production path) resolves the `target` of [`INPUT_AFFECTING`] commands once **by the same
-/// rule** as the verb body and looks at the lease with that id. With two resolvers, the agent checked and the agent executed would diverge.
-/// ★The outcome is read by code★: absent = `NOT_FOUND` · two or more of the same name = `CONFLICT` (the two codes this function emits). At the end of both texts
-/// ` — candidates: a, b` is appended (at most 5 · sorted) — absent = names worth choosing (`none` if the roster is empty) · same name = those
-/// ids. The text is prose to read, not a contract (the CLI · cross-check look only at the code).
+/// ★Two reasons it is `pub`★: ① the daemon crate's cross-check test must run the real resolver to measure it is **the same rule** as the mail entry; taking the roster as an argument avoids imitating the whole `AgentCommandHost` and keeps no separate copy.
+/// ② the daemon's input lease check (`control::commands::admit_input`) resolves the `target` of [`INPUT_AFFECTING`] commands **by the same rule** as the verb body; two resolvers would let the agent checked and the agent executed diverge.
+/// ★The outcome is read by code★: absent = `NOT_FOUND` · same name two or more = `CONFLICT`. Both texts end with ` — candidates: a, b` (≤5 · sorted) — absent = names worth choosing (`none` if the roster is empty), same name = those ids. The text is prose, not a
+/// contract (CLI · cross-check look only at the code).
 // ADR-0132
 // ADR-0155
 // ADR-0231
@@ -1793,9 +1718,9 @@ pub fn resolve_in(roster: &[AgentRosterRow], token: &str) -> Result<ResolvedAgen
         id: row.id,
         name: row.canonical_name.clone(),
     };
-    // ★Not compared in canonical spelling★: the daemon converts the agent fields of shell commands (including the old `agent_id`) with this function (ADR-0308),
-    //   so matching only the canonical spelling would make old callers that sent ids in other spellings such as uppercase get `NOT_FOUND`. An id-shaped value not in the roster
-    //   falls through to the name.
+    // ★Not compared in canonical spelling★: the daemon converts shell commands' agent fields (including the old `agent_id`) with this
+    //   function (ADR-0308), so canonical-only matching would give old callers sending ids in other spellings (e.g. uppercase) `NOT_FOUND`.
+    //   An id-shaped value not in the roster falls through to the name.
     if let Ok(id) = AgentId::parse_str(token) {
         if let Some(row) = roster.iter().find(|r| r.id == id) {
             return Ok(found(row));
@@ -1831,10 +1756,9 @@ pub fn resolve_in(roster: &[AgentRosterRow], token: &str) -> Result<ResolvedAgen
 // The cap of TRD S28 §5-3.
 const CANDIDATES_MAX: usize = 5;
 
-/// Name candidates to give for a missing word — names containing that word (case-insensitive) if any, otherwise the first ones of all in name order.
-/// The same name is carried only once.
-// ★Sorted★: the row order of the roster is not fixed (asleep rows come from a new HashMap each time — `AgentManager::roster`).
-//   Cutting in that order would give the same request different candidates each call.
+/// Name candidates for a missing word — names containing it (case-insensitive) if any, otherwise the first ones of all in name order; the same name once.
+// ★Sorted★: the roster's row order is not fixed (asleep rows come from a new HashMap each time — `AgentManager::roster`); cutting in that
+//   order would give the same request different candidates each call.
 fn name_candidates(roster: &[AgentRosterRow], token: &str) -> Vec<String> {
     let mut names: Vec<&str> = roster
         .iter()
@@ -1887,14 +1811,10 @@ fn not_found_message(token: &str) -> String {
 
 /// A whitespace-only value is **rejected rather than folded into absence**.
 ///
-/// ★The shape where an unset shell variable expands into an empty argument (`--parent "$UNSET"`) realistically comes in★ — folding it
-/// as "not given" would silently turn a single typo into a different action (hierarchy release etc.).
-/// ★Emitted **all gathered** rather than cut per field★: cutting at the first field would make a caller who sent three blank values repeat rejection and fix
-/// three times (for the same reason the entry's unknown-field check also counts all — `CommandTable::check_args`).
-/// ★The guidance differs **per field** (load-bearing)★: if a caller (especially an LLM) gets rejected again after doing as told, it circles the same
-/// place. Telling a required field "may be omitted" would get the omitting retry rejected as 「missing」, and telling a field where `null` is an active instruction
-/// only "fill in a value" would hide that branch entirely. So each field writes **the way that actually works for that field**
-/// ([`Blank`]).
+/// ★An unset shell variable expanding to an empty argument (`--parent "$UNSET"`) realistically comes in★ — folding it as "not given" would turn one typo into a different action (hierarchy release etc.).
+/// ★Emitted **all gathered**, not cut per field★: cutting at the first would make a caller sending three blanks repeat rejection and fix three times (like the entry's unknown-field check — `CommandTable::check_args`).
+/// ★Guidance differs **per field** (load-bearing)★: a caller (especially an LLM) rejected again after doing as told circles the same place — telling a required field "may be omitted" gets the omitting retry rejected as 「missing」, and telling a field where `null` is an
+/// active instruction only "fill in a value" hides that branch. Each field gets **the way that works for that field** ([`Blank`]).
 fn reject_blanks(fields: &[(&str, Option<&str>, Blank)]) -> Result<(), CommandError> {
     let advice: Vec<String> = fields
         .iter()
@@ -1963,13 +1883,11 @@ mod tests {
         /// The store state `agent.list` carries — by default both writable.
         // ADR-0291 R17 (D6)
         store_status: Mutex<RosterStoreStatus>,
-        /// The target to delete from the roster **inside** the reparent call — reproduces 「vanished in the meantime」 (child or parent).
-        /// ★Deleted regardless of apply success★: vanishing after a failure exercises the reason branch, vanishing after success the response name's
-        /// fallback — putting it on only one side leaves the other side's code unreached by any test.
+        /// The target to delete from the roster **inside** the reparent call — reproduces 「vanished in the meantime」 (child or parent). ★Deleted regardless of apply success★: after a failure it exercises the reason branch, after success the response name's fallback;
+        /// one side only would leave the other side's code unreached.
         vanish_on_reparent: Mutex<Option<AgentId>>,
-        /// The state `activate_profile` returns. ★It must be possible to put a terminal one in★ — dying right after launching
-        ///   (ADR-0082 resume early exit) is the only way to measure whether the response state is made up, and if this were fixed at `Running`,
-        ///   baking `"live"` into `started_payload` would keep the whole suite green.
+        /// The state `activate_profile` returns. ★It must be possible to put a terminal one in★ — dying right after launching (ADR-0082 resume early exit) is the only way to measure whether the response state is made up; fixed at `Running`, baking `"live"` into
+        ///   `started_payload` would keep the suite green.
         started_status: Mutex<Option<AgentStatus>>,
         /// The new name the child gets right after a reparent succeeds — reproduces 「a rename slipped in after applying」.
         rename_on_reparent: Mutex<Option<String>>,
@@ -2200,7 +2118,8 @@ mod tests {
         ) -> Result<bool, PtyError> {
             self.refuse_if_set()?;
             let ok = *self.reparent_ok.lock().unwrap();
-            // ★It vanishes regardless of apply success★: the window vanishing **after** success is the only path that exercises the response name's fallback.
+            // ★It vanishes regardless of apply success★: the window vanishing **after** success is the only path that exercises the
+            //   response name's fallback.
             //   Putting it only on the failure side leaves that fallback unreached by any test.
             if let Some(vanished) = *self.vanish_on_reparent.lock().unwrap() {
                 self.rows.lock().unwrap().retain(|row| row.id != vanished);
@@ -2313,8 +2232,7 @@ mod tests {
         assert_eq!(agents[0]["parent"], serde_json::Value::Null);
     }
 
-    /// ★The three store states are carried in `agent.list` with their reasons (D6)★ — without `Refusing`, a refusal during the run would look `Writable`
-    ///   while change requests come back `CONFLICT`, and the caller would not see the state explaining that error.
+    /// ★The three store states are carried in `agent.list` with their reasons (D6)★ — without `Refusing`, a refusal during the run would look `Writable` while changes come back `CONFLICT`, leaving the error unexplained.
     // ADR-0291 R17 (D6)
     #[test]
     fn list_reports_each_store_status_with_its_reason() {
@@ -2353,8 +2271,7 @@ mod tests {
         }
     }
 
-    /// ★The real manager carries the state of the two stores each in its own place (D6)★ — the fake manager only returns the planted fields, so a manager-side
-    ///   implementation swapping the two or always leaving one `Writable` is caught only with the real thing.
+    /// ★The real manager carries the two stores' states each in its own place (D6)★ — the fake only returns planted fields, so a manager swapping the two or always leaving one `Writable` is caught only with the real thing.
     // ADR-0291 R17 (D6)
     #[test]
     fn a_real_manager_reports_each_store_in_its_own_slot() {
@@ -2472,8 +2389,7 @@ mod tests {
         );
     }
 
-    /// ★A failure from an LLM wake-up must reach the screen★: without this notification, a human click (WS `SpawnProfile`) shows
-    /// the failure marker but the command bus does not, so the two handles would not move the same thing.
+    /// ★A failure from an LLM wake-up must reach the screen★: without this notification a human click (WS `SpawnProfile`) shows the failure marker but the command bus does not — the two handles would not move the same thing.
     // ADR-0172
     #[test]
     fn waking_that_fails_still_announces_the_roster() {
@@ -2487,15 +2403,10 @@ mod tests {
         assert_eq!(*notify.calls.lock().unwrap(), 1);
     }
 
-    /// ★Resume is not derived from a stored sid alone (ADR-0185)★ — a state where a sid remains on a command that cannot resume
-    /// is made even today (a hand-edited `agents.json` · a profile that switched backends). Launching it as Resume then
-    /// **opens a new conversation but reports the result as 「resumed」** — the wire has no marker saying it is a new conversation,
-    /// so neither the screen nor the LLM can tell.
-    /// ★The WS entry has the same pair★ — the two handles must move the same thing (CLAUDE.md 「LLM-first control」).
+    /// ★Resume is not derived from a stored sid alone (ADR-0185)★ — a sid on a command that cannot resume exists today (hand-edited `agents.json` · a profile that switched backends); launching it as Resume **opens a new conversation but reports 「resumed」**, and the
+    /// wire has no marker for a new conversation, so neither screen nor LLM can tell. ★The WS entry has the same pair★ (CLAUDE.md 「LLM-first control」).
     // ADR-0185
-    /// ★The sample being shell is intended — do not bring the codex terminal mode back here★: by ADR-0208 that mode
-    /// came to use `codex resume <id>`, and its resume axis is now **true**. The only sample with the axis off is shell, and
-    /// replacing shell thinking it is a wrong sample would remove what this entry measures.
+    /// ★The sample being shell is intended — do not bring the codex terminal mode back here★: by ADR-0208 that mode uses `codex resume <id>` and its resume axis is **true**; shell is the only sample with the axis off, and replacing it would remove what this entry measures.
     #[test]
     fn waking_does_not_resume_a_profile_whose_backend_cannot_resume() {
         let host = FakeHost::new();
@@ -2523,8 +2434,7 @@ mod tests {
         );
     }
 
-    /// ★The pair of the entry above — the codex terminal mode now stands **on the opposite side** (ADR-0208)★: if the handle is in the roster,
-    /// that mode must also launch as Resume. Without this, only the entry above would remain, green even if the axis were turned off entirely.
+    /// ★The pair of the entry above — the codex terminal mode now stands **on the opposite side** (ADR-0208)★: with the handle in the roster it must also launch as Resume; without this the entry above would stay green even if the axis were turned off entirely.
     // ADR-0208
     #[test]
     fn waking_a_codex_terminal_profile_with_a_stored_handle_resumes() {
@@ -2706,9 +2616,9 @@ mod tests {
                 ErrorCode::Internal,
                 RetryMode::Never,
             ),
-            // ADR-0291 R17 — a refusal is `CONFLICT`, and the retry instruction is decided by where it came from and why (user decision
-            //   2026-10-11): load refusal = `never` (clears only by restarting the daemon) · re-decision newer edition = `never` · re-decision unreadable
-            //   = `after-condition` (usually a briefly held lock). Write failure is `INTERNAL`.
+            // ADR-0291 R17 — a refusal is `CONFLICT`; the retry instruction depends on origin: load refusal = `never` (clears only by
+            //   restarting the daemon) · re-decision newer edition = `never` · re-decision unreadable = `after-condition` (usually a
+            //   briefly held lock). Write failure = `INTERNAL`.
             (
                 PtyError::Store(StoreError::ReadOnly(Refusal::Newer { found: 2 })),
                 ErrorCode::Conflict,
@@ -2768,8 +2678,7 @@ mod tests {
         }
     }
 
-    /// ★The reason of a store refusal is in English, and names what to do★ — it is a surface the LLM reads. A load refusal says restart, and a re-decision's
-    ///   unreadable says again a little later (the retry instruction is lowered at the daemon exit, so the text carries that role).
+    /// ★A store refusal's reason is English and names what to do★ — the LLM reads it. A load refusal says restart; a re-decision's unreadable says again a little later (the retry instruction is lowered at the daemon exit, so the text carries it).
     // ADR-0291 R17
     #[test]
     fn store_refusal_reasons_are_english_and_name_the_way_out() {
@@ -2966,14 +2875,9 @@ mod tests {
         );
     }
 
-    /// ★The fact that a rejection **touches nothing in the roster** is decision material for another crate★
-    ///
-    /// The daemon uses the premise 「failure answer = nothing remained」 when deciding whether to block re-queries after the deadline
-    /// (`command_delivery::retains_the_id`). If that premise breaks, that side is **silently** wrong — holding on to a failed number
-    /// blocks a normal retry, or letting go of an applied number makes it apply twice.
-    /// ★`agent.spawn` is **absent** from this assertion — because only that verb is different★: if it cannot launch after creating, it
-    /// answers `INTERNAL` while leaving the agent in the roster (the neighboring test `a_created_agent_that_fails_to_start_is_not_rolled_back`
-    /// pins that fact). So the daemon-side decision also splits off that one code as an exception.
+    /// ★That a rejection **touches nothing in the roster** is decision material for another crate★: the daemon uses 「failure answer = nothing remained」 to decide whether to block re-queries after the deadline (`command_delivery::retains_the_id`); if it breaks, that side
+    /// is **silently** wrong (holding a failed number blocks a normal retry; letting go of an applied number applies twice).
+    /// ★`agent.spawn` is **absent** here — only that verb differs★: if it cannot launch after creating it answers `INTERNAL` with the agent left in the roster (`a_created_agent_that_fails_to_start_is_not_rolled_back` pins that), so the daemon splits that one code off as an exception.
     #[test]
     fn a_rejection_from_the_mutating_verbs_leaves_the_roster_untouched() {
         let host = FakeHost::new();
@@ -3023,8 +2927,8 @@ mod tests {
                 "{name}: the rejection changed the roster — {args}"
             );
         }
-        // ★The same holds for changes the store did not accept★ — the manager's `try_` versions commit only if the save succeeds, so the daemon's premise that `CONFLICT` is
-        //   「before touching anything」 stands as is.
+        // ★The same holds for changes the store did not accept★ — the manager's `try_` versions commit only if the save succeeds, so the
+        //   daemon's premise that `CONFLICT` is 「before touching anything」 stands.
         // ADR-0291 R17
         *host.store_refuses.lock().unwrap() = true;
         for (name, args) in [
@@ -3051,8 +2955,7 @@ mod tests {
         );
     }
 
-    /// ★A rename or move the store did not accept is `CONFLICT` with no notification★ — the name and hierarchy are unchanged, so there is no change to announce.
-    ///   If a rename answered `Renamed`, the caller would type the next command with the changed name.
+    /// ★A rename or move the store did not accept is `CONFLICT` with no notification★ — name and hierarchy are unchanged, so nothing to announce; answering `Renamed` would make the caller type the next command with a changed name.
     // ADR-0291 R17 (D3)
     #[test]
     fn a_rename_or_move_the_store_refuses_is_a_conflict_that_announces_nothing() {
@@ -3088,8 +2991,7 @@ mod tests {
         assert_eq!(*notify.calls.lock().unwrap(), 0, "nothing changed");
     }
 
-    /// ★Waking announces the roster even on a save refusal (E2)★ — the activation failure writes that entry's 「last failure」, and that axis
-    ///   reaches the screen only through the roster notification (ADR-0172). The code is `CONFLICT`.
+    /// ★Waking announces the roster even on a save refusal (E2)★ — the activation failure writes that entry's 「last failure」, which reaches the screen only through the roster notification (ADR-0172). The code is `CONFLICT`.
     // ADR-0291 R17 (E2)
     #[test]
     fn a_wake_the_store_refuses_is_a_conflict_that_still_announces_the_roster() {
@@ -3112,8 +3014,7 @@ mod tests {
         assert_eq!(*notify.calls.lock().unwrap(), 1);
     }
 
-    /// ★If the create of create-and-launch is refused, it does not reach the launch (§3-9 ⓐ)★ — roster unchanged · 0 launch attempts · 0 notifications.
-    ///   Retrying creates no duplicate (the create is refused too).
+    /// ★If the create of create-and-launch is refused, it does not reach the launch (§3-9 ⓐ)★ — roster unchanged · 0 launch attempts · 0 notifications; a retry creates no duplicate.
     // ADR-0291 R17
     #[test]
     fn a_create_and_start_whose_create_the_store_refuses_starts_nothing_and_announces_nothing() {
@@ -3139,14 +3040,13 @@ mod tests {
         assert_eq!(*notify.calls.lock().unwrap(), 0);
     }
 
-    /// ★Even if the store refuses the launch after creating, it is `INTERNAL` (§3-9 ⓑ)★ — the already-created agent remains, so if the daemon
-    ///   read it as 「rejection before touching」 (`CONFLICT`) and let go of the request number, a retry with the same number would create again. The text carries the recovery path
-    ///   (launch again by that name) as is, and the store's reason carries only the cause — if instructions like 「again a little later」 · 「retrying is useless」
-    ///   mixed in, the caller would create again with the same `--cwd` or contradict the tail. Measured per refusal cause.
+    /// ★A store refusal of the launch after creating is `INTERNAL` (§3-9 ⓑ)★ — the created agent remains, so `CONFLICT` (「rejection before touching」) would let the daemon release the request number and a same-number retry create again. The text carries the recovery path
+    ///   (launch again by that name) and the store's reason only the cause — mixed-in 「again a little later」 · 「retrying is useless」 would make the caller create again with the same `--cwd` or contradict the tail. Measured per refusal cause.
     // ADR-0291 R17
     #[test]
     fn a_created_agent_whose_start_the_store_refuses_stays_internal_with_the_recovery_hint() {
-        // The create is saved and the launch's registration is refused — the shape where the file changed in between. The second field makes the refusal cause.
+        // The create is saved and the launch's registration is refused — the shape where the file changed in between. The second field
+        //   makes the refusal cause.
         struct RefuseOnStart(Arc<FakeHost>, fn() -> StoreError);
         impl AgentCommandHost for RefuseOnStart {
             fn roster(&self) -> Vec<AgentRosterRow> {
@@ -3267,11 +3167,9 @@ mod tests {
         }
     }
 
-    /// ★Through the bus with the real manager and a store that does not accept★ — the fake manager only imitates the `try_` versions, so whether the table really calls the manager's
-    ///   caller entry (an old version would stand in memory and be `Ok`) is measured only with the real thing. Decision refusal = `CONFLICT` · write
-    ///   failure = `INTERNAL`, and either way the roster is unchanged · nothing launched · the only notification is the one after waking's activation (E2).
-    /// ★It does not launch a process★ — the launch stops at registration (①). Even if it regressed and passed through, it would be a shell calling a nonexistent program
-    ///   and end in failure.
+    /// ★Through the bus with the real manager and a store that does not accept★ — the fake only imitates the `try_` versions, so whether the table really calls the manager's caller entry (an old version would stand in memory and be `Ok`) is measurable only with the real thing.
+    ///   Decision refusal = `CONFLICT` · write failure = `INTERNAL`; either way roster unchanged · nothing launched · the only notification is the one after waking's activation (E2).
+    /// ★It launches no process★ — the launch stops at registration (①); a regression passing through would be a shell calling a nonexistent program, ending in failure.
     // ADR-0291 R17 (D3 · E2)
     #[test]
     fn a_real_manager_behind_the_bus_changes_nothing_while_its_store_does_not_save() {
@@ -3394,12 +3292,8 @@ mod tests {
         }
     }
 
-    /// ★Pins **the value itself** of [`NEW_AGENT_OUTPUT_FORMAT`] as a literal★ — every place reading this constant is a
-    /// relative comparison (`assert_eq!(…, NEW_AGENT_OUTPUT_FORMAT)`), so flipping the constant to `Terminal` makes those assertions
-    /// move along and **the whole workspace stays green** (measured 2026-09-22 — there was not a single assertion in the repository measuring that value
-    /// as a literal). A relative comparison measures only 「the two branches look at the same home」, not 「what is in that home」
-    /// — the latter is the value the user sees (whether the screen right after creation is a chat or a terminal), so it is
-    /// measured separately here. Changing the value is a decision, so an edit fixing this line must go through that decision (ADR-0078).
+    /// ★Pins **the value itself** of [`NEW_AGENT_OUTPUT_FORMAT`] as a literal★ — every reader of the constant compares relatively (`assert_eq!(…, NEW_AGENT_OUTPUT_FORMAT)`), so flipping it to `Terminal` moves those assertions along and **the whole workspace stays green**
+    /// (no literal assertion existed). Relative comparison measures 「both branches look at the same home」, not 「what is in it」 — the latter is what the user sees (chat or terminal after creation). Changing the value is a decision (ADR-0078).
     #[test]
     fn the_new_agent_default_output_format_is_pinned_to_a_literal() {
         assert_eq!(NEW_AGENT_OUTPUT_FORMAT, CoreAgentOutputFormat::StreamJson);
@@ -3410,10 +3304,10 @@ mod tests {
     fn advertised(field: &str) -> Vec<String> {
         let schema: serde_json::Value =
             serde_json::from_str(AgentNewArgs::SPEC.args_schema).expect("args schema");
-        // ★Both shapes are read★ — a required field spreads directly as `{"enum":[…]}`, and an omittable field is
-        //   wrapped one layer as `{"anyOf":[{"enum":[…]},…]}`. Reading only one shape would make the sweep an **empty list** when that field
-        //   switches between required and optional, silently measuring nothing (the caller's `is_empty` assertion is
-        //   the last defense, but without folding here that assertion would blow up every time).
+        // ★Both shapes are read★ — a required field spreads as `{"enum":[…]}`, an omittable one is wrapped as
+        //   `{"anyOf":[{"enum":[…]},…]}`; reading one shape would make the sweep an **empty list** when the field switches
+        //   required/optional, silently measuring nothing
+        //   (the caller's `is_empty` assertion is the last defense).
         let property = &schema["properties"][field];
         let branches = match property.get("anyOf") {
             Some(any_of) => any_of.as_array().expect("anyOf is an array").clone(),
@@ -3427,16 +3321,11 @@ mod tests {
             .collect()
     }
 
-    /// ★The place where **the compiler** binds the declaration vocabulary and the core vocabulary★ — binding them only in prose would leave the declaration side silently
-    /// narrow when the core gains a variant, and that word would be rejected at the entry with `INVALID_ARGUMENT` (a missing feature
-    /// with no error or log, so nobody notices).
+    /// ★The place where **the compiler** binds the declaration vocabulary and the core vocabulary★ — prose binding would leave the declaration silently narrow when the core gains a variant, and that word would be rejected at the entry with `INVALID_ARGUMENT` (no error or log).
     ///
-    /// ★Half of what this test measures is **compilation**★ — the two `match`es below have no wildcard, so when the core enum
-    /// gains a variant this file **does not compile**. So do not put `_ =>` when filling the branches: the moment you do,
-    /// that half guards nothing.
-    /// ★The other half comes from **the value list the declaration advertised**★ — writing words by hand would let an edit that adds a variant without putting it
-    /// in that list silently bypass the spelling check. Drawing from the advertisement makes that impossible: when the core gains a variant
-    /// the `match` breaks → a variant is added to the declaration → that variant enters the advertisement → this sweep covers it.
+    /// ★Half is **compilation**★ — the two `match`es below have no wildcard, so a new core variant **fails to compile** here; do not put `_ =>` when filling branches.
+    /// ★The other half comes from **the value list the declaration advertised**★ — hand-written words would let an edit adding a variant but not the list bypass the spelling check. Drawn from the advertisement: core gains a variant → `match` breaks → variant added to the
+    /// declaration → enters the advertisement → this sweep covers it.
     #[test]
     fn the_declared_vocabularies_are_pinned_to_the_core_ones() {
         // ── Output format: declaration variants ↔ core variants are one-to-one, down to the wire notation ──
@@ -3477,11 +3366,10 @@ mod tests {
                 // ★`Shell` being `None` is a decision, not a blank★ — this entry cannot create it
                 //   (it has not been confirmed that the profile creation path runs with it — the `AgentBackend` declaration).
                 AgentCommand::Shell { .. } => None,
-                // ★`Codex` opened on 2026-09-22★ — the old `None` reason (「the LLM cannot get past the trust confirmation modal of a never-seen folder」)
-                //   was overturned by measurement (that table = the
-                //   codex line of [`LLM_BACKEND_POLICY`] carries the grounds). What this line measures now is not that decision but **the vocabulary round trip**:
-                //   whether the run command the declaration `Codex` builds reads back as `Codex`, and whether the stored `kind` tag has
-                //   the same spelling.
+                // ★`Codex` is open★ — its old `None` reason (trust modal) was overturned by measurement (grounds: the codex line of
+                //   [`LLM_BACKEND_POLICY`]). This line now measures **the vocabulary round trip**: whether the run command the declaration
+                //   `Codex` builds reads back as `Codex`
+                //   and the stored `kind` tag has the same spelling.
                 AgentCommand::Codex { .. } => Some(AgentBackend::Codex),
             }
         }
@@ -3501,8 +3389,8 @@ mod tests {
                 "{word}: the run command the declaration vocabulary builds does not read back into that vocabulary"
             );
             // ★Even the core-side wire spelling is bound★: `AgentCommand` is written to disk as is with `#[serde(tag = "kind")]`
-            //   (`agents.json`), so changing that tag value must be caught here — if not, the declaration vocabulary and
-            //   the stored vocabulary silently diverge, and that divergence shows up as old builds unable to read the file.
+            //   (`agents.json`), so a changed tag value must be caught here — else the declaration and stored vocabularies silently
+            //   diverge and old builds cannot read the file.
             assert_eq!(
                 serde_json::to_value(&built).expect("core serialization")["kind"],
                 serde_json::Value::String(word.clone()),
@@ -3511,14 +3399,12 @@ mod tests {
         }
     }
 
-    /// ★The values passing today are the two `Claude`·`Codex`, and **each of them works in both modes**★ (2026-09-22).
+    /// ★The values passing today are `Claude`·`Codex`, **each working in both modes**★.
     ///
-    /// The core also has `Shell`, but it has not been confirmed that the creation path runs with it, so it is outside the vocabulary (reason =
-    /// the `AgentBackend` declaration).
+    /// The core also has `Shell`, but the creation path is unconfirmed with it, so it is outside the vocabulary (reason: the `AgentBackend` declaration).
     ///
-    /// ★Why the mode axis is measured here too★ — opening codex is not one word but **word × two modes**, and
-    /// whether the mode was actually carried is visible only by looking into **the stored run command** (`AgentNewOk` has no such field).
-    /// Without measuring here, the whole suite would be green even if [`backend_command`] pinned codex to one mode.
+    /// ★The mode axis is measured here too★ — opening codex is **word × two modes**, and whether the mode was carried is visible only in **the stored run command** (`AgentNewOk` has no such field); otherwise the suite would stay green even if [`backend_command`] pinned codex
+    /// to one mode.
     #[test]
     fn new_accepts_both_declared_backends_and_refuses_the_rest() {
         for word in ["Claude", "Codex"] {
@@ -3558,7 +3444,8 @@ mod tests {
                     kind, word,
                     "{word}/{spelled}: a different backend was stored"
                 );
-                // ★This entry does not grow the argument surface★ — if fields like model or reasoning effort leaked in here, the assertion that it is empty
+                // ★This entry does not grow the argument surface★ — if fields like model or reasoning effort leaked in here, the assertion
+                //   that it is empty
                 //   breaks first.
                 assert!(
                     format.0.is_empty(),
@@ -3572,7 +3459,8 @@ mod tests {
             }
         }
 
-        // ★Outside the vocabulary is rejected before registration — but **spelling is not the outside-vocabulary axis**★: a word differing only in case
+        // ★Outside the vocabulary is rejected before registration — but **spelling is not the outside-vocabulary axis**★: a word differing
+        //   only in case
         //   reads as the same word (`new_accepts_the_backend_word_in_any_casing`).
         let host = FakeHost::new();
         let (table, notify) = wiring(&host);
@@ -3604,11 +3492,8 @@ mod tests {
         );
     }
 
-    /// ★Not giving the field at all is a rejection — it does not silently become claude★ (2026-09-08).
-    ///
-    /// Unspecified used to mean `Claude`. Since there came to be two backends, that default folds 「did not choose」 and 「chose claude」
-    /// into the same value, and it was already removed from the spawn packet for the same reason (the daemon's `MISSING_BACKEND`).
-    /// Leaving only this door would split that decision per entry.
+    /// ★Not giving the field at all is a rejection — it does not silently become claude★. Unspecified used to mean `Claude`; with two backends that default folds 「did not choose」 and 「chose claude」 into one value (already removed from the spawn packet — the daemon's
+    /// `MISSING_BACKEND`), and leaving only this door would split that decision per entry.
     #[test]
     fn new_refuses_an_unspecified_backend_instead_of_defaulting() {
         let host = FakeHost::new();
@@ -3635,24 +3520,15 @@ mod tests {
 
     /// ★This door opens **the same set** as [`LLM_BACKEND_POLICY`] — measured by **calls**, not by comparing lists★.
     ///
-    /// Matching only the lists stays green even if the gate is removed entirely (it actually happened at a sibling door — 2026-09-08 review).
-    /// So for each word of the table, `agent.new` is **called** and the outcome is checked: words the table opened go onto the roster, and words the table closed
-    /// do not go on **in any spelling**.
+    /// List matching stays green even with the gate removed entirely (it happened at a sibling door). So for each table word `agent.new` is **called**: words the table opened go onto the roster, words it closed do not **in any spelling**.
     ///
-    /// ★The spellings this door accepts are decided by the declaration vocabulary★ — they differ from the table's words only in case (the `word` doc of
-    /// [`LlmBackendPolicy`]). So for one word, **every spelling this door could accept** is tried. Trying only one spelling
-    /// would make that attempt hit the wrong spelling and silently pass the day the vocabulary widens.
+    /// ★The spellings this door accepts are decided by the declaration vocabulary★ — they differ from the table's words only in case ([`LlmBackendPolicy`] `word` doc), so **every spelling this door could accept** is tried; one spelling would silently pass the day the vocabulary widens.
     ///
-    /// ★What it catches — written precisely (updated 2026-09-22: with the table closing nothing, the weight of the two directions split)★
-    ///   - **the table closed but this door still creates** → turns red. An edit that widens the vocabulary ([`AgentBackend`]) while
-    ///     deleting only the [`llm_creation_refusal`] arm of `verb_new` is caught here. This is the only regression net of that
-    ///     arm.
-    ///   - **the table opened but this door does not create** → turns red. An edit that adds only one line to the table without filling the vocabulary and [`backend_command`]
-    ///     is caught here (the [`LLM_BACKEND_POLICY`] doc gives that guidance).
+    /// ★What it catches★:
+    ///   - **table closed but this door still creates** → red: an edit widening the vocabulary ([`AgentBackend`]) while deleting only the [`llm_creation_refusal`] arm of `verb_new`. The only regression net of that arm.
+    ///   - **table opened but this door does not create** → red: an edit adding a table line without filling the vocabulary and [`backend_command`] (guidance in the [`LLM_BACKEND_POLICY`] doc).
     ///
-    /// ★**Deleting only the arm** cannot be caught by this test even today★ — but the reason changed: before, it was 「because the vocabulary was narrower than the table」,
-    /// and now it is 「because the table closes nothing, no input reaches the arm at all」. Do not read that fact as 「so the arm is unnecessary」
-    /// — the day the table closes a line again, that arm becomes the only runtime defense.
+    /// ★**Deleting only the arm** is uncatchable here even today★ — the table closes nothing, so no input reaches the arm. Do not read that as 「the arm is unnecessary」: the day the table closes a line again it is the only runtime defense.
     #[test]
     fn new_creates_exactly_what_the_llm_backend_policy_opens() {
         /// Spelling candidates this door can accept for this word — the table is lowercase, the declaration vocabulary PascalCase.
@@ -3721,13 +3597,10 @@ mod tests {
         }
     }
 
-    /// ★The backend words `agent.new` **advertises** == the set the policy table opens★ — spellings differ only in case
-    /// (declaration vocabulary `Claude` · table `claude`).
+    /// ★The backend words `agent.new` **advertises** == the set the policy table opens★ (spellings differ only in case: declaration `Claude` · table `claude`).
     ///
-    /// `new_creates_exactly_what_the_llm_backend_policy_opens` sweeps **the table's lines**, so it cannot see a word only in the advertisement
-    /// — if a variant is added to the vocabulary without adding a line to the table, that word is advertised but
-    /// closed by [`NO_POLICY_DECLARED`], and the caller gets rejected for a value it was told it could choose. This test catches that
-    /// direction.
+    /// `new_creates_exactly_what_the_llm_backend_policy_opens` sweeps **the table's lines** and cannot see a word only in the advertisement — a variant added to the vocabulary without a table line is advertised but closed by [`NO_POLICY_DECLARED`], rejecting a value the caller
+    /// was told it could choose. This catches that direction.
     #[test]
     fn new_advertises_exactly_the_backends_the_llm_policy_opens() {
         let mut opened: Vec<String> = LLM_BACKEND_POLICY
@@ -3938,7 +3811,8 @@ mod tests {
         )
         .expect_err("a whitespace-only value");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
-        // ★For the same field, whichever mistake was made, the same branch is told★: if the blank-value text hid the `null` (detach to top level)
+        // ★For the same field, whichever mistake was made, the same branch is told★: if the blank-value text hid the `null` (detach to top
+        //   level)
         //   the absence text tells about, the caller would read that putting a value into that field is the only way.
         assert!(
             err.message().contains("null"),
@@ -3947,9 +3821,7 @@ mod tests {
         );
     }
 
-    /// ★Doing as the rejection text says must work★: telling a caller who sent a required field as a blank value "may be omitted"
-    /// would make the retry that omits it as is **rejected again** (this time as 「missing」) — the LLM follows the text as is,
-    /// so it circles the same place. For a required field it says only to fill in a value.
+    /// ★Doing as the rejection text says must work★: telling a caller who sent a required field blank "may be omitted" would get the omitting retry **rejected again** (as 「missing」) and the LLM circles the same place; a required field is told only to fill in a value.
     #[test]
     fn the_advice_for_a_blank_required_field_does_not_tell_the_caller_to_drop_it() {
         let host = FakeHost::new();
@@ -3971,7 +3843,8 @@ mod tests {
             !required.contains("left out"),
             "saying only to omit it gets that retry rejected again as one-of-the-two-must-be-given: {required}"
         );
-        // ★A rejection creates nothing★ — if the check were pushed after registration, a call with blank arguments would create an agent and then
+        // ★A rejection creates nothing★ — if the check were pushed after registration, a call with blank arguments would create an agent
+        //   and then
         //   answer with a rejection (the caller reads it as a failure and calls again — only the names grow one by one).
         assert!(
             host.rows.lock().unwrap().is_empty(),
@@ -4015,11 +3888,9 @@ mod tests {
         .expect("following the omit guidance works");
     }
 
-    /// ★Both fields of `rename` are **required**★ — telling either 「may be omitted」 would make the retry that omits it as is rejected again at the entry
-    /// check with 「requires …」, and the caller would circle the same place.
+    /// ★Both fields of `rename` are **required**★ — telling either 「may be omitted」 would get the omitting retry rejected at the entry check with 「requires …」.
     ///
-    /// ★A property to be looked at **per call site**, not per field★: whether blank-value guidance is right or wrong depends on what that field is
-    /// required to be in that verb, so checking the shared function once guards no verb.
+    /// ★A property to look at **per call site**, not per field★: whether blank-value guidance is right depends on what that field must be in that verb, so checking the shared function once guards no verb.
     #[test]
     fn a_blank_rename_argument_is_told_to_fill_it_not_to_drop_it() {
         let host = FakeHost::new();
@@ -4060,9 +3931,7 @@ mod tests {
         assert_eq!(out["name"], "beta", "{out}");
     }
 
-    /// ★The constraint of `spawn` is not a field but **a combination**★: `cwd` is `Option` by declaration, so 「may be omitted」 is true by the declaration,
-    /// but the retry that omits it as is gets rejected again with 「either target or cwd must be given」.
-    /// The text must state the combination to get out in one go.
+    /// ★The constraint of `spawn` is **a combination**, not a field★: `cwd` is `Option` by declaration so 「may be omitted」 is true there, but omitting it is rejected again with 「either target or cwd must be given」; the text must state the combination in one go.
     #[test]
     fn a_blank_spawn_argument_is_told_what_actually_satisfies_the_verb() {
         let host = FakeHost::new();
@@ -4087,9 +3956,10 @@ mod tests {
             refusal.contains("target") && refusal.contains("cwd"),
             "must say what to give for it to work (one of the two): {refusal}"
         );
-        // ★In this verb the rejection must happen **before doing anything irreversible**★: if the blank-value check were pushed after the combination branch,
-        //   a call with a blank `cwd` would **create an agent and even notify** and then answer with a rejection. The caller
-        //   reads it as a failure and calls again, so only the names grow one by one, and what was created has no way to be deleted (ADR-0122).
+        // ★In this verb the rejection must come **before anything irreversible**★: a blank-value check after the combination branch would
+        //   let a blank `cwd` **create an agent and notify** and then answer with a rejection; the caller reads a failure, calls again,
+        //   names grow
+        //   one by one, and the created ones cannot be deleted (ADR-0122).
         assert_eq!(
             host.rows.lock().unwrap().len(),
             before,
@@ -4169,9 +4039,8 @@ mod tests {
 
     /// ★The change verbs and `list` must pass through the same function so the two answers cannot diverge★ — every state is pinned here.
     ///
-    /// ★Known blind spot (not fixed)★: the list below is **written by hand**, and `state_of` emits asleep through a catch-all branch (`_ =>`).
-    /// So even when a new variant appears this test is green, and if that variant is 「of a live nature」, it silently
-    /// goes out as asleep. Filling the list automatically would require changing the shape on the `AgentStatus` side, so it is not done here.
+    /// ★Known blind spot (not fixed)★: the list below is **hand-written** and `state_of` emits asleep through a catch-all (`_ =>`), so a new 「live-natured」 variant would silently go out as asleep with this test green; filling the list automatically needs a shape change on the
+    /// `AgentStatus` side.
     #[test]
     fn every_status_maps_to_one_of_the_two_agent_state_words() {
         assert_eq!(
@@ -4206,9 +4075,8 @@ mod tests {
         }
     }
 
-    /// ★The state of the response is **derived**, not a literal★: if `spawn` answered that an agent that died right after launching (ADR-0082 resume early exit —
-    /// there is no fresh fallback) is alive, the `list` right after would answer that it is asleep. The caller
-    /// would write mail to a corpse in between. Baking `"live"` into `started_payload` dies here.
+    /// ★The response state is **derived**, not a literal★: if `spawn` answered alive for an agent that died right after launching (ADR-0082 resume early exit — no fresh fallback) the next `list` would say asleep and the caller would write mail to a corpse. Baking `"live"` into
+    /// `started_payload` dies here.
     #[test]
     fn a_spawn_whose_activation_lands_terminal_reports_sleeping() {
         for terminal in [
@@ -4267,9 +4135,9 @@ mod tests {
         let host = FakeHost::new();
         let helper = host.with_agent("helper", false, false);
         let lead = host.with_agent("lead", false, false);
-        // ★The old parent is planted★: it is the only way to tell whether the response's `parent` is **the parent this call instructed** or the old value
-        //   left in the roster (if neither existed, either would carry the same value and they could not be told apart).
-        //   ★The fake manager does not fix the parent field★ — so this old value stays in the roster as is.
+        // ★The old parent is planted★: the only way to tell whether the response's `parent` is **the parent this call instructed** or the
+        //   old value left in the roster (otherwise both carry the same value). ★The fake manager does not fix the parent field★, so the
+        //   old value stays.
         let stale = AgentId::new_v4();
         for row in host.rows.lock().unwrap().iter_mut() {
             if row.id == helper {
@@ -4293,11 +4161,9 @@ mod tests {
         );
     }
 
-    /// ★A target that was applied but vanished in the meantime★ — the response must not become **a nameless success row**. Carrying an empty name would
-    /// make the caller's decider read the success response as "an unreadable response", and a move that actually happened would be recorded as a failure.
+    /// ★A target applied but vanished in the meantime★ — the response must not become **a nameless success row** (an empty name would make the caller's decider read the success as "an unreadable response" and record a move that happened as a failure).
     ///
-    /// ★Resolution must succeed to reach this branch★: emptying the roster beforehand would have `resolve` emit `NOT_FOUND` first and this code
-    /// would not even run — so the vanishing is caused **at apply time** (`vanish_on_reparent`).
+    /// ★Resolution must succeed to reach this branch★: an emptied roster would make `resolve` emit `NOT_FOUND` first, so the vanishing is caused **at apply time** (`vanish_on_reparent`).
     #[test]
     fn move_falls_back_to_the_resolved_name_when_the_agent_vanishes_after_the_move() {
         let host = FakeHost::new();
@@ -4328,9 +4194,9 @@ mod tests {
             out["name"].as_str().is_some_and(|n| !n.is_empty()),
             "a nameless row must not be carried in a success response: {out}"
         );
-        // Even if the target vanished, **the parent axis carries the value this call instructed** — if a request told to detach succeeded but
-        //   the `parent` field were empty or gone, the caller could not read what was applied.
-        //   (The defect of carrying the old parent splits only while the roster remains, so the neighboring test below looks at it.)
+        // Even if the target vanished, **the parent axis carries the value this call instructed** — an empty or missing `parent` would
+        //   leave the caller unable to read what was applied. (The old-parent defect splits only while the roster remains; the neighboring
+        //   test looks at it.)
         assert!(
             out["parent"].is_null(),
             "it was told to detach, so null: {out}"
@@ -4643,8 +4509,7 @@ mod tests {
         digits.parse().ok()
     }
 
-    /// ★A failure caused by one word keeps its code and its text starts with `targets[i]: ` — the shell reads this head★
-    /// (the declaration header comment). With several blank words, the head is the first position.
+    /// ★A failure caused by one word keeps its code and its text starts with `targets[i]: ` — the shell reads this head★ (the declaration header comment). With several blank words the head is the first position.
     // ADR-0307
     #[test]
     fn the_resolve_failure_prefix_is_a_stable_contract() {
@@ -4694,7 +4559,8 @@ mod tests {
             ambiguous.message()
         );
 
-        // Blank words are checked before reaching the resolver — a later blank word is rejected before a missing name at an earlier position (0).
+        // Blank words are checked before reaching the resolver — a later blank word is rejected before a missing name at an earlier
+        //   position (0).
         let blank = fail(json!(["ghost", "alpha", "  ", ""]));
         assert_eq!(blank.code(), ErrorCode::InvalidArgument);
         assert_eq!(
@@ -4748,8 +4614,7 @@ mod tests {
         );
     }
 
-    /// ★The answer shape is pinned to a file★ — the shell does not depend on this crate and reads the answer as untyped JSON, and the shell tests'
-    /// fake daemon builds its answers from the same file (TRD S28 §6). If a field name changes, either here or the shell side turns red.
+    /// ★The answer shape is pinned to a file★ — the shell does not depend on this crate and reads the answer as untyped JSON, and the shell tests' fake daemon builds answers from the same file (TRD S28 §6); a changed field name turns either side red.
     // ADR-0307
     #[test]
     fn the_resolve_reply_matches_the_golden_fixture() {
