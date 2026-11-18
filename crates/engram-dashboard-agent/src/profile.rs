@@ -106,9 +106,13 @@ pub enum RestoreOutcome {
         reason: String,
     },
     /// Skipped because it is not a restore target, e.g. `auto_restore=false`.
-    Blocked { reason: String },
+    Blocked {
+        reason: String,
+    },
     /// Even fresh failed → stop. A terminal point without recursive retry (H-1.7).
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 // ── Persistent profiles ────────────────────────────────────────────────────────────────

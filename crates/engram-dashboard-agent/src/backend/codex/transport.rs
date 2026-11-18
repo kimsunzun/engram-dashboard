@@ -856,7 +856,10 @@ enum Stage {
     ///   turn id"; no separate counter exists, so the two cannot diverge. A late response · echo moves the item only when (id, gen) and
     ///   **the current stage** match. `turn_id` = the turn that request aimed at (`None` = `turn/start` carried it and its response has
     ///   not given the id yet — a steer goes out only after the turn id is known).
-    InFlight { gen: u64, turn_id: Option<String> },
+    InFlight {
+        gen: u64,
+        turn_id: Option<String>,
+    },
 }
 
 /// State + the condition variable waiting on it. The writer sleeps here.

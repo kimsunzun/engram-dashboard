@@ -655,7 +655,6 @@ mod tests {
         detail.upstream.as_ref().map(UpstreamText::as_str)
     }
 
-
     #[test]
     fn policy_and_key_are_the_claude_values() {
         assert_eq!(CLAUDE_USAGE_PROBE.key(), USAGE_VENDOR);
@@ -668,7 +667,6 @@ mod tests {
             }
         );
     }
-
 
     #[test]
     fn success_carries_both_windows_and_the_plan() {
@@ -1134,7 +1132,6 @@ mod tests {
         }
     }
 
-
     fn kind(err: &ProbeError) -> &'static str {
         match err {
             ProbeError::RateLimited { retry_after: None } => "rate",
@@ -1249,7 +1246,6 @@ mod tests {
             assert!(spawner.child_dropped());
         }
     }
-
 
     #[test]
     fn the_request_is_one_get_usage_control_line_with_a_fresh_uuid() {
@@ -1490,7 +1486,6 @@ mod tests {
         assert_eq!(spawner.commands().len(), 1);
         assert_scratch_gone(&root);
     }
-
 
     #[test]
     fn the_command_runs_in_its_own_scratch_dir_with_hooks_and_mcp_off() {
