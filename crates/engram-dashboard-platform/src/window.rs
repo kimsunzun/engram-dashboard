@@ -1,22 +1,22 @@
-//! The OS rules of desktop windows — window identity · position and z order · visibility · restoring position · topmost window under the cursor · window
-//! diagnostic facts (the log's job) · whether the foreground window is this process's · whether that window is the foreground window · title-bar chrome shape (TRD S26-window-chrome §6-2 · §7-11).
+//! The OS rules of desktop windows — window identity, position and z order, visibility, restoring position, topmost window under the
+//!   cursor, diagnostic facts (the log's job), foreground checks, title-bar chrome shape
+//! (TRD S26-window-chrome §6-2 · §7-11).
 //!
-//! A window is received as `raw-window-handle` 0.6's [`HasWindowHandle`], and matching that handle's variant (Windows = `Win32` · otherwise =
-//! [`WindowError::Unsupported`]) is done by this module — if the caller matched the variant, that too would be a runtime OS
-//! split outside this crate (TRD S21-slot-docking 6.3rd edition §8 · B10 · 7th edition §5-1). The functions that change a window are raw Win32 calls, so they do not go through the window
-//! toolkit's (tao's) flags — that it may disagree with the visibility the toolkit knows is the caller's contract (TRD
-//! S21-slot-docking §9-3 I29).
+//! A window is received as `raw-window-handle` 0.6's [`HasWindowHandle`]; matching its variant (Windows = `Win32`, else
+//!   [`WindowError::Unsupported`]) is done here — a caller-side match would be a runtime OS split outside
+//! this crate (TRD S21-slot-docking 6.3 §8 · B10, 7 §5-1). Functions that change a window are raw Win32 calls and bypass tao's flags;
+//!   disagreement with the visibility the toolkit knows is the caller's contract
+//! (TRD S21-slot-docking §9-3 I29).
 //!
-//! ★Threads★ — the functions that change a window ([`place_window`] · [`restore_placement`]) are called from the thread that created that window (main).
-//! Called from another thread, Win32 sends a message to that window's thread and waits for the answer — if that thread is
-//! waiting on the caller, it deadlocks. Reads ([`NativeWindow::of`] · [`top_level_at`] · [`describe_window`] ·
-//! [`foreground_is_current_process`] · [`is_foreground`]) work from any thread.
+//! ★Threads★ — [`place_window`] and [`restore_placement`] are called from the thread that created the window (main); from another thread
+//!   Win32 sends a message to that thread and waits, deadlocking if it waits on the caller.
+//! Reads ([`NativeWindow::of`], [`top_level_at`], [`describe_window`], [`foreground_is_current_process`], [`is_foreground`]) work from any
+//!   thread.
 //!
-//! The snap layout overlay (a child window over the maximize button) is the submodule `snap` and sits behind the cargo feature `snap-overlay` — off by default (TRD
-//! S26-window-chrome §8-4 · user decision Q1 2026-10-24).
+//! The snap layout overlay (a child window over the maximize button) is submodule `snap`, behind cargo feature `snap-overlay` (off by
+//!   default — TRD S26-window-chrome §8-4).
 
-// ADR-0266
-// ADR-0295
+// ADR-0266, ADR-0295
 
 use std::fmt;
 use std::io;
@@ -27,7 +27,7 @@ use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
 #[cfg(feature = "snap-overlay")]
 pub mod snap;
 
-/// A screen point in physical px. If the process is not per-monitor DPI aware (v2 — tao turns it on), the OS gives a value virtualized by scaling.
+/// A screen point in physical px. If the process is not per-monitor DPI aware (v2 — tao turns it on), the OS gives a scaling-virtualized value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PhysPoint {
     pub x: i32,
@@ -43,16 +43,16 @@ pub struct PhysRect {
     pub height: i32,
 }
 
-/// Window identity — compare whether it is the same window (the answer of [`top_level_at`]) · used as the reference of [`ZOrder::After`]. The caller does not
-/// know the inside (Windows = the HWND value).
-///
-/// ★The value remains even after the window is gone★ — the OS may give the same value again to a new window, so equality between long-held values does not guarantee 「the same window」.
+/// Window identity — compare whether two are the same window (answer of [`top_level_at`]); the reference of [`ZOrder::After`]. Opaque to
+///   the caller (Windows = the HWND value).
+/// ★The value remains after the window is gone★ — the OS may reuse it for a new window, so equality between long-held values does not
+///   guarantee "the same window".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NativeWindow(isize);
 
 impl NativeWindow {
-    /// `None` = the handle could not be obtained (the window does not exist yet or any more) or it is not a window handle this crate handles — outside Windows it is
-    /// always `None`.
+    /// `None` = the handle could not be obtained (window not yet/no longer existing) or it is not a handle this crate handles; always
+    ///   `None` outside Windows.
     pub fn of(w: &impl HasWindowHandle) -> Option<NativeWindow> {
         raw_of(w).ok().map(NativeWindow)
     }
@@ -74,7 +74,7 @@ pub enum ZOrder {
     Top,
     /// Directly below this window.
     After(NativeWindow),
-    /// Does not touch the z order — but if `activate` of [`place_window`] is true, the OS raises the window that became active to the top.
+    /// Does not touch the z order — but if `activate` of [`place_window`] is true, the OS raises the activated window to the top.
     Keep,
 }
 
@@ -113,17 +113,14 @@ fn raw_of(w: &impl HasWindowHandle) -> Result<isize, WindowError> {
     }
 }
 
-/// Applies position · size · z · visibility · activation with one `SetWindowPos` (TRD S21-slot-docking §9-3 I29 — places it in
-/// one go without flicker).
-///
-/// - `rect: None` = leave position · size as is (show in place — used with `show`).
-/// - `show` = if false, visibility is not touched (it does not hide).
-/// - `activate` = if true, asks for that window to be the foreground — once active it comes to the top even if `z` is [`ZOrder::Keep`].
-///   ★If the OS refuses, it is left as is and returns `Ok`★ — unlike tao's `force_window_active`, it does not synthesize Alt to steal the foreground:
-///   it only raises without stealing focus (ADR-0299 decision 5 · TRD S21-slot-docking §9-3 I5 · I29). Whether it was refused is checked separately with [`is_foreground`] (is that window the foreground).
-///
+/// Applies position, size, z, visibility and activation with one `SetWindowPos` (TRD S21-slot-docking §9-3 I29 — no flicker).
+/// - `rect: None` = leave position/size (show in place — used with `show`). `show` false = visibility untouched (does not hide).
+/// - `activate` = ask for that window to be the foreground — once active it comes to the top even if `z` is [`ZOrder::Keep`]. ★If the OS
+///   refuses, it is left and returns `Ok`★ — unlike tao's `force_window_active` it does not
+///   synthesize Alt to steal the foreground; it only raises without stealing focus (ADR-0299 decision 5, TRD S21-slot-docking §9-3 I5 ·
+///   I29). Check refusal with [`is_foreground`].
 /// Outside Windows = [`WindowError::Unsupported`].
-// ADR-0295
+// ADR-0295, ADR-0299
 // ADR-0299
 pub fn place_window(
     w: &impl HasWindowHandle,
@@ -143,18 +140,16 @@ pub fn place_window(
     }
 }
 
-/// The topmost top-level window containing screen point `p` — walking down from the top of the z order, the first window that is visible · not minimized ·
-/// not hidden (DWM cloaked — another virtual desktop and the like) · and not a see-through window. See-through window = a window that
-/// clicks pass through (`WS_EX_LAYERED` + `WS_EX_TRANSPARENT` — any window) · among other apps' layered windows, one whose whole-window alpha is 0 or
-/// that has a color key. Another app's layered window with per-pixel alpha counts as a covering window (decision = `hit_accepts`). Whether it is our
-/// window is compared by the caller with [`NativeWindow::of`] — the drop command reads another app's window or the desktop as a new window
-/// (TRD S21-slot-docking §3-5 ④ · PRD R22).
-///
-/// 「contains」 means the OS outer rectangle (`GetWindowRect` — including the invisible resize border). The OS hit test also counts that
-/// border as that window. But for a window with a window shape (`SetWindowRgn`), the point must be inside that shape. `None` = no window
-/// contains it · outside Windows.
-// ADR-0295
-// ADR-0296
+/// The topmost top-level window containing screen point `p` — walking down the z order, the first window that is visible, not minimized,
+///   not hidden (DWM cloaked — another virtual desktop etc.) and not see-through.
+/// See-through = clicks pass through (`WS_EX_LAYERED` + `WS_EX_TRANSPARENT`, any window), or — among other apps' layered windows —
+///   whole-window alpha 0 or a color key (per-pixel-alpha counts as covering; `hit_accepts`).
+/// Whether it is our window is compared by the caller with [`NativeWindow::of`] — the drop command reads another app's window or the
+///   desktop as a new window (TRD S21-slot-docking §3-5 ④, PRD R22).
+/// "Contains" = the OS outer rectangle (`GetWindowRect`, including the invisible resize border; the OS hit test counts it too); a window
+///   with a window shape (`SetWindowRgn`) needs the point inside the shape.
+/// `None` = no window contains it, or outside Windows.
+// ADR-0295, ADR-0296
 pub fn top_level_at(p: PhysPoint) -> Option<NativeWindow> {
     #[cfg(windows)]
     {
@@ -173,11 +168,11 @@ pub enum LayeredKind {
     NotLayered,
     /// The whole-window alpha given with `SetLayeredWindowAttributes` — a window given without `LWA_ALPHA` is 255 (opaque).
     Alpha(u8),
-    /// The color key (`LWA_COLORKEY`) of `SetLayeredWindowAttributes` — pixels of that color are not drawn and clicks pass through. Even if a whole-window
-    /// alpha is also present, it is this.
+    /// The color key (`LWA_COLORKEY`) of `SetLayeredWindowAttributes` — pixels of that color are not drawn and clicks pass through;
+    ///   applies even with a whole-window alpha.
     ColorKey,
-    /// The attributes could not be read — for an `UpdateLayeredWindow` window with per-pixel alpha, the OS does not answer (MS
-    /// `GetLayeredWindowAttributes` docs). A layered window with no attributes given yet also lands here (measured). Which pixels are empty is not known.
+    /// The attributes could not be read — an `UpdateLayeredWindow` per-pixel-alpha window gets no answer (MS `GetLayeredWindowAttributes`
+    ///   docs); a layered window with no attributes yet lands here too (measured). Which pixels are empty is unknown.
     PerPixel,
 }
 
@@ -198,8 +193,8 @@ pub struct WindowFacts {
     pub has_region: bool,
 }
 
-/// Diagnostic facts of that window — only queries that send no message to the window, so even an unresponsive other-app window does not block them. `None` =
-/// that window does not exist · outside Windows.
+/// Diagnostic facts of that window — only queries that send no message to the window, so an unresponsive other-app window does not block
+///   them. `None` = window missing or outside Windows.
 pub fn describe_window(w: NativeWindow) -> Option<WindowFacts> {
     #[cfg(windows)]
     {
@@ -212,17 +207,15 @@ pub fn describe_window(w: NativeWindow) -> Option<WindowFacts> {
     }
 }
 
-/// Restores the normal position `normal` (★screen coordinates★) and maximization (`SetWindowPlacement` · TRD S21-slot-docking §5-1).
-///
-/// - Coordinate system — the normal position of `WINDOWPLACEMENT` is, for a top-level window without `WS_EX_TOOLWINDOW`, in workspace coordinates (the top left of that monitor's
-///   work area is 0 — if the taskbar is at the top or left it is shifted by that much), and with it, in screen coordinates (MS
-///   `WINDOWPLACEMENT` docs · TRD S21-slot-docking 6.3rd edition E12). This function converts it using that window's current extended style and the monitor nearest to `normal`
-///   — so changing that window's `WS_EX_TOOLWINDOW` is finished before this function.
-/// - `activate` = if false, the normal position is shown without activation (`SW_SHOWNOACTIVATE`). ★`maximized` is `SW_SHOWMAXIMIZED` regardless of
-///   `activate`★ — Win32 has no show command that shows maximized without activation. So if the OS's foreground
-///   rules allow, it becomes active (unconfirmed — TRD S21-slot-docking 6.3rd edition §12 M6 · §15-2 S-c).
-/// - The OS fixes a normal position that goes entirely off screen back onto the screen (MS `SetWindowPlacement` docs).
-///
+/// Restores the normal position `normal` (★screen coordinates★) and maximization (`SetWindowPlacement`, TRD S21-slot-docking §5-1).
+/// - Coordinates — `WINDOWPLACEMENT`'s normal position is in workspace coordinates for a top-level window without `WS_EX_TOOLWINDOW` (the
+///   monitor work area's top left is 0; shifted by a top/left taskbar) and in screen
+///   coordinates with it (MS docs, TRD S21-slot-docking 6.3 E12). This function converts using the window's current extended style and the
+///   monitor nearest `normal` — so finish changing `WS_EX_TOOLWINDOW` before calling.
+/// - `activate` false = the normal position is shown without activation (`SW_SHOWNOACTIVATE`). ★`maximized` is `SW_SHOWMAXIMIZED`
+///   regardless of `activate`★ — Win32 has no show command that maximizes without activating, so
+///   if foreground rules allow it becomes active (unconfirmed — TRD S21-slot-docking 6.3 §12 M6 · §15-2 S-c).
+/// - The OS fixes a normal position entirely off screen back onto the screen (MS `SetWindowPlacement` docs).
 /// Outside Windows = [`WindowError::Unsupported`].
 // ADR-0295
 pub fn restore_placement(
@@ -242,17 +235,16 @@ pub fn restore_placement(
     }
 }
 
-/// Is the current foreground window this process's. `None` = this crate has no means to answer on this OS — the caller decides with its own
-/// means (the window toolkit's focus getter and the like) (lib.rs 「Rules for taking things in」 3 — the branch outside Windows is a placeholder).
-///
-/// Windows = is the PID of the thread that created the window of `GetForegroundWindow` the same as this process's PID. If there is no foreground window or it
-/// vanished in the meantime, `Some(false)`.
+/// Is the current foreground window this process's. `None` = no means on this OS — the caller decides with its own (window toolkit focus
+///   getter etc.; lib.rs 「Rules for taking things in」 3 — placeholder branch).
+/// Windows = the PID of the thread that created the `GetForegroundWindow` window equals this PID; no foreground window or it vanished →
+///   `Some(false)`.
 #[cfg(windows)]
 pub fn foreground_is_current_process() -> Option<bool> {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
     let mut pid = 0u32;
-    // SAFETY: one query with no arguments, and one query that writes a PID into a live local variable. If there is no foreground window or it
-    //   vanished in the meantime, the PID stays 0.
+    // SAFETY: one no-argument query and one query writing a PID into a live local; with no foreground window or one that vanished the PID
+    //   stays 0.
     unsafe {
         let foreground = GetForegroundWindow();
         if !foreground.is_invalid() {
@@ -266,13 +258,12 @@ pub fn foreground_is_current_process() -> Option<bool> {
     None
 }
 
-/// Is that window the OS foreground window now — there is only one foreground window, so at most one window is true. `None` = this crate has no means to answer on this OS
-/// — the caller decides with its own means (the window toolkit's focus getter and the like) (same as [`foreground_is_current_process`]).
-///
-/// Windows = is `GetForegroundWindow` that top-level window. If the handle could not be obtained or that window is already gone, `Some(false)`. It may
-/// differ from the window toolkit's focus getter — for a window that hosts WebView2, that getter is false while the webview holds keyboard focus
-/// (TRD S26-window-chrome §6-2 「front window decision」).
-// ADR-0302 — window state command (foreground window decision)
+/// Is that window the OS foreground window now (at most one window is true). `None` = no means on this OS — the caller decides with its
+///   own (as [`foreground_is_current_process`]).
+/// Windows = `GetForegroundWindow` is that top-level window; handle not obtained or window gone → `Some(false)`. It may differ from the
+///   toolkit's focus getter — for a WebView2-hosting window that getter is false while the
+/// webview holds keyboard focus (TRD S26-window-chrome §6-2 「front window decision」).
+// ADR-0302
 pub fn is_foreground(w: &impl HasWindowHandle) -> Option<bool> {
     #[cfg(windows)]
     {
@@ -285,20 +276,19 @@ pub fn is_foreground(w: &impl HasWindowHandle) -> Option<bool> {
     }
 }
 
-/// The chrome shape of a window's title bar — the answer of [`caption_style`].
-///
-/// - `drawn_buttons` = the app draws the minimize · maximize · close buttons (it strips the OS frame). False = the OS draws the buttons.
-/// - `leading_inset` = the width (CSS px) the app leaves empty at the left of the title bar — the OS draws buttons in that spot.
+/// The chrome shape of a window's title bar — the answer of [`caption_style`]. `drawn_buttons` = the app draws minimize/maximize/close
+///   (strips the OS frame); false = the OS draws them.
+/// `leading_inset` = the width (CSS px) the app leaves empty at the title bar's left — the OS draws buttons there.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CaptionStyle {
     pub drawn_buttons: bool,
     pub leading_inset: f64,
 }
 
-/// The title-bar chrome shape of this OS (TRD S26-window-chrome §7-11) — always `{ drawn_buttons: true, leading_inset: 0 }`. On macOS
-/// the OS draws the traffic-light buttons, so it should be `{ false, <traffic-light width> }`, but that width was not measured and macOS is not built, so that
-/// branch was not added — add it inside this function when building macOS.
-// ADR-0303 — chrome-style title bar
+/// The title-bar chrome shape of this OS (TRD S26-window-chrome §7-11) — always `{ drawn_buttons: true, leading_inset: 0 }`. macOS should
+///   be `{ false, <traffic-light width> }`, but that width was not measured and macOS is not
+/// built — add that branch here when building macOS.
+// ADR-0303
 pub fn caption_style() -> CaptionStyle {
     CaptionStyle {
         drawn_buttons: true,
@@ -306,8 +296,8 @@ pub fn caption_style() -> CaptionStyle {
     }
 }
 
-/// A screen-coordinate rectangle to workspace coordinates — subtract the shift from the monitor's top left to the work area's top left. It has the same form as the opposite
-/// computation Chromium uses when reading (hwnd_message_handler.cc `GetWindowPlacement` — it adds `rcWork − rcMonitor`).
+/// A screen-coordinate rectangle to workspace coordinates — subtract the monitor-top-left to work-area-top-left shift; the inverse of
+///   Chromium's read-side computation (hwnd_message_handler.cc `GetWindowPlacement`, adds `rcWork − rcMonitor`).
 fn screen_to_workspace(rect: PhysRect, monitor: PhysRect, work: PhysRect) -> PhysRect {
     PhysRect {
         x: rect.x - (work.x - monitor.x),
@@ -329,25 +319,25 @@ enum RegionHit {
     Outside,
 }
 
-/// Does it count a window containing the point in its outer rectangle (visible · not minimized · not hidden) as the answer of [`top_level_at`] — it follows the OS's
-/// hit test as far as it can be read. `ours` = this process's window · `transparent` = `WS_EX_TRANSPARENT`.
-///
-/// - A layered + `WS_EX_TRANSPARENT` window is skipped — clicks pass through (MS 「Layered Windows」 · the OS `WindowFromPoint` also
-///   skips it). A window with only `WS_EX_TRANSPARENT` on is a covering window — that flag alone is just drawing order and the window still receives the click (measured —
-///   the test `transparent_only_window_still_takes_the_click`, compared against `WindowFromPoint`).
-/// - Another app's layered window is skipped if whole-window alpha is 0 or it has a color key. The OS lets clicks pass through only at alpha 0 or color-key pixels
-///   (MS 「Layered Windows」), but pixels cannot be read, so a color-key window is treated as see-through as a whole — the cost: the painted area of that window
-///   is also treated as uncovered. This branch prevents a drop under an always-on-top recording-area frame (a screen-recording tool and the like) from being
-///   read as a drop over another app's window and going to a new window instead of our window — it does not resolve if that frame is a per-pixel-alpha window, and which one it is was not measured.
-/// - Any other app's layered window (alpha 1 or more · per-pixel alpha) is a covering window — many layered apps draw opaquely
-///   (WPF `AllowsTransparency` · Electron `transparent` · Qt translucent windows). If all were skipped, the drop-end decision would read a drop over that app as a drop over
-///   our window hidden under it, and no new window would be created (TRD S21-slot-docking §3-5 ③ · ④). Chromium `TopMostFinder` (Chrome 70 `window_finder_win.cc`) skips a window if either layered or
-///   `WS_EX_TRANSPARENT` alone is on, but we do not follow it, to avoid paying this cost.
-/// - Our window is skipped only if it is click-through — tao turns on layered only for cursor-ignoring windows (tao 0.35.3 `window_state.rs`
+/// Does it count a window containing the point in its outer rectangle (visible, not minimized, not hidden) as the answer of
+///   [`top_level_at`] — follows the OS hit test as far as readable. `ours` = this process's window,
+/// `transparent` = `WS_EX_TRANSPARENT`.
+/// - A layered + `WS_EX_TRANSPARENT` window is skipped — clicks pass through (MS 「Layered Windows」; `WindowFromPoint` skips it too). A
+///   window with only `WS_EX_TRANSPARENT` is a covering window — that flag alone is drawing order
+///   and it still receives the click (measured — `transparent_only_window_still_takes_the_click`).
+/// - Another app's layered window is skipped if whole-window alpha is 0 or it has a color key. The OS passes clicks only at alpha 0 or
+///   color-key pixels but pixels cannot be read, so a color-key window is treated as see-through
+///   as a whole — cost: its painted area also counts as uncovered. This prevents a drop under an always-on-top recording-area frame being
+///   read as a drop over another app's window (new window instead of ours); it does not help
+///   if that frame is per-pixel-alpha (not measured).
+/// - Any other app's layered window (alpha ≥ 1, per-pixel alpha) is covering — many layered apps draw opaquely (WPF `AllowsTransparency`,
+///   Electron `transparent`, Qt translucent). Skipping all would read a drop over such an app as a
+///   drop over our hidden window and create no new window (TRD S21-slot-docking §3-5 ③·④). Chromium `TopMostFinder` (Chrome 70
+///   `window_finder_win.cc`) skips on layered or `WS_EX_TRANSPARENT` alone; not followed, to avoid this cost.
+/// - Our window is skipped only if click-through — tao turns on layered only for cursor-ignoring windows (tao 0.35.3 `window_state.rs`
 ///   `IGNORE_CURSOR_EVENT`).
-/// - If there is a window shape, the point must be inside it — outside the shape that window neither draws nor receives clicks (as in Chromium).
-// ADR-0295
-// ADR-0296
+/// - With a window shape the point must be inside it — outside the shape the window neither draws nor receives clicks (as Chromium).
+// ADR-0295, ADR-0296
 fn hit_accepts(ours: bool, layered: LayeredKind, transparent: bool, region: RegionHit) -> bool {
     let click_through = layered != LayeredKind::NotLayered && transparent;
     let see_through = click_through
@@ -383,8 +373,8 @@ mod win {
         PhysRect, RegionHit, WindowError, WindowFacts, ZOrder,
     };
 
-    /// Upper bound of the top-level window z walk — MS writes that walking with `GetWindow` can loop endlessly because the z order changes meanwhile
-    /// (`GetWindow` docs). The top-level windows of one desktop, hidden ones included, do not exceed a few thousand.
+    /// Upper bound of the top-level window z walk — walking with `GetWindow` can loop endlessly because the z order changes meanwhile (MS
+    ///   `GetWindow` docs); one desktop's top-level windows, hidden included, stay under a few thousand.
     const MAX_Z_WALK: usize = 16_384;
 
     pub(super) fn hwnd_of(w: &impl HasWindowHandle) -> Result<HWND, WindowError> {
@@ -414,9 +404,9 @@ mod win {
         WindowError::Os(io::Error::other(format!("{api}: {e}")))
     }
 
-    /// The `SetWindowPos` arguments of `place_window` — (z reference window, flags). `Keep`'s `SWP_NOZORDER` only makes the z reference window ignored; it does not
-    /// stop activation from raising the window (MS `SetWindowPos` docs — without `SWP_NOACTIVATE`, activating takes it to the
-    /// top of its band, and so does a following `SetForegroundWindow`).
+    /// The `SetWindowPos` arguments of `place_window` — (z reference window, flags). `Keep`'s `SWP_NOZORDER` only makes the z reference
+    ///   ignored; it does not stop activation from raising the window (MS `SetWindowPos`: without
+    /// `SWP_NOACTIVATE`, activating takes it to the top of its band, and so does a following `SetForegroundWindow`).
     pub(super) fn place_plan(
         keep_rect: bool,
         z: ZOrder,
@@ -589,10 +579,10 @@ mod win {
         let Some(rgn) = window_region(hwnd) else {
             return RegionHit::NoRegion;
         };
-        // Window-shape coordinates have 0 at the top left of the outer rectangle (MS `GetWindowRgn` docs). A `WS_EX_LAYOUTRTL` window has 0 at the top right
-        //   and x grows to the left — the rightmost pixel is x = 0 (measured — the test `top_level_at_mirrors_the_region_of_rtl_windows`,
-        //   compared against the OS hit test `WindowFromPoint`). Whether another app's window with a different DPI awareness reports its shape in that window's logical
-        //   coordinates was not measured — if so, that window's shape decision is off by the scale factor.
+        // Window-shape coordinates have 0 at the top left of the outer rectangle (MS `GetWindowRgn` docs); a `WS_EX_LAYOUTRTL` window has
+        //   0 at the top right and x grows leftward (measured —
+        //   `top_level_at_mirrors_the_region_of_rtl_windows`, vs `WindowFromPoint`). Whether another app with a different DPI awareness
+        //   reports its shape in logical coordinates was not measured — if so the shape decision is off by the scale factor.
         let x = if rtl {
             outer.right - 1 - p.x
         } else {
@@ -612,7 +602,8 @@ mod win {
         }
         let mut alpha = 0u8;
         let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
-        // Whether it also answers for another process's window was not measured — if not received it is `PerPixel`, so it falls to a covering window (the new-window side for a drop).
+        // Whether it also answers for another process's window was not measured — if not received it is `PerPixel`, falling to a covering
+        //   window (the new-window side for a drop).
         // SAFETY: a query that writes into a live local variable (the color key value is not taken). It fails if the window vanished.
         if unsafe { GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags)) }
             .is_err()
@@ -891,14 +882,14 @@ mod tests {
             let _ = unsafe { ShowWindow(w.hwnd(), SW_HIDE) };
         }
 
-        /// A borderless tool window with a chosen extended style — [`TestWindow`] cannot choose the extended style. At `rect` it is always shown on top
-        /// without activation. Destroyed when dropped.
+        /// A borderless tool window with a chosen extended style ([`TestWindow`] cannot choose it); always shown on top at `rect` without
+        ///   activation. Destroyed when dropped.
         struct StyledWindow(HWND);
 
         impl StyledWindow {
             fn new(ex: WINDOW_EX_STYLE, rect: PhysRect) -> Self {
-                // `SS_NOTIFY` (a constant of `Win32_UI_Controls`, which this crate does not turn on) — without it STATIC does not answer the OS hit test
-                //   and `WindowFromPoint` passes over that window (measured).
+                // `SS_NOTIFY` (a `Win32_UI_Controls` constant this crate does not turn on) — without it STATIC does not answer the OS hit
+                //   test and `WindowFromPoint` passes over the window (measured).
                 const SS_NOTIFY: WINDOW_STYLE = WINDOW_STYLE(0x100);
                 // SAFETY: only a system class name and value arguments. No instance, parent or menu.
                 let hwnd = unsafe {
@@ -954,8 +945,8 @@ mod tests {
             assert_eq!(n, NativeWindow(w.hwnd().0 as isize));
         }
 
-        // A hidden window · a vanished window is not the foreground. The true branch measures against the current foreground window without stealing the foreground — if there is no foreground window (service
-        //   session) or it changes while measuring, that branch is skipped.
+        // A hidden or vanished window is not the foreground. The true branch measures against the current foreground without stealing it —
+        //   skipped if there is no foreground window (service session) or it changes while measuring.
         #[test]
         fn is_foreground_is_true_only_for_the_foreground_window() {
             use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -1231,7 +1222,7 @@ mod tests {
             assert_eq!(top_level_at(p), Some(w.native()));
         }
 
-        /// It shows an ordinary (non-tool) window on screen, so it briefly appears on the viewer's screen — run it by hand in a desktop session.
+        /// It shows an ordinary (non-tool) window, so it briefly appears on the viewer's screen — run by hand in a desktop session.
         #[test]
         #[ignore = "briefly shows a window on screen — by hand in a desktop session"]
         fn restore_placement_round_trips_screen_coordinates() {

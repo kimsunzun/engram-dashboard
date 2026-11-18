@@ -1,30 +1,30 @@
 // ADR-0304 — snap overlay feature
-//! Snap layout overlay — makes the layout-picker menu that Windows 11 shows when the cursor is over the maximize button also
-//! appear on a web-drawn maximize button (TRD S26-window-chrome §8-4). ★Behind the cargo feature `snap-overlay` · off by default★ (user decision Q1 2026-10-24 — we do not turn it on ·
-//! we keep the code). Why it stays off = code blocked by comments is not compiled and rots — a build with it on is compiled by CI.
+//! Snap layout overlay — makes the layout-picker menu Windows 11 shows over the maximize button also appear on a web-drawn maximize button
+//!   (TRD S26-window-chrome §8-4). ★Behind cargo feature `snap-overlay`, off by default★ (decision
+//! Q1 2026-10-24 — code kept, not turned on; code blocked by comments rots uncompiled, so CI builds it with the feature on).
 //!
-//! Design — over the web maximize button's spot, one system-class `STATIC` child window is laid as the topmost sibling, and its window procedure is swapped so that its hit test (`WM_NCHITTEST`)
-//! answers `HTMAXBUTTON` — the OS sees that spot as the maximize button and shows the menu (MS 「Support snap
-//! layouts for desktop apps on Windows 11」 — a custom title bar returns `HTMAXBUTTON` at the maximize button's spot).
-//! - That window takes the cursor, so the web button does not know about hover — the hover change is handed to the caller's callback ([`HoverFn`]).
-//! - On release, that window sends a maximize / restore system command (`WM_SYSCOMMAND`) to the parent — the same OS path as double-clicking the title bar, so
-//!   it does not pass through the command bus. The keyboard (Tab · Enter) is still received by the web button.
-//! - That the web-drawn button stays visible was seen in the spike (2026-10-24 · TRD §1-3 S6) and the reason was not measured.
+//! Design — over the web maximize button's spot one system-class `STATIC` child window is laid as the topmost sibling, and its window
+//!   procedure is swapped so `WM_NCHITTEST` answers `HTMAXBUTTON`; the OS then sees the maximize button
+//! and shows the menu (MS 「Support snap layouts for desktop apps on Windows 11」).
+//! - That window takes the cursor, so the web button does not know hover — the change goes to the caller's callback ([`HoverFn`]).
+//! - On release it sends a maximize/restore system command (`WM_SYSCOMMAND`) to the parent — the same OS path as double-clicking the title
+//!   bar, not the command bus. The keyboard (Tab, Enter) still reaches the web button.
+//! - That the web-drawn button stays visible was seen in the spike (2026-10-24, TRD §1-3 S6); the reason was not measured.
 //!
-//! Reference — rebuilt by porting the overlay of `Hyph-M/tauri-plugin-snap-layout` (MIT · `src/snap.rs`) (borrowing the shape, not copy-pasting code).
-//! Differences: the window procedure is swapped with `SetWindowLongPtrW` (not a comctl32 subclass — no `Win32_UI_Shell` binding is brought in) ·
-//! the rectangle is given by the caller in parent-client physical px · hover goes to the caller's callback · the overlay is found
-//! by its child ID under the parent (no global table).
+//! Reference — rebuilt by porting the overlay of `Hyph-M/tauri-plugin-snap-layout` (MIT, `src/snap.rs`; shape borrowed, no code copy).
+//!   Differences: the window procedure is swapped with `SetWindowLongPtrW` (not a comctl32 subclass — no
+//! `Win32_UI_Shell` binding), the rectangle is given by the caller in parent-client physical px, hover goes to the caller's callback, the
+//!   overlay is found by its child ID under the parent (no global table).
 //!
-//! ★Threads★ — both functions are called from the thread that created the parent window (main) (a child window is bound to the calling thread, and the window procedure and callback also run on that
-//! thread). Called from another thread, they do nothing and give [`WindowError::Os`] — a guard that checks the parent window's thread
-//! stops it (building a child window on someone else's thread can deadlock because notifications sent to the parent wait on that thread, and the built window vanishes when the calling thread
-//! ends). ★Do not call this module's functions inside the callback★ — it is not blocked (even if the callback is swapped or the overlay
-//! removed, a running callback runs to the end) but that pattern was not tested, and leave (`WM_NCMOUSELEAVE`) is passed to the previous procedure after the callback, so
-//! removing inside the callback passes it to a destroyed window.
+//! ★Threads★ — both functions are called from the thread that created the parent window (main): a child window binds to the calling
+//!   thread, and the window procedure and callback run there. From another thread they do nothing and give
+//! [`WindowError::Os`] — a guard on the parent window's thread (building a child on someone else's thread can deadlock on notifications to
+//!   the parent, and the window vanishes when that thread ends). ★Do not call this module's functions
+//! inside the callback★ — not blocked, but untested, and leave (`WM_NCMOUSELEAVE`) is passed to the previous procedure after the callback,
+//!   so removing inside it passes to a destroyed window.
 //!
-//! Outside Windows = [`WindowError::Unsupported`] (this crate's 「Rules for taking things in」 3 — placeholder). The behavior of the build with it on (scaling · per window ·
-//! focus) is measured again on the day it is turned on (TRD §14 W8).
+//! Outside Windows = [`WindowError::Unsupported`] (「Rules for taking things in」 3 — placeholder). The behavior of the build with it on
+//!   (scaling, per window, focus) is measured again when it is turned on (TRD §14 W8).
 
 // ADR-0266
 
@@ -32,13 +32,14 @@ use raw_window_handle::HasWindowHandle;
 
 use super::{PhysRect, WindowError};
 
-/// Hover change — true = the cursor entered the overlay · false = it left. Called on the parent window's thread. It is not called when
-/// removing the overlay — the remover clears its own hover state.
+/// Hover change — true = the cursor entered the overlay · false = left. Called on the parent window's thread; not called when removing the
+///   overlay (the remover clears its own hover state).
 pub type HoverFn = Box<dyn Fn(bool)>;
 
-/// Places the overlay at `rect`, the client physical-px rectangle of `parent` — builds it if absent, moves it if present (raises it again as the topmost sibling).
-/// `on_hover` replaces the previous callback. If the width or height is below 1 or it is called from a thread other than the one that created `parent`,
-/// it does nothing and gives [`WindowError::Os`] (for an empty rectangle the caller calls remove).
+/// Places the overlay at `rect`, the client physical-px rectangle of `parent` — builds it if absent, moves it if present (raises it again
+///   as the topmost sibling). `on_hover` replaces the previous callback. A width or height below 1,
+/// or a call from a thread other than the one that created `parent`, does nothing and gives [`WindowError::Os`] (for an empty rectangle
+///   the caller calls remove).
 pub fn place_overlay(
     parent: &impl HasWindowHandle,
     rect: PhysRect,
@@ -55,8 +56,8 @@ pub fn place_overlay(
     }
 }
 
-/// Removes the overlay of `parent` — a no-op `Ok` if there is none. Called from a thread other than the one that created `parent`, it does nothing and gives
-/// [`WindowError::Os`].
+/// Removes the overlay of `parent` — a no-op `Ok` if none. From a thread other than the one that created `parent`, it does nothing and
+///   gives [`WindowError::Os`].
 pub fn remove_overlay(parent: &impl HasWindowHandle) -> Result<(), WindowError> {
     #[cfg(windows)]
     {
@@ -95,8 +96,8 @@ mod win {
     use super::super::win::hwnd_of;
     use super::{HoverFn, PhysRect, WindowError};
 
-    /// The overlay's child window ID — [`find`] looks for it by this value under the parent. Someone else's child window with the same ID is filtered out because its window procedure is
-    /// not ours.
+    /// The overlay's child window ID — [`find`] looks for it under the parent; someone else's child with the same ID is filtered out
+    ///   because its window procedure is not ours.
     const OVERLAY_ID: i32 = 0x534E;
 
     /// The state of one overlay window — `GWLP_USERDATA` holds it and `WM_NCDESTROY` releases it.
@@ -126,8 +127,8 @@ mod win {
         }
     }
 
-    /// Parent-window thread guard (header 「Threads」) — if it is not the thread that created `parent`, it refuses before touching anything. This guard also backs that the later
-    /// state reads and writes and the window procedure are on the same thread and so do not overlap.
+    /// Parent-window thread guard (header 「Threads」) — refuses before touching anything if not the thread that created `parent`; it also
+    ///   backs that later state reads/writes and the window procedure share one thread and do not overlap.
     fn on_parent_thread(parent: HWND) -> Result<(), WindowError> {
         // SAFETY: two queries that only read values — if the window vanished it is 0, which does not match, so it is refused.
         let (owner, caller) =
@@ -157,7 +158,8 @@ mod win {
         let on_hover: Rc<dyn Fn(bool)> = Rc::from(on_hover);
         let child = match find(parent) {
             Some(child) => {
-                // SAFETY: the state of our overlay (filtered by `find` through the window procedure) — it is a window of this thread, so it does not overlap with the window procedure.
+                // SAFETY: the state of our overlay (filtered by `find` through the window procedure) — it is a window of this thread, so
+                //   it does not overlap with the window procedure.
                 //   A running callback holds its own clone, so it is fine to drop the old one here.
                 unsafe {
                     let state = GetWindowLongPtrW(child, GWLP_USERDATA) as *mut State;
@@ -203,7 +205,8 @@ mod win {
             )
         }
         .map_err(|e| os("CreateWindowExW", e))?;
-        // SAFETY: a window of this thread just built — load the state first and then swap the window procedure (the swapped procedure trusts that state
+        // SAFETY: a window of this thread just built — load the state first and then swap the window procedure (the swapped procedure
+        //   trusts that state
         //   exists). The state is released by `WM_NCDESTROY`.
         unsafe {
             let prev = GetWindowLongPtrW(child, GWLP_WNDPROC);
@@ -229,8 +232,8 @@ mod win {
         unsafe { DestroyWindow(child) }.map_err(|e| os("DestroyWindow", e))
     }
 
-    /// Makes it receive `WM_NCMOUSELEAVE` when hover ends (the cursor leaves the non-client area). If it fails, leaving goes unheard — hover stays until the next
-    /// hit test.
+    /// Makes it receive `WM_NCMOUSELEAVE` when hover ends (the cursor leaves the non-client area). If it fails, leaving goes unheard —
+    ///   hover stays until the next hit test.
     fn track_leave(hwnd: HWND) {
         let mut tme = TRACKMOUSEEVENT {
             cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -242,7 +245,8 @@ mod win {
         let _ = unsafe { TrackMouseEvent(&mut tme) };
     }
 
-    /// Changes the hover field to `hover` and, if it changed, returns the callback to call — the borrow of the state ends before the callback is called.
+    /// Changes the hover field to `hover` and, if it changed, returns the callback to call — the borrow of the state ends before the
+    ///   callback is called.
     ///
     /// # Safety
     /// `state` is the state of this live window.
@@ -275,9 +279,10 @@ mod win {
                 }
                 return LRESULT(HTMAXBUTTON as isize);
             }
-            // Do only our share (hover field · callback) and pass on to the previous procedure — the spike did so and the menu appeared in that build (TRD §1-3
-            //   S6 — user observation). The variant that swallows the message (not passing it on) has never been tested on screen. `prev` was already copied above so the state is not read again
-            //   — but if the callback removes the overlay it would pass to a destroyed window, so do not remove inside the callback (header 「Threads」).
+            // Do only our share (hover field, callback) and pass on to the previous procedure — the spike did so and the menu appeared
+            //   (TRD §1-3 S6, user observation); swallowing the message has never been tested on screen.
+            //   `prev` was copied above so the state is not read again — but a callback that removes the overlay would pass to a destroyed
+            //   window, so do not remove inside the callback (header 「Threads」).
             WM_NCMOUSELEAVE => {
                 if let Some(f) = flip(state, false) {
                     f(false);
@@ -315,8 +320,9 @@ mod win {
     }
 }
 
-// Real window — builds the overlay on an off-screen, hidden parent (`test_window`). Messages call the window procedure directly with `SendMessageW`
-//   on the same thread, and the system command sent to the parent is only taken out (`PeekMessageW` · `PM_REMOVE`) so the window does not actually grow.
+// Real window — builds the overlay on an off-screen, hidden parent (`test_window`). Messages call the window procedure directly with
+//   `SendMessageW` on the same thread; the system command sent to the parent is only taken out
+//   (`PeekMessageW`, `PM_REMOVE`) so the window does not actually grow.
 #[cfg(all(test, windows))]
 mod tests {
     use std::cell::RefCell;
@@ -353,7 +359,8 @@ mod tests {
         }
     }
 
-    /// The overlay's parent-client position — the parent is a frameless window (`WS_POPUP`), so the top left of the outer rectangle is the client origin.
+    /// The overlay's parent-client position — the parent is a frameless window (`WS_POPUP`), so the top left of the outer rectangle is the
+    ///   client origin.
     fn placed(parent: &TestWindow, child: HWND) -> PhysRect {
         let p = parent.outer();
         let c = rect_of(child);
@@ -439,7 +446,8 @@ mod tests {
         let child = find(parent.hwnd()).expect("overlay");
         let take = || {
             let mut msg = MSG::default();
-            // SAFETY: takes out only the system command that came to the parent in this thread's queue — it is not dispatched, so the window does not grow.
+            // SAFETY: takes out only the system command that came to the parent in this thread's queue — it is not dispatched, so the
+            //   window does not grow.
             unsafe {
                 PeekMessageW(
                     &mut msg,
@@ -476,8 +484,9 @@ mod tests {
                 remove_overlay(&handle),
             )
         });
-        // If the guard is missing, someone else's thread sends a message to this window and waits for the answer — meanwhile this thread handles the messages it received so that, instead of a
-        //   deadlock, it ends in the failure of the assertion below (`PeekMessageW` handles messages sent in while it peeks).
+        // If the guard is missing, someone else's thread sends this window a message and waits for the answer — meanwhile this thread
+        //   handles received messages so it ends in the assertion failure below instead of a deadlock (`PeekMessageW` handles messages
+        //   sent in while it peeks).
         let deadline = Instant::now() + Duration::from_secs(5);
         while !worker.is_finished() {
             assert!(Instant::now() < deadline, "the other thread did not end");

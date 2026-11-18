@@ -1,7 +1,6 @@
-//! OS settings when launching child processes — launching without a window · launching as a tree root and the handle that cuts that tree at once ·
-//! deciding 「program not found」 for a failed shell · launching outside this process's Job (WMI).
-// ADR-0230
-// ADR-0266
+//! OS settings when launching child processes — launching without a window · launching as a tree root and the handle that cuts that tree
+//!   at once · deciding "program not found" for a failed shell · launching outside this process's Job (WMI).
+// ADR-0230, ADR-0266
 
 use std::io;
 use std::path::Path;
@@ -12,12 +11,10 @@ use std::time::Instant;
 mod cmd_lookup;
 mod wmi;
 
-/// Launches without a console window — Windows = `CREATE_NO_WINDOW`, other OSes = no-op. If a windowless process (the daemon) simply launches a console app,
-/// Windows opens a new console window.
-///
-/// ★It decides the creation flags wholesale★ — std's `creation_flags` replaces rather than adds. Creation flags given before this are erased by it,
-/// and if creation flags are given again after this, this is erased. When launching as a tree root, call
-/// [`prepare_tree_root`] instead of this (it also does the launch without a window).
+/// Launches without a console window — Windows = `CREATE_NO_WINDOW`, other OSes = no-op (a windowless process such as the daemon launching
+///   a console app otherwise opens a new console window). ★Decides the creation flags wholesale★ —
+/// std's `creation_flags` replaces: flags given before are erased, and flags given again after erase this. For a tree root call
+///   [`prepare_tree_root`] instead (it also launches without a window).
 pub fn hide_console_window(cmd: &mut Command) {
     #[cfg(windows)]
     {
@@ -31,12 +28,11 @@ pub fn hide_console_window(cmd: &mut Command) {
     }
 }
 
-/// Prepares the child to launch as the root of a [`TreeRoot`] — Windows = no console window + suspended (wake it with
-/// [`TreeRoot::start`] after putting it in the group), POSIX = a new process group whose id is the child pid.
-///
-/// ★Why launch suspended on Windows★ — a group (Job) is inherited only by processes created **after** they are inside it. If it is
-///   launched awake, a grandchild the child launches before being put in escapes the tree kill.
-/// ★On Windows it decides the creation flags wholesale★ — same as [`hide_console_window`] (do not call it together with that).
+/// Prepares the child to launch as the root of a [`TreeRoot`] — Windows = no console window + suspended (wake with [`TreeRoot::start`]
+///   after putting it in the group), POSIX = a new process group whose id is the child pid.
+/// ★Why suspended on Windows★: a group (Job) is inherited only by processes created **after** they are inside it; launched awake, a
+///   grandchild launched before being put in escapes the tree kill.
+/// ★On Windows it decides the creation flags wholesale★ — as [`hide_console_window`] (do not call both).
 pub fn prepare_tree_root(cmd: &mut Command) {
     #[cfg(windows)]
     {
@@ -51,12 +47,10 @@ pub fn prepare_tree_root(cmd: &mut Command) {
     }
 }
 
-/// A handle that cuts the child and all its descendants at once — prepare with [`prepare_tree_root`], launch, [`Self::attach`] it to the child,
-/// and wake it with [`Self::start`]. Windows = its own group that this handle owns (a Job — dropping it makes the OS end the remaining members) ·
-/// POSIX = the child's process group (dropping it ends nothing).
-///
-/// ★The POSIX branch has never been compiled★ (this crate's admission rule 3) — to do the group kill with std alone and no new dependency, it launches the POSIX
-///   `kill` utility.
+/// A handle that cuts the child and all descendants at once — prepare with [`prepare_tree_root`], launch, [`Self::attach`] to the child,
+///   wake with [`Self::start`]. Windows = its own group this handle owns (a Job — dropping it makes the
+/// OS end the remaining members) · POSIX = the child's process group (dropping ends nothing). ★The POSIX branch has never been compiled★
+///   (admission rule 3) — to kill the group with std alone and no new dependency it launches the POSIX `kill` utility.
 // ADR-0275
 pub struct TreeRoot {
     #[cfg(windows)]
@@ -66,8 +60,8 @@ pub struct TreeRoot {
 }
 
 impl TreeRoot {
-    /// Ties the launched child as the root of the tree. Windows `Err` = an OS failure in creating the group or putting it in — then the child remains
-    /// suspended, so the caller cuts it.
+    /// Ties the launched child as the root of the tree. Windows `Err` = an OS failure creating the group or putting it in — then the child
+    ///   stays suspended, so the caller cuts it.
     pub fn attach(child: &Child) -> io::Result<Self> {
         #[cfg(windows)]
         {
@@ -81,10 +75,9 @@ impl TreeRoot {
         }
     }
 
-    /// Wakes the child launched suspended — call it **after** [`Self::attach`]. POSIX = nothing to wake (`Ok`).
-    ///
-    /// ★On Windows it is `Err` if not even one suspended thread was woken★ — if [`prepare_tree_root`] was skipped and the child was launched
-    ///   unsuspended, the gap before putting it in does not silently revive but shows up as a startup failure.
+    /// Wakes the child launched suspended — call **after** [`Self::attach`]. POSIX = nothing to wake (`Ok`). ★On Windows `Err` if not even
+    ///   one suspended thread was woken★ — if [`prepare_tree_root`] was skipped (launched unsuspended),
+    /// the gap before putting it in shows up as a startup failure instead of silently reviving.
     pub fn start(&self, child: &Child) -> io::Result<()> {
         #[cfg(windows)]
         {
@@ -97,13 +90,11 @@ impl TreeRoot {
         }
     }
 
-    /// Cuts the whole tree and cuts the child too — it only starts the ending and returns. Whether everything ended is checked by the child's exit and
-    /// [`Self::members_gone`]. The result of the child kill is discarded — it is also called on an already-ended child.
-    ///
-    /// `Err` = the tree kill (ending the Windows group · launching POSIX `kill`) failed — the child was cut then too.
-    ///
-    /// ★A known gap on POSIX★: if called after the child has already been reaped (wait) — while any member remains that number is not reused,
-    ///   but if none remain and the number passed to a new group in the meantime, it hits someone else's group (window = microseconds).
+    /// Cuts the whole tree and the child — only starts the ending and returns; check with the child's exit and [`Self::members_gone`]. The
+    ///   child kill's result is discarded (also called on an already-ended child). `Err` = the tree kill
+    /// (ending the Windows group · launching POSIX `kill`) failed — the child was cut then too. ★Known gap on POSIX★: called after the
+    ///   child was reaped (wait), while any member remains the number is not reused, but if none remain and the
+    /// number passed to a new group meanwhile it hits someone else's group (microsecond window).
     pub fn kill(&self, child: &mut Child) -> io::Result<()> {
         #[cfg(windows)]
         let tree = self.group.terminate(1);
@@ -124,8 +115,8 @@ impl TreeRoot {
         tree
     }
 
-    /// Have all descendants of the tree ended. Windows = is the group empty (true if the query fails — it trusts only the child's exit) · POSIX = always
-    /// true (std has no means to count group members — it trusts only the child's exit).
+    /// Have all descendants of the tree ended. Windows = is the group empty (true if the query fails — trusts only the child's exit) ·
+    ///   POSIX = always true (std cannot count group members — trusts only the child's exit).
     pub fn members_gone(&self) -> bool {
         #[cfg(windows)]
         {
@@ -138,36 +129,33 @@ impl TreeRoot {
     }
 }
 
-/// The 「the program we tried to launch is missing」 decision — what it needs from the command is captured at launch, and when a non-zero exit is received it is decided by
-/// [`Self::judge`].
-///
-/// ★On Windows the exit code alone cannot tell apart★ — the exit code of `cmd.exe /c <missing name>` differs per build
-///   (measured 2026-09-27, Windows 11 26200 = **1**, the errorlevel inside it is 9009 · the widely known value is 9009). 1 is
-///   indistinguishable from the target program's own failure. So for a failure that is not 9009, it looks up the target of `cmd.exe /c <target> …` by the same
-///   rules as cmd (working folder → `PATH`, extension = `PATHEXT`), and only when it is absent is it 「missing」. If the shape is one where the target cannot be singled out,
-///   only 9009 remains.
-/// ★Do not look it up before launching — do not revive that★: one unresponsive remote `PATH` entry held startup past the deadline
-///   (measured 21 s), and if cmd's AutoRun changes `PATH`, a decision before launching is always wrong. The decision after the failure sees the same env too, so
-///   on a PC where AutoRun changed `PATH` it can be wrong — but only when the target really failed.
-/// POSIX has nothing to decide, because startup fails with `NotFound` — outside Windows it is always
-/// [`MissingProgramVerdict::NotJudged`].
+/// The "program we tried to launch is missing" decision — what it needs from the command is captured at launch, and on a non-zero exit
+///   [`Self::judge`] decides.
+/// ★On Windows the exit code alone cannot tell★: `cmd.exe /c <missing name>` exits differently per build (measured Windows 11 26200 =
+///   **1**, the inner errorlevel 9009; 9009 is the widely known value), and 1 is
+/// indistinguishable from the target's own failure. So for a failure other than 9009 it looks up the target of `cmd.exe /c <target> …` by
+///   cmd's rules (working folder → `PATH`, extension = `PATHEXT`), and only when absent is it "missing"; if the
+/// target cannot be singled out, only 9009 remains. ★Do not look it up before launching — do not revive★: one unresponsive remote `PATH`
+///   entry held startup past the deadline (measured 21 s), and if cmd's AutoRun changes `PATH` a pre-launch
+/// decision is always wrong (the post-failure decision sees the same env, so on an AutoRun-changed `PATH` it can be wrong, but only when
+///   the target really failed). POSIX has nothing to decide (startup fails with `NotFound`) —
+/// always [`MissingProgramVerdict::NotJudged`] outside Windows.
 pub struct MissingProgramCheck {
     #[cfg(windows)]
     through_cmd: bool,
     #[cfg(windows)]
     lookup: Option<cmd_lookup::CmdLookup>,
-    /// In production = one lookup list per process. Tests put in their own — so that tests running in parallel do not block each other's lookups.
+    /// In production = one lookup list per process. Tests put in their own so parallel tests do not block each other's lookups.
     #[cfg(windows)]
     gate: &'static cmd_lookup::LookupGate,
 }
 
-/// The exit code when `cmd.exe` ends with 「is not an internal or external command」.
+/// The exit code when `cmd.exe` ends with "is not an internal or external command".
 #[cfg(windows)]
 const CMD_NOT_FOUND_EXIT: i32 = 9009;
 
 impl MissingProgramCheck {
-    /// The launched command as is — `env_set` is treated as applied later than `env_remove` (if the same key is in both lists
-    /// it stays). `cwd` = the child's working folder.
+    /// The launched command as is — `env_set` is applied later than `env_remove` (a key in both stays). `cwd` = the child's working folder.
     pub fn new(
         program: &str,
         args: &[String],
@@ -209,8 +197,8 @@ impl MissingProgramCheck {
         }
     }
 
-    /// Was the child that ended with `code` a 「missing」 one. Looking up the target waits only until `deadline` — if it cannot finish within the deadline, unknown.
-    /// If successful (`Some(0)`), no decision is made.
+    /// Was the child that ended with `code` a "missing" one. The target lookup waits only until `deadline` (unknown if not finished);
+    ///   success (`Some(0)`) makes no decision.
     pub fn judge(&self, code: Option<i32>, deadline: Instant) -> MissingProgramVerdict {
         #[cfg(windows)]
         {
@@ -235,20 +223,20 @@ impl MissingProgramCheck {
     }
 }
 
-/// The answer of [`MissingProgramCheck::judge`]. Whether it is 「missing」 is [`Self::is_missing`], and the rest is material for the caller to log
-/// (this crate does not log).
+/// The answer of [`MissingProgramCheck::judge`]. "Missing" is [`Self::is_missing`]; the rest is material for the caller to log (this crate
+///   does not log).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MissingProgramVerdict {
-    /// Nothing to decide — it did not go through a shell · it succeeded · the shell's target cannot be singled out as a one-word program name.
+    /// Nothing to decide — did not go through a shell, succeeded, or the shell's target cannot be singled out as a one-word program name.
     NotJudged,
-    /// The shell ended with the 「missing command」 exit code — 「missing」.
+    /// The shell ended with the "missing command" exit code — "missing".
     NotFoundExitCode,
     /// The failed shell's target was looked up.
     Looked(TargetLookup),
 }
 
 impl MissingProgramVerdict {
-    /// Is it 「missing」 — if unknown, false.
+    /// Is it "missing" — false if unknown.
     pub fn is_missing(&self) -> bool {
         matches!(
             self,
@@ -257,16 +245,16 @@ impl MissingProgramVerdict {
     }
 }
 
-/// The result of looking up the failed shell's target. ★The unknown branches (`Unknown` · `Busy` · `NoThread`) are not folded into 「missing」★.
+/// The result of looking up the failed shell's target. ★The unknown branches (`Unknown`, `Busy`, `NoThread`) are not folded into "missing"★.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetLookup {
     Found,
     Missing,
-    /// Unknown — it could not finish looking within the deadline, or the target given as a path is a remote location.
+    /// Unknown — could not finish looking within the deadline, or the target given as a path is remote.
     Unknown,
-    /// Unknown — an earlier lookup for the same target is still running (or the lookup list is poisoned by an earlier panic), so no new lookup was done.
-    /// Usually the earlier decision's lookup went past the deadline and is stuck in a blocked file-system query — a lookup for the same target runs once at a time across the whole
-    /// process, so stuck lookups do not pile up with each decision.
+    /// Unknown — an earlier lookup for the same target is still running (or the lookup list is poisoned by an earlier panic), so no new
+    ///   lookup was done. Usually the earlier lookup went past the deadline and is stuck in a blocked
+    /// file-system query; a lookup per target runs once at a time process-wide, so stuck lookups do not pile up.
     Busy,
     /// Unknown — the lookup thread could not be launched (the message of that OS error).
     NoThread(String),
@@ -275,32 +263,29 @@ pub enum TargetLookup {
 /// Failure of [`spawn_outside_job`].
 #[derive(Debug)]
 pub enum DetachedSpawnError {
-    /// `Win32_Process.Create` did not launch it — `rv` = its `ReturnValue` (a non-zero value · e.g. 9 = path not found ·
-    /// 21 = invalid argument). If the answer object or that value could not be obtained, it is `u32::MAX`.
+    /// `Win32_Process.Create` did not launch it — `rv` = its `ReturnValue` (non-zero, e.g. 9 = path not found, 21 = invalid argument);
+    ///   `u32::MAX` if the answer object or value could not be obtained.
     Refused { rv: u32 },
-    /// Any other failure — failures of COM initialization and the WMI call are kind `Other` (the message holds that HRESULT) · outside Windows =
-    /// `Unsupported` (this means is absent).
+    /// Any other failure — COM initialization and WMI call failures are kind `Other` (message holds the HRESULT) · outside Windows =
+    ///   `Unsupported`.
     Io(io::Error),
 }
 
-/// Launches `exe` outside the Job this process is in — Windows = WMI `Win32_Process.Create`. The launched process's parent is not this
-/// process but the WMI provider (WmiPrvSE), so it does not inherit this process's Job (including `KILL_ON_JOB_CLOSE`) (measured —
-/// spike #1). It returns only whether it launched — no pid, and no waiting for the launched process.
-///
-/// - Command line = just `exe` wrapped in quotes — no arguments are passed. Environment variables cannot be passed by this means.
-/// - `exe` must be an absolute path — a relative path gives `Refused { rv: 9 }` (Path not found).
-/// - `console` = if true, launch with a new console window (`CREATE_NEW_CONSOLE`) · if false, no creation flags are passed.
-///   ★False is not a guarantee that no window appears★ — a console-subsystem exe gets a console window even when launched this way, and a windows
-///   subsystem exe does not (measured 2026-06-19). Launching without a window works only through the exe's subsystem.
-/// - On the calling thread, COM is initialized as a multithreaded apartment and released before returning. If the thread was already
-///   initialized in another apartment mode, it calls into that apartment and does not release.
-///
+/// Launches `exe` outside the Job this process is in — Windows = WMI `Win32_Process.Create`. The launched process's parent is the WMI
+///   provider (WmiPrvSE), not this process, so it does not inherit this process's Job (including
+/// `KILL_ON_JOB_CLOSE`; measured, spike #1). It returns only whether it launched — no pid, no waiting.
+/// - Command line = `exe` wrapped in quotes — no arguments, and environment variables cannot be passed this way. `exe` must be an absolute
+///   path (a relative path gives `Refused { rv: 9 }`).
+/// - `console` = true launches with a new console window (`CREATE_NEW_CONSOLE`); false passes no creation flags. ★False is not a no-window
+///   guarantee★ — a console-subsystem exe gets a console window anyway and a windows-subsystem exe does not
+///   (measured 2026-06-19); a windowless launch works only through the exe's subsystem.
+/// - On the calling thread COM is initialized as a multithreaded apartment and released before returning; if the thread was already
+///   initialized in another apartment mode it calls into that apartment and does not release.
 /// Outside Windows = `Io` with `Unsupported`.
-// ADR-0021
-// ADR-0271
+// ADR-0021, ADR-0271
 pub fn spawn_outside_job(exe: &Path, console: bool) -> Result<(), DetachedSpawnError> {
-    // ★Do not pass `CREATE_NO_WINDOW` (0x0800_0000)★ — WMI rejects it with `rv` 21 (Invalid Parameter) (measured
-    //   2026-06-17 · `real_wmi_spawn_flag_matrix` in the shell's `discovery` tests). It is a flag for direct CreateProcess calls, so it is outside WMI Create's
+    // ★Do not pass `CREATE_NO_WINDOW` (0x0800_0000)★ — WMI rejects it with `rv` 21 (Invalid Parameter) (measured 2026-06-17,
+    //   `real_wmi_spawn_flag_matrix` in the shell's `discovery` tests); it is a direct-CreateProcess flag outside WMI Create's
     //   allowed set. `CREATE_NEW_CONSOLE` is accepted.
     const CREATE_NEW_CONSOLE: i32 = 0x0000_0010;
     let create_flags = console.then_some(CREATE_NEW_CONSOLE);
@@ -310,10 +295,9 @@ pub fn spawn_outside_job(exe: &Path, console: bool) -> Result<(), DetachedSpawnE
     }
 }
 
-/// The raw call of [`spawn_outside_job`] — it returns `ReturnValue` as is without raising it as an error. `create_flags` =
-/// `None` passes no startup info, `Some` passes it as `Win32_ProcessStartup.CreateFlags`. Measuring which creation
-/// flags WMI rejects is the job of the diagnostic tests. `Err(Refused)` = a needed WMI object was empty and it stopped before launching
-/// (`rv` = `u32::MAX`).
+/// The raw call of [`spawn_outside_job`] — returns `ReturnValue` as is without raising an error. `create_flags` = `None` passes no startup
+///   info, `Some` passes `Win32_ProcessStartup.CreateFlags`; measuring which flags WMI rejects is the
+/// diagnostic tests' job. `Err(Refused)` = a needed WMI object was empty and it stopped before launching (`rv` = `u32::MAX`).
 #[cfg(any(test, feature = "test-support"))]
 pub fn wmi_create_raw(exe: &Path, create_flags: Option<i32>) -> Result<u32, DetachedSpawnError> {
     wmi::create(exe, create_flags)
@@ -335,7 +319,7 @@ mod tests {
         Instant::now() + Duration::from_secs(20)
     }
 
-    /// There are only two 「missing」 cases — neither the unknown branches (`Unknown` · `Busy` · `NoThread`) nor "nothing to decide" fold into 「missing」.
+    /// Only two "missing" cases — neither the unknown branches (`Unknown`, `Busy`, `NoThread`) nor "nothing to decide" fold into "missing".
     #[test]
     fn only_a_not_found_exit_or_a_missing_target_is_missing() {
         use MissingProgramVerdict::{Looked, NotFoundExitCode, NotJudged};
@@ -352,7 +336,7 @@ mod tests {
         }
     }
 
-    /// 9009 is 「missing」 right away; any other failure looks up the target first; success, not-cmd and past-deadline are never 「missing」.
+    /// 9009 is "missing" at once; any other failure looks up the target first; success, not-cmd and past-deadline are never "missing".
     #[cfg(windows)]
     #[test]
     fn the_judgment_reads_9009_and_looks_only_after_a_failure() {
@@ -423,9 +407,10 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// ★The whole tree is inside the group★ — cmd and its child `ping` are members of the group. It is launched suspended, put in, and then woken, so a grandchild launched right away
-    ///   is not left out either. Before cutting it is not 「all ended」, and only after cutting does the group empty and that `ping` end —
-    ///   if the member count cannot be read or is undercounted, 「all ended」 stands early and the caller stops waiting early.
+    /// ★The whole tree is inside the group★ — cmd and its child `ping` are members; launched suspended, put in, then woken, so a
+    ///   grandchild launched right away is not left out. Before cutting it is not "all ended" and only after cutting does the
+    ///   group empty and `ping` end — an unreadable or undercounted member count would make "all ended" stand early and the caller stop
+    ///   waiting early.
     #[cfg(windows)]
     #[test]
     fn the_tree_holds_every_member_until_it_is_killed() {
@@ -450,7 +435,7 @@ mod tests {
         tree.start(&child).expect("wake");
 
         let members = tree.group.downgrade().expect("the group's weak handle");
-        // See the ending by the pinned handle — by number, someone else's process that took over the number after the end would read as 「alive」.
+        // See the ending by the pinned handle — by number, someone else's process that took over the number would read as "alive".
         let ping = wait_until("ping inside the group", || {
             let pid = members
                 .member_pids()

@@ -1,22 +1,22 @@
-//! Windows Job Object wrapper + a tool that wakes a process launched suspended ([`resume_suspended_process`]) — the Windows
-//! branch of the outer module (`group`).
+//! Windows Job Object wrapper + a tool that wakes a process launched suspended ([`resume_suspended_process`]) — the Windows branch of the
+//!   outer module (`group`).
 //!
-//! It ties child processes into a Job, so that when we kill explicitly (TerminateJobObject)
-//! or the host process crashes (KILL_ON_JOB_CLOSE), grandchild processes are cleaned up together.
-//! The parts that handle one member at a time (list, pinning and facts, ending) and the Job join-notification port are here too — it does not
-//! know what to end; it only checks that the number given by the chooser is a member of this Job and pins it (ADR-0262). The exit code to give when ending is also
-//! supplied by the caller (ADR-0275 decision 12).
+//! It ties child processes into a Job so that on explicit kill (TerminateJobObject) or host crash (KILL_ON_JOB_CLOSE) grandchildren are
+//!   cleaned up too. The per-member parts (list, pinning and facts, ending) and the Job
+//! join-notification port are here as well — it does not know what to end; it only checks that the number given by the chooser is a member
+//!   of this Job and pins it (ADR-0262). The exit code when ending is supplied by the caller
+//! (ADR-0275 decision 12).
 //!
-//! ★A Job is inherited only by processes created **after** they are inside it★ — if an already-running process is put in with [`JobObjectHandle::assign`],
-//!   children it launched before being put in stay outside the Job and escape a tree kill. The tree root (used by the agent usage query)
-//!   is launched suspended (`CREATE_SUSPENDED`) via `spawn::prepare_tree_root`, and `spawn::TreeRoot` puts it in and then wakes it,
-//!   closing that gap. ★The agent's agent paths (`transport::pty`, `transport::stdio`, the codex path) put the process in after launching, so they
-//!   still carry that gap★.
+//! ★A Job is inherited only by processes created **after** they are inside it★ — children an already-running process launched before
+//!   [`JobObjectHandle::assign`] stay outside the Job and escape a tree kill. The tree root (agent usage
+//! query) is launched suspended (`CREATE_SUSPENDED`) via `spawn::prepare_tree_root` and `spawn::TreeRoot` puts it in then wakes it,
+//!   closing the gap. ★The agent paths (`transport::pty`, `transport::stdio`, the codex path) put the
+//! process in after launching, so they still carry that gap★.
 //!
-//! The call order and flags are the same as verified by measurement on Windows in the Phase 0 spike (agent `examples/spike.rs`).
-//! ★Nothing is used except the `windows` crate and the standard library★ — the result, fact and notification types are also kept here and the outer layer moves them
-//! into its own public types (ADR-0262 「Implementation: what was chosen」 — user decision 2026-09-29). Only the tests borrow `process` and
-//! `testing` from the same crate.
+//! The call order and flags match what the Phase 0 spike verified on Windows (agent `examples/spike.rs`). ★Only the `windows` crate and
+//!   std are used★ — result, fact and notification types are kept here and the outer layer
+//! moves them into its own public types (ADR-0262 「Implementation: what was chosen」). Only the tests borrow `process` and `testing` from
+//!   the same crate.
 
 use std::io;
 use std::sync::Arc;
@@ -54,14 +54,15 @@ const MEMBER_LIST_INITIAL: usize = 64;
 /// List re-ask limit — if members keep growing while asking and a complete list cannot be obtained, it stops here (closed failure).
 const MEMBER_LIST_ATTEMPTS: usize = 4;
 
-/// The Job notification number carried in the byte-count field of a completion port packet — a member newly joined. It is kept here so as not to
-/// turn on `Win32_System_SystemServices` for this one constant.
+/// The Job notification number carried in the byte-count field of a completion port packet — a member newly joined; kept here so as not to
+///   turn on `Win32_System_SystemServices` for one constant.
 const JOB_OBJECT_MSG_NEW_PROCESS: u32 = 6;
 /// The key given when attaching the Job to the port — only packets that come with this key are read as Job notifications.
 const BIRTH_PORT_KEY: usize = 1;
 /// Executable path buffer (UTF-16 slots) — the maximum length of a Win32 path.
 const IMAGE_PATH_CHARS: usize = 32_768;
-/// Command-line buffer — a size where the longest command line (32,767 chars) fits after the header (`UNICODE_STRING`). If too small the command line is an empty field.
+/// Command-line buffer — fits the longest command line (32,767 chars) after the `UNICODE_STRING` header; if too small the command line is
+///   an empty field.
 const COMMAND_LINE_BYTES: usize = core::mem::size_of::<UNICODE_STRING>() + 65_536;
 
 /// Result layout of `NtQueryInformationProcess(ProcessBasicInformation)` — kept here so as not to turn on `Win32_System_Kernel`.
@@ -78,8 +79,8 @@ struct PROCESS_BASIC_INFORMATION {
     inherited_from_unique_process_id: usize,
 }
 
-/// Facts read once through the handle pinned by [`JobObjectHandle::pin_member`]. The meaning of the fields and the value of unread fields are the same as the outer public facts
-/// type — this file keeps its own shape so as not to call the outer layer (module header).
+/// Facts read once through the handle pinned by [`JobObjectHandle::pin_member`]; field meanings and unread values match the outer public
+///   facts type (own shape here so as not to call the outer layer).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MemberFacts {
     pub ppid: u32,
@@ -88,7 +89,8 @@ pub(crate) struct MemberFacts {
     pub cmdline: String,
 }
 
-/// The answer of [`BirthPort::next`] — the meaning is the same as the outer public notification type (the reason to keep it separate is the same as for [`MemberFacts`]).
+/// The answer of [`BirthPort::next`] — the meaning is the same as the outer public notification type (the reason to keep it separate is
+///   the same as for [`MemberFacts`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PortOutcome {
     Joined(u32),
@@ -96,33 +98,32 @@ pub(crate) enum PortOutcome {
     Timeout,
 }
 
-/// A process confirmed as a member of our Job and pinned — while it is held that PID is not reused (the open handle pins
-/// the process object). It can be held even after it ends. drop = CloseHandle.
+/// A process confirmed as a member of our Job and pinned — while held that PID is not reused (the open handle pins the process object);
+///   can be held after it ends. drop = CloseHandle.
 #[derive(Debug)]
 pub(crate) struct PinnedMember {
     handle: HANDLE,
     facts: MemberFacts,
 }
 
-// SAFETY: a process handle may be used from any thread. The methods only do OS queries and terminate on the handle, and closing is the single drop
+// SAFETY: a process handle may be used from any thread. The methods only do OS queries and terminate on the handle, and closing is the
+//   single drop
 //   that this value solely owns.
 unsafe impl Send for PinnedMember {}
 unsafe impl Sync for PinnedMember {}
 
-/// The Job join-notification port — [`JobObjectHandle::watch_births`] creates it. Several threads share it through `Arc`, and the last
-/// drop closes the port handle.
-///
-/// Notifications are only notices and delivery is not guaranteed (MS Learn) — a missed join cannot be known here.
-///
-/// ★Do not let go of the last `Arc` while the Job is attached — detach first ([`JobObjectHandle::unwatch_births`]), then let go★: while attached
-/// the Job holds the port as its own kernel reference, so the port survives even if the handle closes, and notifications keep piling up on a port nobody reads.
-/// That kernel reference is not written in MS Learn and was not measured here — even if wrong, detaching first loses nothing.
+/// The Job join-notification port — [`JobObjectHandle::watch_births`] creates it; threads share it through `Arc` and the last drop closes
+///   the handle. Notifications are only notices and delivery is not guaranteed (MS Learn) — a
+/// missed join cannot be known here. ★Do not let go of the last `Arc` while the Job is attached — detach first
+///   ([`JobObjectHandle::unwatch_births`])★: the attached Job holds the port as its own kernel reference, so the port
+/// survives a handle close and notifications pile up unread (not in MS Learn, not measured — detaching first loses nothing even if wrong).
 #[derive(Debug)]
 pub(crate) struct BirthPort {
     handle: HANDLE,
 }
 
-// SAFETY: a completion port handle is a kernel object that several threads may take from at the same time. Closing is the single drop of the last `Arc`.
+// SAFETY: a completion port handle is a kernel object that several threads may take from at the same time. Closing is the single drop of
+//   the last `Arc`.
 unsafe impl Send for BirthPort {}
 unsafe impl Sync for BirthPort {}
 
@@ -173,8 +174,9 @@ impl JobObjectHandle {
         Ok(Self { handle })
     }
 
-    /// ★If you put it in after launching, children it launched before being put in remain outside the Job★ (the gap of the three agent paths) — the precedent that closes it =
-    /// launch suspended via `spawn::prepare_tree_root`, and `spawn::TreeRoot` puts it in and then wakes it with [`resume_suspended_process`].
+    /// ★Putting it in after launching leaves children launched before as outside the Job★ (the gap of the three agent paths) — closed by
+    ///   launching suspended via `spawn::prepare_tree_root`, with `spawn::TreeRoot` putting it in then waking it with
+    ///   [`resume_suspended_process`].
     pub(crate) fn assign(&self, process_id: u32) -> io::Result<()> {
         // SAFETY: OpenProcess — opens only the minimum rights that AssignProcessToJobObject requires
         // (SET_QUOTA|TERMINATE).
@@ -200,7 +202,8 @@ impl JobObjectHandle {
         unsafe { TerminateJobObject(self.handle, exit_code) }.map_err(win_err)
     }
 
-    /// Number of processes in the Job that have not yet ended. `terminate` only starts the ending and returns, so a side that waits for 「the tree has all ended」 checks with this.
+    /// Number of processes in the Job that have not yet ended. `terminate` only starts the ending, so a side waiting for "the tree has all
+    ///   ended" checks this.
     pub(crate) fn active_processes(&self) -> io::Result<u32> {
         let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
         // SAFETY: QueryInformationJobObject — passes a valid Job handle, a stack struct pointer matching the class (BasicAccounting)
@@ -217,16 +220,14 @@ impl JobObjectHandle {
         .map_err(win_err)?;
         Ok(info.ActiveProcesses)
     }
-    /// All PIDs of processes now in this Job (including members of nested Jobs; the order has no meaning).
-    ///
-    /// ★`Ok` only when complete★ — if the list count does not equal the Job's member count within the re-ask limit it is `Err`. A missing member
-    /// would read to the caller as 「not ours」.
+    /// All PIDs of processes now in this Job (nested Jobs' members included; order meaningless). ★`Ok` only when complete★ — a list count
+    ///   not equal to the Job's member count within the re-ask limit is `Err`; a missing member would read as "not ours".
     // ADR-0262
     pub(crate) fn member_pids(&self) -> io::Result<Vec<u32>> {
         self.member_pids_with_capacity(MEMBER_LIST_INITIAL)
     }
 
-    /// Same rule as [`Self::member_pids`] · only the first slot count is injected — tests measure the grow and re-ask path with few processes.
+    /// Same rule as [`Self::member_pids`], injecting only the first slot count — tests measure the grow and re-ask path with few processes.
     pub(crate) fn member_pids_with_capacity(&self, initial: usize) -> io::Result<Vec<u32>> {
         const HEAD_WORDS: usize =
             core::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
@@ -303,12 +304,10 @@ impl JobObjectHandle {
         )))
     }
 
-    /// Opens the process with that number, pins it **only when it is a member of this Job**, and reads the facts once. It does not check whether it is alive
-    /// ([`PinnedMember::exited`]).
-    ///
-    /// `kill` = also opens the terminate right — for one pinned with `false`, [`PinnedMember::terminate_raw`] always fails.
-    /// `Ok(None)` = no process with that number · it is outside this Job. `Err` = failure to open (other than absence — access denied etc.) ·
-    /// failure of the membership query.
+    /// Opens the process with that number, pins it **only when it is a member of this Job**, and reads the facts once; liveness is not
+    ///   checked ([`PinnedMember::exited`]). `kill` = also opens the terminate right (a pinned-with-`false`
+    /// member makes [`PinnedMember::terminate_raw`] always fail). `Ok(None)` = no such process or outside this Job. `Err` = open failure
+    ///   other than absence (access denied …) or membership query failure.
     pub(crate) fn pin_member(&self, pid: u32, kill: bool) -> io::Result<Option<PinnedMember>> {
         let mut access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
         if kill {
@@ -328,7 +327,8 @@ impl JobObjectHandle {
         };
 
         let mut in_job = BOOL::default();
-        // SAFETY: two valid handles + stack output. ★The Job argument is always our handle★ — if it were NULL it would turn into 「is it in any Job at all」 and see someone else's Job member as ours.
+        // SAFETY: two valid handles + stack output. ★The Job argument is always our handle★ — if it were NULL it would turn into 「is it in
+        //   any Job at all」 and see someone else's Job member as ours.
         unsafe { IsProcessInJob(member.handle, self.handle, &mut in_job) }.map_err(win_err)?;
         if !in_job.as_bool() {
             return Ok(None);
@@ -337,11 +337,10 @@ impl JobObjectHandle {
         Ok(Some(member))
     }
 
-    /// Creates the join-notification port and passes it to `start`, and attaches this Job to that port **only when `start` is `Ok`** — by the time notifications can
-    /// pile up, the side that takes them out already holds the port. `start`'s `Err` is returned as is (nothing was attached).
-    ///
-    /// Members already inside are announced again as `Joined` when attaching · notifications for a member whose state changes during attaching may be missed
-    /// (MS Learn). ★Call it only once per Job★ — a second call is not blocked here (that is the caller's job).
+    /// Creates the join-notification port, passes it to `start`, and attaches this Job to it **only when `start` is `Ok`** — by the time
+    ///   notifications can pile up, the taking side already holds the port. `start`'s `Err` is returned
+    /// as is (nothing attached). Members already inside are announced again as `Joined` on attaching; notifications for a member changing
+    ///   state during attaching may be missed (MS Learn). ★Call once per Job★ (a second call is not blocked here).
     pub(crate) fn watch_births(
         &self,
         start: impl FnOnce(Arc<BirthPort>) -> io::Result<()>,
@@ -353,12 +352,14 @@ impl JobObjectHandle {
         let port = Arc::new(BirthPort { handle });
         start(Arc::clone(&port))?;
         let attached = self.associate_port(port.handle);
-        // Let go after attaching ends — if the `start` side lets go first and the handle closes, that value is reused and someone else's handle could be attached.
+        // Let go after attaching ends — if `start` let go first and the handle closed, the value could be reused and someone else's handle
+        //   attached.
         drop(port);
         attached
     }
 
-    /// Detaches this Job's port connection (NULL in the port slot — the detach MS Learn describes). Members born after detaching are not announced.
+    /// Detaches this Job's port connection (NULL in the port slot — the detach MS Learn describes). Members born after detaching are not
+    ///   announced.
     pub(crate) fn unwatch_births(&self) -> io::Result<()> {
         self.associate_port(HANDLE::default())
     }
@@ -396,15 +397,15 @@ impl PinnedMember {
         &self.facts
     }
 
-    /// Makes **only one `TerminateProcess` call**, giving `exit_code`, on that pinned handle. Asynchronous — it does not wait for the target to
-    /// end. It returns the raw result only; sorting is done by [`Self::classify`] (narrowed so that it can be called inside a
-    /// lock). One pinned with `kill = false` is always `Err`.
+    /// Makes **only one `TerminateProcess` call**, with `exit_code`, on that pinned handle; asynchronous (does not wait for the end).
+    ///   Returns the raw result; sorting is [`Self::classify`] (narrow enough to call inside a lock).
+    /// A pinned `kill = false` member is always `Err`.
     pub(crate) fn terminate_raw(&self, exit_code: u32) -> io::Result<()> {
         terminate_handle(self.handle, exit_code)
     }
 
-    /// Sorts the raw result of [`Self::terminate_raw`]. Even on failure, if it ended by itself in the meantime it is `Gone`. The handle is not
-    /// closed (drop closes it).
+    /// Sorts the raw result of [`Self::terminate_raw`]; on failure, if it ended by itself meanwhile it is `Gone`. The handle is not closed
+    ///   (drop closes it).
     pub(crate) fn classify(&self, raw: io::Result<()>) -> io::Result<MemberOutcome> {
         classify_terminate(self.handle, raw)
     }
@@ -461,9 +462,8 @@ impl Drop for BirthPort {
     }
 }
 
-/// One `TerminateProcess` call. ★Even failure is built as an error that does not use the heap★ — since it is called inside a lock,
-/// it does not use `win_err` (`io::Error::other` = a box allocation). The `ok()` of windows 0.58 only reads `GetLastError`, so
-/// the last error is still there.
+/// One `TerminateProcess` call. ★Even failure is built without heap use★ — it runs inside a lock, so no `win_err` (`io::Error::other`
+///   allocates a box); windows 0.58 `ok()` only reads `GetLastError`, so the last error is still there.
 // ADR-0262
 fn terminate_handle(handle: HANDLE, exit_code: u32) -> io::Result<()> {
     // SAFETY: a valid process handle held by the caller — if there is no terminate right the OS refuses.
@@ -490,8 +490,8 @@ fn finite_millis(wait: Duration) -> u32 {
         .min(u32::MAX - 1)
 }
 
-/// Did the handle get signaled within `millis` (= has it ended). Liveness is not measured by the exit code (STILL_ACTIVE = 259) — a process that
-/// ended with 259 would look alive.
+/// Did the handle get signaled within `millis` (= has it ended). Liveness is not measured by the exit code (STILL_ACTIVE = 259) — a
+///   process that ended with 259 would look alive.
 fn signaled_within(handle: HANDLE, millis: u32) -> io::Result<bool> {
     // SAFETY: a valid handle held by the caller · finite wait.
     match unsafe { WaitForSingleObject(handle, millis) } {
@@ -561,7 +561,8 @@ pub(crate) fn image_path(handle: HANDLE) -> Option<String> {
     buf.get(..len as usize).map(String::from_utf16_lossy)
 }
 
-/// That it can be read with the `QUERY_LIMITED` right is a measurement, not documentation (TRD t40 §8 ㉒ⓘ) — if refused it becomes an empty field.
+/// That it can be read with the `QUERY_LIMITED` right is a measurement, not documentation (TRD t40 §8 ㉒ⓘ) — if refused it becomes an empty
+///   field.
 fn command_line(handle: HANDLE) -> Option<String> {
     const HEAD: usize = core::mem::size_of::<UNICODE_STRING>();
     // Taken as u64 slots to match the alignment of the pointer fields in the header.
@@ -587,7 +588,8 @@ fn command_line(handle: HANDLE) -> Option<String> {
     if units == 0 {
         return Some(String::new());
     }
-    // The kernel fills the characters after the header inside our buffer and Buffer points at that spot — that address is not trusted as is; it is
+    // The kernel fills the characters after the header inside our buffer and Buffer points at that spot — that address is not trusted as
+    //   is; it is
     //   converted to an offset inside our buffer, the range is checked, and then it is read from our buffer.
     let offset = (head.Buffer.0 as usize).checked_sub(buf.as_ptr() as usize)?;
     if offset < HEAD || !offset.is_multiple_of(2) || offset.checked_add(units * 2)? > bytes {
@@ -611,13 +613,12 @@ impl Drop for JobObjectHandle {
 }
 
 /// Wakes the suspended thread of process `process_id`, launched with `CREATE_SUSPENDED` (a just-launched process has one first thread).
-///
-/// std's `Child` does not hand out the first thread handle (it closes it right after startup) — so the process's thread is
-/// looked up in a thread snapshot. Threads that vanished after the snapshot, and someone else's thread that took over their number, are skipped (not woken).
-///
-/// ★It is an error if not even one suspended thread was woken★ — calling it on a process that is not suspended fails. So if the launching side
-///   loses launch-suspended (the child starts running before it is put in the Job), startup fails instead of silently reviving the gap.
-///   If that process's own thread cannot be woken (`ResumeThread` failed), that is the error.
+///   std's `Child` does not hand out the first thread handle (closed right after startup), so
+/// the thread is looked up in a thread snapshot; threads that vanished after the snapshot and someone else's thread that took their number
+///   are skipped (not woken).
+/// ★An error if not even one suspended thread was woken★ — calling it on a non-suspended process fails, so if the launching side loses
+///   launch-suspended (the child runs before being put in the Job), startup fails instead of silently
+/// reviving the gap. If the process's own thread cannot be woken (`ResumeThread` failed), that is the error.
 pub fn resume_suspended_process(process_id: u32) -> io::Result<()> {
     // SAFETY: a thread snapshot is system-wide, so the process argument is ignored (0).
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }.map_err(win_err)?;
@@ -681,7 +682,8 @@ fn resume_own_thread(thread_id: u32, process_id: u32) -> io::Result<Resumed> {
     let Ok(thread) = opened else {
         return Ok(Resumed::NotOurs);
     };
-    // SAFETY: the valid thread handle just opened. On failure it is 0 — 0 is the number of the System Idle process, so it cannot be the number of the
+    // SAFETY: the valid thread handle just opened. On failure it is 0 — 0 is the number of the System Idle process, so it cannot be the
+    //   number of the
     // child we launched, and so the comparison below sorts it as 「someone else's」.
     let owner = unsafe { GetProcessIdOfThread(thread) };
     let result = if owner != process_id {
@@ -702,8 +704,8 @@ fn resume_own_thread(thread_id: u32, process_id: u32) -> io::Result<Resumed> {
     result
 }
 
-/// Passing an HRESULT to from_raw_os_error wraps it as 0x8007xxxx and garbles the message, so
-/// io::Error::other is used to preserve the original error (message included).
+/// Passing an HRESULT to from_raw_os_error wraps it as 0x8007xxxx and garbles the message, so io::Error::other preserves the original
+///   error (message included).
 fn win_err(e: windows::core::Error) -> io::Error {
     io::Error::other(e)
 }
@@ -760,8 +762,8 @@ mod tests {
         panic!("the notifications do not stop");
     }
 
-    /// ⑥ Facts read through the pinned handle — parent = this test process that launched it · creation is later than this test process · executable ·
-    /// command line (with the query right only). One pinned with the query right only cannot be ended.
+    /// ⑥ Facts read through the pinned handle — parent = this test process that launched it, creation later than this test process,
+    ///   executable, command line (query right only). A query-only pinned member cannot be ended.
     #[test]
     fn a_pinned_member_carries_its_facts_and_ends_only_with_the_kill_right() {
         let job = JobObjectHandle::new().expect("create Job");
@@ -833,8 +835,8 @@ mod tests {
         assert_eq!(status.code(), Some(EXIT_CODE as i32));
     }
 
-    /// ⑦-a If `start` fails the Job is not attached to the port — neither the re-announcement of the original member nor anything born in the Job afterwards
-    /// arrives (had it been attached, both would already be piled up — ⑦-b).
+    /// ⑦-a If `start` fails the Job is not attached to the port — neither the original member's re-announcement nor anything born in the
+    ///   Job afterwards arrives (attached, both would already be piled up — ⑦-b).
     #[test]
     fn a_failed_start_leaves_the_job_unwatched() {
         let job = JobObjectHandle::new().expect("create Job");
@@ -872,8 +874,8 @@ mod tests {
         let _ = x.wait();
     }
 
-    /// ⑦-b An attached port — when attaching, the X already inside is announced again · the ping X launched is `Joined` · when that ping ends,
-    /// `Other` · members born after detaching are not announced.
+    /// ⑦-b An attached port — on attaching the X already inside is announced again, the ping X launched is `Joined`, when that ping ends
+    ///   `Other`; members born after detaching are not announced.
     #[test]
     fn a_watched_job_reports_births_until_unwatched() {
         let job = JobObjectHandle::new().expect("create Job");
@@ -911,8 +913,8 @@ mod tests {
             .expect("pin")
             .expect("our member");
         assert_eq!(ping.facts().ppid, root, "ping's parent: {:?}", ping.facts());
-        // Drain before ending — the `Other` below then comes from after the ending, and the only member left then is the waiting X, so there is no place for it to come from
-        // other than the ping's ending.
+        // Drain before ending — the `Other` below then comes from after the ending, and the only member left is the waiting X, so only the
+        //   ping's ending can produce it.
         drain(&port);
         let raw = ping.terminate_raw(EXIT_CODE);
         assert_eq!(ping.classify(raw).expect("end"), MemberOutcome::Terminated);
@@ -976,11 +978,10 @@ mod tests {
         let _ = root.wait();
     }
 
-    /// ⑧ The three shapes of an MSYS command line — the hook-copy decision relies on them (TRD t40 §3-0): a script the shell exec'd has its own command line
-    /// · its subshell (fork) has the same executable and command line as the parent · a `sleep` the script exec'd differs.
-    /// The shell execs one command after passing the gate (`read _`) — handing it over without a fork like the hook's `-c "bash x.sh"`, so that
-    /// everything is born inside the Job. Launched without a console so it does not drag in a console host (shell · script · subshell ·
-    /// `sleep`: four).
+    /// ⑧ The three shapes of an MSYS command line — the hook-copy decision relies on them (TRD t40 §3-0): a script the shell exec'd has
+    ///   its own command line · its subshell (fork) has the parent's executable and command line · a `sleep` the
+    /// script exec'd differs. The shell execs one command after the gate (`read _`) — handed over without a fork like the hook's `-c "bash
+    ///   x.sh"` so everything is born inside the Job. Launched without a console (shell, script, subshell, `sleep`: four).
     #[test]
     #[ignore = "needs Git Bash (C:\\Program Files\\Git\\usr\\bin\\bash.exe)"]
     fn msys_births_carry_exec_fork_and_foreign_command_lines() {
@@ -991,8 +992,8 @@ mod tests {
             "{BASH} is missing — the bash on PATH is not used instead"
         );
         let script = std::env::temp_dir().join(format!("t40-facts-{}.sh", std::process::id()));
-        // A non-interactive shell redirects a background command's stdin to /dev/null — the subshell lives to the end only if it receives the pipe as fd 3 and waits
-        // on it.
+        // A non-interactive shell redirects a background command's stdin to /dev/null — the subshell lives to the end only if it receives
+        //   the pipe as fd 3 and waits on it.
         std::fs::write(
             &script,
             "exec 3<&0\n( read _ <&3 ) &\nexec /usr/bin/sleep 30\n",
