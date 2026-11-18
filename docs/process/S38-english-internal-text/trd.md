@@ -10,7 +10,7 @@ Implements PRD R1–R8. Keep / hold lists are the PRD's (§2). Reference files c
 ## 2. Translation rules (every unit)
 
 - Translate Korean in: comments (incl. `///`/`//!` doc comments), log messages, panic/expect/assert/unreachable messages, error strings and `Display` impls, LLM-facing descriptions, test names, assertion messages, test data that is not intentional Korean, script output, YAML/TOML/PS1/bat comments, Cargo/capability `description`.
-- Translation only. Do not restructure, delete or "improve" comments or code (this overrides the code-conventions binding rule that aligns comments of a touched function). Already-English text stays as is.
+- Units U1–U2: translation only. Units U3–U5 (user, 2026-11-18: 「주석은 이왕이면 뺄수 있는건 뺏으면 좋겠어 … AI 기준으로 꼭 필요한것만」, scope 「A로 해보고 괜찮으면 B도 정리하자」): translate and prune comments to the code-conventions §주석 기준 — delete comments that restate code, narrate history or repeat a fact stated elsewhere; keep why / intentional absence / external facts / contracts of cross-crate definitions; keep ADR anchors (as a one-line token if the sentence goes), tool directives and section markers. Code is never changed. Pruning U1–U2 comments is a follow-up if the U3–U5 result is good.
 - Keep verbatim: identifiers, paths, ADR numbers, links, numbers, backtick spans, user quotes in 「」, format placeholders (`{e}`, `{0}`, `%s`), structured log fields (`agent = %id`).
 - Meaning first: negation, conditions, invariants, ★emphasis markers★ and `**bold**` survive. Terms follow `docs/process/S33-english-translation/glossary.md`. Units do not edit the glossary; they report new terms and U9 adds the rows.
 - Logs: one English line saying what happened; identifiers stay structured fields (the new `logging-conventions.md` §Format, written by U9).
