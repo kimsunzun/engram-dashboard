@@ -174,9 +174,9 @@ const ITEM_SHAPE_INVALID: &str = "item-shape-invalid";
 /// unparsed attached path (resolve) and a `set_root` path that is not absolute answer `args {path (controls escaped),
 /// why}`.
 pub(crate) const ITEM_PATH_INVALID: &str = "item-path-invalid";
-const BACKEND_TAG_UNKNOWN: &str = "backend-tag-unknown";
-const BACKEND_TAG_NOT_ALLOWED: &str = "backend-tag-not-allowed";
-const FOLDER_PATH_RELATIVE: &str = "folder-path-relative";
+pub(crate) const BACKEND_TAG_UNKNOWN: &str = "backend-tag-unknown";
+pub(crate) const BACKEND_TAG_NOT_ALLOWED: &str = "backend-tag-not-allowed";
+pub(crate) const FOLDER_PATH_RELATIVE: &str = "folder-path-relative";
 
 /// Reads a preset file. `Err` = the file cannot be read as a preset: YAML refused (`yaml-syntax`), more than one
 /// document or content after an explicit `...` (`preset-multi-document`), not a map or a `kind` other than `preset`

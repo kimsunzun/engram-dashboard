@@ -657,7 +657,7 @@ fn apply_reported(catalog: &mut Catalog, result: ScanResult) -> ScanReport {
                 .into_iter()
                 .map(|reason| (item.path.clone(), reason)),
         );
-        if let ItemContent::Preset { doc } = &item.content {
+        if let ItemContent::Preset { doc, .. } = &item.content {
             presets_read.push((item.path.clone(), preset_refs(doc).cloned().collect()));
         }
     }
@@ -699,7 +699,7 @@ fn apply_reported(catalog: &mut Catalog, result: ScanResult) -> ScanReport {
 fn item_problems(item: &Item) -> Vec<Reason> {
     match &item.content {
         ItemContent::Broken { reason } => vec![reason.clone()],
-        ItemContent::Preset { doc } => doc.line_problems.clone(),
+        ItemContent::Preset { doc, .. } => doc.line_problems.clone(),
         ItemContent::Settings { verdict, .. } => verdict
             .problems
             .iter()

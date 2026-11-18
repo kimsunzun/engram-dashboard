@@ -46,7 +46,7 @@ pub fn closure(catalog: &Catalog, preset: &LibPath) -> Vec<AssetRef> {
 /// The library references `preset` lists, in list order; empty when it is not a preset in the catalog.
 fn direct_refs(catalog: &Catalog, preset: &LibPath) -> Vec<LibPath> {
     match catalog.get(&key(preset)).map(|item| &item.content) {
-        Some(ItemContent::Preset { doc }) => preset_refs(doc).cloned().collect(),
+        Some(ItemContent::Preset { doc, .. }) => preset_refs(doc).cloned().collect(),
         _ => Vec::new(),
     }
 }
@@ -228,6 +228,7 @@ mod tests {
                         unmodeled: vec![],
                         line_problems: vec![],
                     },
+                    rev: String::new(),
                 },
             }
         };

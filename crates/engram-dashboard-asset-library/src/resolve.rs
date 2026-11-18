@@ -328,12 +328,12 @@ struct Agent<'l> {
 
 /// The identity an expansion dedups by: a library item by its catalog key, a built-in by its id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum RefKey {
+pub(crate) enum RefKey {
     Library(PathKey),
     BuiltIn(BuiltinId),
 }
 
-fn ref_key(r: &AssetRef) -> RefKey {
+pub(crate) fn ref_key(r: &AssetRef) -> RefKey {
     match r {
         AssetRef::Library(path) => RefKey::Library(key(path)),
         AssetRef::BuiltIn(id) => RefKey::BuiltIn(*id),
@@ -434,7 +434,7 @@ impl<'l> Walk<'l> {
             return None;
         }
         let (spelling, view) = self.look(ListName::Presets, at, line, via)?;
-        let ItemContent::Preset { doc } = view.content else {
+        let ItemContent::Preset { doc, .. } = view.content else {
             self.wrong_kind(spelling, via, ListName::Presets, line);
             return None;
         };

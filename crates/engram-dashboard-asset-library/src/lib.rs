@@ -61,6 +61,14 @@
 //! The root generation starts each run at the base the daemon draws (`LibraryValues::root_generation_base`), so a
 //! generation kept from an earlier run does not match; generations are compared only for equality (ADR-0381).
 //!
+//! ## Preset views and edits
+//!
+//! `edit.rs` holds the `preset.get` view, the preset edits, the draft check and the folder preview. Each edit is one
+//! [`LibraryService::change_at`]: link admission, then the read of the file's current bytes, the operation, the write
+//! (skipped when nothing changed) and the per-item apply, all under the write lock; the folders an `add` names are
+//! stat'ed before it, outside every lock. A preset item carries `rev`, the SHA-256 of the bytes it was made from
+//! (ADR-0378), so `preset.get` reads no preset file. The rules are in the `edit.rs` header.
+//!
 //! ## Refusals
 //!
 //! A body refuses with [`LibraryRefusal`]: a [`RefusalClass`] plus an agent `launch::Reason`, or the profile store's
@@ -68,6 +76,7 @@
 //! applied nothing must map onto a code that does not keep the request id.
 // ADR-0311
 // ADR-0324
+// ADR-0378
 // ADR-0379
 // ADR-0381
 // ADR-0382
@@ -76,6 +85,7 @@ pub mod backends;
 pub mod builtin;
 pub mod catalog;
 pub mod config;
+pub mod edit;
 pub mod excerpt;
 pub mod folder;
 pub mod format;
@@ -113,7 +123,7 @@ use crate::gate::{Gate, Tags};
 pub use crate::gate::{Numbers, State, NOT_FOUND};
 use crate::path::{AssetRef, LibPath, PathError};
 use crate::refs::{reference_count, referrers_of};
-use crate::resolve::{resolve, CatalogLookup, Resolution, RootState, Target};
+use crate::resolve::{resolve, CatalogLookup, Lookup, Resolution, RootState, Target};
 use crate::store::LibraryStore;
 
 /// The largest library file a scan or the list safety net reads. A longer file is a failed read: its item is kept as
@@ -477,14 +487,36 @@ impl LibraryService {
     /// every resolution, the folder stats with no lock, then the link probes of `mark_links` with no lock. A block-④
     /// resolution has no folder and no `not-found` row, so it is neither stat'ed nor probed.
     fn resolve_wants(&self, wants: &[&Want]) -> Vec<Resolution> {
-        let joined = self.first_scan_join();
+        self.resolve_over(wants, true, None, |_, _| ()).0
+    }
+
+    /// [`LibraryService::resolve_wants`] with `draft` standing in for the catalog item at its path (`preset.check`)
+    /// and `extra` run over the state and the same lookup inside the read lock that resolves. `library` = the
+    /// computation reads library items; `false` skips the first-scan entrance and the root stat and takes the root as
+    /// usable (only built-ins and `draft` are looked up).
+    pub(crate) fn resolve_over<R>(
+        &self,
+        wants: &[&Want],
+        library: bool,
+        draft: Option<&edit::Draft>,
+        extra: impl FnOnce(&State, &dyn Lookup) -> R,
+    ) -> (Vec<Resolution>, R) {
+        let joined = if library {
+            self.first_scan_join()
+        } else {
+            Ok(())
+        };
         let root = self.gate.with_read(|state| state.root.clone());
         let io = self.io.begin_read();
-        let library_attached = wants
-            .iter()
-            .flat_map(|want| &want.presets)
-            .any(|preset| matches!(preset, AssetRef::Library(_)));
-        let root_state = self.root_state(&io, root.as_deref(), joined, library_attached);
+        let library_attached = library
+            && wants
+                .iter()
+                .flat_map(|want| &want.presets)
+                .any(|preset| matches!(preset, AssetRef::Library(_)));
+        let root_state = match library {
+            true => self.root_state(&io, root.as_deref(), joined, library_attached),
+            false => RootState::Ok,
+        };
         let targets: Vec<Target> = wants
             .iter()
             .map(|want| Target {
@@ -497,16 +529,22 @@ impl LibraryService {
             })
             .collect();
         let backends = &*self.values.backends;
-        let mut resolved: Vec<Resolution> = self.gate.with_read(|state| {
-            let lookup = CatalogLookup {
+        let (mut resolved, extra): (Vec<Resolution>, R) = self.gate.with_read(|state| {
+            let catalog = CatalogLookup {
                 catalog: &state.catalog,
                 root: state.root.as_deref(),
                 builtins: &self.builtins,
             };
-            targets
+            let overlaid = draft.map(|draft| draft.over(&catalog));
+            let lookup: &dyn Lookup = match &overlaid {
+                Some(overlaid) => overlaid,
+                None => &catalog,
+            };
+            let resolved = targets
                 .iter()
-                .map(|target| resolve(target, &lookup, backends))
-                .collect()
+                .map(|target| resolve(target, lookup, backends))
+                .collect();
+            (resolved, extra(state, lookup))
         });
         let folders: Vec<(PathBuf, Need)> = resolved
             .iter()
@@ -520,7 +558,7 @@ impl LibraryService {
                 self.mark_links(root, resolution);
             }
         }
-        resolved
+        (resolved, extra)
     }
 
     /// The root as block ④ needs it: unset; unusable because no full scan could be applied (`joined`); or, when a
@@ -1029,7 +1067,7 @@ impl LibraryService {
             let registry = &self.values.registry;
             let (reaching, agents_direct) = referrers_of(catalog, registry, &item.path);
             let lists_it = |preset: &LibPath| match catalog.get(&key(preset)).map(|p| &p.content) {
-                Some(ItemContent::Preset { doc }) => {
+                Some(ItemContent::Preset { doc, .. }) => {
                     preset_refs(doc).any(|target| key(target) == key(&item.path))
                 }
                 _ => false,
@@ -1231,7 +1269,7 @@ fn row(item: &Item, references: usize) -> ListRow {
             name, description, ..
         } => (name.clone(), description.clone(), None),
         ItemContent::SkillFile => (file_name(), String::new(), None),
-        ItemContent::Preset { doc } => (
+        ItemContent::Preset { doc, .. } => (
             file_name(),
             doc.description.clone().unwrap_or_default(),
             None,

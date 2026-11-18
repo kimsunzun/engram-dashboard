@@ -107,7 +107,7 @@ pub fn merge_instructions(priming: Option<&str>, sources: &[(&str, &str)]) -> St
     merged
 }
 
-/// The lowercase hex SHA-256 of `bytes` — the stamp of a source and the instructions hash.
+/// The lowercase hex SHA-256 of `bytes` — the stamp of a source, the instructions hash and a preset's `rev`.
 // ADR-0336
 // TRD S25 step-7 B7 · B9
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -205,17 +205,22 @@ struct Listed {
 /// The reader handed to the port for one folder (folder-relative paths, joined to the folder and keyed by the
 /// absolute path on the launch's budget). A read that got no answer about the file is remembered — whatever the port
 /// files it as, the caller decides what it means for the folder.
-struct FolderReads<'a> {
+pub(crate) struct FolderReads<'a> {
     svc: &'a LibraryService,
     io: &'a LaunchIo,
     root: &'a Path,
     need: Need,
-    unanswered: RefCell<Option<String>>,
+    pub(crate) unanswered: RefCell<Option<String>>,
     texts: RefCell<HashMap<PathBuf, String>>,
 }
 
 impl<'a> FolderReads<'a> {
-    fn new(svc: &'a LibraryService, io: &'a LaunchIo, root: &'a Path, need: Need) -> Self {
+    pub(crate) fn new(
+        svc: &'a LibraryService,
+        io: &'a LaunchIo,
+        root: &'a Path,
+        need: Need,
+    ) -> Self {
         FolderReads {
             svc,
             io,
@@ -226,7 +231,7 @@ impl<'a> FolderReads<'a> {
         }
     }
 
-    fn read(&self, rel: &Path) -> io::Result<String> {
+    pub(crate) fn read(&self, rel: &Path) -> io::Result<String> {
         let read = self
             .svc
             .io
@@ -678,7 +683,7 @@ impl LibraryService {
             })
             .collect();
         if want.default_preset {
-            if let ItemContent::Preset { doc } =
+            if let ItemContent::Preset { doc, .. } =
                 self.builtins.view(BuiltinId::DefaultPreset).content
             {
                 todo.extend(preset_refs(doc).cloned());
@@ -690,7 +695,7 @@ impl LibraryService {
             }
             let seen = self.overlay_read(&path, &mut overlay);
             if let Seen::Item(i) = &seen {
-                if let ItemContent::Preset { doc } = &overlay.items[*i].content {
+                if let ItemContent::Preset { doc, .. } = &overlay.items[*i].content {
                     todo.extend(preset_refs(doc).cloned());
                 }
             }

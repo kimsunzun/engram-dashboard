@@ -37,6 +37,7 @@ use crate::format::{
     library_skill_name, options, parse_preset, parse_settings, sniff_kind, split_front_matter,
     ParseError, PresetDoc, SettingsDoc, Sniff, YAML_SYNTAX,
 };
+use crate::launch::sha256_hex;
 use crate::path::{AssetRef, LibPath};
 use crate::store::{ContentTag, ScanListing};
 use crate::validate::{check_settings, SettingsVerdict};
@@ -101,6 +102,10 @@ pub enum ItemContent {
     SkillFile,
     Preset {
         doc: PresetDoc,
+        /// The lowercase-hex SHA-256 of the exact bytes the item was made from, BOM included — the preset's `rev`
+        /// (a built-in stand-in: of no bytes).
+        // ADR-0378
+        rev: String,
     },
     Settings {
         doc: SettingsDoc,
@@ -258,6 +263,11 @@ impl ScanResult {
     }
 }
 
+/// Whether `path` names a `.yaml` / `.yml` file — the only files that can hold a preset (or settings) item.
+pub(crate) fn yaml_file(path: &LibPath) -> bool {
+    matches!(FileKind::of(path), Some(FileKind::Yaml))
+}
+
 /// The kind decision by name (TRD S25 §1-2 table); content decides only between the `.yaml` kinds.
 enum FileKind {
     Instruction,
@@ -319,7 +329,13 @@ pub(crate) fn yaml_item(bytes: &[u8], backends: &dyn Backends) -> Option<(ItemKi
         // An unknown `kind` value is read as a preset too: the reader's own error (`kind-unknown` with its line, or
         //   a syntax error) is the reason.
         Sniff::Preset | Sniff::Unknown(_) => match parse_preset(text, backends) {
-            Ok(doc) => Some((ItemKind::Preset, ItemContent::Preset { doc })),
+            Ok(doc) => Some((
+                ItemKind::Preset,
+                ItemContent::Preset {
+                    doc,
+                    rev: sha256_hex(bytes),
+                },
+            )),
             Err(e) => broken(e.to_reason()),
         },
         Sniff::Absent => unreachable!("returned above"),
@@ -655,7 +671,7 @@ pub(crate) fn preset_refs(doc: &PresetDoc) -> impl Iterator<Item = &LibPath> {
 
 fn direct_refs(item: &Item) -> BTreeSet<PathKey> {
     match &item.content {
-        ItemContent::Preset { doc } => preset_refs(doc).map(key).collect(),
+        ItemContent::Preset { doc, .. } => preset_refs(doc).map(key).collect(),
         _ => BTreeSet::new(),
     }
 }

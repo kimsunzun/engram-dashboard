@@ -20,6 +20,7 @@ use crate::backends::Backends;
 use crate::catalog::{yaml_item, ItemContent, ItemKind};
 use crate::excerpt::excerpt;
 use crate::format::{PresetDoc, SettingsDoc};
+use crate::launch::sha256_hex;
 use crate::path::BuiltinId;
 use crate::resolve::ItemView;
 use crate::validate::SettingsVerdict;
@@ -157,6 +158,7 @@ fn stand_in(id: BuiltinId, why: String) -> Entry {
                     unmodeled: Vec::new(),
                     line_problems: Vec::new(),
                 },
+                rev: sha256_hex(&[]),
             },
         ),
         BuiltinId::Priming => (
@@ -236,7 +238,7 @@ pub(crate) mod tests {
             preset.file.as_deref(),
             Some(dir.path().join("presets/default.yaml").as_path())
         );
-        let ItemContent::Preset { doc } = preset.content else {
+        let ItemContent::Preset { doc, .. } = preset.content else {
             panic!("{:?}", preset.content)
         };
         assert_eq!(doc.description.as_deref(), Some("the default"));
@@ -288,7 +290,7 @@ pub(crate) mod tests {
         }
 
         let preset = builtins.view(BuiltinId::DefaultPreset);
-        let ItemContent::Preset { doc } = preset.content else {
+        let ItemContent::Preset { doc, .. } = preset.content else {
             panic!("{:?}", preset.content)
         };
         assert!(doc.description.is_some());
@@ -384,7 +386,7 @@ pub(crate) mod tests {
             assert_eq!(view.file, None, "{id:?}");
             assert_eq!(view.stand_in, Some(NO_FOLDER), "{id:?}");
             match (id, view.content) {
-                (BuiltinId::DefaultPreset, ItemContent::Preset { doc }) => {
+                (BuiltinId::DefaultPreset, ItemContent::Preset { doc, .. }) => {
                     assert!(doc.presets.is_empty() && doc.instructions.is_empty());
                     assert!(doc.skills.is_empty() && doc.settings.is_empty());
                     assert!(doc.folders.is_empty());
@@ -412,7 +414,7 @@ pub(crate) mod tests {
         let builtins = Builtins::new(Some(dir.path()), &AgentBackends);
         let preset = builtins.view(BuiltinId::DefaultPreset);
         assert_eq!(*preset.kind, ItemKind::Preset, "not broken");
-        let ItemContent::Preset { doc } = preset.content else {
+        let ItemContent::Preset { doc, .. } = preset.content else {
             panic!("{:?}", preset.content)
         };
         assert!(doc.presets.is_empty() && doc.instructions.is_empty());
